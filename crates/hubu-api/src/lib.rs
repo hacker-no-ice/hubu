@@ -1342,10 +1342,6 @@ struct ExecutorSpendResolveHttpRequest {
 struct ExecutorSpendClaimHttpRequest {
     #[serde(flatten)]
     spend: ExecutorSpendHttpRequest,
-    /// Optional v4.3 cross-check. A v4.4 claim is identified by the token
-    /// alone and Hubu derives the operation key from the stored decision.
-    #[serde(alias = "executor_execution_id")]
-    operation_key: Option<String>,
 }
 
 #[derive(Debug)]
@@ -1363,23 +1359,9 @@ struct ExecutorSpendFinalizeHttpRequest {
 /// How an executor names the claim it settles or releases.
 #[derive(Debug)]
 enum ExecutorFinalizationIdentity {
-    /// v4.3: the agent and the private operation key echoed from resolve.
-    AgentOperation {
-        agent_id: String,
-        operation_key: String,
-    },
-    /// v4.4: the claim Hubu returned. An executor that lost the claim
-    /// response recovers it by replaying the identical claim.
+    /// The claim Hubu returned. An executor that lost the claim response
+    /// recovers it by replaying the identical claim.
     Claim(String),
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ExecutorSpendAgentOperationFinalizeHttpRequest {
-    #[serde(alias = "executor_execution_id")]
-    operation_key: String,
-    agent_id: String,
-    receipt: Option<SpendExecutorSettlementReceipt>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1389,6 +1371,7 @@ struct ExecutorSpendClaimFinalizeHttpRequest {
     receipt: Option<SpendExecutorSettlementReceipt>,
 }
 
+/// Retired v4.3 executor identity fields, recognized only to reject them.
 const LEGACY_FINALIZATION_FIELDS: [&str; 3] =
     ["operation_key", "executor_execution_id", "agent_id"];
 const CLAIM_FINALIZATION_FIELDS: [&str; 1] = ["claim_id"];
@@ -1420,20 +1403,9 @@ impl ExecutorSpendFinalizationHttpRequest {
             ));
         }
         match (legacy, claim) {
-            (true, true) => Err(anyhow!(
-                "executor finalization must identify the claim by claim_id, or by agent_id and operation_key, not both"
+            (true, _) => Err(anyhow!(
+                "{EXECUTOR_CONTRACT} finalization is identified by claim_id; the retired v4.3 identity fields agent_id and operation_key are no longer accepted"
             )),
-            (true, false) => {
-                let request: ExecutorSpendAgentOperationFinalizeHttpRequest =
-                    serde_json::from_value(value)?;
-                Ok(Self::Executor(ExecutorSpendFinalizeHttpRequest {
-                    identity: ExecutorFinalizationIdentity::AgentOperation {
-                        agent_id: request.agent_id,
-                        operation_key: request.operation_key,
-                    },
-                    receipt: request.receipt,
-                }))
-            }
             (false, true) => {
                 let request: ExecutorSpendClaimFinalizeHttpRequest =
                     serde_json::from_value(value)?;
@@ -1458,7 +1430,6 @@ struct ExecutorClaimReconciliationHttpRequest {
 
 #[derive(Debug, Serialize)]
 struct ExecutorSpendHttpResponse {
-    operation_key: String,
     reason: String,
     spend_auth_token_id: String,
     decision_id: String,
@@ -1477,7 +1448,6 @@ struct ExecutorSpendHttpResponse {
 
 #[derive(Debug, Serialize)]
 struct ExecutorSpendClaimHttpResponse {
-    operation_key: String,
     claim_id: String,
     lease_profile: String,
     status: String,
@@ -1501,7 +1471,6 @@ struct ExecutorClaimsHttpResponse {
 
 #[derive(Debug, Serialize)]
 struct ExecutorSpendSettlementHttpResponse {
-    operation_key: String,
     settlement_id: String,
     claim_id: String,
     status: String,
@@ -2194,9 +2163,9 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
             "when policy returns needs_approval, the client shows approval.review to the human and resolves the approval_request_id as approve or deny before continuing",
             "agent sends the spend_auth_token_id and execution intent to an executor",
             "executor resolves the authoritative authorization through POST /spend/executor/resolve and independently verifies its derived price and scope",
-            "executor calls POST /spend/executor/claim with the same operation_key before irreversible work",
+            "executor calls POST /spend/executor/claim with the spend_auth_token_id before irreversible work; Hubu derives the operation from the stored decision",
             "executor performs work with its own credentials",
-            "executor finalizes by agent_id and operation_key with a provider receipt after successful irreversible work or releases before work is performed"
+            "executor settles by claim_id with a provider receipt after successful irreversible work, or releases by claim_id before work is performed; it never sends operation_key or agent_id"
         ],
         "routes": {
             "guidance": [
@@ -2228,7 +2197,7 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
             },
             "persistence": [
                 "Hubu is the authoritative store for workflow state under the agent-scoped operation_key",
-                "the client must reuse its stable operation_key for authorization, claim, finalization, and retries",
+                "the client must reuse its stable operation_key for every authorization retry; executors claim by spend_auth_token_id and finalize by claim_id instead",
                 "do not rely on model conversation memory for the operation_key"
             ],
             "prohibited": [
@@ -2273,10 +2242,14 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
             "retry": "replay the exact authorization request or read approval status to recover the durable result",
             "mcp": "hubu_resolve_spend_approval is protected by the narrow spend-approval client gate"
         },
+        "validate_request": {
+            "required": ["spend_auth_token_id", "account_id", "amount_cents"],
+            "rejected": ["operation_key", "agent_id"],
+            "note": "read-only scope inspection; it never authorizes irreversible work"
+        },
         "claim_request": {
             "required": [
                 "spend_auth_token_id",
-                "operation_key",
                 "account_id",
                 "amount_cents"
             ],
@@ -2285,12 +2258,13 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
                 "merchant (legacy only)",
                 "task_id (compatibility assertion only; Hubu uses the authorization snapshot)"
             ],
+            "rejected": ["operation_key", "agent_id"],
             "currency": "usd in v4"
         },
         "settle_request": {
+            "identity": "claim_id",
+            "rejected": ["spend_auth_token_id", "operation_key", "agent_id"],
             "required": [
-                "agent_id",
-                "operation_key",
                 "receipt.actual_vendor_cost.amount",
                 "receipt.actual_vendor_cost.scale",
                 "receipt.actual_vendor_cost.currency",
@@ -2302,10 +2276,8 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
             "legacy_v4_3_response": "receipt.actual_vendor_cost_cents remains available as the conservative budget_charge_cents projection; actual_vendor_cost preserves the exact provider decimal"
         },
         "release_request": {
-            "required": [
-                "agent_id",
-                "operation_key"
-            ]
+            "identity": "claim_id",
+            "rejected": ["spend_auth_token_id", "operation_key", "agent_id", "receipt"]
         },
         "reconciliation_request": {
             "required": [
@@ -2342,10 +2314,11 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
             "provider, executor, capability, and billing_merchant are independently policy-addressable stable identities",
             "lease_profile is selected during authorization and cannot be changed by the executor",
             "the spend auth token must be unexpired, unused, unrevoked, and unclaimed when a new claim starts",
-            "authorization and claim retries with the same operation_key return stored workflow state, including terminal state",
+            "authorization retries with the same operation_key and claim retries with the same spend_auth_token_id return stored workflow state, including terminal state",
             "claiming moves the associated budget hold from frozen to claimed and extends it to claim_expires_at",
             "an active claim remains finalizable after the original authorization expires",
-            "Hubu does not accept vendor API keys or model/provider payloads in this protocol"
+            "Hubu does not accept vendor API keys or model/provider payloads in this protocol",
+            "executor route responses never include the private operation_key; executors identify work by spend_auth_token_id, claim_id, and the public decision_id"
         ],
         "settlement_rules": [
             "settle only after the executor has performed irreversible billable work",
@@ -2354,7 +2327,7 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
             "actual vendor cost is an integer major-unit decimal with scale at most 18; Hubu never uses floating point and rounds fractional budget cents up",
             "normal settlement rejects a conservative budget charge above the authorized maximum; human vendor-billed reconciliation records an already-incurred overrun explicitly",
             "an identical settlement retry returns the original settlement_id and receipt without consuming budget twice; a changed receipt is rejected",
-            "finalization resolves by agent_id and operation_key, so a caller can recover the result even if it lost the claim response",
+            "finalization resolves by claim_id; an executor that lost the claim response replays the identical claim, which returns the existing claim even after the authorization expires",
             "claim expiry is evaluated once when the settlement transaction starts",
             "release atomically marks the claim released and token revoked while returning the reserved amount",
             "settle and release serialize so the first terminal finalization wins",
@@ -4226,13 +4199,34 @@ fn spend_at(body: String, state: &ServerState, now: DateTime<Utc>) -> Result<Spe
     })
 }
 
+/// Resolve, validate and claim reject the retired v4.3 identity with one
+/// explicit v4.4 error. The field names are rejected by presence, including an
+/// explicit JSON `null`, which serde would otherwise read as an absent value;
+/// the flattened claim/validate body would otherwise ignore them silently.
+fn reject_retired_executor_identity(body: &str) -> Result<()> {
+    let value: Value = serde_json::from_str(body)?;
+    let retired = value.as_object().is_some_and(|object| {
+        LEGACY_FINALIZATION_FIELDS
+            .iter()
+            .any(|field| object.contains_key(*field))
+    });
+    if retired {
+        return Err(anyhow!(
+            "{EXECUTOR_CONTRACT} resolve, validate and claim requests are identified by spend_auth_token_id; the retired v4.3 identity fields operation_key and agent_id are no longer accepted"
+        ));
+    }
+    Ok(())
+}
+
 fn validate_executor_spend(body: String, state: &ServerState) -> Result<ExecutorSpendHttpResponse> {
-    let request: ExecutorSpendHttpRequest = serde_json::from_str(&body)?;
-    let validated = validate_executor_spend_request(request, state)?;
+    reject_retired_executor_identity(&body)?;
+    let request: ExecutorSpendClaimHttpRequest = serde_json::from_str(&body)?;
+    let validated = validate_executor_spend_request(request.spend, state)?;
     Ok(executor_spend_response(&validated))
 }
 
 fn resolve_executor_spend(body: String, state: &ServerState) -> Result<ExecutorSpendHttpResponse> {
+    reject_retired_executor_identity(&body)?;
     let request: ExecutorSpendResolveHttpRequest = serde_json::from_str(&body)?;
     let token_id: SpendAuthTokenId = request
         .spend_auth_token_id
@@ -4312,7 +4306,6 @@ fn resolve_executor_spend(body: String, state: &ServerState) -> Result<ExecutorS
     };
 
     let validated = ValidatedExecutorSpend {
-        operation_key: decision.operation_key.clone(),
         reason: decision.request.reason.clone(),
         lease_profile: decision.request.lease_profile.clone(),
         status: "available".to_string(),
@@ -4354,18 +4347,16 @@ fn claim_executor_spend(
     body: String,
     state: &ServerState,
 ) -> Result<ExecutorSpendClaimHttpResponse> {
+    reject_retired_executor_identity(&body)?;
     let request: ExecutorSpendClaimHttpRequest = serde_json::from_str(&body)?;
     let mut resolved = resolve_executor_spend_request(request.spend, state)?;
-    let (authoritative_operation_key, _, _) = {
+    let (operation_key, _, _) = {
         let spend = state
             .spend
             .lock()
             .map_err(|_| anyhow!("spend manager lock poisoned"))?;
         apply_authoritative_executor_identity(&mut resolved, &spend)?
     };
-    // A supplied key stays a cross-check that the claim service rejects on
-    // mismatch; a token-identified claim uses the authorized key.
-    let operation_key = request.operation_key.unwrap_or(authoritative_operation_key);
     let authorization = resolved.payment_validation_request();
     let claim_state = {
         let mut spend_manager = state
@@ -4586,7 +4577,6 @@ fn settle_executor_spend_request(
         .ok_or_else(|| anyhow!("settled executor claim is missing provider receipt"))?;
 
     Ok(ExecutorSpendSettlementHttpResponse {
-        operation_key: claim_state.claim.operation_key.clone(),
         settlement_id: settlement_id.to_string(),
         claim_id: claim_state.claim.id.to_string(),
         status: executor_claim_status_name(&claim_state.claim.status).to_string(),
@@ -4658,7 +4648,6 @@ fn release_executor_spend_request(
 }
 
 struct ValidatedExecutorSpend {
-    operation_key: String,
     reason: String,
     lease_profile: String,
     status: String,
@@ -4698,7 +4687,6 @@ impl ResolvedExecutorSpend {
 
     fn into_validated(
         self,
-        operation_key: String,
         reason: String,
         lease_profile: String,
         validation: hubu_core::spend::ValidatedSpendAuthorization,
@@ -4706,7 +4694,6 @@ impl ResolvedExecutorSpend {
         budget_balance: hubu_core::budget::BudgetBalance,
     ) -> ValidatedExecutorSpend {
         ValidatedExecutorSpend {
-            operation_key,
             reason,
             lease_profile,
             status: "available".to_string(),
@@ -4812,16 +4799,16 @@ fn validate_executor_spend_request(
     state: &ServerState,
 ) -> Result<ValidatedExecutorSpend> {
     let mut resolved = resolve_executor_spend_request(request, state)?;
-    let (validation, operation_key, reason, lease_profile) = {
+    let (validation, reason, lease_profile) = {
         let spend = state
             .spend
             .lock()
             .map_err(|_| anyhow!("spend manager lock poisoned"))?;
-        let (operation_key, reason, lease_profile) =
+        let (_, reason, lease_profile) =
             apply_authoritative_executor_identity(&mut resolved, &spend)?;
         let validation =
             spend.validate_auth_token_for_payment(&resolved.payment_validation_request())?;
-        (validation, operation_key, reason, lease_profile)
+        (validation, reason, lease_profile)
     };
 
     let (budget_hold, budget_balance) = {
@@ -4865,7 +4852,6 @@ fn validate_executor_spend_request(
     );
 
     Ok(resolved.into_validated(
-        operation_key,
         reason,
         lease_profile,
         validation,
@@ -4879,45 +4865,24 @@ fn executor_claim_validation_request(
     user: &UserContext,
     state: &ServerState,
 ) -> Result<FinalizeExecutorClaimRequest> {
-    let (agent_id, operation_key) = match request.identity {
-        ExecutorFinalizationIdentity::AgentOperation {
-            agent_id,
-            operation_key,
-        } => {
-            let operation_key = operation_key.trim();
-            if operation_key.is_empty() {
-                return Err(anyhow!("executor spend operation_key is required"));
-            }
-            let agent_pub_id = agent_id.trim();
-            if agent_pub_id.is_empty() {
-                return Err(anyhow!("executor spend agent_id is required"));
-            }
-            (
-                resolve_agent_id_for_user(agent_pub_id, user, state)?,
-                operation_key.to_string(),
-            )
-        }
-        ExecutorFinalizationIdentity::Claim(claim_id) => {
-            let claim_id = claim_id
-                .trim()
-                .parse::<SpendExecutorClaimId>()
-                .with_context(|| "parse executor spend claim_id")?;
-            let spend_manager = state
-                .spend
-                .lock()
-                .map_err(|_| anyhow!("spend manager lock poisoned"))?;
-            let budget_manager = state
-                .budgets
-                .lock()
-                .map_err(|_| anyhow!("budget manager lock poisoned"))?;
-            let claim_state = ExecutorClaimService.get(
-                &claim_id,
-                &user.user_id,
-                &spend_manager,
-                &budget_manager,
-            )?;
-            (claim_state.claim.agent_id, claim_state.claim.operation_key)
-        }
+    let ExecutorFinalizationIdentity::Claim(claim_id) = request.identity;
+    let claim_id = claim_id
+        .trim()
+        .parse::<SpendExecutorClaimId>()
+        .with_context(|| "parse executor spend claim_id")?;
+    let (agent_id, operation_key) = {
+        let spend_manager = state
+            .spend
+            .lock()
+            .map_err(|_| anyhow!("spend manager lock poisoned"))?;
+        let budget_manager = state
+            .budgets
+            .lock()
+            .map_err(|_| anyhow!("budget manager lock poisoned"))?;
+        // The owner-scoped lookup reports another owner's claim as unknown.
+        let claim_state =
+            ExecutorClaimService.get(&claim_id, &user.user_id, &spend_manager, &budget_manager)?;
+        (claim_state.claim.agent_id, claim_state.claim.operation_key)
     };
     Ok(FinalizeExecutorClaimRequest {
         owner_user_id: user.user_id.clone(),
@@ -4950,7 +4915,6 @@ fn executor_spend_from_claim_state(
     }
 
     Ok(ValidatedExecutorSpend {
-        operation_key: claim_state.decision.operation_key.clone(),
         reason: claim_state.decision.request.reason.clone(),
         lease_profile: claim_state.decision.request.lease_profile.clone(),
         status: executor_claim_status_name(&claim_state.claim.status).to_string(),
@@ -4994,7 +4958,6 @@ fn executor_claim_response(
         None
     };
     Ok(ExecutorSpendClaimHttpResponse {
-        operation_key: claim.operation_key.clone(),
         claim_id: claim.id.to_string(),
         lease_profile: claim.lease_profile.clone(),
         status: executor_claim_status_name(&claim.status).to_string(),
@@ -5035,7 +4998,6 @@ fn executor_spend_response_with_hold(
     balance: hubu_core::budget::BudgetBalance,
 ) -> ExecutorSpendHttpResponse {
     ExecutorSpendHttpResponse {
-        operation_key: validated.operation_key.clone(),
         reason: validated.reason.clone(),
         spend_auth_token_id: validated.token_id.to_string(),
         decision_id: validated.validation.spend_decision_id.to_string(),
@@ -6541,7 +6503,7 @@ lease_profiles:
         );
         assert_eq!(
             response.body["executor_contract"],
-            "hubu-spend-executor-v4.3"
+            "hubu-spend-executor-v4.4"
         );
         assert!(response.body["source_commit"]
             .as_str()
@@ -8500,7 +8462,7 @@ lease_profiles:
             assert_eq!(response.status, 200);
             assert_eq!(
                 response.body["protocol_version"],
-                "hubu-spend-executor-v4.3"
+                "hubu-spend-executor-v4.4"
             );
             assert!(response.body["role_boundary"]["hubu"]
                 .as_array()
@@ -8517,20 +8479,22 @@ lease_profiles:
                 .expect("required fields should be an array")
                 .iter()
                 .any(|item| item == "account_id"));
-            assert!(response.body["claim_request"]["required"]
+            assert!(!response.body["claim_request"]["required"]
                 .as_array()
                 .expect("required fields should be an array")
                 .iter()
                 .any(|item| item == "operation_key"));
+            assert_eq!(
+                response.body["claim_request"]["rejected"],
+                json!(["operation_key", "agent_id"])
+            );
             assert!(response.body["authorization_request"]["required"]
                 .as_array()
                 .expect("authorization required fields should be an array")
                 .iter()
                 .any(|item| item == "operation_key"));
-            assert_eq!(
-                response.body["release_request"]["required"],
-                json!(["agent_id", "operation_key"])
-            );
+            assert_eq!(response.body["release_request"]["identity"], "claim_id");
+            assert_eq!(response.body["settle_request"]["identity"], "claim_id");
             assert!(response.body["settle_request"]["required"]
                 .as_array()
                 .expect("settlement fields should be an array")
@@ -8591,7 +8555,13 @@ lease_profiles:
 
         let first = resolve_executor_spend(body.clone(), &state).unwrap();
         let second = resolve_executor_spend(body, &state).unwrap();
-        assert_eq!(first.operation_key, authorization.operation_key);
+        assert!(
+            serde_json::to_value(&first)
+                .unwrap()
+                .get("operation_key")
+                .is_none(),
+            "executor responses never carry the private operation key"
+        );
         assert_eq!(first.decision_id, authorization.decision_id);
         assert_eq!(first.account_id, agent.account_id);
         assert_eq!(first.agent_id, agent.agent_id);
@@ -8606,7 +8576,6 @@ lease_profiles:
 
         let claim = claim_executor_spend(
             json!({
-                "operation_key": first.operation_key,
                 "spend_auth_token_id": first.spend_auth_token_id,
                 "account_id": first.account_id,
                 "amount_cents": first.amount_cents,
@@ -8676,7 +8645,6 @@ lease_profiles:
             .contains("changed scope retry is unsafe"));
 
         let request = json!({
-            "operation_key": operation_key,
             "spend_auth_token_id": token,
             "account_id": agent.account_id,
             "amount_cents": 500,
@@ -8700,8 +8668,7 @@ lease_profiles:
         assert_eq!(retry.spend.budget_hold.status, "claimed");
 
         let finalize = json!({
-            "agent_id": agent.agent_id,
-            "operation_key": claim.operation_key,
+            "claim_id": claim.claim_id,
             "receipt": precise_settlement_receipt_json(3_991, 3),
         });
         let settlement = settle_executor_spend(finalize.to_string(), &state)
@@ -8799,7 +8766,6 @@ lease_profiles:
 
         let claim = claim_executor_spend(
             json!({
-                "operation_key": authorization.operation_key,
                 "spend_auth_token_id": authorization.auth_token_id,
                 "account_id": agent.account_id,
                 "amount_cents": 500,
@@ -8916,7 +8882,6 @@ lease_profiles:
             second_authorization.decision_id
         );
         let first_claim_request = json!({
-            "operation_key": first_authorization.operation_key,
             "spend_auth_token_id": first_authorization.auth_token_id,
             "account_id": first_agent.account_id,
             "amount_cents": 500,
@@ -8924,7 +8889,6 @@ lease_profiles:
             "task_id": "first-agent-task",
         });
         let second_claim_request = json!({
-            "operation_key": second_authorization.operation_key,
             "spend_auth_token_id": second_authorization.auth_token_id,
             "account_id": second_agent.account_id,
             "amount_cents": 500,
@@ -8939,8 +8903,7 @@ lease_profiles:
 
         settle_executor_spend(
             json!({
-                "agent_id": first_agent.agent_id,
-                "operation_key": first_authorization.operation_key,
+                "claim_id": first_claim.claim_id,
                 "receipt": settlement_receipt_json(400),
             })
             .to_string(),
@@ -8979,7 +8942,11 @@ lease_profiles:
         let claim = claim_executor_spend(claim_request.to_string(), &state)
             .expect("a token-identified claim should not need the operation key");
         assert_eq!(claim.status, "claimed");
-        assert_eq!(claim.operation_key, authorization.operation_key);
+        assert_eq!(claim.spend.decision_id, authorization.decision_id);
+        assert!(serde_json::to_string(&claim)
+            .unwrap()
+            .find("operation_key")
+            .is_none());
         let claim_replay = claim_executor_spend(claim_request.to_string(), &state)
             .expect("token-identified claim replay");
         assert_eq!(claim_replay.claim_id, claim.claim_id);
@@ -8994,22 +8961,31 @@ lease_profiles:
         assert_eq!(settled.receipt.budget_charge_cents, 400);
         assert_eq!(settled.spend.budget_hold.consumed_amount_cents, 400);
 
-        // Every identity form names the same claim and replays the stored
-        // settlement without consuming budget again.
-        for body in [
-            json!({"claim_id": claim.claim_id, "receipt": settlement_receipt_json(400)}),
+        // The claim id names the same claim and replays the stored settlement
+        // without consuming budget again.
+        let replay = settle_executor_spend(
+            json!({"claim_id": claim.claim_id, "receipt": settlement_receipt_json(400)})
+                .to_string(),
+            &state,
+        )
+        .expect("identical settlement replays by claim id");
+        assert_eq!(replay.settlement_id, settled.settlement_id);
+        assert_eq!(replay.receipt.created_at, settled.receipt.created_at);
+        assert_eq!(replay.spend.budget_hold.consumed_amount_cents, 400);
+
+        let retired = settle_executor_spend(
             json!({
                 "agent_id": agent.agent_id,
                 "operation_key": authorization.operation_key,
                 "receipt": settlement_receipt_json(400),
-            }),
-        ] {
-            let replay = settle_executor_spend(body.to_string(), &state)
-                .expect("identical settlement replays under any identity form");
-            assert_eq!(replay.settlement_id, settled.settlement_id);
-            assert_eq!(replay.receipt.created_at, settled.receipt.created_at);
-            assert_eq!(replay.spend.budget_hold.consumed_amount_cents, 400);
-        }
+            })
+            .to_string(),
+            &state,
+        )
+        .expect_err("the retired v4.3 finalization identity is rejected");
+        assert!(retired
+            .to_string()
+            .contains("agent_id and operation_key are no longer accepted"));
 
         let changed = settle_executor_spend(
             json!({"claim_id": claim.claim_id, "receipt": settlement_receipt_json(399)})
@@ -9063,7 +9039,7 @@ lease_profiles:
     }
 
     #[test]
-    fn executor_finalization_is_claim_identified_and_rejects_tokens() {
+    fn executor_finalization_is_claim_identified_and_rejects_retired_fields() {
         let (path, state, agent, authorization) =
             setup_executor_authorization("executor-v44-identity");
         let token = authorization.auth_token_id.clone().expect("token");
@@ -9078,21 +9054,45 @@ lease_profiles:
             "{unknown}"
         );
 
-        let mismatched_key = claim_executor_spend(
-            json!({
-                "operation_key": "some-other-operation",
-                "spend_auth_token_id": token,
-                "account_id": agent.account_id,
-                "amount_cents": 500,
-                "merchant": "gongbu.image",
-            })
-            .to_string(),
-            &state,
-        )
-        .expect_err("a supplied operation key remains a cross-check");
-        assert!(mismatched_key
-            .to_string()
-            .contains("operation key was already authorized with different spend scope"));
+        for (field, value) in [
+            ("operation_key", json!(authorization.operation_key)),
+            ("agent_id", json!(agent.agent_id)),
+            ("executor_execution_id", json!("legacy-execution")),
+            ("operation_key", Value::Null),
+            ("agent_id", Value::Null),
+        ] {
+            let mut retired = token_identified_claim_request(&agent, &authorization);
+            retired[field] = value;
+            for (route, error) in [
+                (
+                    "claim",
+                    claim_executor_spend(retired.to_string(), &state)
+                        .expect_err("retired v4.3 claim identity is rejected"),
+                ),
+                (
+                    "validate",
+                    validate_executor_spend(retired.to_string(), &state)
+                        .expect_err("retired v4.3 validate identity is rejected"),
+                ),
+                (
+                    "resolve",
+                    resolve_executor_spend(
+                        json!({
+                            "spend_auth_token_id": retired["spend_auth_token_id"],
+                            field: retired[field],
+                        })
+                        .to_string(),
+                        &state,
+                    )
+                    .expect_err("retired v4.3 resolve identity is rejected"),
+                ),
+            ] {
+                assert!(
+                    error.to_string().contains("retired v4.3 identity fields"),
+                    "{route} {field}: {error}"
+                );
+            }
+        }
         let claim = claim_executor_spend(
             token_identified_claim_request(&agent, &authorization).to_string(),
             &state,
@@ -9113,7 +9113,7 @@ lease_profiles:
                     "agent_id": agent.agent_id,
                     "operation_key": authorization.operation_key,
                 }),
-                "not both",
+                "retired v4.3 identity fields",
             ),
             (json!({}), "requires claim_id"),
             (
@@ -9148,7 +9148,6 @@ lease_profiles:
             .clone()
             .expect("authorization should issue a token");
         let request = json!({
-            "operation_key": authorization.operation_key,
             "spend_auth_token_id": token,
             "account_id": agent.account_id,
             "amount_cents": 500,
@@ -9159,8 +9158,7 @@ lease_profiles:
         let claim =
             claim_executor_spend(request.to_string(), &state).expect("executor spend should claim");
         let release_request = json!({
-            "agent_id": agent.agent_id,
-            "operation_key": claim.operation_key,
+            "claim_id": claim.claim_id,
         });
         let release = release_executor_spend(release_request.to_string(), &state)
             .expect("executor spend should release");
@@ -9210,7 +9208,6 @@ lease_profiles:
                 "amount_cents": 500,
                 "merchant": "gongbu.image",
                 "task_id": "hubu-logo-demo",
-                "operation_key": "executor-reconciliation-operation",
             })
             .to_string(),
             &state,
@@ -9246,8 +9243,7 @@ lease_profiles:
 
         let normal_error = finalize_executor_spend(
             json!({
-                "operation_key": "executor-reconciliation-operation",
-                "agent_id": agent.agent_id,
+                "claim_id": claim.claim_id,
                 "receipt": settlement_receipt_json(400),
             })
             .to_string(),
@@ -9343,7 +9339,6 @@ lease_profiles:
             setup_executor_authorization("executor-claim-restart");
         let claim = claim_executor_spend(
             json!({
-                "operation_key": authorization.operation_key,
                 "spend_auth_token_id": authorization
                     .auth_token_id
                     .expect("authorization should issue a token"),
@@ -9386,8 +9381,7 @@ lease_profiles:
         );
         let settlement = settle_executor_spend(
             json!({
-                "agent_id": agent.agent_id,
-                "operation_key": claim.operation_key,
+                "claim_id": claim.claim_id,
                 "receipt": settlement_receipt_json(400),
             })
             .to_string(),
@@ -9455,7 +9449,6 @@ lease_profiles:
         broadened.billing_merchant = scope_identity("merchant:ideogram", "Ideogram");
         let rejected = claim_executor_spend(
             json!({
-                "operation_key":"typed-scope-operation",
                 "spend_auth_token_id":authorization.auth_token_id,
                 "account_id":agent.account_id,
                 "amount_cents":500,
@@ -9472,7 +9465,6 @@ lease_profiles:
 
         let claim = claim_executor_spend(
             json!({
-                "operation_key":"typed-scope-operation",
                 "spend_auth_token_id":authorization.auth_token_id,
                 "account_id":agent.account_id,
                 "amount_cents":500,

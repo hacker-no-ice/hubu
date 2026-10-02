@@ -53,7 +53,7 @@ impl Server {
             return Ok(true);
         };
         let expected = GongbuContinuation {
-            operation_key: operation.operation_key.clone(),
+            auth_token_id: operation.auth_token_id.clone(),
             operation_handle: operation.operation_handle.clone(),
             execution_id: operation.execution_id.clone(),
         };

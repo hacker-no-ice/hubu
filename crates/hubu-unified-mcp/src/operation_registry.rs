@@ -263,7 +263,9 @@ pub(crate) struct ApprovalSyncTarget {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct GongbuContinuation {
-    pub(crate) operation_key: String,
+    /// The bound Hubu authorization continuation. Gongbu reports the token it
+    /// consumed, so the router verifies executions without a private key.
+    pub(crate) auth_token_id: String,
     pub(crate) operation_handle: String,
     pub(crate) execution_id: Option<String>,
 }
@@ -271,7 +273,7 @@ pub(crate) struct GongbuContinuation {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct GongbuLifecycle {
     pub(crate) execution_id: String,
-    pub(crate) operation_key: String,
+    pub(crate) spend_auth_token_id: String,
     pub(crate) status: String,
     pub(crate) outcome: Option<String>,
 }
@@ -294,7 +296,7 @@ impl DurableOperationStatus {
 #[derive(Clone, Debug)]
 pub(crate) struct ClaimedDurableOperation {
     pub(crate) lease_id: String,
-    pub(crate) operation_key: String,
+    pub(crate) auth_token_id: String,
     pub(crate) operation_handle: String,
     pub(crate) request: Option<Value>,
     pub(crate) execution_id: Option<String>,
@@ -1506,9 +1508,6 @@ impl OperationRegistry {
             )
             .optional()?
             .ok_or_else(|| anyhow!("authorization continuation is unknown or expired"))?;
-        let operation_key = continuation.0.ok_or_else(|| {
-            anyhow!("authorization continuation is missing private operation identity")
-        })?;
         if !matches!(
             continuation.2.as_str(),
             "hubu_authorize_spend" | "hubu_submit_governed_execution"
@@ -1555,7 +1554,7 @@ impl OperationRegistry {
         }
         transaction.commit()?;
         Ok(GongbuContinuation {
-            operation_key,
+            auth_token_id: auth_token_id.to_owned(),
             operation_handle: continuation.1,
             execution_id: continuation.5,
         })
@@ -1658,7 +1657,7 @@ impl OperationRegistry {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let candidate = transaction
             .query_row(
-                "SELECT operation_handle, operation_key, gongbu_request_json,
+                "SELECT operation_handle, auth_token_id, gongbu_request_json,
                         gongbu_execution_id, operation_state, dispatch_attempts,
                         observation_failures, reconciliation_attempts,
                         operation_deadline_at
@@ -1688,9 +1687,9 @@ impl OperationRegistry {
             transaction.commit()?;
             return Ok(None);
         };
-        let operation_key = candidate
-            .1
-            .ok_or_else(|| anyhow!("durable operation is missing private operation identity"))?;
+        let auth_token_id = candidate.1.ok_or_else(|| {
+            anyhow!("durable operation is missing its authorization continuation")
+        })?;
         let request = candidate
             .2
             .as_deref()
@@ -1720,7 +1719,7 @@ impl OperationRegistry {
         transaction.commit()?;
         Ok(Some(ClaimedDurableOperation {
             lease_id,
-            operation_key,
+            auth_token_id,
             operation_handle: candidate.0,
             request,
             execution_id: candidate.3,
@@ -1778,8 +1777,8 @@ impl OperationRegistry {
         reconciliation_observation: bool,
     ) -> Result<()> {
         validate_gongbu_status(&lifecycle.status)?;
-        if lifecycle.operation_key != operation.operation_key {
-            bail!("Gongbu lifecycle conflicts with private operation identity");
+        if lifecycle.spend_auth_token_id != operation.auth_token_id {
+            bail!("Gongbu lifecycle conflicts with the bound authorization continuation");
         }
         let next = timestamp(
             Utc::now()
@@ -1801,7 +1800,7 @@ impl OperationRegistry {
                  operation_updated_at = CURRENT_TIMESTAMP
              WHERE operation_handle = ?1 AND worker_lease_id = ?2
                AND operation_state NOT IN ('succeeded','failed')
-               AND operation_key = ?11
+               AND auth_token_id = ?11
                AND (gongbu_execution_id IS NULL OR gongbu_execution_id = ?3)",
             params![
                 operation.operation_handle,
@@ -1814,7 +1813,7 @@ impl OperationRegistry {
                 i64::from(reconciliation_observation),
                 terminal,
                 next,
-                operation.operation_key,
+                operation.auth_token_id,
             ],
         )?;
         ensure_lease_update(changed)
@@ -1848,8 +1847,8 @@ impl OperationRegistry {
     ) -> Result<()> {
         validate_gongbu_status(&lifecycle.status)?;
         validate_result_code(result_code)?;
-        if lifecycle.operation_key != operation.operation_key {
-            bail!("Gongbu lifecycle conflicts with private operation identity");
+        if lifecycle.spend_auth_token_id != operation.auth_token_id {
+            bail!("Gongbu lifecycle conflicts with the bound authorization continuation");
         }
         let changed = self.connection.execute(
             "UPDATE harness_operations
@@ -1863,7 +1862,7 @@ impl OperationRegistry {
                  operation_updated_at = CURRENT_TIMESTAMP
              WHERE operation_handle = ?1 AND worker_lease_id = ?2
                AND operation_state NOT IN ('succeeded','failed')
-               AND operation_key = ?7
+               AND auth_token_id = ?7
                AND (gongbu_execution_id IS NULL OR gongbu_execution_id = ?3)",
             params![
                 operation.operation_handle,
@@ -1872,7 +1871,7 @@ impl OperationRegistry {
                 lifecycle.status,
                 lifecycle.outcome,
                 result_code,
-                operation.operation_key,
+                operation.auth_token_id,
             ],
         )?;
         ensure_lease_update(changed)
@@ -1886,7 +1885,7 @@ impl OperationRegistry {
         let continuation = self
             .connection
             .query_row(
-                "SELECT operation_key, operation_handle, gongbu_execution_id
+                "SELECT auth_token_id, operation_handle, gongbu_execution_id
                  FROM harness_operations WHERE gongbu_execution_id = ?1",
                 [execution_id],
                 |row| {
@@ -1899,10 +1898,10 @@ impl OperationRegistry {
             )
             .optional()?;
         continuation
-            .map(|(operation_key, operation_handle, execution_id)| {
+            .map(|(auth_token_id, operation_handle, execution_id)| {
                 Ok(GongbuContinuation {
-                    operation_key: operation_key.ok_or_else(|| {
-                        anyhow!("Gongbu execution is missing private operation identity")
+                    auth_token_id: auth_token_id.ok_or_else(|| {
+                        anyhow!("Gongbu execution is missing its authorization continuation")
                     })?,
                     operation_handle,
                     execution_id,
@@ -1923,7 +1922,7 @@ impl OperationRegistry {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let existing = transaction
             .query_row(
-                "SELECT operation_key, gongbu_execution_id
+                "SELECT auth_token_id, gongbu_execution_id
                  FROM harness_operations WHERE operation_handle = ?1",
                 [operation_handle],
                 |row| {
@@ -1935,7 +1934,7 @@ impl OperationRegistry {
             )
             .optional()?
             .ok_or_else(|| anyhow!("Gongbu execution has no matching normalized operation"))?;
-        if existing.0.as_deref() != Some(lifecycle.operation_key.as_str())
+        if existing.0.as_deref() != Some(lifecycle.spend_auth_token_id.as_str())
             || existing
                 .1
                 .as_deref()
@@ -1975,14 +1974,14 @@ impl OperationRegistry {
                  worker_lease_expires_at = CASE WHEN ?8 THEN NULL ELSE worker_lease_expires_at END,
                  operation_updated_at = CURRENT_TIMESTAMP
              WHERE operation_handle = ?1
-               AND operation_key = ?5
+               AND auth_token_id = ?5
                AND (gongbu_execution_id IS NULL OR gongbu_execution_id = ?2)",
             params![
                 operation_handle,
                 lifecycle.execution_id,
                 lifecycle.status,
                 lifecycle.outcome,
-                lifecycle.operation_key,
+                lifecycle.spend_auth_token_id,
                 operation_state,
                 operation_result_code,
                 terminal,
@@ -1995,6 +1994,9 @@ impl OperationRegistry {
         Ok(())
     }
 
+    /// Forget expired continuations nobody will consume. A continuation that
+    /// Gongbu or the durable worker owns is kept: it is the identity the router
+    /// verifies Gongbu executions against.
     fn remove_expired_authorization_identifiers(&mut self) -> Result<()> {
         let now = Utc::now();
         let transaction = self
@@ -2006,7 +2008,8 @@ impl OperationRegistry {
                  FROM harness_operations
                  WHERE auth_token_id IS NOT NULL
                    AND authorization_expires_at IS NOT NULL
-                   AND gongbu_create_started_at IS NULL",
+                   AND gongbu_create_started_at IS NULL
+                   AND operation_state IS NULL",
             )?;
             let mapped = statement.query_map([], |row| {
                 Ok((
@@ -2037,7 +2040,8 @@ impl OperationRegistry {
                 "UPDATE harness_operations
                  SET auth_token_id = NULL, result_json = ?2
                  WHERE operation_handle = ?1
-                   AND gongbu_create_started_at IS NULL",
+                   AND gongbu_create_started_at IS NULL
+                   AND operation_state IS NULL",
                 params![handle, result_json],
             )?;
         }
@@ -4832,7 +4836,7 @@ mod tests {
                 &claimed,
                 &GongbuLifecycle {
                     execution_id: "execution-success".into(),
-                    operation_key: continuation.operation_key.clone(),
+                    spend_auth_token_id: continuation.auth_token_id.clone(),
                     status: "pending".into(),
                     outcome: None,
                 },
@@ -4862,7 +4866,7 @@ mod tests {
                 &claimed,
                 &GongbuLifecycle {
                     execution_id: "execution-success".into(),
-                    operation_key: continuation.operation_key,
+                    spend_auth_token_id: continuation.auth_token_id,
                     status: "succeeded".into(),
                     outcome: Some("succeeded".into()),
                 },
@@ -4890,7 +4894,7 @@ mod tests {
         let dispatch = registry.claim_due_operation().unwrap().unwrap();
         let pending = GongbuLifecycle {
             execution_id: "execution-race".into(),
-            operation_key: continuation.operation_key.clone(),
+            spend_auth_token_id: continuation.auth_token_id.clone(),
             status: "pending".into(),
             outcome: None,
         };
@@ -4905,7 +4909,7 @@ mod tests {
                 &operation.operation_handle,
                 &GongbuLifecycle {
                     execution_id: "execution-race".into(),
-                    operation_key: continuation.operation_key,
+                    spend_auth_token_id: continuation.auth_token_id,
                     status: "succeeded".into(),
                     outcome: Some("succeeded".into()),
                 },
@@ -4959,7 +4963,15 @@ mod tests {
         let mut restarted = OperationRegistry::open(&path).unwrap();
         let replay = restarted.claim_due_operation().unwrap().unwrap();
         assert_eq!(replay.request, Some(arguments));
-        assert_eq!(replay.operation_key, operation.operation_key.unwrap());
+        let bound_token: String = restarted
+            .connection
+            .query_row(
+                "SELECT auth_token_id FROM harness_operations WHERE operation_handle = ?1",
+                [&operation.operation_handle],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(replay.auth_token_id, bound_token);
         assert!(replay.execution_id.is_none());
     }
 
@@ -5039,7 +5051,7 @@ mod tests {
         let claimed = registry.claim_due_operation().unwrap().unwrap();
         let lifecycle = GongbuLifecycle {
             execution_id: "execution-reconciliation".into(),
-            operation_key: continuation.operation_key,
+            spend_auth_token_id: continuation.auth_token_id,
             status: "reconciliation_required".into(),
             outcome: Some("ambiguous".into()),
         };
@@ -5436,7 +5448,7 @@ mod tests {
             .resolve_gongbu_continuation("dispatched-authorization", &arguments)
             .unwrap();
         assert_eq!(recovered.operation_handle, operation.operation_handle);
-        assert_eq!(recovered.operation_key, operation.operation_key.unwrap());
+        assert_eq!(recovered.auth_token_id, "dispatched-authorization");
         assert!(recovered.execution_id.is_none());
     }
 

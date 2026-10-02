@@ -28,7 +28,7 @@ Future release template
 ### Highlights
 
 - Added an executor-neutral, black-box conformance suite for the
-  `hubu-spend-executor-v4.3` contract: a versioned fixture corpus of
+  `hubu-spend-executor-v4.4` contract: a versioned fixture corpus of
   requests, responses, error codes and retry decisions, and a
   standard-library runner that targets any Hubu base URL with a pluggable
   executor side. It covers authorization, claims, settlement, release, lease
@@ -37,6 +37,27 @@ Future release template
 
 ### Breaking or operational changes
 
+- The executor contract is now `hubu-spend-executor-v4.4`, and it is
+  intentionally startup-incompatible with v4.3. Executors identify an
+  operation only by values Hubu issued:
+  - claim with the token plus the account, amount and scope assertions;
+  - settle or release with the `claim_id`; an executor that lost the claim
+    response replays the identical claim to recover it.
+
+  Hubu rejects `operation_key` and `agent_id` on executor routes, and rejects
+  the token on settle and release. A claim replay returns the existing claim
+  even after the authorization expires. Gongbu, unified MCP and the
+  release tooling move to v4.4 together, and every binary must report the same
+  version. External v4.3 executors must migrate; see the migration notes in
+  `docs/spend-executor-contract.md`. Human reconciliation and the operation
+  key's role in authorization retries are unchanged.
+- No `/spend/executor/*` response returns `operation_key` any more, including
+  `resolve`. Executors receive only the token, `claim_id` and public IDs.
+  Gongbu identifies new executions by Hubu's `decision_id`, which also seeds
+  the vendor idempotency key; executions created earlier keep their stored
+  identity. Gongbu responses report the consumed `spend_auth_token_id`, which
+  unified MCP verifies against the continuation it bound. The `hubu spend
+  claim` output shows the public `workflow_id` instead of the private key.
 - Removed recurring-budget creation from core (`CreateBudgetSeriesRequest`,
   `CreateBudgetSeriesResponse`, `BudgetRecurrence`, and the series creation
   methods), HTTP (`POST /budgets/series`), CLI (`hubu budget create-recurring`),

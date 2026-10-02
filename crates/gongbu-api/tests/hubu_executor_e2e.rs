@@ -984,7 +984,7 @@ impl TestWorkspace {
         // Share the executor-neutral conformance corpus's Hubu server profile
         // so Gongbu is qualified against the same lease configuration.
         let corpus: Value = serde_json::from_str(include_str!(
-            "../../../fixtures/hubu-executor-conformance-v4.3.json"
+            "../../../fixtures/hubu-executor-conformance-v4.4.json"
         ))
         .expect("parse Hubu executor conformance corpus");
         fs::write(

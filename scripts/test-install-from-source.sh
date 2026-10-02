@@ -155,7 +155,7 @@ cat <<JSON
   "product_version": "${binary_version}",
   "source_commit": "${binary_commit}",
   "build_id": "${binary_build_id}",
-  "executor_contract": "hubu-spend-executor-v4.3"
+  "executor_contract": "hubu-spend-executor-v4.4"
 }
 JSON
 SCRIPT

@@ -1,15 +1,15 @@
 # Executor Conformance Suite
 
 Hubu publishes a black-box conformance suite for the
-[`hubu-spend-executor-v4.3` contract](spend-executor-contract.md). Any executor
+[`hubu-spend-executor-v4.4` contract](spend-executor-contract.md). Any executor
 can run it to check its understanding of Hubu's lifecycle: Gongbu, the
 first-party reference executor, or an external executor that implements
 authorize → claim → settle/release without running Gongbu.
 
 The suite has three parts:
 
-- [`fixtures/hubu-executor-conformance-v4.3.json`](../fixtures/hubu-executor-conformance-v4.3.json):
-  the versioned fixture corpus. It holds the expected v4.3 requests,
+- [`fixtures/hubu-executor-conformance-v4.4.json`](../fixtures/hubu-executor-conformance-v4.4.json):
+  the versioned fixture corpus. It holds the expected v4.4 requests,
   responses, error codes, and retry decisions.
 - [`scripts/hubu-executor-conformance.py`](../scripts/hubu-executor-conformance.py):
   a runner that needs only the Python standard library. It replays the corpus
@@ -79,7 +79,7 @@ stdin/stdout, one JSON object per line
 (`hubu-executor-conformance-plugin-v1`):
 
 1. The runner sends
-   `{"type":"hello","protocol":"hubu-executor-conformance-plugin-v1","base_url":…,"executor_contract":"hubu-spend-executor-v4.3"}`.
+   `{"type":"hello","protocol":"hubu-executor-conformance-plugin-v1","base_url":…,"executor_contract":"hubu-spend-executor-v4.4"}`.
    The executor answers `{"type":"ready","executor":"<name>"}`.
 2. For each executor step, the runner sends
    `{"type":"invoke","scenario","step","operation","method","path","body","query","reconciliation_capability"}`.
@@ -102,16 +102,24 @@ reports an HTTP response it could not have received, or if the request never
 reached Hubu. Invoke messages don't say which steps drop the response.
 
 A real executor maps each `operation` onto its own Hubu client and returns what
-Hubu answered. `method`, `path`, and `body` give the canonical v4.3 request
+Hubu answered. `method`, `path`, and `body` give the canonical v4.4 request
 the executor must send. HUB-206 wires its standalone external-executor example
 into this protocol.
 
 ## Corpus format and determinism
 
+- Executor requests are identified only by the `spend_auth_token_id` or
+  `claim_id` Hubu issued. The corpus lists the retired v4.3 identity fields in
+  `retired_identity_fields`. The runner refuses a corpus where an executor step
+  sends them, unless the step is marked `legacy_identity_probe` and expects
+  Hubu to reject it. Executor responses are asserted with `absent` to carry no
+  `operation_key`. An executor that passes the suite therefore neither needs
+  nor ever sees the private operation key.
+
 - `schema` (`hubu-executor-conformance-v1`) versions the corpus format.
   `corpus_version` versions the fixture content. `protocol_version` names the
   Hubu contract under test. A breaking contract version gets a new corpus file,
-  such as `…-v4.4.json`.
+  such as `…-v4.5.json`.
 - `operations` maps each operation name to its public route and default actor.
 - `retry_decisions` names every non-success outcome an executor must handle.
   For each one it records the observable response (`status`, `error_contains`,
@@ -120,7 +128,7 @@ into this protocol.
   repeating the response.
 - `definitions` holds deterministic inputs: typed scopes, exact costs, and
   complete frozen pricing snapshots. Operation keys are fixed strings such as
-  `conformance:v4.3:s02:op-a`. They are agent-scoped, and the runner
+  `conformance:v4.4:s01:op-a`. They are agent-scoped, and the runner
   registers a fresh agent and budget for every scenario.
 - Server-generated IDs and timestamps are **never** asserted literally. Steps
   `capture` them and assert them by relation: `same`, `different`, `before`,
@@ -143,9 +151,9 @@ into this protocol.
 | 1. Two independent provider operations under one agent budget | `S01` | Two allowed authorizations against the **same** budget produce distinct tokens, holds, decisions, and claims. Budget frozen 700 / remaining 300. Two claimed workflows share a task reference. No postings while claimed. |
 | 2. Settle both with precise costs and immutable references | `S02` (includes `S01`) | Exact costs `3.500001` and `2.5001` USD charge 351 and 251 cents with 49-cent releases each. Snapshots, provider request IDs, and artifact references are returned unchanged. Changed provider reference, artifact reference, or an equal-but-rescaled cost is rejected. Exactly one `external_provider` posting per settlement, linked to its claim and workflow. Budget coverage has no unaccounted consumption. |
 | 3. Ambiguous retry of authorization, claim, and finalization | `S03` | Each stage's first response is dropped. Retries return the same token, hold, claim, and settlement (`idempotent_replay`, same timestamps). One hold, one consumption, one posting, one workflow. |
-| 4. Operation-key reuse with changed scope | `S04` | Changed amount, provider scope, or lease profile returns `409 create_new_operation`. Claims with a changed amount, scope, or operation key are rejected. No extra hold. Exact replay still recovers the original. Changed scope is still rejected after claim. |
-| 5. Release before billable work | `S05` | Release returns the full hold once (replay keeps `finalized_at`). Settlement after release is rejected. Claim replay reports `released`. No posting, no receipt. |
-| 6. Settlement response loss | `S06` | The claim shows `settled` after the lost response. Release cannot erase billed work. The identical retry returns the stored settlement. A changed-cost retry is rejected. One consumption and one posting. |
+| 4. Operation-key reuse with changed scope | `S04` | Changed amount, provider scope, or lease profile returns `409 create_new_operation`. Claims with a changed amount or scope are rejected, and a claim carrying the retired v4.3 `operation_key` is rejected. No extra hold. Exact replay still recovers the original. Changed scope is still rejected after claim. |
+| 5. Release before billable work | `S05` | The claim response is lost; the retired `agent_id` + `operation_key` release is rejected, then replaying the identical claim recovers the `claim_id` and the executor releases by it. Release returns the full hold once (replay by `claim_id` keeps `finalized_at`). Settlement after release is rejected. Claim replay reports `released`. No posting, no receipt. |
+| 6. Settlement response loss | `S06` | The claim shows `settled` after the lost response. A release named by the token instead of the `claim_id` is rejected. Release cannot erase billed work. The identical retry returns the stored settlement. A changed-cost retry is rejected. One consumption and one posting. |
 | 7. Lease expiry into reconciliation | `S07` | Hubu marks the expired claim `reconciliation_required` and keeps the hold `claimed`/frozen. Normal settle and release are rejected. The claim appears in the owner reconciliation queue. The workflow shows `reconciliation_required`. No posting. |
 | 8. Human reconciliation, both outcomes | `S08` | Executor attempts with only the normal bearer (missing capability) or the bearer presented as the capability (invalid) are rejected for both outcomes, and the queue is unchanged. The human `vendor_billed` path settles with one posting. `vendor_did_not_bill` releases with no posting. Replays are stable. Changed evidence is rejected. |
 | 9. Restart between stages | `S09` | SIGKILL/restart after authorization (including a denied-then-corrected revision), after claim, and after a lost settlement response. Every replay returns the same durable IDs and timestamps. Budget and posting stay consistent. |

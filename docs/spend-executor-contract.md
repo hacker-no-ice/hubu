@@ -18,7 +18,7 @@ settlement auditability.
 
 ## Protocol Version
 
-The current version is `hubu-spend-executor-v4.3`. Agents and executors can
+The current version is `hubu-spend-executor-v4.4`. Agents and executors can
 discover its machine-readable guidance from either public route:
 
 ```http
@@ -26,12 +26,19 @@ GET /spend/executor/guidance
 GET /.well-known/hubu-spend-executor.json
 ```
 
-The precise-cost fields are additive within `hubu-spend-executor-v4.3`. They add a precise
+V4.4 identifies executor claims by the `spend_auth_token_id` and finalization
+by the `claim_id` Hubu issued; see
+[v4.4 executor request identity](#v44-executor-request-identity).
+It is intentionally startup-incompatible with v4.3: every binary in the
+installation reports and requires the same contract version, and a v4.3
+executor must migrate its request shapes.
+
+The precise-cost fields were added within `hubu-spend-executor-v4.3` and remain in v4.4. They add a precise
 integer external-cost object, preserves the complete frozen pricing snapshot,
 and separates exact provider cost from the conservatively rounded number of
 cents charged to a Hubu budget. Normal and human-reconciled billed settlement
-use the same validation and rounding. Existing v4.3 callers may keep sending
-the cents-only receipt field described below while they migrate.
+use the same validation and rounding. Callers may still send the cents-only
+receipt field described below while they migrate to the precise object.
 
 V4.3 renamed Hubu's `workload_profile` field to `lease_profile`, made the
 authorization TTL global, and limited each lease profile to its claim TTL.
@@ -44,14 +51,17 @@ for token-only executor admission.
 
 Executors can check their lifecycle handling against the black-box
 [executor conformance suite](executor-conformance.md), which replays a
-versioned v4.3 fixture corpus against a real `hubu-server`.
+versioned v4.4 fixture corpus against a real `hubu-server`.
 
 The unified MCP continuation binding remains independent of
 the v4.3 cost fields. It makes the existing `auth_token_id` /
 `spend_auth_token_id` the agent-visible continuation identifier for one private
-normalized operation. The agent never supplies or receives `operation_key` on
-Gongbu tools. Gongbu learns it only from authenticated Hubu resolution and
-retains it internally for claim, idempotency, settlement, and recovery.
+normalized operation. The private `operation_key` stays with the platform,
+the unified MCP router and Hubu. No executor ever receives it, Gongbu
+included: executor routes neither accept nor return it. Gongbu identifies an
+execution by Hubu's `decision_id` (one decision, one authorization, at most
+one provider call). That identity also seeds the vendor idempotency key.
+Gongbu claims and finalizes by the continuation token.
 
 V4 retains V3's immutable, platform-provided `operation_key` from authorization
 through claim and finalization. Hubu stores workflow state under
@@ -66,23 +76,19 @@ remainder of the authorized maximum.
 `POST /spend/executor/validate` remains available for scope inspection, but
 validation alone does not authorize irreversible work.
 
-## Upcoming v4.4: Token-Identified Executor Requests
+## V4.4 Executor Request Identity
 
-> Status: accepted by Hubu, **not yet advertised**. `/version` and executor
-> guidance still report `hubu-spend-executor-v4.3` until the cohort cutover
-> (HUB-214). Do not depend on v4.4-only behaviour in a released build until
-> the advertised version changes.
+An executor identifies its operation only by values Hubu gave it: it claims
+with the authorization continuation (`spend_auth_token_id`), and it settles or
+releases by the `claim_id` that claim returns. It never sends `operation_key`
+or `agent_id` on executor routes, and it does not need to read them from
+`resolve`.
 
-In v4.4 an executor identifies its operation only by values Hubu gave it: it
-claims with the authorization continuation (`spend_auth_token_id`), and it
-settles or releases by the `claim_id` that claim returns. It no longer reads `operation_key` or `agent_id` from
-`resolve`, and it never sends them back.
-
-| Route | v4.4 identity | v4.3 identity (removed at cutover) |
+| Route | Identity | Rejected |
 | --- | --- | --- |
-| `POST /spend/executor/claim` | `spend_auth_token_id`, plus the account, amount and scope assertions | the same, plus `operation_key` |
-| `POST /spend/executor/settle` | `claim_id`, plus `receipt` | `agent_id` + `operation_key`, plus `receipt` |
-| `POST /spend/executor/release` | `claim_id` | `agent_id` + `operation_key` |
+| `POST /spend/executor/claim` | `spend_auth_token_id`, plus the account, amount and scope assertions | `operation_key`, `agent_id` |
+| `POST /spend/executor/settle` | `claim_id`, plus `receipt` | `spend_auth_token_id`, `operation_key`, `agent_id` |
+| `POST /spend/executor/release` | `claim_id` | `spend_auth_token_id`, `operation_key`, `agent_id`, `receipt` |
 
 ```json
 {"claim_id":"00000000-0000-4000-8000-000000000456","receipt":{"…":"…"}}
@@ -92,26 +98,27 @@ Rules:
 
 - **Claim:** Hubu derives the operation key, agent, task and reason from the
   stored decision. The account, amount and scope assertions remain, so the
-  executor still proves it is claiming exactly the work it priced. During the
-  transition, a supplied `operation_key` is still a cross-check, and a
-  mismatch is rejected.
+  executor still proves it is claiming exactly the work it priced.
 - **Settle and release:** identified by `claim_id` only. An executor that
   lost the claim response replays the identical claim, using the same token,
   to recover it. A claim replay returns the existing claim, including its
   terminal state, even after the authorization expires.
   - Owner checks apply: another owner's claim is reported as unknown.
-  - Sending `spend_auth_token_id`, or mixing `claim_id` with
-    `agent_id`/`operation_key`, is rejected.
-- **Replay:** an identical settlement or release returns the stored result. A changed receipt is
-  rejected. Budget, holds and ledger postings are never applied twice.
+  - Sending `spend_auth_token_id` is rejected with that recovery guidance.
+  - The retired v4.3 `agent_id` + `operation_key` identity is rejected, alone
+    or mixed with `claim_id`.
+- **Replay:** an identical settlement or release returns the stored result. A
+  changed receipt is rejected. Budget, holds and ledger postings are never
+  applied twice.
 - **Human reconciliation:** unchanged. It uses `claim_id`, `provider_reference`
   and `evidence` with the separate capability. Adding executor identity fields
   to that shape is rejected.
-- **`resolve`:** keeps returning `operation_key` and `agent_id`. Gongbu and the
-  unified MCP router use them internally to verify their bound normalized
-  operation, and Hubu has no executor-scoped credential (HUB-32) that could
-  tell Gongbu apart from an external executor. External v4.4 executors must
-  not depend on these fields; revisit this projection with HUB-32.
+- **Responses:** no `/spend/executor/*` response carries `operation_key`.
+  That covers resolve, validate, claim, settle, release, claim inspection and
+  the reconciliation queue. Executors receive the token, `claim_id`,
+  `decision_id` (the public workflow ID) and the public `agent_id`/`account_id`.
+  Owners who hold the private key can still look a workflow up through
+  `GET /spend/workflows/show`.
 
 ### Migrating a v4.3 executor
 
@@ -186,8 +193,10 @@ Agent platforms or orchestrators are responsible for:
 Executors are responsible for:
 
 - storing vendor API keys and other execution secrets outside Hubu
-- resolving the immutable `operation_key` from Hubu and carrying it into the
-  durable claim/finalization requests
+- persisting the `spend_auth_token_id` before claiming, claiming by it, and
+  settling or releasing by the returned `claim_id` (replaying the identical
+  claim recovers a lost `claim_id`); executors never send the private
+  `operation_key`
 - claiming Hubu authorization before irreversible work
 - calling vendors or tools
 - reporting the exact vendor cost with a provider request ID, complete frozen
@@ -479,12 +488,13 @@ guidance.
    conflicts. The persisted execution agent is used for claim settlement or
    release.
 
-   Gongbu's HTTP response still contains `operation_key` on this private
-   backend contract. The unified MCP router verifies it against its bound
-   normalized operation, persists Gongbu's execution ID and lifecycle state,
-   and removes the key recursively from all agent-facing content, structured
-   content, errors, failure text, and status projections. A returned execution
-   ID conflict fails closed. Exact replay can only recover the same Gongbu
+   Gongbu's HTTP response reports the `spend_auth_token_id` the execution
+   consumed. The unified MCP router verifies it against the continuation it
+   bound to the normalized operation, then persists Gongbu's execution ID and
+   lifecycle state. Gongbu never learns the private operation key. As defence
+   in depth, the router still removes any `operation_key` field or
+   `hubu:operation:v1:` value from agent-facing content. A returned execution
+   or continuation conflict fails closed. Exact replay can only recover the same Gongbu
    execution; payload-similarity inference and ambiguous provider retry remain
    out of scope.
 
@@ -497,7 +507,6 @@ guidance.
 
    ```json
    {
-     "operation_key": "codex:tool-call:01JABC123",
      "spend_auth_token_id": "00000000-0000-4000-8000-000000000123",
      "account_id": "aga_example",
      "amount_cents": 500,
@@ -516,8 +525,9 @@ guidance.
    hold. Hubu resolves task ID and reason from the stored authorization rather
    than trusting executor input. A legacy executor may send `task_id` as a
    compatibility assertion, but a mismatch is rejected. A retry with the same
-   operation key returns the existing claim,
-   including its terminal state if it has already been settled or released.
+   token returns the existing claim, including its terminal state if it has
+   already been settled or released. Hubu derives the operation key from the
+   stored decision; sending `operation_key` or `agent_id` is rejected.
 
    The version-1 typed scope and legacy migration behavior are specified in
    [trusted execution scope](spend-lifecycle.md#trusted-execution-scope). New
@@ -537,8 +547,7 @@ guidance.
 
    ```json
    {
-     "agent_id": "agt_example",
-     "operation_key": "codex:tool-call:01JABC123",
+     "claim_id": "00000000-0000-4000-8000-000000000456",
      "receipt": {
        "actual_vendor_cost": {
          "amount": 4000001,
@@ -574,7 +583,7 @@ guidance.
    and releases the 99-cent remainder in one SQLite write transaction. A normal
    executor settlement is accepted only when its checked `budget_charge_cents`
    does not exceed the 500-cent authorized maximum. Hubu resolves the claim
-   from the agent and operation key, so an identical retry returns the original
+   from the `claim_id`, so an identical retry returns the original
    `settlement_id` and receipt even if the caller lost the response. A retry
    with any changed exact-cost, currency, scale, snapshot, provider, or artifact
    data is rejected, and budget is not consumed twice.
@@ -597,8 +606,7 @@ guidance.
 
    ```json
    {
-     "agent_id": "agt_example",
-     "operation_key": "codex:tool-call:01JABC123"
+     "claim_id": "00000000-0000-4000-8000-000000000456"
    }
    ```
 
@@ -610,7 +618,6 @@ guidance.
 
 ```json
 {
-  "operation_key": "codex:tool-call:01JABC123",
   "claim_id": "uuid",
   "lease_profile": "long_running",
   "status": "claimed",
@@ -625,7 +632,6 @@ guidance.
   "reconciled_at": null,
   "reconciled_by_user_id": null,
   "spend": {
-    "operation_key": "codex:tool-call:01JABC123",
     "spend_auth_token_id": "uuid",
     "decision_id": "uuid",
     "account_id": "aga_...",
@@ -675,7 +681,6 @@ user, and timestamp.
 
 ```json
 {
-  "operation_key": "codex:tool-call:01JABC123",
   "settlement_id": "uuid",
   "claim_id": "uuid",
   "status": "settled",
@@ -841,8 +846,8 @@ X-Hubu-Reconciliation-Capability: HUMAN_CAPABILITY
 ```
 
 The existing settle/release endpoints therefore accept one of two exclusive
-request shapes: the normal executor shape with `agent_id` plus the immutable
-`operation_key`, or the human reconciliation shape with `claim_id`,
+request shapes: the normal executor shape identified by `claim_id`, or the
+human reconciliation shape with `claim_id`,
 `provider_reference`, and `evidence`. Mixing the shapes is rejected. The
 vendor-billed shape also requires the provider receipt; vendor-did-not-bill
 rejects one. Reconciliation requires non-empty evidence fields, accepts only an
@@ -906,7 +911,8 @@ with only the normal bearer are rejected.
 
 - Executors must claim before irreversible work; validation alone is insufficient.
 - Agent platforms must supply one stable operation key and reuse it for
-  authorization, claim, finalization, and every retry.
+  every authorization retry. Executors claim by `spend_auth_token_id`, settle
+  or release by `claim_id`, and never send the operation key.
 - Executors must settle after irreversible billable work succeeds.
 - Settlement must report exact vendor cost, currency, scale, the complete
   frozen pricing snapshot, and immutable provider receipt metadata.
@@ -917,8 +923,8 @@ with only the normal bearer are rejected.
   overrun rather than hiding part of a legitimate vendor bill.
 - Executors must release only when no irreversible billable work occurred.
 - Agents and executors may retry any stage after an ambiguous response; Hubu
-  returns stored workflow state for the same operation key and rejects changed
-  spend scope.
+  returns stored workflow state for the same operation key (authorization) or
+  token/claim (claim and finalization) and rejects changed spend scope.
 - Executors must not resolve expired claims. A human must review provider
   billing and choose the reconciliation outcome.
 - Never distribute the human reconciliation capability to an executor.

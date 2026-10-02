@@ -287,9 +287,9 @@ pub(super) fn execution_result(
     requested_execution_id: Option<&str>,
     expected_schema_version: u32,
 ) -> Result<(ToolResult, crate::operation_registry::GongbuLifecycle), ToolError> {
-    if expected.is_some_and(|expected| expected.operation_key != response.operation_key) {
+    if expected.is_some_and(|expected| expected.auth_token_id != response.spend_auth_token_id) {
         return Err(ToolError::identity_conflict(
-            "Gongbu returned an execution for a different normalized operation",
+            "Gongbu returned an execution for a different authorization continuation",
         ));
     }
     if requested_execution_id.is_some_and(|execution_id| execution_id != response.execution_id)
@@ -313,13 +313,12 @@ pub(super) fn execution_result(
     }
     let lifecycle = crate::operation_registry::GongbuLifecycle {
         execution_id: response.execution_id.clone(),
-        operation_key: response.operation_key.clone(),
+        spend_auth_token_id: response.spend_auth_token_id.clone(),
         status: response.status.clone(),
         outcome: response.outcome.clone(),
     };
     let timing = response.timing();
     let provider_transport = response.provider_transport();
-    let private_operation_key = response.operation_key.clone();
     let public = PublicExecutionResponse {
         schema_version: response.schema_version,
         execution_id: response.execution_id,
@@ -337,7 +336,7 @@ pub(super) fn execution_result(
         recovery: response.recovery,
     };
     let mut public = serde_json::to_value(public).expect("public execution response serializes");
-    scrub_private_projection(&mut public, &private_operation_key);
+    scrub_private_projection(&mut public);
     Ok((text_result(&public), lifecycle))
 }
 
@@ -511,18 +510,16 @@ fn scrub_private_text(text: &mut String, private_operation_key: Option<&str>) {
     }
 }
 
-fn scrub_private_projection(value: &mut Value, private_operation_key: &str) {
+/// Gongbu never learns the router's private operation key under v4.4; this
+/// remains a defence in depth against any operation-key field or value.
+fn scrub_private_projection(value: &mut Value) {
     match value {
         Value::Object(object) => {
             object.retain(|key, _| key != "operation_key");
-            object
-                .values_mut()
-                .for_each(|value| scrub_private_projection(value, private_operation_key));
+            object.values_mut().for_each(scrub_private_projection);
         }
-        Value::Array(values) => values
-            .iter_mut()
-            .for_each(|value| scrub_private_projection(value, private_operation_key)),
-        Value::String(text) => scrub_private_text(text, Some(private_operation_key)),
+        Value::Array(values) => values.iter_mut().for_each(scrub_private_projection),
+        Value::String(text) => scrub_private_text(text, None),
         _ => {}
     }
 }
@@ -631,7 +628,7 @@ struct RecoveryGuidance {
 pub(super) struct ExecutionResponse {
     schema_version: u32,
     execution_id: String,
-    operation_key: String,
+    spend_auth_token_id: String,
     status: String,
     outcome: Option<String>,
     failure: Option<FailureResponse>,
@@ -860,7 +857,7 @@ mod tests {
         ExecutionResponse {
             schema_version: EXECUTION_V2_SCHEMA_VERSION,
             execution_id: "exec-1".into(),
-            operation_key: "operation-1".into(),
+            spend_auth_token_id: "token-1".into(),
             status: "executing".into(),
             outcome: None,
             failure: None,
@@ -884,7 +881,7 @@ mod tests {
 
     fn continuation(execution_id: Option<&str>) -> GongbuContinuation {
         GongbuContinuation {
-            operation_key: "operation-1".into(),
+            auth_token_id: "token-1".into(),
             operation_handle: "hubu:public-operation:v1:test".into(),
             execution_id: execution_id.map(str::to_owned),
         }
@@ -930,7 +927,7 @@ mod tests {
     #[test]
     fn execution_identity_conflicts_remain_permanent_and_fail_closed() {
         let mut wrong_operation = execution();
-        wrong_operation.operation_key = "another-operation".into();
+        wrong_operation.spend_auth_token_id = "another-token".into();
         let error = result_error(execution_result(
             wrong_operation,
             Some(&continuation(None)),

@@ -453,13 +453,20 @@ fn exact_qualification_artifact(
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
+/// The qualification execution's identity: the historical Codex operation
+/// key it was persisted with, or the Hubu decision identity that executions
+/// admitted under `hubu-spend-executor-v4.4` carry instead.
 fn valid_qualification_operation_key(value: &str) -> bool {
-    value.strip_prefix("codex:v1:").is_some_and(|suffix| {
+    let legacy_codex_key = value.strip_prefix("codex:v1:").is_some_and(|suffix| {
         suffix.len() == 32
             && suffix
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-    })
+    });
+    let hubu_decision = value
+        .strip_prefix("hubu-decision:")
+        .is_some_and(|decision_id| !decision_id.trim().is_empty() && decision_id.len() <= 255);
+    legacy_codex_key || hubu_decision
 }
 
 fn exact_scope(scope: &crate::execution_scope::ExecutionScope) -> bool {

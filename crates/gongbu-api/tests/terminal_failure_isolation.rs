@@ -562,7 +562,6 @@ impl SpendAuthorizationResolver for ScenarioHubu {
         spend_auth_token_id: &str,
     ) -> Result<ExecutorSpendResponse, HttpClientError> {
         Ok(ExecutorSpendResponse {
-            operation_key: spend_auth_token_id.into(),
             reason: "terminal isolation scenario".into(),
             spend_auth_token_id: spend_auth_token_id.into(),
             decision_id: format!("decision-{spend_auth_token_id}"),

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the executor-neutral Hubu v4.3 conformance corpus against a real
+# Run the executor-neutral Hubu v4.4 conformance corpus against a real
 # hubu-server, once with the built-in executor side and once through the
 # external executor plugin protocol.
 set -euo pipefail

@@ -2270,7 +2270,11 @@ fn print_executor_claim(claim: &Value) -> Result<()> {
             style.success("false")
         }
     );
-    println!("  operation_key: {}", string_at(claim, "operation_key")?);
+    // Executor responses carry no private operation key; the public
+    // workflow id links the claim to `hubu spend show --workflow-id`.
+    if let Some(workflow_id) = claim.pointer("/spend/decision_id").and_then(Value::as_str) {
+        println!("  workflow_id: {workflow_id}");
+    }
     println!(
         "  claim_expires_at: {}",
         local_timestamp(string_at(claim, "claim_expires_at")?)
