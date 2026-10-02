@@ -9073,7 +9073,10 @@ lease_profiles:
             &state,
         )
         .expect_err("an unknown claim has nothing to finalize");
-        assert!(unknown.to_string().contains("unknown executor spend claim"), "{unknown}");
+        assert!(
+            unknown.to_string().contains("unknown executor spend claim"),
+            "{unknown}"
+        );
 
         let mismatched_key = claim_executor_spend(
             json!({
