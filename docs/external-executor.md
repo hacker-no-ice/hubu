@@ -34,8 +34,8 @@ Hubu credentials or operation keys.
 
 ## 2. The executor claims before billable work
 
-Your executor authenticates with its own normal Hubu bearer. It identifies the
-operation **only** by the token, and by the `claim_id` once Hubu returns one:
+Your executor authenticates with its own normal Hubu bearer. It claims by the
+token and finalizes by the `claim_id` that the claim returns:
 
 1. Persist the token durably before doing anything else.
 2. `POST /spend/executor/resolve` with `{"spend_auth_token_id": …}` reads the
@@ -43,26 +43,27 @@ operation **only** by the token, and by the `claim_id` once Hubu returns one:
    you priced.
 3. `POST /spend/executor/claim` with the token plus `account_id`,
    `amount_cents` and `execution_scope`. Never send `operation_key` or
-   `agent_id`; v4.4 rejects them. A retry with the same token returns the same
-   claim.
+   `agent_id`; v4.4 rejects them. Persist the returned `claim_id`. A retry with
+   the same token returns the same claim, even after the authorization
+   expires, so a lost claim response is recovered by replaying the claim.
 
 Do no irreversible or billable work until the claim succeeds.
 
 ## 3. Finalize: settle or release
 
 - **Billable work happened:** `POST /spend/executor/settle` with
-  `{"spend_auth_token_id": …}` or `{"claim_id": …}` and a receipt. The receipt
+  `{"claim_id": …}` and a receipt. The receipt
   holds the exact vendor cost (`amount`, `scale`, `currency`), the provider
   request ID, the complete frozen pricing snapshot and an artifact reference.
   Hubu consumes the conservative budget charge, releases the remainder, and
   posts exactly one ledger transaction.
-- **No billable work happened:** `POST /spend/executor/release` with the token
-  or the `claim_id`. Hubu returns the full hold and posts nothing.
+- **No billable work happened:** `POST /spend/executor/release` with
+  `{"claim_id": …}`. Hubu returns the full hold and posts nothing.
 
-If a response is lost, replay the identical request. The token still names its
-operation after the authorization expires, and even if you never saw the claim
-response. Never change a receipt on retry, and never release work that may
-have been billed.
+Settle and release reject the token; they are identified by the `claim_id`
+only. If a response is lost, replay the identical request. If you never saw
+the claim response, replay the claim first to recover the `claim_id`. Never
+change a receipt on retry, and never release work that may have been billed.
 
 ## 4. Ambiguous outcomes need a human
 

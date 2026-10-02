@@ -257,28 +257,34 @@ class ExternalExecutor:
 
     def __init__(self, hubu: HubuServer):
         self.hubu = hubu
+        # Persisted claim requests, replayed verbatim to recover a claim.
+        self.claim_requests: dict[str, dict] = {}
 
     def claim(self, token: str) -> dict:
         status, snapshot = http(self.hubu.base, "POST", "/spend/executor/resolve", {"spend_auth_token_id": token})
         check(status == 200, f"resolve failed: {snapshot}")
         assert_no_private_identity("resolve", snapshot)
-        status, claim = http(
-            self.hubu.base,
-            "POST",
-            "/spend/executor/claim",
-            {
-                "spend_auth_token_id": token,
-                "account_id": snapshot["account_id"],
-                "amount_cents": snapshot["amount_cents"],
-                "execution_scope": snapshot["execution_scope"],
-            },
-        )
+        request = {
+            "spend_auth_token_id": token,
+            "account_id": snapshot["account_id"],
+            "amount_cents": snapshot["amount_cents"],
+            "execution_scope": snapshot["execution_scope"],
+        }
+        self.claim_requests[token] = request
+        status, claim = http(self.hubu.base, "POST", "/spend/executor/claim", request)
         check(status == 200 and claim["status"] == "claimed", f"claim failed: {claim}")
         assert_no_private_identity("claim", claim)
         return claim
 
-    def settle(self, token: str) -> dict:
-        status, body = http(self.hubu.base, "POST", "/spend/executor/settle", {"spend_auth_token_id": token, "receipt": RECEIPT})
+    def replay_claim(self, token: str) -> dict:
+        """Recover a claim by replaying the persisted, identical claim request."""
+        status, claim = http(self.hubu.base, "POST", "/spend/executor/claim", self.claim_requests[token])
+        check(status == 200, f"claim replay failed: {claim}")
+        assert_no_private_identity("claim replay", claim)
+        return claim
+
+    def settle(self, claim_id: str) -> dict:
+        status, body = http(self.hubu.base, "POST", "/spend/executor/settle", {"claim_id": claim_id, "receipt": RECEIPT})
         check(status == 200 and body["status"] == "settled", f"settle failed: {body}")
         assert_no_private_identity("settle", body)
         return body
@@ -348,9 +354,9 @@ def run(hubu_bin: Path, mcp_bin: Path, root: Path) -> None:
         check(replay["operation_handle"] == handle and continuation(replay) == token, "exact redelivery changed the operation")
         check(budget(hubu, ids["agent_id"])["frozen_amount_cents"] == 400, "redelivery created a second hold")
         expect_status(mcp, handle, "authorized", False, True)
-        executor.claim(token)
+        claim = executor.claim(token)
         expect_status(mcp, handle, "executing", False, False)
-        executor.settle(token)
+        executor.settle(claim["claim_id"])
         settled = expect_status(mcp, handle, "settled", True, False)
         check(settled.get("settlement", {}).get("budget_charge_cents") == 351, f"settlement summary: {settled}")
         check(settled["result"] == {"code": "executor_settled"}, f"settled result: {settled}")
@@ -392,10 +398,14 @@ def run(hubu_bin: Path, mcp_bin: Path, root: Path) -> None:
         long_running = authorize(mcp, ids, 400, "standalone-long-running")
         long_handle = long_running["operation_handle"]
         long_token = continuation(long_running)
-        executor.claim(long_token)
+        long_claim = executor.claim(long_token)
         time.sleep(3.5)
         expect_status(mcp, long_handle, "executing", False, False)
-        executor.settle(long_token)
+        # The claim outlived the authorization; the executor still settles by
+        # the claim id (and a claim replay would recover it if it were lost).
+        recovered = executor.replay_claim(long_token)
+        check(recovered["claim_id"] == long_claim["claim_id"], "claim replay after expiry must return the same claim")
+        executor.settle(long_claim["claim_id"])
         expect_status(mcp, long_handle, "settled", True, False)
 
         # lease expiry routes to human reconciliation and is never replaceable
