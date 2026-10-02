@@ -49,6 +49,9 @@ shape makes v4.3 intentionally startup-incompatible with v4.2.
 V4.2 introduced the read-only `POST /spend/executor/resolve` capability used
 for token-only executor admission.
 
+To run your own executor behind MCP authorization, follow
+[Use Hubu with your own executor](external-executor.md).
+
 Executors can check their lifecycle handling against the black-box
 [executor conformance suite](executor-conformance.md), which replays a
 versioned v4.4 fixture corpus against a real `hubu-server`.

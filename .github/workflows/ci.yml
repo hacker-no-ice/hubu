@@ -76,6 +76,9 @@ jobs:
       - name: Run executor-neutral Hubu conformance suite
         run: ./scripts/integration-executor-conformance.sh
 
+      - name: Qualify standalone MCP authorization with an external executor
+        run: ./scripts/integration-standalone-mcp-executor.sh
+
       - name: Run Hubu-to-Gongbu executor E2E
         run: ./scripts/integration-hubu-gongbu-executor.sh
 
