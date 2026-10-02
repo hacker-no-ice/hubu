@@ -1403,10 +1403,7 @@ impl ExecutorSpendFinalizationHttpRequest {
             ));
         }
         match (legacy, claim) {
-            (true, true) => Err(anyhow!(
-                "executor finalization must identify the claim by claim_id, or by agent_id and operation_key, not both"
-            )),
-            (true, false) => Err(anyhow!(
+            (true, _) => Err(anyhow!(
                 "{EXECUTOR_CONTRACT} finalization is identified by claim_id; the retired v4.3 identity fields agent_id and operation_key are no longer accepted"
             )),
             (false, true) => {
@@ -9116,7 +9113,7 @@ lease_profiles:
                     "agent_id": agent.agent_id,
                     "operation_key": authorization.operation_key,
                 }),
-                "not both",
+                "retired v4.3 identity fields",
             ),
             (json!({}), "requires claim_id"),
             (

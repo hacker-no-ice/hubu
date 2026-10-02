@@ -1,6 +1,6 @@
 {
   "schema": "hubu-executor-conformance-v1",
-  "corpus_version": "2026-10-02.3",
+  "corpus_version": "2026-10-02.4",
   "protocol_version": "hubu-spend-executor-v4.4",
   "description": "Executor-neutral black-box conformance fixtures for the Hubu spend-executor contract. Every request targets the public Hubu HTTP API. Executors claim by the spend_auth_token_id and settle or release by the claim_id Hubu issued; the retired v4.3 agent_id/operation_key identity appears only in steps marked legacy_identity_probe, which must be rejected. Server-generated IDs and timestamps are captured and asserted by relation, never by literal value. Executor responses never carry the private operation key.",
   "server_profile": {
@@ -94,7 +94,7 @@
   "retry_decisions": {
     "replay_exactly": {
       "trigger": "No HTTP response was observed (dropped response, timeout, connection loss, process restart) or Hubu returned 5xx.",
-      "executor_action": "Retry the identical request with the same operation_key. Hubu returns the stored authorization, claim, settlement or release without a second hold, consumption or ledger posting.",
+      "executor_action": "Retry the identical request. Authorization retries reuse the same operation_key (platform side); claim retries reuse the same spend_auth_token_id; settle and release retries use the same claim_id, and a lost claim_id is recovered by replaying the identical claim. Hubu returns the stored authorization, claim, settlement or release without a second hold, consumption or ledger posting.",
       "gongbu_activity_class": "ambiguous"
     },
     "create_new_operation": {
