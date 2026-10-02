@@ -263,23 +263,23 @@ pub(super) fn route_tool_call_v1(
             &arguments,
             &["agent_id", "account_id", "budget_id", "limit", "cursor"],
         )?),
-        "hubu_list_spend_workflows" => get_request(history_path(
-            "/spend/workflows",
+        "hubu_list_authorization_records" => get_request(history_path(
+            "/spend/authorizations",
             &arguments,
             &["agent_id", "account_id", "status", "limit", "cursor"],
         )?),
-        "hubu_get_spend_workflow" => {
+        "hubu_get_authorization_record" => {
             if arguments
-                .get("workflow_id")
+                .get("authorization_id")
                 .and_then(Value::as_str)
                 .is_none()
             {
-                bail!("hubu_get_spend_workflow requires workflow_id");
+                bail!("hubu_get_authorization_record requires authorization_id");
             }
             get_request(history_path(
-                "/spend/workflows/show",
+                "/spend/authorizations/show",
                 &arguments,
-                &["workflow_id"],
+                &["authorization_id"],
             )?)
         }
         "hubu_get_executor_claim" => {
@@ -816,7 +816,7 @@ fn history_path(endpoint: &str, arguments: &Value, allowed: &[&str]) -> Result<S
                         | "reconciliation_required"
                 )
             {
-                bail!("invalid workflow status");
+                bail!("invalid authorization record status");
             }
             url.query_pairs_mut().append_pair(key, &value);
         }

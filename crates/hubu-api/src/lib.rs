@@ -1831,8 +1831,10 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
         ("POST", "/spend") => spend_at(request.body, state, request_now).map(to_json),
         ("GET", "/ledger") => list_ledger(state).map(to_json),
         ("GET", "/ledger/transactions") => history::ledger(&request, state),
-        ("GET", "/spend/workflows") => history::workflows(&request, state, false),
-        ("GET", "/spend/workflows/show") => history::workflows(&request, state, true),
+        ("GET", "/spend/authorizations") => history::authorization_records(&request, state, false),
+        ("GET", "/spend/authorizations/show") => {
+            history::authorization_records(&request, state, true)
+        }
         _ => Err(anyhow!("no route for {} {}", request.method, request.path)),
     };
 
@@ -2159,7 +2161,7 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
         },
         "executor_flow": [
             "platform supplies one stable operation_key and requests POST /spend/authorize with merchant, task scope, and lease_profile",
-            "Hubu durably records the workflow under the agent-scoped operation_key",
+            "Hubu durably records the authorization record under the agent-scoped operation_key",
             "when policy returns needs_approval, the client shows approval.review to the human and resolves the approval_request_id as approve or deny before continuing",
             "agent sends the spend_auth_token_id and execution intent to an executor",
             "executor resolves the authoritative authorization through POST /spend/executor/resolve and independently verifies its derived price and scope",
@@ -2196,7 +2198,7 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
                 "comparison": "case-sensitive after trimming surrounding whitespace"
             },
             "persistence": [
-                "Hubu is the authoritative store for workflow state under the agent-scoped operation_key",
+                "Hubu is the authoritative store for authorization record state under the agent-scoped operation_key",
                 "the client must reuse its stable operation_key for every authorization retry; executors claim by spend_auth_token_id and finalize by claim_id instead",
                 "do not rely on model conversation memory for the operation_key"
             ],
@@ -2314,7 +2316,7 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
             "provider, executor, capability, and billing_merchant are independently policy-addressable stable identities",
             "lease_profile is selected during authorization and cannot be changed by the executor",
             "the spend auth token must be unexpired, unused, unrevoked, and unclaimed when a new claim starts",
-            "authorization retries with the same operation_key and claim retries with the same spend_auth_token_id return stored workflow state, including terminal state",
+            "authorization retries with the same operation_key and claim retries with the same spend_auth_token_id return stored authorization record state, including terminal state",
             "claiming moves the associated budget hold from frozen to claimed and extends it to claim_expires_at",
             "an active claim remains finalizable after the original authorization expires",
             "Hubu does not accept vendor API keys or model/provider payloads in this protocol",
@@ -5975,7 +5977,7 @@ fn parse_request(raw: &str) -> Result<HttpRequest> {
     let (path, query) = split_path_and_query(target);
     if matches!(
         path.as_str(),
-        "/ledger/transactions" | "/spend/workflows" | "/spend/workflows/show"
+        "/ledger/transactions" | "/spend/authorizations" | "/spend/authorizations/show"
     ) {
         let mut keys = std::collections::HashSet::new();
         for pair in target
@@ -8608,7 +8610,7 @@ lease_profiles:
             .to_string(),
             &state,
         )
-        .expect("authorization retry should return the original workflow");
+        .expect("authorization retry should return the original authorization record");
         assert_eq!(authorization_retry.decision_id, authorization.decision_id);
         assert_eq!(authorization_retry.operation_key, operation_key);
         assert_eq!(
@@ -8694,7 +8696,7 @@ lease_profiles:
         assert_eq!(replay.spend.budget_hold.frozen_amount_cents, 0);
 
         let claim_replay = claim_executor_spend(request.to_string(), &state)
-            .expect("claim retry should return the stored terminal workflow state");
+            .expect("claim retry should return the stored terminal authorization record state");
         assert_eq!(claim_replay.claim_id, claim.claim_id);
         assert_eq!(claim_replay.status, "settled");
 
@@ -8709,7 +8711,7 @@ lease_profiles:
             .to_string(),
             &state,
         )
-        .expect("authorization retry should return terminal workflow state");
+        .expect("authorization retry should return terminal authorization record state");
         assert_eq!(authorization_replay.decision_id, authorization.decision_id);
         assert_eq!(
             authorization_replay.auth_token_id,

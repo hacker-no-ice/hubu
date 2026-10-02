@@ -46,7 +46,7 @@ pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 pub const UNIFIED_CONTRACT_VERSION: &str = "hubu-gongbu-mcp-v1";
 pub const EXECUTOR_CONTRACT_VERSION: &str = "hubu-spend-executor-v4.4";
 pub const HUBU_ROUTING_CONTRACT_VERSION: &str = "hubu-mcp-routing-v1";
-pub const ROUTING_REVISION: u32 = 12;
+pub const ROUTING_REVISION: u32 = 13;
 
 const HUBU_ENDPOINT_ENV: &str = "HUBU_UNIFIED_HUBU_ENDPOINT";
 const HUBU_TOKEN_ENV: &str = "HUBU_UNIFIED_HUBU_BEARER_TOKEN";
@@ -90,7 +90,7 @@ const DOMAIN_TOOLS: &[(&str, BackendOwner)] = &[
     ("hubu_create_budget", BackendOwner::Hubu),
     ("hubu_get_executor_claim", BackendOwner::Hubu),
     ("hubu_get_spend_approval", BackendOwner::Hubu),
-    ("hubu_get_spend_workflow", BackendOwner::Hubu),
+    ("hubu_get_authorization_record", BackendOwner::Hubu),
     ("hubu_list_agents", BackendOwner::Hubu),
     ("hubu_list_budgets", BackendOwner::Hubu),
     (
@@ -98,7 +98,7 @@ const DOMAIN_TOOLS: &[(&str, BackendOwner)] = &[
         BackendOwner::Hubu,
     ),
     ("hubu_list_ledger", BackendOwner::Hubu),
-    ("hubu_list_spend_workflows", BackendOwner::Hubu),
+    ("hubu_list_authorization_records", BackendOwner::Hubu),
     ("hubu_list_users", BackendOwner::Hubu),
     ("hubu_policy_diff", BackendOwner::Hubu),
     ("hubu_policy_history", BackendOwner::Hubu),
@@ -1202,7 +1202,7 @@ impl Server {
             .fail_pre_execution_operation(operation_handle, result_code)
     }
 
-    /// Read Hubu's authoritative workflow for a standalone authorization.
+    /// Read Hubu's authoritative authorization record for a standalone authorization.
     ///
     /// Any executor, not only Gongbu, may resolve, claim and finalize the
     /// continuation through Hubu's executor API without the router observing
@@ -1216,10 +1216,10 @@ impl Server {
         else {
             return None;
         };
-        let workflow_id = registry
+        let authorization_id = registry
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .standalone_authorization_workflow_id(operation_handle)
+            .standalone_authorization_id(operation_handle)
             .ok()
             .flatten()?;
         self.refresh_hubu_capability_if_stale();
@@ -1227,23 +1227,25 @@ impl Server {
             self,
             Value::Null,
             ToolCall {
-                name: "hubu_get_spend_workflow".into(),
-                arguments: json!({"workflow_id": workflow_id}),
+                name: "hubu_get_authorization_record".into(),
+                arguments: json!({"authorization_id": authorization_id}),
                 meta: None,
             },
         );
-        let workflow = response
+        let authorization_record = response
             .get("result")
             .filter(|result| result.get("isError") != Some(&Value::Bool(true)))
-            .and_then(|result| result.pointer("/structuredContent/workflow"))
-            .filter(|workflow| {
-                workflow
-                    .get("workflow_id")
+            .and_then(|result| result.pointer("/structuredContent/authorization_record"))
+            .filter(|authorization_record| {
+                authorization_record
+                    .get("authorization_id")
                     .and_then(Value::as_str)
-                    .is_some_and(|returned| same_approval_request_id(&workflow_id, returned))
+                    .is_some_and(|returned| same_approval_request_id(&authorization_id, returned))
             });
-        Some(match workflow {
-            Some(workflow) => StandaloneAuthorizationObservation::Verified(workflow.clone()),
+        Some(match authorization_record {
+            Some(authorization_record) => {
+                StandaloneAuthorizationObservation::Verified(authorization_record.clone())
+            }
             None => StandaloneAuthorizationObservation::Unverified,
         })
     }
@@ -1550,9 +1552,9 @@ fn operation_status_result(status: &operation_registry::DurableOperationStatus) 
     })
 }
 
-/// What Hubu reported for a standalone authorization's workflow.
+/// What Hubu reported for a standalone authorization's authorization record.
 enum StandaloneAuthorizationObservation {
-    /// Hubu's workflow projection, identity-checked against the stored id.
+    /// Hubu's authorization record projection, identity-checked against the stored id.
     Verified(Value),
     /// Hubu could not be read, or returned an unusable or mismatched result.
     Unverified,
@@ -1560,7 +1562,7 @@ enum StandaloneAuthorizationObservation {
 
 const STANDALONE_UNVERIFIED_GUIDANCE: &str = "Hubu could not confirm whether an executor has claimed this authorization. Do not submit a replacement; check hubu_operation_status again later.";
 
-/// Status for a standalone authorization, derived from Hubu's workflow.
+/// Status for a standalone authorization, derived from Hubu's authorization record.
 ///
 /// An executor may hold Hubu's claim even after the authorization itself
 /// expires, so the router's own token-expiry projection must not decide
@@ -1571,13 +1573,15 @@ fn standalone_authorization_status_result(
     observation: &StandaloneAuthorizationObservation,
 ) -> Value {
     let verified = match observation {
-        StandaloneAuthorizationObservation::Verified(workflow) => Some(workflow),
+        StandaloneAuthorizationObservation::Verified(authorization_record) => {
+            Some(authorization_record)
+        }
         StandaloneAuthorizationObservation::Unverified => None,
     };
-    let workflow_status = verified
-        .and_then(|workflow| workflow.get("status"))
+    let authorization_record_status = verified
+        .and_then(|authorization_record| authorization_record.get("status"))
         .and_then(Value::as_str);
-    let (state, terminal, replacement_safe, result_code, guidance) = match workflow_status {
+    let (state, terminal, replacement_safe, result_code, guidance) = match authorization_record_status {
         Some("authorized") => (
             "authorized",
             false,
@@ -1627,7 +1631,7 @@ fn standalone_authorization_status_result(
     };
     let hubu_verified = verified.is_some()
         && matches!(
-            workflow_status,
+            authorization_record_status,
             Some(
                 "authorized"
                     | "claimed"
@@ -1648,12 +1652,14 @@ fn standalone_authorization_status_result(
         "updated_at": status.updated_at,
         "guidance": guidance,
         "authority": {
-            "source": "hubu_workflow",
+            "source": "hubu_authorization_record",
             "verified": hubu_verified,
         },
     });
-    if let (true, Some(workflow)) = (workflow_status == Some("settled"), verified) {
-        if let Some(receipt) = workflow
+    if let (true, Some(authorization_record)) =
+        (authorization_record_status == Some("settled"), verified)
+    {
+        if let Some(receipt) = authorization_record
             .get("receipt")
             .filter(|receipt| receipt.is_object())
         {
@@ -1665,12 +1671,14 @@ fn standalone_authorization_status_result(
         }
     }
     if let Some(outcome) = verified
-        .and_then(|workflow| workflow.pointer("/claim/reconciliation_outcome"))
+        .and_then(|authorization_record| {
+            authorization_record.pointer("/claim/reconciliation_outcome")
+        })
         .filter(|outcome| outcome.is_string())
     {
         projection["reconciliation_outcome"] = outcome.clone();
     }
-    if workflow_status == Some("expired") {
+    if authorization_record_status == Some("expired") {
         projection["retry_guidance"] = json!({
             "action": "create_new_operation",
             "message": "The authorization expired unclaimed. Create a new logical operation for the work."
@@ -1922,9 +1930,9 @@ mod tests {
     }
 
     #[test]
-    fn standalone_authorization_status_follows_hubu_workflow_and_fails_closed() {
+    fn standalone_authorization_status_follows_hubu_authorization_record_and_fails_closed() {
         // The router's own projection has already given up on this expired
-        // continuation; Hubu's workflow is what decides the answer.
+        // continuation; Hubu's authorization_record is what decides the answer.
         let stored = operation_registry::DurableOperationStatus {
             operation_handle: format!("hubu:public-operation:v1:{}", "b".repeat(32)),
             state: "failed".into(),
@@ -1932,9 +1940,9 @@ mod tests {
             result_code: Some("authorization_continuation_unavailable".into()),
             updated_at: "2026-10-01T00:00:00.000Z".into(),
         };
-        let workflow = |status: &str| {
+        let authorization_record = |status: &str| {
             json!({
-                "workflow_id": "workflow-1",
+                "authorization_id": "authorization_record-1",
                 "status": status,
                 "claim": {"reconciliation_outcome": null},
                 "receipt": {
@@ -1978,7 +1986,8 @@ mod tests {
                 json!({"code": "reconciliation_required"}),
             ),
         ] {
-            let observation = StandaloneAuthorizationObservation::Verified(workflow(hubu_status));
+            let observation =
+                StandaloneAuthorizationObservation::Verified(authorization_record(hubu_status));
             let result_value = standalone_authorization_status_result(&stored, &observation);
             let projected = &result_value["structuredContent"];
             assert_eq!(projected["state"], state, "{hubu_status}");
@@ -2012,7 +2021,7 @@ mod tests {
         }
         let settled = standalone_authorization_status_result(
             &stored,
-            &StandaloneAuthorizationObservation::Verified(workflow("settled")),
+            &StandaloneAuthorizationObservation::Verified(authorization_record("settled")),
         );
         assert_eq!(
             settled["structuredContent"]["settlement"],
@@ -2027,7 +2036,7 @@ mod tests {
         // neither terminal nor replaceable.
         for observation in [
             StandaloneAuthorizationObservation::Unverified,
-            StandaloneAuthorizationObservation::Verified(workflow("unknown")),
+            StandaloneAuthorizationObservation::Verified(authorization_record("unknown")),
         ] {
             let result_value = standalone_authorization_status_result(&stored, &observation);
             let projected = &result_value["structuredContent"];

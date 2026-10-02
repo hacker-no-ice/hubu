@@ -46,24 +46,33 @@ fn provider_history_is_canonical_precise_private_and_budget_scoped() {
     assert_eq!(posting["effective_cost"]["amount"], "1");
     assert_eq!(posting["effective_cost"]["scale"], 3);
     assert_eq!(posting["budget_charge_delta_cents"], 1);
-    assert_eq!(posting["workflow_id"], auth.decision_id);
+    assert_eq!(posting["authorization_id"], auth.decision_id);
     assert_eq!(posting["settlement_id"], settled["settlement_id"]);
     assert_eq!(first["coverage"]["recorded_budget_charges_cents"], 1);
     assert_eq!(first["coverage"]["unaccounted_consumption_cents"], 0);
     assert_eq!(read(&state, "/ledger")["transactions"], json!([]));
-    let workflows = read(
+    let authorization_records = read(
         &state,
         &format!(
-            "/spend/workflows?agent_id={}&status=settled",
+            "/spend/authorizations?agent_id={}&status=settled",
             agent.agent_id
         ),
     );
-    assert_eq!(workflows["workflows"].as_array().unwrap().len(), 1);
-    let flow = &workflows["workflows"][0];
+    assert_eq!(
+        authorization_records["authorization_records"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let flow = &authorization_records["authorization_records"][0];
+    assert_eq!(flow["authorization_id"], auth.decision_id);
+    assert!(flow.get("workflow_id").is_none());
+    assert!(authorization_records.get("workflows").is_none());
     assert_eq!(flow["ledger_transaction_ids"][0], posting["id"]);
     assert_eq!(flow["receipt"]["actual_vendor_cost"]["amount"], "1");
     assert_eq!(flow["receipt"]["artifact_reference"]["redacted"], true);
-    for output in [&first, &workflows] {
+    for output in [&first, &authorization_records] {
         let text = output.to_string();
         for secret in [
             &auth.operation_key,
@@ -78,10 +87,13 @@ fn provider_history_is_canonical_precise_private_and_budget_scoped() {
     }
     let shown = read(
         &state,
-        &format!("/spend/workflows/show?workflow_id={}", auth.decision_id),
+        &format!(
+            "/spend/authorizations/show?authorization_id={}",
+            auth.decision_id
+        ),
     );
-    assert_eq!(shown["workflow"], *flow);
-    // Replaying settlement must not create a duplicate posting or workflow.
+    assert_eq!(shown["authorization_record"], *flow);
+    // Replaying settlement must not create a duplicate posting or authorization_record.
     assert_eq!(settle(&state, &agent, &auth, 1), settled);
     assert_eq!(read(&state, &url)["transactions"], first["transactions"]);
     std::fs::remove_file(path).ok();
@@ -177,7 +189,14 @@ fn owned_empty_budget_and_mismatched_filters_are_checked_before_results() {
             auth.budget_hold.as_ref().unwrap().budget_id
         ),
         "/ledger/transactions?owner_user_id=another".into(),
+        "/spend/authorizations/show?authorization_id=unknown".into(),
+        // Unreleased history names are removed rather than aliased.
+        "/spend/workflows".into(),
         "/spend/workflows/show?workflow_id=unknown".into(),
+        format!(
+            "/spend/authorizations/show?workflow_id={}",
+            auth.decision_id
+        ),
     ] {
         assert_ne!(
             route(authenticated_get_request(&url), &state).status,
@@ -188,15 +207,15 @@ fn owned_empty_budget_and_mismatched_filters_are_checked_before_results() {
     assert_eq!(
         read(
             &state,
-            &format!("/spend/workflows?account_id={}", second.account_id)
-        )["workflows"],
+            &format!("/spend/authorizations?account_id={}", second.account_id)
+        )["authorization_records"],
         json!([])
     );
     std::fs::remove_file(path).ok();
 }
 
 #[test]
-fn workflow_lookup_decodes_private_key_but_returns_only_public_identity() {
+fn authorization_record_lookup_decodes_private_key_but_returns_only_public_identity() {
     let (path, state, agent, auth) = setup_executor_authorization("history + & % 雪");
     let encoded: String = auth
         .operation_key
@@ -206,19 +225,19 @@ fn workflow_lookup_decodes_private_key_but_returns_only_public_identity() {
     let shown = read(
         &state,
         &format!(
-            "/spend/workflows/show?agent_id={}&operation_key={encoded}",
+            "/spend/authorizations/show?agent_id={}&operation_key={encoded}",
             agent.agent_id
         ),
     );
-    assert_eq!(shown["workflow"]["id"], auth.decision_id);
+    assert_eq!(shown["authorization_record"]["id"], auth.decision_id);
     assert!(!shown.to_string().contains(&auth.operation_key));
     assert!(!shown.to_string().contains("operation_key"));
     assert!(parse_request(
-        "GET /spend/workflows?limit=1&%6cimit=2 HTTP/1.1\r\nHost: localhost\r\n\r\n"
+        "GET /spend/authorizations?limit=1&%6cimit=2 HTTP/1.1\r\nHost: localhost\r\n\r\n"
     )
     .is_err());
     let mixed = format!(
-        "/spend/workflows/show?workflow_id={}&agent_id={}",
+        "/spend/authorizations/show?authorization_id={}&agent_id={}",
         auth.decision_id, agent.agent_id
     );
     assert_ne!(route(authenticated_get_request(&mixed), &state).status, 200);
@@ -233,13 +252,16 @@ fn workflow_lookup_decodes_private_key_but_returns_only_public_identity() {
     let released = read(
         &state,
         &format!(
-            "/spend/workflows?agent_id={}&status=released",
+            "/spend/authorizations?agent_id={}&status=released",
             agent.agent_id
         ),
     );
-    assert_eq!(released["workflows"].as_array().unwrap().len(), 1);
-    assert!(released["workflows"][0]["receipt"].is_null());
-    assert!(released["workflows"][0]["claim"]["finalized_at"].is_string());
+    assert_eq!(
+        released["authorization_records"].as_array().unwrap().len(),
+        1
+    );
+    assert!(released["authorization_records"][0]["receipt"].is_null());
+    assert!(released["authorization_records"][0]["claim"]["finalized_at"].is_string());
     assert_eq!(
         read(&state, "/ledger/transactions")["transactions"],
         json!([])
@@ -268,7 +290,10 @@ fn history_never_crosses_owner_boundaries_even_with_known_public_ids() {
         read(&state, "/ledger/transactions")["transactions"],
         json!([])
     );
-    assert_eq!(read(&state, "/spend/workflows")["workflows"], json!([]));
+    assert_eq!(
+        read(&state, "/spend/authorizations")["authorization_records"],
+        json!([])
+    );
     for query in [
         format!("/ledger/transactions?agent_id={}", alice.agent_id),
         format!("/ledger/transactions?account_id={}", alice.account_id),
@@ -277,9 +302,12 @@ fn history_never_crosses_owner_boundaries_even_with_known_public_ids() {
             bob.agent_id,
             auth.budget_hold.as_ref().unwrap().budget_id
         ),
-        format!("/spend/workflows/show?workflow_id={}", auth.decision_id),
         format!(
-            "/spend/workflows/show?agent_id={}&operation_key={}",
+            "/spend/authorizations/show?authorization_id={}",
+            auth.decision_id
+        ),
+        format!(
+            "/spend/authorizations/show?agent_id={}&operation_key={}",
             alice.agent_id, auth.operation_key
         ),
     ] {
@@ -311,7 +339,7 @@ fn history_never_crosses_owner_boundaries_even_with_known_public_ids() {
 }
 
 #[test]
-fn workflow_uses_final_authorization_outcome_after_human_approval_or_denial() {
+fn authorization_record_uses_final_authorization_outcome_after_human_approval_or_denial() {
     let (path, state, agent, pending) = setup_pending_approval_with_lease_config_and_merchant(
         "history-approval",
         LeaseConfig::default(),
@@ -320,7 +348,8 @@ fn workflow_uses_final_authorization_outcome_after_human_approval_or_denial() {
     );
     let id = pending.body["decision_id"].as_str().unwrap();
     assert_eq!(
-        read(&state, "/spend/workflows?status=needs_approval")["workflows"][0]["id"],
+        read(&state, "/spend/authorizations?status=needs_approval")["authorization_records"][0]
+            ["id"],
         id
     );
     let approved = route(
@@ -328,10 +357,16 @@ fn workflow_uses_final_authorization_outcome_after_human_approval_or_denial() {
         &state,
     );
     assert_eq!(approved.status, 200, "{}", approved.body);
-    let shown = read(&state, &format!("/spend/workflows/show?workflow_id={id}"));
-    assert_eq!(shown["workflow"]["decision"], "allow");
-    assert_eq!(shown["workflow"]["policy_decision"], "needs_approval");
-    assert_eq!(shown["workflow"]["status"], "authorized");
+    let shown = read(
+        &state,
+        &format!("/spend/authorizations/show?authorization_id={id}"),
+    );
+    assert_eq!(shown["authorization_record"]["decision"], "allow");
+    assert_eq!(
+        shown["authorization_record"]["policy_decision"],
+        "needs_approval"
+    );
+    assert_eq!(shown["authorization_record"]["status"], "authorized");
     let claim = claim_executor_spend(json!({"spend_auth_token_id":approved.body["auth_token_id"],"account_id":agent.account_id,"amount_cents":600,"merchant":"gongbu.image"}).to_string(),&state).unwrap();
     finalize_executor_spend(
         json!({"claim_id":claim.claim_id,"receipt":precise_settlement_receipt_json(1,3)})
@@ -345,10 +380,10 @@ fn workflow_uses_final_authorization_outcome_after_human_approval_or_denial() {
         read(
             &state,
             &format!(
-                "/spend/workflows/show?agent_id={}&operation_key=history-approval-operation",
+                "/spend/authorizations/show?agent_id={}&operation_key=history-approval-operation",
                 agent.agent_id
             )
-        )["workflow"]["status"],
+        )["authorization_record"]["status"],
         "settled"
     );
     let denied = route(
@@ -367,13 +402,13 @@ fn workflow_uses_final_authorization_outcome_after_human_approval_or_denial() {
     );
     assert_eq!(rejected.status, 200);
     assert_eq!(
-        read(&state, "/spend/workflows?status=needs_approval")["workflows"],
+        read(&state, "/spend/authorizations?status=needs_approval")["authorization_records"],
         json!([])
     );
     assert_ne!(
         route(
             authenticated_get_request(&format!(
-                "/spend/workflows/show?workflow_id={}",
+                "/spend/authorizations/show?authorization_id={}",
                 denied.body["decision_id"].as_str().unwrap()
             )),
             &state
@@ -403,7 +438,7 @@ fn budget_denial_is_not_reported_as_authorized_and_expired_claim_requires_reconc
     );
     assert_eq!(denied.body["decision"], "deny");
     assert_eq!(
-        read(&state, "/spend/workflows")["workflows"]
+        read(&state, "/spend/authorizations")["authorization_records"]
             .as_array()
             .unwrap()
             .len(),
@@ -411,9 +446,18 @@ fn budget_denial_is_not_reported_as_authorized_and_expired_claim_requires_reconc
     );
     claim_executor_spend(json!({"spend_auth_token_id":auth.auth_token_id,"account_id":agent.account_id,"amount_cents":500,"merchant":"gongbu.image"}).to_string(),&state).unwrap();
     std::thread::sleep(std::time::Duration::from_millis(1100));
-    let reconciliation = read(&state, "/spend/workflows?status=reconciliation_required");
-    assert_eq!(reconciliation["workflows"].as_array().unwrap().len(), 1);
-    assert!(reconciliation["workflows"][0]["receipt"].is_null());
+    let reconciliation = read(
+        &state,
+        "/spend/authorizations?status=reconciliation_required",
+    );
+    assert_eq!(
+        reconciliation["authorization_records"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(reconciliation["authorization_records"][0]["receipt"].is_null());
     assert_eq!(
         read(
             &state,
@@ -536,11 +580,11 @@ fn two_providers_for_one_task_have_independent_receipts_and_postings() {
     let output = read(
         &state,
         &format!(
-            "/spend/workflows?agent_id={}&status=settled",
+            "/spend/authorizations?agent_id={}&status=settled",
             agent.agent_id
         ),
     );
-    let rows = output["workflows"].as_array().unwrap();
+    let rows = output["authorization_records"].as_array().unwrap();
     assert_eq!(rows.len(), 2);
     assert_ne!(rows[0]["id"], rows[1]["id"]);
     assert_ne!(rows[0]["provider"], rows[1]["provider"]);
@@ -569,12 +613,12 @@ fn two_providers_for_one_task_have_independent_receipts_and_postings() {
 }
 
 #[test]
-fn corrupt_workflow_agent_reference_never_discloses_foreign_public_identity() {
+fn corrupt_authorization_record_agent_reference_never_discloses_foreign_public_identity() {
     let (path, state, alice, auth) = setup_executor_authorization("history-foreign-decision");
     let owner = authenticated_user_context(&state).unwrap().user_id;
-    init(json!({"username":"foreign-workflow-owner","display_name":"Foreign workflow owner","email":"foreign-workflow@example.com"}).to_string(),&state).unwrap();
+    init(json!({"username":"foreign-authorization-owner","display_name":"Foreign authorization record owner","email":"foreign-authorization@example.com"}).to_string(),&state).unwrap();
     let bob = register_agent(
-        json!({"name":"foreign-workflow-agent","version":"v1"}).to_string(),
+        json!({"name":"foreign-authorization-agent","version":"v1"}).to_string(),
         &state,
     )
     .unwrap();
@@ -611,11 +655,17 @@ fn corrupt_workflow_agent_reference_never_discloses_foreign_public_identity() {
         rusqlite::params![bob_id.to_string(), request.to_string(), auth.decision_id],
     )
     .unwrap();
-    assert_eq!(read(&state, "/spend/workflows")["workflows"], json!([]));
+    assert_eq!(
+        read(&state, "/spend/authorizations")["authorization_records"],
+        json!([])
+    );
     for path in [
-        format!("/spend/workflows/show?workflow_id={}", auth.decision_id),
         format!(
-            "/spend/workflows/show?agent_id={}&operation_key={}",
+            "/spend/authorizations/show?authorization_id={}",
+            auth.decision_id
+        ),
+        format!(
+            "/spend/authorizations/show?agent_id={}&operation_key={}",
             alice.agent_id, auth.operation_key
         ),
     ] {
@@ -706,10 +756,16 @@ fn read_only_history_projects_unclaimed_expiry_consistently() {
     std::thread::sleep(std::time::Duration::from_millis(1100));
     let shown = read(
         &state,
-        &format!("/spend/workflows/show?workflow_id={}", auth.decision_id),
+        &format!(
+            "/spend/authorizations/show?authorization_id={}",
+            auth.decision_id
+        ),
     );
-    assert_eq!(shown["workflow"]["status"], "expired");
-    assert_eq!(shown["workflow"]["budget_hold"]["status"], "expired");
+    assert_eq!(shown["authorization_record"]["status"], "expired");
+    assert_eq!(
+        shown["authorization_record"]["budget_hold"]["status"],
+        "expired"
+    );
     let ledger = read(
         &state,
         &format!(

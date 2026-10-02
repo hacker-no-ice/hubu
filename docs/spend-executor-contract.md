@@ -67,9 +67,9 @@ one provider call). That identity also seeds the vendor idempotency key.
 Gongbu claims and finalizes by the continuation token.
 
 V4 retains V3's immutable, platform-provided `operation_key` from authorization
-through claim and finalization. Hubu stores workflow state under
+through claim and finalization. Hubu stores authorization record state under
 `(agent_id, operation_key)`. Retrying with the same key and scope returns that
-same workflow. Two agents owned by the same user may use the same operation
+same authorization record. Two agents owned by the same user may use the same operation
 key; one agent may not reuse an operation key for different work.
 V2's separate `executor_execution_id` is no longer part of the public contract.
 V4 adds durable provider receipts and actual-cost settlement to V3's exclusive
@@ -119,9 +119,9 @@ Rules:
 - **Responses:** no `/spend/executor/*` response carries `operation_key`.
   That covers resolve, validate, claim, settle, release, claim inspection and
   the reconciliation queue. Executors receive the token, `claim_id`,
-  `decision_id` (the public workflow ID) and the public `agent_id`/`account_id`.
-  Owners who hold the private key can still look a workflow up through
-  `GET /spend/workflows/show`.
+  `decision_id` (the public authorization record ID) and the public `agent_id`/`account_id`.
+  Owners who hold the private key can still look an authorization record up through
+  `GET /spend/authorizations/show`.
 
 ### Migrating a v4.3 executor
 
@@ -171,7 +171,7 @@ Hubu is responsible for:
 
 - agent and owner identity
 - policy evaluation and spend authorization tokens
-- authoritative workflow state keyed by agent and operation
+- authoritative authorization record state keyed by agent and operation
 - one agent-budget hold per spend decision
 - exclusive executor claims and claim leases
 - exact-cost validation, conservative budget settlement, and release of unused
@@ -307,9 +307,9 @@ for example `codex:tool-call:01J...`. If the platform has no suitable ID, its
 adapter should generate and persist an opaque key before the first attempt.
 Operation keys are compared case-sensitively after trimming whitespace.
 
-Hubu is the authoritative store for workflow state under the agent-scoped key.
+Hubu is the authoritative store for authorization record state under the agent-scoped key.
 Replaying authorization with the same agent, operation key, and scope recovers
-the decision, token, hold, and current workflow state. Claim and finalization
+the decision, token, hold, and current authorization record state. Claim and finalization
 use that same key.
 
 Hubu journals immutable, monotonically numbered authorization attempts beneath
@@ -926,7 +926,7 @@ with only the normal bearer are rejected.
   overrun rather than hiding part of a legitimate vendor bill.
 - Executors must release only when no irreversible billable work occurred.
 - Agents and executors may retry any stage after an ambiguous response; Hubu
-  returns stored workflow state for the same operation key (authorization) or
+  returns stored authorization record state for the same operation key (authorization) or
   token/claim (claim and finalization) and rejects changed spend scope.
 - Executors must not resolve expired claims. A human must review provider
   billing and choose the reconciliation outcome.

@@ -1,6 +1,6 @@
 {
   "schema": "hubu-executor-conformance-v1",
-  "corpus_version": "2026-10-02.4",
+  "corpus_version": "2026-10-02.5",
   "protocol_version": "hubu-spend-executor-v4.4",
   "description": "Executor-neutral black-box conformance fixtures for the Hubu spend-executor contract. Every request targets the public Hubu HTTP API. Executors claim by the spend_auth_token_id and settle or release by the claim_id Hubu issued; the retired v4.3 agent_id/operation_key identity appears only in steps marked legacy_identity_probe, which must be rejected. Server-generated IDs and timestamps are captured and asserted by relation, never by literal value. Executor responses never carry the private operation key.",
   "server_profile": {
@@ -85,10 +85,10 @@
       "method": "GET",
       "path": "/ledger/transactions"
     },
-    "workflows": {
+    "authorization_records": {
       "actor": "observer",
       "method": "GET",
-      "path": "/spend/workflows"
+      "path": "/spend/authorizations"
     }
   },
   "retry_decisions": {
@@ -674,8 +674,8 @@
           }
         },
         {
-          "id": "two-claimed-workflows",
-          "operation": "workflows",
+          "id": "two-claimed-authorization_records",
+          "operation": "authorization_records",
           "query": {
             "agent_id": "${agent.agent_id}"
           },
@@ -686,11 +686,11 @@
             },
             "counts": [
               {
-                "path": "workflows",
+                "path": "authorization_records",
                 "equals": 2
               },
               {
-                "path": "workflows",
+                "path": "authorization_records",
                 "where": {
                   "status": "claimed"
                 },
@@ -700,8 +700,8 @@
             "relations": [
               [
                 "same",
-                "@workflows[0].task_reference",
-                "@workflows[1].task_reference"
+                "@authorization_records[0].task_reference",
+                "@authorization_records[1].task_reference"
               ]
             ]
           }
@@ -939,7 +939,7 @@
               "schema_version": "hubu-history-v1",
               "transactions[settlement_id=${settlement_a}].kind": "external_provider",
               "transactions[settlement_id=${settlement_a}].claim_id": "${claim_a}",
-              "transactions[settlement_id=${settlement_a}].workflow_id": "${decision_a}",
+              "transactions[settlement_id=${settlement_a}].authorization_id": "${decision_a}",
               "transactions[settlement_id=${settlement_a}].budget_id": "${budget.budget_id}",
               "transactions[settlement_id=${settlement_a}].budget_charge_delta_cents": 351,
               "transactions[settlement_id=${settlement_a}].effective_cost": {
@@ -959,7 +959,7 @@
                 "currency": "usd"
               },
               "transactions[settlement_id=${settlement_b}].claim_id": "${claim_b}",
-              "transactions[settlement_id=${settlement_b}].workflow_id": "${decision_b}",
+              "transactions[settlement_id=${settlement_b}].authorization_id": "${decision_b}",
               "transactions[settlement_id=${settlement_b}].budget_charge_delta_cents": 251,
               "transactions[settlement_id=${settlement_b}].effective_cost": {
                 "amount": "25001",
@@ -1002,47 +1002,47 @@
           }
         },
         {
-          "id": "workflows-link-receipts-and-postings",
-          "operation": "workflows",
+          "id": "authorization_records-link-receipts-and-postings",
+          "operation": "authorization_records",
           "query": {
             "agent_id": "${agent.agent_id}"
           },
           "expect": {
             "status": 200,
             "match": {
-              "workflows[decision_id=${decision_a}].status": "settled",
-              "workflows[decision_id=${decision_a}].ledger_transaction_ids": [
+              "authorization_records[decision_id=${decision_a}].status": "settled",
+              "authorization_records[decision_id=${decision_a}].ledger_transaction_ids": [
                 "${ledger_a}"
               ],
-              "workflows[decision_id=${decision_a}].receipt.settlement_id": "${settlement_a}",
-              "workflows[decision_id=${decision_a}].receipt.budget_charge_cents": 351,
-              "workflows[decision_id=${decision_a}].receipt.actual_vendor_cost": {
+              "authorization_records[decision_id=${decision_a}].receipt.settlement_id": "${settlement_a}",
+              "authorization_records[decision_id=${decision_a}].receipt.budget_charge_cents": 351,
+              "authorization_records[decision_id=${decision_a}].receipt.actual_vendor_cost": {
                 "amount": "3500001",
                 "scale": 6,
                 "currency": "usd"
               },
-              "workflows[decision_id=${decision_b}].status": "settled",
-              "workflows[decision_id=${decision_b}].ledger_transaction_ids": [
+              "authorization_records[decision_id=${decision_b}].status": "settled",
+              "authorization_records[decision_id=${decision_b}].ledger_transaction_ids": [
                 "${ledger_b}"
               ],
-              "workflows[decision_id=${decision_b}].receipt.budget_charge_cents": 251
+              "authorization_records[decision_id=${decision_b}].receipt.budget_charge_cents": 251
             },
             "counts": [
               {
-                "path": "workflows",
+                "path": "authorization_records",
                 "equals": 2
               }
             ],
             "relations": [
               [
                 "different",
-                "@workflows[decision_id=${decision_a}].receipt.artifact_reference",
-                "@workflows[decision_id=${decision_b}].receipt.artifact_reference"
+                "@authorization_records[decision_id=${decision_a}].receipt.artifact_reference",
+                "@authorization_records[decision_id=${decision_b}].receipt.artifact_reference"
               ],
               [
                 "different",
-                "@workflows[decision_id=${decision_a}].receipt.provider_request_reference",
-                "@workflows[decision_id=${decision_b}].receipt.provider_request_reference"
+                "@authorization_records[decision_id=${decision_a}].receipt.provider_request_reference",
+                "@authorization_records[decision_id=${decision_b}].receipt.provider_request_reference"
               ]
             ]
           }
@@ -1299,20 +1299,20 @@
           }
         },
         {
-          "id": "single-workflow",
-          "operation": "workflows",
+          "id": "single-authorization_record",
+          "operation": "authorization_records",
           "query": {
             "agent_id": "${agent.agent_id}"
           },
           "expect": {
             "status": 200,
             "match": {
-              "workflows[0].status": "settled",
-              "workflows[0].revision": 1
+              "authorization_records[0].status": "settled",
+              "authorization_records[0].revision": 1
             },
             "counts": [
               {
-                "path": "workflows",
+                "path": "authorization_records",
                 "equals": 1
               }
             ]
@@ -1762,17 +1762,17 @@
           }
         },
         {
-          "id": "released-workflow-has-no-receipt",
-          "operation": "workflows",
+          "id": "released-authorization_record-has-no-receipt",
+          "operation": "authorization_records",
           "query": {
             "agent_id": "${agent.agent_id}"
           },
           "expect": {
             "status": 200,
             "match": {
-              "workflows[decision_id=${decision}].status": "released",
-              "workflows[decision_id=${decision}].receipt": null,
-              "workflows[decision_id=${decision}].ledger_transaction_ids": []
+              "authorization_records[decision_id=${decision}].status": "released",
+              "authorization_records[decision_id=${decision}].receipt": null,
+              "authorization_records[decision_id=${decision}].ledger_transaction_ids": []
             }
           }
         }
@@ -1967,17 +1967,17 @@
           }
         },
         {
-          "id": "workflow-settled",
-          "operation": "workflows",
+          "id": "authorization_record-settled",
+          "operation": "authorization_records",
           "query": {
             "agent_id": "${agent.agent_id}"
           },
           "expect": {
             "status": 200,
             "match": {
-              "workflows[decision_id=${decision}].status": "settled",
-              "workflows[decision_id=${decision}].receipt.settlement_id": "${settlement}",
-              "workflows[decision_id=${decision}].claim.finalized_at": "${finalized_at}"
+              "authorization_records[decision_id=${decision}].status": "settled",
+              "authorization_records[decision_id=${decision}].receipt.settlement_id": "${settlement}",
+              "authorization_records[decision_id=${decision}].claim.finalized_at": "${finalized_at}"
             }
           }
         }
@@ -2155,16 +2155,16 @@
           }
         },
         {
-          "id": "workflow-requires-reconciliation",
-          "operation": "workflows",
+          "id": "authorization_record-requires-reconciliation",
+          "operation": "authorization_records",
           "query": {
             "agent_id": "${agent.agent_id}"
           },
           "expect": {
             "status": 200,
             "match": {
-              "workflows[decision_id=${decision}].status": "reconciliation_required",
-              "workflows[decision_id=${decision}].claim.reconciliation_required": true
+              "authorization_records[decision_id=${decision}].status": "reconciliation_required",
+              "authorization_records[decision_id=${decision}].claim.reconciliation_required": true
             }
           }
         }
@@ -2568,21 +2568,21 @@
           }
         },
         {
-          "id": "workflows-record-outcomes",
-          "operation": "workflows",
+          "id": "authorization_records-record-outcomes",
+          "operation": "authorization_records",
           "query": {
             "agent_id": "${agent.agent_id}"
           },
           "expect": {
             "status": 200,
             "match": {
-              "workflows[decision_id=${decision_billed}].status": "settled",
-              "workflows[decision_id=${decision_billed}].claim.reconciliation_outcome": "vendor_billed",
-              "workflows[decision_id=${decision_billed}].receipt.budget_charge_cents": 251,
-              "workflows[decision_id=${decision_not_billed}].status": "released",
-              "workflows[decision_id=${decision_not_billed}].claim.reconciliation_outcome": "vendor_did_not_bill",
-              "workflows[decision_id=${decision_not_billed}].receipt": null,
-              "workflows[decision_id=${decision_not_billed}].ledger_transaction_ids": []
+              "authorization_records[decision_id=${decision_billed}].status": "settled",
+              "authorization_records[decision_id=${decision_billed}].claim.reconciliation_outcome": "vendor_billed",
+              "authorization_records[decision_id=${decision_billed}].receipt.budget_charge_cents": 251,
+              "authorization_records[decision_id=${decision_not_billed}].status": "released",
+              "authorization_records[decision_id=${decision_not_billed}].claim.reconciliation_outcome": "vendor_did_not_bill",
+              "authorization_records[decision_id=${decision_not_billed}].receipt": null,
+              "authorization_records[decision_id=${decision_not_billed}].ledger_transaction_ids": []
             }
           }
         }
@@ -2875,7 +2875,7 @@
             "status": 200,
             "match": {
               "transactions[0].settlement_id": "${settlement}",
-              "transactions[0].workflow_id": "${decision}",
+              "transactions[0].authorization_id": "${decision}",
               "coverage.recorded_budget_charges_cents": 351,
               "coverage.unaccounted_consumption_cents": 0
             },
