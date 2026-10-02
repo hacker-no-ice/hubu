@@ -211,6 +211,19 @@ impl ProductionHubuActivities {
     }
 }
 
+impl ProductionHubuActivities {
+    /// The Hubu claim to finalize. An execution that never recorded its
+    /// claim, such as after a lost claim response, recovers it by replaying
+    /// the identical claim: Hubu returns the existing claim, including its
+    /// terminal state, without claiming twice.
+    fn finalization_claim_id(&self, execution: &Execution) -> Result<String, ActivityError> {
+        match execution.hubu_claim_id.as_deref() {
+            Some(claim_id) => Ok(claim_id.to_owned()),
+            None => self.claim(execution),
+        }
+    }
+}
+
 impl HubuActivities for ProductionHubuActivities {
     fn preflight(&self, execution: &Execution) -> Result<(), ActivityError> {
         self.client
@@ -262,7 +275,7 @@ impl HubuActivities for ProductionHubuActivities {
         }
         self.client
             .settle(&ExecutorSpendFinalizationRequest {
-                spend_auth_token_id: execution.hubu_token_reference.as_str().into(),
+                claim_id: self.finalization_claim_id(execution)?,
                 receipt: Some(ProviderReceipt {
                     actual_vendor_cost: receipt.actual_vendor_cost,
                     provider_request_id: receipt.provider_request_id,
@@ -277,7 +290,7 @@ impl HubuActivities for ProductionHubuActivities {
     fn release(&self, execution: &Execution) -> Result<(), ActivityError> {
         self.client
             .release(&ExecutorSpendFinalizationRequest {
-                spend_auth_token_id: execution.hubu_token_reference.as_str().into(),
+                claim_id: self.finalization_claim_id(execution)?,
                 receipt: None,
             })
             .map(|_| ())
@@ -454,11 +467,9 @@ pub struct ExecutorSpendClaimResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-/// v4.4 settle/release, identified by the authorization token every
-/// execution persists before claiming. It survives a lost claim response and
-/// finalizes executions created before the v4.4 cutover.
+/// v4.4 settle/release, identified by the Hubu claim.
 pub struct ExecutorSpendFinalizationRequest {
-    pub spend_auth_token_id: String,
+    pub claim_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub receipt: Option<ProviderReceipt>,
 }
@@ -563,7 +574,7 @@ mod tests {
     fn settlement_wire_preserves_exact_cost_and_complete_frozen_snapshot() {
         let frozen = execution_params().pricing_snapshot;
         let request = ExecutorSpendFinalizationRequest {
-            spend_auth_token_id: "token-1".into(),
+            claim_id: "claim-1".into(),
             receipt: Some(ProviderReceipt {
                 actual_vendor_cost: crate::provider_contract::ActualVendorCost::new(1, 4, "USD")
                     .unwrap(),
@@ -573,7 +584,7 @@ mod tests {
             }),
         };
         let wire = serde_json::to_value(request).unwrap();
-        assert_eq!(wire["spend_auth_token_id"], "token-1");
+        assert_eq!(wire["claim_id"], "claim-1");
         assert!(wire.get("agent_id").is_none() && wire.get("operation_key").is_none());
         assert_eq!(
             wire["receipt"]["actual_vendor_cost"],
@@ -664,7 +675,7 @@ mod tests {
         let wire = server.join().unwrap();
         // The pre-snapshot execution finalizes by its persisted token: no
         // principal lookup or claim inspection precedes the settlement.
-        assert_eq!(wire["spend_auth_token_id"], "legacy-token");
+        assert_eq!(wire["claim_id"], "legacy-claim");
         assert!(wire.get("agent_id").is_none() && wire.get("operation_key").is_none());
         assert_eq!(
             wire["receipt"],
@@ -685,7 +696,7 @@ mod tests {
         let (client, paths) = fake_hubu(vec![None]);
         client
             .settle(&ExecutorSpendFinalizationRequest {
-                spend_auth_token_id: "token-1".to_string(),
+                claim_id: "claim-1".to_string(),
                 receipt: Some(ProviderReceipt {
                     actual_vendor_cost:
                         crate::provider_contract::ActualVendorCost::new(500, 2, "USD").unwrap(),
@@ -750,35 +761,53 @@ mod tests {
     }
 
     #[test]
-    fn production_activities_send_only_token_identified_executor_requests() {
-        let (client, seen) = recording_hubu(2);
+    fn production_activities_claim_by_token_and_finalize_by_claim_id() {
+        let (client, seen) = recording_hubu(3);
         let root = tempdir().unwrap();
         let repository = crate::execution::Repository::open(
             root.path().join("gongbu.sqlite3"),
             crate::redaction::Redactor::default(),
         )
         .unwrap();
-        let execution = repository.create_execution(&execution_params()).unwrap();
+        let unrecorded = repository.create_execution(&execution_params()).unwrap();
+        let mut params = execution_params();
+        params.hubu_claim_id = Some("claim-1".into());
+        params.hubu_token_reference = crate::execution::HubuTokenReference::new("token-2").unwrap();
+        params.hubu_authorization_id = "token-2".into();
+        params.operation_key = "operation-2".into();
+        let recorded = repository.create_execution(&params).unwrap();
         let activities = ProductionHubuActivities::new(client, repository);
         activities
-            .claim(&execution)
+            .claim(&unrecorded)
             .expect_err("the recording Hubu drops the claim response");
+        // A lost claim response is recovered by replaying the claim, so the
+        // dropped replay stops the release before it is sent.
         activities
-            .release(&execution)
+            .release(&unrecorded)
+            .expect_err("the recording Hubu drops the claim replay");
+        activities
+            .release(&recorded)
             .expect_err("the recording Hubu drops the release response");
 
         let seen = seen.lock().unwrap().clone();
-        assert_eq!(seen.len(), 2);
-        assert_eq!(seen[0].0, "/spend/executor/claim");
-        assert_eq!(seen[1].0, "/spend/executor/release");
+        let paths: Vec<_> = seen.iter().map(|(path, _)| path.as_str()).collect();
+        assert_eq!(
+            paths,
+            [
+                "/spend/executor/claim",
+                "/spend/executor/claim",
+                "/spend/executor/release"
+            ]
+        );
         for (path, body) in &seen {
-            assert_eq!(body["spend_auth_token_id"], "token-1", "{path}");
             for private in ["operation_key", "agent_id", "executor_execution_id"] {
                 assert!(body.get(private).is_none(), "{path} sent {private}: {body}");
             }
         }
+        assert_eq!(seen[0].1["spend_auth_token_id"], "token-1");
         assert_eq!(seen[0].1["account_id"], "account-1");
-        assert_eq!(seen[1].1, json!({"spend_auth_token_id": "token-1"}));
+        assert_eq!(seen[1].1, seen[0].1, "claim replay is identical");
+        assert_eq!(seen[2].1, json!({"claim_id": "claim-1"}));
     }
 
     fn fake_hubu(
