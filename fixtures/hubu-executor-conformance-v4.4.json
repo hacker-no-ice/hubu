@@ -1,8 +1,8 @@
 {
   "schema": "hubu-executor-conformance-v1",
-  "corpus_version": "2026-10-01.2",
+  "corpus_version": "2026-10-02.1",
   "protocol_version": "hubu-spend-executor-v4.4",
-  "description": "Executor-neutral black-box conformance fixtures for the Hubu spend-executor contract. Every request targets the public Hubu HTTP API. Executor requests are identified only by the spend_auth_token_id or claim_id Hubu issued; the retired v4.3 agent_id/operation_key identity appears only in steps marked legacy_identity_probe, which must be rejected. Server-generated IDs and timestamps are captured and asserted by relation, never by literal value.",
+  "description": "Executor-neutral black-box conformance fixtures for the Hubu spend-executor contract. Every request targets the public Hubu HTTP API. Executor requests are identified only by the spend_auth_token_id or claim_id Hubu issued; the retired v4.3 agent_id/operation_key identity appears only in steps marked legacy_identity_probe, which must be rejected. Server-generated IDs and timestamps are captured and asserted by relation, never by literal value. Executor responses never carry the private operation key.",
   "server_profile": {
     "lease_config_yaml": "authorization_ttl_seconds: 300\ndefault_lease_profile: default\nlease_profiles:\n  default:\n    claim_ttl_seconds: 900\n  conformance_short:\n    claim_ttl_seconds: 1\n",
     "required_lease_profiles": {
@@ -557,7 +557,6 @@
             "status": 200,
             "match": {
               "status": "available",
-              "operation_key": "conformance:v4.4:s01:op-a",
               "agent_id": "${agent.agent_id}",
               "account_id": "${agent.account_id}",
               "amount_cents": 400,
@@ -565,7 +564,10 @@
               "lease_profile": "default",
               "execution_scope": "${expanded_scope}",
               "budget_hold.hold_id": "${hold_a}"
-            }
+            },
+            "absent": [
+              "operation_key"
+            ]
           }
         },
         {
@@ -578,10 +580,12 @@
             "status": 200,
             "match": {
               "status": "available",
-              "operation_key": "conformance:v4.4:s01:op-b",
               "amount_cents": 300,
               "budget_hold.hold_id": "${hold_b}"
-            }
+            },
+            "absent": [
+              "operation_key"
+            ]
           }
         },
         {
@@ -597,7 +601,6 @@
             "status": 200,
             "match": {
               "status": "claimed",
-              "operation_key": "conformance:v4.4:s01:op-a",
               "lease_profile": "default",
               "settlement_id": null,
               "finalized_at": null,
@@ -619,6 +622,10 @@
                 "${claim_a_claimed_at}",
                 "${claim_a_expires_at}"
               ]
+            ],
+            "absent": [
+              "operation_key",
+              "spend.operation_key"
             ]
           }
         },
@@ -647,6 +654,10 @@
                 "${claim_b}",
                 "${claim_a}"
               ]
+            ],
+            "absent": [
+              "operation_key",
+              "spend.operation_key"
             ]
           }
         },
@@ -741,7 +752,6 @@
             "match": {
               "status": "settled",
               "claim_id": "${claim_a}",
-              "operation_key": "conformance:v4.4:s01:op-a",
               "receipt.actual_vendor_cost": "${defs.exact_cost.op_a}",
               "receipt.authorized_max_cents": 400,
               "receipt.budget_charge_cents": 351,
@@ -764,6 +774,10 @@
                 "${claim_a_claimed_at}",
                 "${receipt_a_created_at}"
               ]
+            ],
+            "absent": [
+              "operation_key",
+              "spend.operation_key"
             ]
           }
         },
@@ -797,6 +811,10 @@
                 "${settlement_b}",
                 "${settlement_a}"
               ]
+            ],
+            "absent": [
+              "operation_key",
+              "spend.operation_key"
             ]
           }
         },
@@ -867,6 +885,10 @@
                 "${claim_a_claimed_at}",
                 "@finalized_at"
               ]
+            ],
+            "absent": [
+              "operation_key",
+              "spend.operation_key"
             ]
           }
         },
@@ -885,7 +907,11 @@
               "receipt.provider_request_id": "fixture-provider-request:op-a",
               "receipt.artifact_reference": "artifact://conformance/op-a.png",
               "receipt.budget_charge_cents": 351
-            }
+            },
+            "absent": [
+              "operation_key",
+              "spend.operation_key"
+            ]
           }
         },
         {
@@ -1119,7 +1145,8 @@
             "account_id": "${agent.account_id}",
             "amount_cents": 500,
             "execution_scope": "${expanded_scope}"
-          }
+          },
+          "expect": {}
         },
         {
           "id": "claim-retry",
@@ -1140,7 +1167,11 @@
               "claim": "claim_id",
               "claimed_at": "claimed_at",
               "claim_expires_at": "claim_expires_at"
-            }
+            },
+            "absent": [
+              "operation_key",
+              "spend.operation_key"
+            ]
           }
         },
         {
@@ -1159,7 +1190,11 @@
               "claimed_at": "${claimed_at}",
               "claim_expires_at": "${claim_expires_at}",
               "status": "claimed"
-            }
+            },
+            "absent": [
+              "operation_key",
+              "spend.operation_key"
+            ]
           }
         },
         {
@@ -1180,7 +1215,8 @@
           "body": {
             "spend_auth_token_id": "${token}",
             "receipt": "${defs.receipts.op_a}"
-          }
+          },
+          "expect": {}
         },
         {
           "id": "settle-retry",
@@ -1200,7 +1236,11 @@
             "capture": {
               "settlement": "settlement_id",
               "receipt_created_at": "receipt.created_at"
-            }
+            },
+            "absent": [
+              "operation_key",
+              "spend.operation_key"
+            ]
           }
         },
         {
@@ -1215,7 +1255,11 @@
             "match": {
               "settlement_id": "${settlement}",
               "receipt.created_at": "${receipt_created_at}"
-            }
+            },
+            "absent": [
+              "operation_key",
+              "spend.operation_key"
+            ]
           }
         },
         {
@@ -1469,7 +1513,11 @@
               "status": "claimed",
               "spend.amount_cents": 300,
               "spend.budget_hold.hold_id": "${hold}"
-            }
+            },
+            "absent": [
+              "operation_key",
+              "spend.operation_key"
+            ]
           }
         },
         {
@@ -1542,7 +1590,8 @@
             "account_id": "${agent.account_id}",
             "amount_cents": 300,
             "execution_scope": "${expanded_scope}"
-          }
+          },
+          "expect": {}
         },
         {
           "id": "legacy-finalization-identity-rejected",
@@ -1582,6 +1631,10 @@
                 "${finalized_at}",
                 ""
               ]
+            ],
+            "absent": [
+              "operation_key",
+              "spend.operation_key"
             ]
           }
         },
@@ -1597,7 +1650,11 @@
               "claim_id": "${claim}",
               "status": "released",
               "finalized_at": "${finalized_at}"
-            }
+            },
+            "absent": [
+              "operation_key",
+              "spend.operation_key"
+            ]
           }
         },
         {
@@ -1638,7 +1695,11 @@
               "claim_id": "${claim}",
               "status": "released",
               "finalized_at": "${finalized_at}"
-            }
+            },
+            "absent": [
+              "operation_key",
+              "spend.operation_key"
+            ]
           }
         },
         {
@@ -1728,7 +1789,11 @@
             },
             "capture": {
               "claim": "claim_id"
-            }
+            },
+            "absent": [
+              "operation_key",
+              "spend.operation_key"
+            ]
           }
         },
         {
@@ -1738,7 +1803,8 @@
           "body": {
             "spend_auth_token_id": "${token}",
             "receipt": "${defs.receipts.op_a}"
-          }
+          },
+          "expect": {}
         },
         {
           "id": "inspect-shows-committed-settlement",
@@ -1763,6 +1829,10 @@
                 "${settlement}",
                 ""
               ]
+            ],
+            "absent": [
+              "operation_key",
+              "spend.operation_key"
             ]
           }
         },
@@ -1805,7 +1875,11 @@
               "receipt.provider_request_id": "fixture-provider-request:op-a",
               "receipt.artifact_reference": "artifact://conformance/op-a.png",
               "receipt.price_model_snapshot": "${defs.receipts.op_a.price_model_snapshot}"
-            }
+            },
+            "absent": [
+              "operation_key",
+              "spend.operation_key"
+            ]
           }
         },
         {
@@ -1934,6 +2008,10 @@
                 "${claimed_at}",
                 "${claim_expires_at}"
               ]
+            ],
+            "absent": [
+              "operation_key",
+              "spend.operation_key"
             ]
           }
         },
@@ -1958,7 +2036,11 @@
               "claim_expires_at": "${claim_expires_at}",
               "spend.budget_hold.hold_id": "${hold}",
               "spend.budget_hold.status": "claimed"
-            }
+            },
+            "absent": [
+              "operation_key",
+              "spend.operation_key"
+            ]
           }
         },
         {
@@ -2120,7 +2202,11 @@
             "status": 200,
             "capture": {
               "claim_billed": "claim_id"
-            }
+            },
+            "absent": [
+              "operation_key",
+              "spend.operation_key"
+            ]
           }
         },
         {
@@ -2136,7 +2222,11 @@
             "status": 200,
             "capture": {
               "claim_not_billed": "claim_id"
-            }
+            },
+            "absent": [
+              "operation_key",
+              "spend.operation_key"
+            ]
           }
         },
         {
@@ -2280,6 +2370,10 @@
                 "@claim_expires_at",
                 "${reconciled_at_billed}"
               ]
+            ],
+            "absent": [
+              "operation_key",
+              "spend.operation_key"
             ]
           }
         },
@@ -2298,7 +2392,11 @@
               "settlement_id": "${settlement_billed}",
               "reconciled_at": "${reconciled_at_billed}",
               "reconciliation_outcome": "vendor_billed"
-            }
+            },
+            "absent": [
+              "operation_key",
+              "spend.operation_key"
+            ]
           }
         },
         {
@@ -2335,7 +2433,11 @@
             },
             "capture": {
               "reconciled_at_not_billed": "reconciled_at"
-            }
+            },
+            "absent": [
+              "operation_key",
+              "spend.operation_key"
+            ]
           }
         },
         {
@@ -2351,7 +2453,11 @@
             "match": {
               "status": "released",
               "reconciled_at": "${reconciled_at_not_billed}"
-            }
+            },
+            "absent": [
+              "operation_key",
+              "spend.operation_key"
+            ]
           }
         },
         {
@@ -2585,9 +2691,11 @@
             "status": 200,
             "match": {
               "status": "available",
-              "operation_key": "conformance:v4.4:s09:op",
               "budget_hold.hold_id": "${hold}"
-            }
+            },
+            "absent": [
+              "operation_key"
+            ]
           }
         },
         {
@@ -2608,7 +2716,11 @@
               "claim": "claim_id",
               "claimed_at": "claimed_at",
               "claim_expires_at": "claim_expires_at"
-            }
+            },
+            "absent": [
+              "operation_key",
+              "spend.operation_key"
+            ]
           }
         },
         {
@@ -2631,7 +2743,11 @@
               "claimed_at": "${claimed_at}",
               "claim_expires_at": "${claim_expires_at}",
               "status": "claimed"
-            }
+            },
+            "absent": [
+              "operation_key",
+              "spend.operation_key"
+            ]
           }
         },
         {
@@ -2652,7 +2768,8 @@
           "body": {
             "spend_auth_token_id": "${token}",
             "receipt": "${defs.receipts.op_a}"
-          }
+          },
+          "expect": {}
         },
         {
           "id": "restart-after-settle",
@@ -2672,7 +2789,11 @@
             },
             "capture": {
               "settlement": "settlement_id"
-            }
+            },
+            "absent": [
+              "operation_key",
+              "spend.operation_key"
+            ]
           }
         },
         {
@@ -2689,7 +2810,11 @@
               "claim_id": "${claim}",
               "receipt.budget_charge_cents": 351,
               "receipt.released_amount_cents": 49
-            }
+            },
+            "absent": [
+              "operation_key",
+              "spend.operation_key"
+            ]
           }
         },
         {
@@ -2885,7 +3010,11 @@
             },
             "capture": {
               "claim_a": "claim_id"
-            }
+            },
+            "absent": [
+              "operation_key",
+              "spend.operation_key"
+            ]
           }
         },
         {
@@ -2911,7 +3040,11 @@
               "status": "claimed",
               "settlement_id": null,
               "spend.budget_hold.status": "claimed"
-            }
+            },
+            "absent": [
+              "operation_key",
+              "spend.operation_key"
+            ]
           }
         },
         {
@@ -2943,7 +3076,11 @@
             },
             "capture": {
               "settlement_a": "settlement_id"
-            }
+            },
+            "absent": [
+              "operation_key",
+              "spend.operation_key"
+            ]
           }
         },
         {
@@ -2959,7 +3096,11 @@
             "status": 200,
             "match": {
               "status": "claimed"
-            }
+            },
+            "absent": [
+              "operation_key",
+              "spend.operation_key"
+            ]
           }
         },
         {
@@ -2972,7 +3113,11 @@
             "status": 200,
             "match": {
               "status": "released"
-            }
+            },
+            "absent": [
+              "operation_key",
+              "spend.operation_key"
+            ]
           }
         },
         {

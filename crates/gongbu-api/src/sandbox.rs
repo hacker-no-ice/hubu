@@ -1306,7 +1306,6 @@ impl SpendAuthorizationResolver for MockHubu {
         spend_auth_token_id: &str,
     ) -> Result<ExecutorSpendResponse, HttpClientError> {
         Ok(ExecutorSpendResponse {
-            operation_key: spend_auth_token_id.to_string(),
             reason: "deterministic sandbox execution".into(),
             spend_auth_token_id: spend_auth_token_id.to_string(),
             decision_id: format!("decision-{spend_auth_token_id}"),

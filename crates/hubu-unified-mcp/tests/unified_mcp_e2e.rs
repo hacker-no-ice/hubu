@@ -34,15 +34,40 @@ fn execution_arguments_for(token: &str, prompt: &str) -> Value {
     })
 }
 
+thread_local! {
+    /// Private operation key -> the continuation the router bound for it.
+    static BOUND_CONTINUATIONS: std::cell::RefCell<std::collections::HashMap<String, String>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// The router's private operation key for an authorization. Tests keep it as
+/// a leak canary; fake Gongbu responses carry the bound continuation instead,
+/// because under v4.4 Gongbu never learns the key.
 fn private_operation_key(mcp: &McpProcess, auth_token_id: &str) -> String {
-    Connection::open(mcp.operation_state_path())
+    let operation_key: String = Connection::open(mcp.operation_state_path())
         .unwrap()
         .query_row(
             "SELECT operation_key FROM harness_operations WHERE auth_token_id = ?1",
             [auth_token_id],
             |row| row.get(0),
         )
-        .unwrap()
+        .unwrap();
+    BOUND_CONTINUATIONS.with(|bound| {
+        bound
+            .borrow_mut()
+            .insert(operation_key.clone(), auth_token_id.to_owned())
+    });
+    operation_key
+}
+
+fn bound_continuation(operation_key: &str) -> String {
+    BOUND_CONTINUATIONS.with(|bound| {
+        bound
+            .borrow()
+            .get(operation_key)
+            .cloned()
+            .unwrap_or_else(|| operation_key.to_owned())
+    })
 }
 
 fn execution_response(operation_key: &str, status: &str) -> Value {
@@ -53,7 +78,7 @@ fn execution_response_for(operation_key: &str, status: &str, execution_id: &str)
     json!({
         "schema_version":2,
         "execution_id":execution_id,
-        "operation_key":operation_key,
+        "spend_auth_token_id":bound_continuation(operation_key),
         "status":status,
         "outcome":if status == "succeeded" { Some("gongbu-state-marker") } else { None },
         "failure":null,

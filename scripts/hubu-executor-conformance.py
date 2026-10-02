@@ -750,6 +750,12 @@ class Runner:
             wanted = context.render(expected)
             if actual != wanted:
                 raise ConformanceFailure(f"{path}: expected {wanted!r}, got {actual!r}")
+        for path in expect.get("absent", []):
+            try:
+                value = resolve_path(body, context.render(path))
+            except ConformanceFailure:
+                continue
+            raise ConformanceFailure(f"{path} must be absent, got {value!r}")
         for rule in expect.get("counts", []):
             items = resolve_path(body, context.render(rule["path"]))
             if not isinstance(items, list):

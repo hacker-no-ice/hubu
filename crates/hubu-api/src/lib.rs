@@ -1438,7 +1438,6 @@ struct ExecutorClaimReconciliationHttpRequest {
 
 #[derive(Debug, Serialize)]
 struct ExecutorSpendHttpResponse {
-    operation_key: String,
     reason: String,
     spend_auth_token_id: String,
     decision_id: String,
@@ -1457,7 +1456,6 @@ struct ExecutorSpendHttpResponse {
 
 #[derive(Debug, Serialize)]
 struct ExecutorSpendClaimHttpResponse {
-    operation_key: String,
     claim_id: String,
     lease_profile: String,
     status: String,
@@ -1481,7 +1479,6 @@ struct ExecutorClaimsHttpResponse {
 
 #[derive(Debug, Serialize)]
 struct ExecutorSpendSettlementHttpResponse {
-    operation_key: String,
     settlement_id: String,
     claim_id: String,
     status: String,
@@ -2328,7 +2325,8 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
             "authorization retries with the same operation_key and claim retries with the same spend_auth_token_id return stored workflow state, including terminal state",
             "claiming moves the associated budget hold from frozen to claimed and extends it to claim_expires_at",
             "an active claim remains finalizable after the original authorization expires",
-            "Hubu does not accept vendor API keys or model/provider payloads in this protocol"
+            "Hubu does not accept vendor API keys or model/provider payloads in this protocol",
+            "executor route responses never include the private operation_key; executors identify work by spend_auth_token_id, claim_id, and the public decision_id"
         ],
         "settlement_rules": [
             "settle only after the executor has performed irreversible billable work",
@@ -4308,7 +4306,6 @@ fn resolve_executor_spend(body: String, state: &ServerState) -> Result<ExecutorS
     };
 
     let validated = ValidatedExecutorSpend {
-        operation_key: decision.operation_key.clone(),
         reason: decision.request.reason.clone(),
         lease_profile: decision.request.lease_profile.clone(),
         status: "available".to_string(),
@@ -4580,7 +4577,6 @@ fn settle_executor_spend_request(
         .ok_or_else(|| anyhow!("settled executor claim is missing provider receipt"))?;
 
     Ok(ExecutorSpendSettlementHttpResponse {
-        operation_key: claim_state.claim.operation_key.clone(),
         settlement_id: settlement_id.to_string(),
         claim_id: claim_state.claim.id.to_string(),
         status: executor_claim_status_name(&claim_state.claim.status).to_string(),
@@ -4652,7 +4648,6 @@ fn release_executor_spend_request(
 }
 
 struct ValidatedExecutorSpend {
-    operation_key: String,
     reason: String,
     lease_profile: String,
     status: String,
@@ -4692,7 +4687,6 @@ impl ResolvedExecutorSpend {
 
     fn into_validated(
         self,
-        operation_key: String,
         reason: String,
         lease_profile: String,
         validation: hubu_core::spend::ValidatedSpendAuthorization,
@@ -4700,7 +4694,6 @@ impl ResolvedExecutorSpend {
         budget_balance: hubu_core::budget::BudgetBalance,
     ) -> ValidatedExecutorSpend {
         ValidatedExecutorSpend {
-            operation_key,
             reason,
             lease_profile,
             status: "available".to_string(),
@@ -4806,16 +4799,16 @@ fn validate_executor_spend_request(
     state: &ServerState,
 ) -> Result<ValidatedExecutorSpend> {
     let mut resolved = resolve_executor_spend_request(request, state)?;
-    let (validation, operation_key, reason, lease_profile) = {
+    let (validation, reason, lease_profile) = {
         let spend = state
             .spend
             .lock()
             .map_err(|_| anyhow!("spend manager lock poisoned"))?;
-        let (operation_key, reason, lease_profile) =
+        let (_, reason, lease_profile) =
             apply_authoritative_executor_identity(&mut resolved, &spend)?;
         let validation =
             spend.validate_auth_token_for_payment(&resolved.payment_validation_request())?;
-        (validation, operation_key, reason, lease_profile)
+        (validation, reason, lease_profile)
     };
 
     let (budget_hold, budget_balance) = {
@@ -4859,7 +4852,6 @@ fn validate_executor_spend_request(
     );
 
     Ok(resolved.into_validated(
-        operation_key,
         reason,
         lease_profile,
         validation,
@@ -4928,7 +4920,6 @@ fn executor_spend_from_claim_state(
     }
 
     Ok(ValidatedExecutorSpend {
-        operation_key: claim_state.decision.operation_key.clone(),
         reason: claim_state.decision.request.reason.clone(),
         lease_profile: claim_state.decision.request.lease_profile.clone(),
         status: executor_claim_status_name(&claim_state.claim.status).to_string(),
@@ -4972,7 +4963,6 @@ fn executor_claim_response(
         None
     };
     Ok(ExecutorSpendClaimHttpResponse {
-        operation_key: claim.operation_key.clone(),
         claim_id: claim.id.to_string(),
         lease_profile: claim.lease_profile.clone(),
         status: executor_claim_status_name(&claim.status).to_string(),
@@ -5013,7 +5003,6 @@ fn executor_spend_response_with_hold(
     balance: hubu_core::budget::BudgetBalance,
 ) -> ExecutorSpendHttpResponse {
     ExecutorSpendHttpResponse {
-        operation_key: validated.operation_key.clone(),
         reason: validated.reason.clone(),
         spend_auth_token_id: validated.token_id.to_string(),
         decision_id: validated.validation.spend_decision_id.to_string(),
@@ -8577,7 +8566,13 @@ lease_profiles:
 
         let first = resolve_executor_spend(body.clone(), &state).unwrap();
         let second = resolve_executor_spend(body, &state).unwrap();
-        assert_eq!(first.operation_key, authorization.operation_key);
+        assert!(
+            serde_json::to_value(&first)
+                .unwrap()
+                .get("operation_key")
+                .is_none(),
+            "executor responses never carry the private operation key"
+        );
         assert_eq!(first.decision_id, authorization.decision_id);
         assert_eq!(first.account_id, agent.account_id);
         assert_eq!(first.agent_id, agent.agent_id);
@@ -8958,7 +8953,11 @@ lease_profiles:
         let claim = claim_executor_spend(claim_request.to_string(), &state)
             .expect("a token-identified claim should not need the operation key");
         assert_eq!(claim.status, "claimed");
-        assert_eq!(claim.operation_key, authorization.operation_key);
+        assert_eq!(claim.spend.decision_id, authorization.decision_id);
+        assert!(serde_json::to_string(&claim)
+            .unwrap()
+            .find("operation_key")
+            .is_none());
         let claim_replay = claim_executor_spend(claim_request.to_string(), &state)
             .expect("token-identified claim replay");
         assert_eq!(claim_replay.claim_id, claim.claim_id);

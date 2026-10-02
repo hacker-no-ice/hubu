@@ -112,8 +112,9 @@ into this protocol.
   `claim_id` Hubu issued. The corpus lists the retired v4.3 identity fields in
   `retired_identity_fields`. The runner refuses a corpus where an executor step
   sends them, unless the step is marked `legacy_identity_probe` and expects
-  Hubu to reject it. An executor that passes the suite therefore never needs
-  `operation_key` or `agent_id`.
+  Hubu to reject it. Executor responses are asserted with `absent` to carry no
+  `operation_key`. An executor that passes the suite therefore neither needs
+  nor ever sees the private operation key.
 
 - `schema` (`hubu-executor-conformance-v1`) versions the corpus format.
   `corpus_version` versions the fixture content. `protocol_version` names the

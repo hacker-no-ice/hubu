@@ -78,7 +78,7 @@ pub(super) fn default_responses(kind: BackendKind) -> HashMap<(String, String), 
             let execution = json!({
                 "schema_version":2,
                 "execution_id":"exec-93",
-                "operation_key":"operation-93",
+                "spend_auth_token_id":"hubu-spend-token-93",
                 "status":"succeeded",
                 "outcome":"gongbu-state-marker",
                 "failure":null,

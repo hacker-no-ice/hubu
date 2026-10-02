@@ -376,11 +376,11 @@ fn assert_complete_unique_matrix(cases: &[GoldenCase]) {
     );
 }
 
-fn execution_response_for(operation_key: &str) -> Value {
+fn execution_response_for(spend_auth_token_id: &str) -> Value {
     json!({
         "schema_version":2,
         "execution_id":"exec-107",
-        "operation_key":operation_key,
+        "spend_auth_token_id":spend_auth_token_id,
         "status":"succeeded",
         "outcome":"deterministic-no-spend",
         "failure":null,
@@ -598,14 +598,19 @@ fn all_mapped_tools_have_unified_owned_golden_routing_coverage() {
                 .expect("captured HTTP request has a body")
                 .1;
             let value: Value = serde_json::from_str(body).expect("authorization body is JSON");
-            let operation_key = value["operation_key"]
+            assert!(
+                value["operation_key"].is_string(),
+                "unified MCP injects the private operation key into Hubu authorization"
+            );
+            // Gongbu reports the continuation it consumed, never the key.
+            let continuation = case.arguments["spend_auth_token_id"]
                 .as_str()
-                .expect("unified MCP injects the private operation key");
+                .expect("execution creation carries its continuation");
             gongbu.respond_json(
                 case.method,
                 case.path,
                 200,
-                execution_response_for(operation_key),
+                execution_response_for(continuation),
             );
         }
         let response = call(&mut unified, 10 + offset as u64, case);

@@ -56,9 +56,12 @@ versioned v4.4 fixture corpus against a real `hubu-server`.
 The unified MCP continuation binding remains independent of
 the v4.3 cost fields. It makes the existing `auth_token_id` /
 `spend_auth_token_id` the agent-visible continuation identifier for one private
-normalized operation. The agent never supplies or receives `operation_key` on
-Gongbu tools. Gongbu learns it only from authenticated Hubu resolution and
-retains it internally for claim, idempotency, settlement, and recovery.
+normalized operation. The private `operation_key` stays with the platform,
+the unified MCP router and Hubu. No executor ever receives it, Gongbu
+included: executor routes neither accept nor return it. Gongbu identifies an
+execution by Hubu's `decision_id` (one decision, one authorization, at most
+one provider call). That identity also seeds the vendor idempotency key.
+Gongbu claims and finalizes by the continuation token.
 
 V4 retains V3's immutable, platform-provided `operation_key` from authorization
 through claim and finalization. Hubu stores workflow state under
@@ -110,11 +113,12 @@ Rules:
 - **Human reconciliation:** unchanged. It uses `claim_id`, `provider_reference`
   and `evidence` with the separate capability. Adding executor identity fields
   to that shape is rejected.
-- **`resolve`:** keeps returning `operation_key` and `agent_id`. Gongbu and the
-  unified MCP router use them internally to verify their bound normalized
-  operation, and Hubu has no executor-scoped credential (HUB-32) that could
-  tell Gongbu apart from an external executor. External executors must not
-  depend on these fields; revisit this projection with HUB-32.
+- **Responses:** no `/spend/executor/*` response carries `operation_key`.
+  That covers resolve, validate, claim, settle, release, claim inspection and
+  the reconciliation queue. Executors receive the token, `claim_id`,
+  `decision_id` (the public workflow ID) and the public `agent_id`/`account_id`.
+  Owners who hold the private key can still look a workflow up through
+  `GET /spend/workflows/show`.
 
 ### Migrating a v4.3 executor
 
@@ -483,12 +487,13 @@ guidance.
    conflicts. The persisted execution agent is used for claim settlement or
    release.
 
-   Gongbu's HTTP response still contains `operation_key` on this private
-   backend contract. The unified MCP router verifies it against its bound
-   normalized operation, persists Gongbu's execution ID and lifecycle state,
-   and removes the key recursively from all agent-facing content, structured
-   content, errors, failure text, and status projections. A returned execution
-   ID conflict fails closed. Exact replay can only recover the same Gongbu
+   Gongbu's HTTP response reports the `spend_auth_token_id` the execution
+   consumed. The unified MCP router verifies it against the continuation it
+   bound to the normalized operation, then persists Gongbu's execution ID and
+   lifecycle state. Gongbu never learns the private operation key. As defence
+   in depth, the router still removes any `operation_key` field or
+   `hubu:operation:v1:` value from agent-facing content. A returned execution
+   or continuation conflict fails closed. Exact replay can only recover the same Gongbu
    execution; payload-similarity inference and ambiguous provider retry remain
    out of scope.
 
@@ -612,7 +617,6 @@ guidance.
 
 ```json
 {
-  "operation_key": "codex:tool-call:01JABC123",
   "claim_id": "uuid",
   "lease_profile": "long_running",
   "status": "claimed",
@@ -627,7 +631,6 @@ guidance.
   "reconciled_at": null,
   "reconciled_by_user_id": null,
   "spend": {
-    "operation_key": "codex:tool-call:01JABC123",
     "spend_auth_token_id": "uuid",
     "decision_id": "uuid",
     "account_id": "aga_...",
@@ -677,7 +680,6 @@ user, and timestamp.
 
 ```json
 {
-  "operation_key": "codex:tool-call:01JABC123",
   "settlement_id": "uuid",
   "claim_id": "uuid",
   "status": "settled",

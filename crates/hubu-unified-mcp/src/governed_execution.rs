@@ -1672,13 +1672,16 @@ mod tests {
                         serde_json::to_vec(&gongbu_version).unwrap(),
                     )
                 } else if first_line.starts_with("POST /v2/executions ") {
-                    let key = gongbu_operation_key.lock().unwrap().clone().unwrap();
+                    assert!(
+                        gongbu_operation_key.lock().unwrap().is_some(),
+                        "Hubu authorization carries the private key"
+                    );
                     (
                         "application/json",
                         serde_json::to_vec(&json!({
                             "schema_version":2,
                             "execution_id":"execution-1",
-                            "operation_key":key,
+                            "spend_auth_token_id":"authorization-1",
                             "status":"pending",
                             "outcome":null,
                             "failure":null,
@@ -1713,13 +1716,16 @@ mod tests {
                 } else if first_line.starts_with("GET /v1/artifacts/artifact-1 ") {
                     ("image/png", b"png-bytes".to_vec())
                 } else if first_line.starts_with("GET /v1/executions/execution-1 ") {
-                    let key = gongbu_operation_key.lock().unwrap().clone().unwrap();
+                    assert!(
+                        gongbu_operation_key.lock().unwrap().is_some(),
+                        "Hubu authorization carries the private key"
+                    );
                     (
                         "application/json",
                         serde_json::to_vec(&json!({
                             "schema_version":1,
                             "execution_id":"execution-1",
-                            "operation_key":key,
+                            "spend_auth_token_id":"authorization-1",
                             "status":"succeeded",
                             "outcome":"completed",
                             "failure":null,
@@ -1895,13 +1901,16 @@ mod tests {
                         serde_json::to_vec(&gongbu_version).unwrap(),
                     )
                 } else if first_line.starts_with("POST /v2/executions ") {
-                    let key = gongbu_operation_key.lock().unwrap().clone().unwrap();
+                    assert!(
+                        gongbu_operation_key.lock().unwrap().is_some(),
+                        "Hubu authorization carries the private key"
+                    );
                     (
                         "application/json",
                         serde_json::to_vec(&json!({
                             "schema_version":2,
                             "execution_id":"timeout-execution",
-                            "operation_key":key,
+                            "spend_auth_token_id":"timeout-authorization",
                             "status":"pending",
                             "outcome":null,
                             "failure":null,
@@ -1914,13 +1923,16 @@ mod tests {
                         .unwrap(),
                     )
                 } else if first_line.starts_with("GET /v1/executions/timeout-execution ") {
-                    let key = gongbu_operation_key.lock().unwrap().clone().unwrap();
+                    assert!(
+                        gongbu_operation_key.lock().unwrap().is_some(),
+                        "Hubu authorization carries the private key"
+                    );
                     (
                         "application/json",
                         serde_json::to_vec(&json!({
                             "schema_version":1,
                             "execution_id":"timeout-execution",
-                            "operation_key":key,
+                            "spend_auth_token_id":"timeout-authorization",
                             "status":"succeeded",
                             "outcome":"completed",
                             "failure":null,

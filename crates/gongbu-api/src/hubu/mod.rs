@@ -251,7 +251,7 @@ impl HubuActivities for ProductionHubuActivities {
             .inspect_claim(claim_id)
             .map_err(map_activity_error)?;
         if matches!(claim.status.as_str(), "claimed" | "active")
-            && claim.operation_key == execution.operation_key
+            && claim.spend.spend_auth_token_id == execution.hubu_token_reference.as_str()
             && claim.spend.account_id == execution.account_id
         {
             Ok(())
@@ -435,7 +435,6 @@ pub struct ExecutorSpendClaimRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExecutorSpendResponse {
-    pub operation_key: String,
     pub reason: String,
     pub spend_auth_token_id: String,
     pub decision_id: String,
@@ -454,7 +453,6 @@ pub struct ExecutorSpendResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExecutorSpendClaimResponse {
-    pub operation_key: String,
     pub claim_id: String,
     pub lease_profile: String,
     pub status: String,
@@ -484,7 +482,6 @@ pub struct ProviderReceipt {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExecutorSpendSettlementResponse {
-    pub operation_key: String,
     pub settlement_id: String,
     pub claim_id: String,
     pub status: String,

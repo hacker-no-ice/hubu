@@ -50,6 +50,13 @@ Future release template
   version. External v4.3 executors must migrate; see the migration notes in
   `docs/spend-executor-contract.md`. Human reconciliation and the operation
   key's role in authorization retries are unchanged.
+- No `/spend/executor/*` response returns `operation_key` any more, including
+  `resolve`. Executors receive only the token, `claim_id` and public IDs.
+  Gongbu identifies new executions by Hubu's `decision_id`, which also seeds
+  the vendor idempotency key; executions created earlier keep their stored
+  identity. Gongbu responses report the consumed `spend_auth_token_id`, which
+  unified MCP verifies against the continuation it bound. The `hubu spend
+  claim` output shows the public `workflow_id` instead of the private key.
 - Removed recurring-budget creation from core (`CreateBudgetSeriesRequest`,
   `CreateBudgetSeriesResponse`, `BudgetRecurrence`, and the series creation
   methods), HTTP (`POST /budgets/series`), CLI (`hubu budget create-recurring`),

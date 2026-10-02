@@ -124,9 +124,12 @@ release Hubu's hold merely because a response was lost. Gongbu claims with
 the execution's persisted Hubu authorization token and settles or releases by
 the Hubu `claim_id` (the v4.4 request shapes). If the claim response was lost
 and no claim ID was recorded, Gongbu replays the identical claim to recover it;
-Hubu returns the existing claim without claiming twice. Gongbu never sends its
-private operation key or agent on executor routes. With the persisted provider
-receipt, finalization remains idempotent under repeated delivery.
+Hubu returns the existing claim without claiming twice. Gongbu never receives
+or sends Hubu's private operation key: it identifies each new execution by
+Hubu's `decision_id` (`hubu-decision:<id>`), which also seeds the vendor
+idempotency key. Executions persisted before v4.4 keep the identity they were
+created with. With the persisted provider receipt, finalization remains
+idempotent under repeated delivery.
 
 The same rule applies when an exact vendor charge rounds conservatively above
 the authorization. Gongbu persists the exact integer amount, scale, currency,

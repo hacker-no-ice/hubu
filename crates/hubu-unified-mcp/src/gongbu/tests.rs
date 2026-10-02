@@ -20,7 +20,7 @@ use super::{
     transport::{call_tool, fetch_durable_execution_observation},
 };
 
-const EXECUTION: &str = r#"{"schema_version":2,"execution_id":"exec-1","operation_key":"op-1","status":"pending","outcome":"backend echoed op-1","failure":null,"authorization":{"amount_minor":25,"currency":"USD"},"created_at":"now","updated_at":"now","started_at":null,"completed_at":null}"#;
+const EXECUTION: &str = r#"{"schema_version":2,"execution_id":"exec-1","spend_auth_token_id":"token-1","status":"pending","outcome":"backend echoed hubu:operation:v1:leaked","failure":null,"authorization":{"amount_minor":25,"currency":"USD"},"created_at":"now","updated_at":"now","started_at":null,"completed_at":null}"#;
 const TARGET_ID: &str =
     "gongbu:target:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -85,7 +85,7 @@ fn create_arguments() -> Value {
 
 fn continuation() -> GongbuContinuation {
     GongbuContinuation {
-        operation_key: "op-1".into(),
+        auth_token_id: "token-1".into(),
         operation_handle: "hubu:public-operation:v1:test".into(),
         execution_id: None,
     }
@@ -112,7 +112,7 @@ fn create_keeps_private_operation_identity_internal() {
     .result;
     assert_eq!(result["isError"], false);
     let text = result["content"][0]["text"].as_str().unwrap();
-    assert!(!text.contains("operation_key") && !text.contains("op-1"));
+    assert!(!text.contains("operation_key") && !text.contains("hubu:operation:v1:"));
     assert!(text.contains("hubu:public-operation:v1:test"));
     let requests = requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
@@ -125,7 +125,7 @@ fn create_keeps_private_operation_identity_internal() {
 
 #[test]
 fn durable_observation_returns_only_validated_gongbu_timing() {
-    let response = r#"{"schema_version":1,"execution_id":"exec-1","operation_key":"op-1","status":"succeeded","outcome":"succeeded","failure":null,"authorization":{"amount_minor":25,"currency":"USD"},"created_at":"2026-08-05T00:00:00Z","updated_at":"2026-08-05T00:00:04Z","started_at":"2026-08-05T00:00:00.100Z","completed_at":"2026-08-05T00:00:04Z","timing":{"schema_version":1,"scope":"gongbu_execution","execution_total_ms":4000,"provider_interaction_ms":3500,"non_provider_ms":500},"provider_transport":{"schema_version":1,"poll_count":2,"artifact_fetch_count":1}}"#;
+    let response = r#"{"schema_version":1,"execution_id":"exec-1","spend_auth_token_id":"token-1","status":"succeeded","outcome":"succeeded","failure":null,"authorization":{"amount_minor":25,"currency":"USD"},"created_at":"2026-08-05T00:00:00Z","updated_at":"2026-08-05T00:00:04Z","started_at":"2026-08-05T00:00:00.100Z","completed_at":"2026-08-05T00:00:04Z","timing":{"schema_version":1,"scope":"gongbu_execution","execution_total_ms":4000,"provider_interaction_ms":3500,"non_provider_ms":500},"provider_transport":{"schema_version":1,"poll_count":2,"artifact_fetch_count":1}}"#;
     let (endpoint, requests) = mock_server(vec![("200 OK", "application/json", response)]);
     let mut expected = continuation();
     expected.execution_id = Some("exec-1".into());

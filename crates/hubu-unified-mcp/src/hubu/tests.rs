@@ -1985,7 +1985,7 @@ fn canonical_apply_requires_yaml_and_preserves_assignment_and_cas() {
 fn execution_lookup_survives_unavailable_operation_store() {
     let (endpoint, requests, worker) = one_shot_http_server(
         200,
-        r#"{"schema_version":1,"execution_id":"exec-recovery","operation_key":"private-operation","status":"pending","outcome":"waiting","failure":null,"authorization":{"amount_minor":25,"currency":"USD"},"created_at":"now","updated_at":"now","started_at":null,"completed_at":null}"#,
+        r#"{"schema_version":1,"execution_id":"exec-recovery","spend_auth_token_id":"recovery-token","status":"pending","outcome":"waiting","failure":null,"authorization":{"amount_minor":25,"currency":"USD"},"created_at":"now","updated_at":"now","started_at":null,"completed_at":null}"#,
     );
     let mut server = server_with_backends(&endpoint, Some(&endpoint), false, None);
     server.operation_registry = Arc::new(OperationRegistryCapability::Unavailable {

@@ -61,7 +61,6 @@ pub struct ExecutionTargetCatalogResponse {
 #[derive(Clone, Debug)]
 struct CreateExecutionRequest {
     spend_auth_token_id: String,
-    operation_key: Option<String>,
     hubu_claim_id: Option<String>,
     authorization: Option<Money>,
     execution_scope: Option<ExecutionScope>,
@@ -93,7 +92,9 @@ pub struct ReconciliationRequest {
 pub struct ExecutionResponse {
     pub schema_version: u32,
     pub execution_id: String,
-    pub operation_key: String,
+    /// The Hubu authorization continuation this execution consumed. The
+    /// unified MCP router verifies it against the continuation it bound.
+    pub spend_auth_token_id: String,
     pub status: ExecutionStatus,
     pub outcome: Option<String>,
     pub failure: Option<FailureResponse>,
@@ -558,7 +559,6 @@ impl Api {
             || authorization.budget_hold.status != "frozen"
             || authorization.budget_hold.amount_cents != authorization.amount_cents
             || authorization.account_id.trim().is_empty()
-            || authorization.operation_key.trim().is_empty()
             || authorization.decision_id.trim().is_empty()
             || authorization.amount_cents != pricing_snapshot.estimated_amount_minor
             || !authorization
@@ -581,10 +581,15 @@ impl Api {
             &pricing_snapshot,
             &normalized_input,
         )?;
+        // Hubu keeps its operation key private from executors (v4.4). One
+        // Hubu decision is one authorization and at most one provider call,
+        // so it is Gongbu's stable execution identity and the source of the
+        // vendor idempotency key.
+        let operation_identity = hubu_decision_operation_identity(&authorization.decision_id);
         let authorization_snapshot = HubuAuthorizationSnapshot {
             account_id: authorization.account_id.clone(),
             agent_id: authorization.agent_id.clone(),
-            operation_key: authorization.operation_key.clone(),
+            operation_key: operation_identity.clone(),
             decision_id: authorization.decision_id.clone(),
             spend_auth_token_id: authorization.spend_auth_token_id.clone(),
             amount_minor: authorization.amount_cents,
@@ -599,7 +604,7 @@ impl Api {
         let pricing_schema_version = i64::from(pricing_snapshot.schema_version);
         let params = CreateExecutionParams {
             account_id: authorization.account_id.clone(),
-            operation_key: authorization.operation_key.trim().to_owned(),
+            operation_key: operation_identity.clone(),
             // Both legacy execution columns retain their historical token-ID
             // meaning. The authoritative decision ID exists only in the
             // separately named Hubu authorization snapshot.
@@ -835,19 +840,21 @@ fn input_quantity(input: &Value, field: &str) -> Result<Option<i64>, ApiError> {
     }
 }
 
+/// Gongbu's execution identity for a Hubu authorization. Executions admitted
+/// before v4.4 keep the Hubu operation key they were persisted with.
+fn hubu_decision_operation_identity(decision_id: &str) -> String {
+    format!("hubu-decision:{}", decision_id.trim())
+}
+
 fn immutable_request_matches(
     execution: &Execution,
     request: &CreateExecutionRequest,
     normalized_input: &Value,
 ) -> bool {
     request
-        .operation_key
+        .hubu_claim_id
         .as_ref()
-        .is_none_or(|value| execution.operation_key == value.trim())
-        && request
-            .hubu_claim_id
-            .as_ref()
-            .is_none_or(|value| execution.hubu_claim_id.as_deref() == Some(value.trim()))
+        .is_none_or(|value| execution.hubu_claim_id.as_deref() == Some(value.trim()))
         && request.authorization.as_ref().is_none_or(|money| {
             execution.authorized_minor == money.amount_minor
                 && execution
@@ -919,7 +926,6 @@ fn translate_v2(
     }
     Ok(CreateExecutionRequest {
         spend_auth_token_id: request.spend_auth_token_id,
-        operation_key: None,
         hubu_claim_id: None,
         authorization: None,
         execution_scope: None,
@@ -938,13 +944,10 @@ fn validate_create(request: &CreateExecutionRequest) -> Result<(), ApiError> {
         || spend_auth_token_id.len() > 255
         || request.input_schema_version < 1
         || !request.input.is_object()
-        || [
-            request.operation_key.as_deref(),
-            request.hubu_claim_id.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        .any(|value| value.trim().is_empty() || value.len() > 255)
+        || request
+            .hubu_claim_id
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty() || value.len() > 255)
         || request.authorization.as_ref().is_some_and(|money| {
             money.amount_minor < 0
                 || money.currency.len() != 3
@@ -974,11 +977,7 @@ fn legacy_authorization_matches(
     execution_scope: &ExecutionScope,
     pricing_snapshot: &PricingSnapshot,
 ) -> bool {
-    request
-        .operation_key
-        .as_ref()
-        .is_none_or(|value| authorization.operation_key == value.trim())
-        && request.hubu_claim_id.is_none()
+    request.hubu_claim_id.is_none()
         && request.authorization.as_ref().is_none_or(|money| {
             money.amount_minor == authorization.amount_cents
                 && money.amount_minor == pricing_snapshot.estimated_amount_minor
@@ -1001,7 +1000,7 @@ fn immutable_hash(
     normalized_input: &Value,
 ) -> Result<String, ApiError> {
     let scope = json!({
-        "operation_key": authorization.operation_key,
+        "operation_key": hubu_decision_operation_identity(&authorization.decision_id),
         "decision_id": authorization.decision_id,
         "spend_auth_token_id": authorization.spend_auth_token_id,
         "authorization": {
@@ -1144,7 +1143,7 @@ fn execution_response(
     Ok(ExecutionResponse {
         schema_version,
         execution_id: execution.execution_id,
-        operation_key: execution.operation_key,
+        spend_auth_token_id: execution.hubu_token_reference.as_str().to_owned(),
         status,
         outcome: execution.outcome,
         failure,
@@ -1411,7 +1410,6 @@ mod tests {
                 });
             }
             let mut response = crate::hubu::ExecutorSpendResponse {
-                operation_key: spend_auth_token_id.into(),
                 reason: "test execution".into(),
                 spend_auth_token_id: spend_auth_token_id.into(),
                 decision_id: format!("decision-{spend_auth_token_id}"),
@@ -1478,7 +1476,6 @@ mod tests {
                 response.expires_at = "2026-08-28T21:00:00Z".into();
             }
             if spend_auth_token_id == "flux-managed-hub-172-attestation" {
-                response.operation_key = "codex:v1:11111111111111111111111111111111".into();
                 response.reason = "HUB-172 guarded FLUX live qualification: one 1k PNG.".into();
                 response.account_id = "aga_n063sdm0pepd".into();
                 response.agent_id = "agt_wk3q33h3j6w8".into();
@@ -1954,8 +1951,9 @@ mod tests {
     }
 
     #[test]
-    fn caller_bound_operation_key_is_not_secret_probe_material() {
-        const OPERATION_KEY: &str = "codex:v1:11111111111111111111111111111111";
+    fn execution_identity_is_not_secret_probe_material() {
+        // Gongbu's v4.4 execution identity, derived from the Hubu decision.
+        const OPERATION_KEY: &str = "hubu-decision:decision-flux-managed-hub-172-attestation";
         let fixture = fixture();
         let (api, execution_id) = successful_hub_172_attestation_execution(
             &fixture,
@@ -2321,7 +2319,7 @@ mod tests {
         assert_eq!(created.status, 200);
         let stored = fixture
             .repository
-            .get_execution_by_operation("account-a", "target-id-selection")
+            .get_execution_by_operation("account-a", "hubu-decision:decision-target-id-selection")
             .unwrap();
         assert_eq!(stored.provider, "example");
         assert_eq!(stored.adapter, "fixture");
@@ -2903,8 +2901,8 @@ mod tests {
         let second = execution(&call_create(&fixture, &request("identity-mismatch-token")));
 
         assert_ne!(first.execution_id, second.execution_id);
-        assert_eq!(first.operation_key, "account-a-token");
-        assert_eq!(second.operation_key, "identity-mismatch-token");
+        assert_eq!(first.spend_auth_token_id, "account-a-token");
+        assert_eq!(second.spend_auth_token_id, "identity-mismatch-token");
         let first_snapshot = fixture
             .repository
             .get_hubu_authorization_snapshot(&first.execution_id)
@@ -2975,7 +2973,10 @@ mod tests {
         let snapshot = restarted
             .get_hubu_authorization_snapshot(&created.execution_id)
             .unwrap();
-        assert_eq!(snapshot.operation_key, "restart-token");
+        assert_eq!(
+            snapshot.operation_key,
+            "hubu-decision:decision-restart-token"
+        );
         assert_eq!(snapshot.task_id.as_deref(), Some("linear:HUB-72"));
         assert_eq!(snapshot.reason, "test execution");
         assert_eq!(snapshot.lease_profile, "default");
