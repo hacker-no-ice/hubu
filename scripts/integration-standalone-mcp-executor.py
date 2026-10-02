@@ -244,6 +244,14 @@ class UnifiedMcp:
         self.stderr.close()
 
 
+def assert_no_private_identity(route: str, body) -> None:
+    """Executor responses never carry Hubu's private operation key (v4.4)."""
+    check(
+        "operation_key" not in json.dumps(body) and "hubu:operation:v1:" not in json.dumps(body),
+        f"{route} response exposed the private operation key: {body}",
+    )
+
+
 class ExternalExecutor:
     """A non-Gongbu executor holding only the continuation it was handed."""
 
@@ -253,6 +261,7 @@ class ExternalExecutor:
     def claim(self, token: str) -> dict:
         status, snapshot = http(self.hubu.base, "POST", "/spend/executor/resolve", {"spend_auth_token_id": token})
         check(status == 200, f"resolve failed: {snapshot}")
+        assert_no_private_identity("resolve", snapshot)
         status, claim = http(
             self.hubu.base,
             "POST",
@@ -265,16 +274,19 @@ class ExternalExecutor:
             },
         )
         check(status == 200 and claim["status"] == "claimed", f"claim failed: {claim}")
+        assert_no_private_identity("claim", claim)
         return claim
 
     def settle(self, token: str) -> dict:
         status, body = http(self.hubu.base, "POST", "/spend/executor/settle", {"spend_auth_token_id": token, "receipt": RECEIPT})
         check(status == 200 and body["status"] == "settled", f"settle failed: {body}")
+        assert_no_private_identity("settle", body)
         return body
 
     def release(self, claim_id: str) -> dict:
         status, body = http(self.hubu.base, "POST", "/spend/executor/release", {"claim_id": claim_id})
         check(status == 200 and body["status"] == "released", f"release failed: {body}")
+        assert_no_private_identity("release", body)
         return body
 
 
@@ -336,8 +348,7 @@ def run(hubu_bin: Path, mcp_bin: Path, root: Path) -> None:
         check(replay["operation_handle"] == handle and continuation(replay) == token, "exact redelivery changed the operation")
         check(budget(hubu, ids["agent_id"])["frozen_amount_cents"] == 400, "redelivery created a second hold")
         expect_status(mcp, handle, "authorized", False, True)
-        claim = executor.claim(token)
-        check("operation_key" not in claim or claim["operation_key"], "claim response shape")
+        executor.claim(token)
         expect_status(mcp, handle, "executing", False, False)
         executor.settle(token)
         settled = expect_status(mcp, handle, "settled", True, False)
