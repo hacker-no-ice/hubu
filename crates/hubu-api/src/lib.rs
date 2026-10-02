@@ -1342,11 +1342,6 @@ struct ExecutorSpendResolveHttpRequest {
 struct ExecutorSpendClaimHttpRequest {
     #[serde(flatten)]
     spend: ExecutorSpendHttpRequest,
-    /// Retired v4.3 identity, captured only so it can be rejected explicitly:
-    /// the flattened claim body would otherwise silently ignore it. A v4.4
-    /// claim is identified by the token alone.
-    #[serde(alias = "executor_execution_id")]
-    operation_key: Option<String>,
 }
 
 #[derive(Debug)]
@@ -4207,11 +4202,18 @@ fn spend_at(body: String, state: &ServerState, now: DateTime<Utc>) -> Result<Spe
     })
 }
 
-/// Claim and validate requests share one body shape. Its fields are
-/// flattened, so the retired v4.3 identity would otherwise be silently
-/// ignored instead of rejected.
-fn reject_retired_executor_identity(request: &ExecutorSpendClaimHttpRequest) -> Result<()> {
-    if request.operation_key.is_some() || request.spend.agent_id.is_some() {
+/// Claim and validate requests share one flattened body shape, so the retired
+/// v4.3 identity would otherwise be silently ignored. The field names are
+/// rejected by presence, including an explicit JSON `null`, which serde would
+/// otherwise read as an absent value.
+fn reject_retired_executor_identity(body: &str) -> Result<()> {
+    let value: Value = serde_json::from_str(body)?;
+    let retired = value.as_object().is_some_and(|object| {
+        LEGACY_FINALIZATION_FIELDS
+            .iter()
+            .any(|field| object.contains_key(*field))
+    });
+    if retired {
         return Err(anyhow!(
             "{EXECUTOR_CONTRACT} claim and validate requests are identified by spend_auth_token_id; remove operation_key and agent_id"
         ));
@@ -4220,8 +4222,8 @@ fn reject_retired_executor_identity(request: &ExecutorSpendClaimHttpRequest) -> 
 }
 
 fn validate_executor_spend(body: String, state: &ServerState) -> Result<ExecutorSpendHttpResponse> {
+    reject_retired_executor_identity(&body)?;
     let request: ExecutorSpendClaimHttpRequest = serde_json::from_str(&body)?;
-    reject_retired_executor_identity(&request)?;
     let validated = validate_executor_spend_request(request.spend, state)?;
     Ok(executor_spend_response(&validated))
 }
@@ -4347,8 +4349,8 @@ fn claim_executor_spend(
     body: String,
     state: &ServerState,
 ) -> Result<ExecutorSpendClaimHttpResponse> {
+    reject_retired_executor_identity(&body)?;
     let request: ExecutorSpendClaimHttpRequest = serde_json::from_str(&body)?;
-    reject_retired_executor_identity(&request)?;
     let mut resolved = resolve_executor_spend_request(request.spend, state)?;
     let (operation_key, _, _) = {
         let spend = state
@@ -9068,6 +9070,9 @@ lease_profiles:
         for (field, value) in [
             ("operation_key", json!(authorization.operation_key)),
             ("agent_id", json!(agent.agent_id)),
+            ("executor_execution_id", json!("legacy-execution")),
+            ("operation_key", Value::Null),
+            ("agent_id", Value::Null),
         ] {
             let mut retired = token_identified_claim_request(&agent, &authorization);
             retired[field] = value;
