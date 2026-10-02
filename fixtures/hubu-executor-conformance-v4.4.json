@@ -1,6 +1,6 @@
 {
   "schema": "hubu-executor-conformance-v1",
-  "corpus_version": "2026-10-02.2",
+  "corpus_version": "2026-10-02.3",
   "protocol_version": "hubu-spend-executor-v4.4",
   "description": "Executor-neutral black-box conformance fixtures for the Hubu spend-executor contract. Every request targets the public Hubu HTTP API. Executors claim by the spend_auth_token_id and settle or release by the claim_id Hubu issued; the retired v4.3 agent_id/operation_key identity appears only in steps marked legacy_identity_probe, which must be rejected. Server-generated IDs and timestamps are captured and asserted by relation, never by literal value. Executor responses never carry the private operation key.",
   "server_profile": {
@@ -1465,6 +1465,18 @@
             "account_id": "${agent.account_id}",
             "amount_cents": 300,
             "execution_scope": "${expanded_scope}"
+          },
+          "expect": {
+            "retry_decision": "reject_retired_v4_3_identity"
+          }
+        },
+        {
+          "id": "resolve-with-retired-agent-id-rejected",
+          "operation": "resolve",
+          "legacy_identity_probe": true,
+          "body": {
+            "spend_auth_token_id": "${token}",
+            "agent_id": "${agent.agent_id}"
           },
           "expect": {
             "retry_decision": "reject_retired_v4_3_identity"

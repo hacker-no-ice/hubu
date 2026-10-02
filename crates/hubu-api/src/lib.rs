@@ -4202,10 +4202,10 @@ fn spend_at(body: String, state: &ServerState, now: DateTime<Utc>) -> Result<Spe
     })
 }
 
-/// Claim and validate requests share one flattened body shape, so the retired
-/// v4.3 identity would otherwise be silently ignored. The field names are
-/// rejected by presence, including an explicit JSON `null`, which serde would
-/// otherwise read as an absent value.
+/// Resolve, validate and claim reject the retired v4.3 identity with one
+/// explicit v4.4 error. The field names are rejected by presence, including an
+/// explicit JSON `null`, which serde would otherwise read as an absent value;
+/// the flattened claim/validate body would otherwise ignore them silently.
 fn reject_retired_executor_identity(body: &str) -> Result<()> {
     let value: Value = serde_json::from_str(body)?;
     let retired = value.as_object().is_some_and(|object| {
@@ -4215,7 +4215,7 @@ fn reject_retired_executor_identity(body: &str) -> Result<()> {
     });
     if retired {
         return Err(anyhow!(
-            "{EXECUTOR_CONTRACT} claim and validate requests are identified by spend_auth_token_id; the retired v4.3 identity fields operation_key and agent_id are no longer accepted"
+            "{EXECUTOR_CONTRACT} resolve, validate and claim requests are identified by spend_auth_token_id; the retired v4.3 identity fields operation_key and agent_id are no longer accepted"
         ));
     }
     Ok(())
@@ -4229,6 +4229,7 @@ fn validate_executor_spend(body: String, state: &ServerState) -> Result<Executor
 }
 
 fn resolve_executor_spend(body: String, state: &ServerState) -> Result<ExecutorSpendHttpResponse> {
+    reject_retired_executor_identity(&body)?;
     let request: ExecutorSpendResolveHttpRequest = serde_json::from_str(&body)?;
     let token_id: SpendAuthTokenId = request
         .spend_auth_token_id
@@ -9075,6 +9076,18 @@ lease_profiles:
                     "validate",
                     validate_executor_spend(retired.to_string(), &state)
                         .expect_err("retired v4.3 validate identity is rejected"),
+                ),
+                (
+                    "resolve",
+                    resolve_executor_spend(
+                        json!({
+                            "spend_auth_token_id": retired["spend_auth_token_id"],
+                            field: retired[field],
+                        })
+                        .to_string(),
+                        &state,
+                    )
+                    .expect_err("retired v4.3 resolve identity is rejected"),
                 ),
             ] {
                 assert!(
