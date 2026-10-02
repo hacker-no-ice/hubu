@@ -193,9 +193,10 @@ Agent platforms or orchestrators are responsible for:
 Executors are responsible for:
 
 - storing vendor API keys and other execution secrets outside Hubu
-- persisting the `spend_auth_token_id` before claiming and identifying the
-  durable claim and finalization requests by it (or by the returned
-  `claim_id`); executors never send the private `operation_key`
+- persisting the `spend_auth_token_id` before claiming, claiming by it, and
+  settling or releasing by the returned `claim_id` (replaying the identical
+  claim recovers a lost `claim_id`); executors never send the private
+  `operation_key`
 - claiming Hubu authorization before irreversible work
 - calling vendors or tools
 - reporting the exact vendor cost with a provider request ID, complete frozen
@@ -546,7 +547,7 @@ guidance.
 
    ```json
    {
-     "spend_auth_token_id": "00000000-0000-4000-8000-000000000123",
+     "claim_id": "00000000-0000-4000-8000-000000000456",
      "receipt": {
        "actual_vendor_cost": {
          "amount": 4000001,
@@ -582,7 +583,7 @@ guidance.
    and releases the 99-cent remainder in one SQLite write transaction. A normal
    executor settlement is accepted only when its checked `budget_charge_cents`
    does not exceed the 500-cent authorized maximum. Hubu resolves the claim
-   from the token (or `claim_id`), so an identical retry returns the original
+   from the `claim_id`, so an identical retry returns the original
    `settlement_id` and receipt even if the caller lost the response. A retry
    with any changed exact-cost, currency, scale, snapshot, provider, or artifact
    data is rejected, and budget is not consumed twice.
@@ -605,7 +606,7 @@ guidance.
 
    ```json
    {
-     "spend_auth_token_id": "00000000-0000-4000-8000-000000000123"
+     "claim_id": "00000000-0000-4000-8000-000000000456"
    }
    ```
 
@@ -910,8 +911,8 @@ with only the normal bearer are rejected.
 
 - Executors must claim before irreversible work; validation alone is insufficient.
 - Agent platforms must supply one stable operation key and reuse it for
-  every authorization retry. Executors identify the operation by
-  `spend_auth_token_id` or `claim_id` and never send the operation key.
+  every authorization retry. Executors claim by `spend_auth_token_id`, settle
+  or release by `claim_id`, and never send the operation key.
 - Executors must settle after irreversible billable work succeeds.
 - Settlement must report exact vendor cost, currency, scale, the complete
   frozen pricing snapshot, and immutable provider receipt metadata.
