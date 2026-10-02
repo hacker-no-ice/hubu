@@ -88,10 +88,10 @@ See [Spend lifecycle](spend-lifecycle.md) for reservation, settlement, and
 ledger behavior. Policies govern individual requests; budgets govern cumulative
 spending over their active period.
 
-## Ledger and workflow history
+## Ledger and authorization record history
 
 `hubu ledger list` prints canonical JSON for wallet payments, provider expenses
 and corrections. Select an agent budget with `--agent-id` and `--budget-id`, and
-page with `--limit` and `--cursor`. `hubu spend history` lists workflows;
-`hubu spend show --workflow-id ID` inspects one public workflow. See
-[ledger and spend history](ledger-history.md) for examples and cost semantics.
+page with `--limit` and `--cursor`. `hubu spend authorizations` lists authorization records;
+`hubu spend show --authorization-id ID` inspects one public authorization record. See
+[ledger and authorization records](ledger-history.md) for examples and cost semantics.

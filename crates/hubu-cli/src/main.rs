@@ -1868,7 +1868,10 @@ fn spend(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
         print_spend_help();
         return Ok(());
     }
-    if matches!(args.first().map(String::as_str), Some("history" | "show")) {
+    if matches!(
+        args.first().map(String::as_str),
+        Some("authorizations" | "show")
+    ) {
         let command = args.remove(0);
         let path = history_path(&format!("spend-{command}"), args)?;
         println!(
@@ -2271,9 +2274,9 @@ fn print_executor_claim(claim: &Value) -> Result<()> {
         }
     );
     // Executor responses carry no private operation key; the public
-    // workflow id links the claim to `hubu spend show --workflow-id`.
-    if let Some(workflow_id) = claim.pointer("/spend/decision_id").and_then(Value::as_str) {
-        println!("  workflow_id: {workflow_id}");
+    // authorization id links the claim to `hubu spend show --authorization-id`.
+    if let Some(authorization_id) = claim.pointer("/spend/decision_id").and_then(Value::as_str) {
+        println!("  authorization_id: {authorization_id}");
     }
     println!(
         "  claim_expires_at: {}",
@@ -2525,8 +2528,8 @@ fn print_execution_scope(value: &Value) {
 fn history_path(command: &str, mut args: Vec<String>) -> Result<String> {
     let endpoint = match command {
         "ledger" => "/ledger/transactions",
-        "spend-history" => "/spend/workflows",
-        "spend-show" => "/spend/workflows/show",
+        "spend-authorizations" => "/spend/authorizations",
+        "spend-show" => "/spend/authorizations/show",
         _ => bail!("unknown history command"),
     };
     let mut url = reqwest::Url::parse(&format!("http://localhost{endpoint}"))?;
@@ -2538,7 +2541,7 @@ fn history_path(command: &str, mut args: Vec<String>) -> Result<String> {
             ("--limit", "limit"),
             ("--cursor", "cursor"),
         ],
-        "spend-history" => &[
+        "spend-authorizations" => &[
             ("--agent-id", "agent_id"),
             ("--account-id", "account_id"),
             ("--status", "status"),
@@ -2546,7 +2549,7 @@ fn history_path(command: &str, mut args: Vec<String>) -> Result<String> {
             ("--cursor", "cursor"),
         ],
         _ => &[
-            ("--workflow-id", "workflow_id"),
+            ("--authorization-id", "authorization_id"),
             ("--agent-id", "agent_id"),
             ("--operation-key", "operation_key"),
         ],
@@ -2565,10 +2568,10 @@ fn history_path(command: &str, mut args: Vec<String>) -> Result<String> {
         bail!("--budget-id requires --agent-id");
     }
     if command == "spend-show" {
-        let public = values.contains_key("workflow_id");
+        let public = values.contains_key("authorization_id");
         let private = values.contains_key("agent_id") && values.contains_key("operation_key");
         if !(public && values.len() == 1 || !public && private && values.len() == 2) {
-            bail!("provide --workflow-id OR --agent-id with --operation-key");
+            bail!("provide --authorization-id OR --agent-id with --operation-key");
         }
     }
     if let Some(limit) = values.get("limit") {
@@ -2588,7 +2591,7 @@ fn history_path(command: &str, mut args: Vec<String>) -> Result<String> {
                 | "expired"
                 | "reconciliation_required"
         ) {
-            bail!("invalid workflow status");
+            bail!("invalid authorization record status");
         }
     }
     if !values.is_empty() {
@@ -3701,9 +3704,9 @@ Usage:
 }
 
 fn print_spend_help() {
-    println!("Inspect spend workflow history (versioned JSON):
-  hubu spend history [--agent-id ID] [--account-id ID] [--status STATUS] [--limit 1..100] [--cursor CURSOR]
-  hubu spend show --workflow-id ID
+    println!("Inspect authorization records (versioned JSON):
+  hubu spend authorizations [--agent-id ID] [--account-id ID] [--status STATUS] [--limit 1..100] [--cursor CURSOR]
+  hubu spend show --authorization-id ID
   hubu spend show --agent-id ID --operation-key KEY
 Statuses: authorized, unknown, needs_approval, claimed, settled, released, expired, reconciliation_required.");
     println!(
@@ -3806,8 +3809,8 @@ mod tests {
             "/ledger/transactions"
         );
         assert_eq!(
-            history_path("spend-history", args(&["--status", "unknown"])).unwrap(),
-            "/spend/workflows?status=unknown"
+            history_path("spend-authorizations", args(&["--status", "unknown"])).unwrap(),
+            "/spend/authorizations?status=unknown"
         );
         assert_eq!(
             history_path(
@@ -3815,16 +3818,23 @@ mod tests {
                 args(&["--agent-id", "agent", "--operation-key", "a+b&%雪"])
             )
             .unwrap(),
-            "/spend/workflows/show?agent_id=agent&operation_key=a%2Bb%26%25%E9%9B%AA"
+            "/spend/authorizations/show?agent_id=agent&operation_key=a%2Bb%26%25%E9%9B%AA"
         );
         assert!(history_path("ledger", args(&["--budget-id", "budget"])).is_err());
+        assert!(history_path("spend-history", vec![]).is_err());
+        assert!(history_path("spend-show", args(&["--workflow-id", "public"])).is_err());
         assert!(history_path(
             "spend-show",
-            args(&["--workflow-id", "workflow", "--operation-key", "secret"])
+            args(&[
+                "--authorization-id",
+                "authorization",
+                "--operation-key",
+                "secret"
+            ])
         )
         .is_err());
         assert!(history_path("ledger", args(&["--limit", "101"])).is_err());
-        assert!(history_path("spend-history", args(&["--status", "invalid"])).is_err());
+        assert!(history_path("spend-authorizations", args(&["--status", "invalid"])).is_err());
     }
 
     #[test]

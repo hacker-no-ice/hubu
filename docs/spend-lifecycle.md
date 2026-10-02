@@ -20,7 +20,7 @@ request
 ## Request identity and retry safety
 
 Every spend operation has a stable, agent-scoped `operation_key` supplied by a
-trusted client platform or orchestrator. Hubu stores the workflow under that
+trusted client platform or orchestrator. Hubu stores the authorization record under that
 key. An identical retry recovers the existing operation. A trusted direct Hubu
 client may change scope under that key only when Hubu explicitly returns
 `reuse_operation_key` after an entirely denied, side-effect-free history. The

@@ -941,15 +941,15 @@ impl OperationRegistry {
             .map_err(Into::into)
     }
 
-    /// Hubu workflow identity for a standalone authorization: an allowed
+    /// Hubu authorization record identity for a standalone authorization: an allowed
     /// `hubu_authorize_spend` operation that was never handed to Gongbu or a
     /// governed dispatch. Any executor may consume its continuation through
     /// Hubu's executor API without the router observing it, so its status
-    /// must be read from Hubu's authoritative workflow rather than from this
+    /// must be read from Hubu's authoritative authorization record rather than from this
     /// registry. Selection does not depend on the stored continuation, which
     /// the registry purges once the authorization expires even though an
     /// executor may still hold Hubu's claim.
-    pub(crate) fn standalone_authorization_workflow_id(
+    pub(crate) fn standalone_authorization_id(
         &self,
         operation_handle: &str,
     ) -> Result<Option<String>> {
@@ -3806,7 +3806,7 @@ mod tests {
     }
 
     #[test]
-    fn standalone_authorizations_are_selected_for_hubu_workflow_status() {
+    fn standalone_authorizations_are_selected_for_hubu_authorization_record_status() {
         let mut registry = OperationRegistry::open_in_memory().unwrap();
         let mut record = |call_id: &str, tool: &str, result: Value| {
             let operation = registry
@@ -3853,11 +3853,7 @@ mod tests {
             .resolve_gongbu_continuation("gongbu-token", &execution_arguments("gongbu-token"))
             .unwrap();
 
-        let selected = |handle: &str| {
-            registry
-                .standalone_authorization_workflow_id(handle)
-                .unwrap()
-        };
+        let selected = |handle: &str| registry.standalone_authorization_id(handle).unwrap();
         assert_eq!(
             selected(&standalone).as_deref(),
             Some("standalone-decision")

@@ -151,19 +151,20 @@ fn cases() -> Vec<GoldenCase> {
             meta: None,
         },
         GoldenCase {
-            name: "hubu_list_spend_workflows",
+            name: "hubu_list_authorization_records",
             owner: hubu,
             method: "GET",
-            path: "/spend/workflows",
+            path: "/spend/authorizations",
             arguments: json!({}),
             meta: None,
         },
         GoldenCase {
-            name: "hubu_get_spend_workflow",
+            name: "hubu_get_authorization_record",
             owner: hubu,
             method: "GET",
-            path: "/spend/workflows/show?workflow_id=11111111-1111-4111-8111-111111111111",
-            arguments: json!({"workflow_id":"11111111-1111-4111-8111-111111111111"}),
+            path:
+                "/spend/authorizations/show?authorization_id=11111111-1111-4111-8111-111111111111",
+            arguments: json!({"authorization_id":"11111111-1111-4111-8111-111111111111"}),
             meta: None,
         },
         GoldenCase {

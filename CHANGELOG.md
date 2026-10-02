@@ -27,6 +27,11 @@ Future release template
 
 ### Highlights
 
+- Renamed Hubu history to authorization records: `/spend/authorizations`,
+  `authorization_id`, `hubu_list_authorization_records`,
+  `hubu_get_authorization_record`, and `hubu spend authorizations` /
+  `hubu spend show --authorization-id`. The unreleased old names are removed.
+  History remains `hubu-history-v1`; unified MCP routing advances to revision 13.
 - Added an executor-neutral, black-box conformance suite for the
   `hubu-spend-executor-v4.4` contract: a versioned fixture corpus of
   requests, responses, error codes and retry decisions, and a
@@ -61,7 +66,7 @@ Future release template
   the vendor idempotency key; executions created earlier keep their stored
   identity. Gongbu responses report the consumed `spend_auth_token_id`, which
   unified MCP verifies against the continuation it bound. The `hubu spend
-  claim` output shows the public `workflow_id` instead of the private key.
+  claim` output shows the public `authorization_id` instead of the private key.
 - Removed recurring-budget creation from core (`CreateBudgetSeriesRequest`,
   `CreateBudgetSeriesResponse`, `BudgetRecurrence`, and the series creation
   methods), HTTP (`POST /budgets/series`), CLI (`hubu budget create-recurring`),
@@ -73,7 +78,7 @@ Future release template
 ### Important fixes
 
 - `hubu_operation_status` now reports a standalone authorization from Hubu's
-  workflow (`authorized`, `executing`, `settled`, `released`, `expired`,
+  authorization record (`authorized`, `executing`, `settled`, `released`, `expired`,
   `reconciliation_required`). Previously a handle stayed `authorized` and
   `replacement_safe` after another executor claimed or settled it, and turned
   `failed` once the authorization expired even while a claim was active. An

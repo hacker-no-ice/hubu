@@ -93,13 +93,13 @@ hubu_authorize_spend
 hubu_budget_history
 hubu_create_budget
 hubu_get_executor_claim
-hubu_get_spend_workflow
+hubu_get_authorization_record
 hubu_get_spend_approval
 hubu_list_agents
 hubu_list_budgets
 hubu_list_claims_requiring_reconciliation
 hubu_list_ledger
-hubu_list_spend_workflows
+hubu_list_authorization_records
 hubu_list_users
 hubu_policy_diff
 hubu_policy_history
@@ -530,7 +530,7 @@ The version-1 compatibility boundary requires:
 | Surface | Required value |
 | --- | --- |
 | Unified contract | `hubu-gongbu-mcp-v1` |
-| Routing revision | `12` |
+| Routing revision | `13` |
 | MCP protocol | `2024-11-05` |
 | Hubu and Gongbu executor contract | `hubu-spend-executor-v4.4` |
 | Gongbu API schema | `2` |
@@ -898,11 +898,11 @@ cannot offer public-handle continuation. The capability snapshot reports
 The router implementation and ownership map live in
 [`crates/hubu-unified-mcp`](../crates/hubu-unified-mcp).
 
-## Ledger and workflow history
+## Ledger and authorization record history
 
 `hubu_list_ledger` reads canonical wallet/provider/adjustment postings with
-optional agent/account/budget filters and pagination. `hubu_list_spend_workflows`
-discovers owner-scoped authorization workflows; `hubu_get_spend_workflow` accepts
-only a public `workflow_id`, never a private operation key. Exact values,
+optional agent/account/budget filters and pagination. `hubu_list_authorization_records`
+discovers owner-scoped authorization records; `hubu_get_authorization_record` accepts
+only a public `authorization_id`, never a private operation key. Exact values,
 full-budget coverage and safe evidence references follow the
 [history contract](ledger-history.md).

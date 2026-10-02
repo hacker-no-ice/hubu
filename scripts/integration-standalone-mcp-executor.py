@@ -6,7 +6,7 @@ Gongbu deliberately unconfigured. An agent authorizes through MCP; a minimal
 external executor then consumes only the authorization continuation through
 Hubu's ``hubu-spend-executor-v4.4`` HTTP API, never the private operation key
 or agent. The script asserts that ``hubu_operation_status`` follows Hubu's
-authoritative workflow at every stage and fails closed when Hubu is
+authoritative authorization record at every stage and fails closed when Hubu is
 unreachable.
 
 Only the Python standard library is used. Run it through
@@ -386,8 +386,8 @@ def run(hubu_bin: Path, mcp_bin: Path, root: Path) -> None:
         check(resumed.get("state") == "authorized", f"resume must authorize without Gongbu: {resumed}")
         approved_status = expect_status(mcp, pending_handle, "authorized", False, True)
         check(approved_status.get("execution_id") is None, "standalone resume must not start Gongbu")
-        status_code, workflows = http(hubu.base, "GET", f"/spend/workflows?agent_id={ids['agent_id']}&status=authorized")
-        check(status_code == 200 and len(workflows["workflows"]) == 1, f"approved authorization workflow: {workflows}")
+        status_code, authorization_records = http(hubu.base, "GET", f"/spend/authorizations?agent_id={ids['agent_id']}&status=authorized")
+        check(status_code == 200 and len(authorization_records["authorization_records"]) == 1, f"approved authorization record: {authorization_records}")
         approved_claim = executor.claim(resumed_token)
         executor.release(approved_claim["claim_id"])
         expect_status(mcp, pending_handle, "released", True, False)
