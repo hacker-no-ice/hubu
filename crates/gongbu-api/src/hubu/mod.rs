@@ -209,52 +209,18 @@ impl ProductionHubuActivities {
             task_id: None,
         }
     }
+}
 
-    fn agent_id_for(&self, execution: &Execution) -> Result<String, ActivityError> {
-        match self
-            .repository
-            .get_hubu_authorization_snapshot(&execution.execution_id)
-        {
-            Ok(authorization)
-                if authorization.account_id == execution.account_id
-                    && authorization.operation_key == execution.operation_key
-                    && authorization.spend_auth_token_id
-                        == execution.hubu_token_reference.as_str() =>
-            {
-                return Ok(authorization.agent_id);
-            }
-            Ok(_) => {
-                return Err(ActivityError::Proven(
-                    "persisted_hubu_authorization_identity_mismatch".into(),
-                ));
-            }
-            Err(crate::execution::Error::NotFound) => {}
-            Err(_) => {
-                return Err(ActivityError::Proven(
-                    "persisted_hubu_authorization_unavailable".into(),
-                ));
-            }
+impl ProductionHubuActivities {
+    /// The Hubu claim to finalize. An execution that never recorded its
+    /// claim, such as after a lost claim response, recovers it by replaying
+    /// the identical claim: Hubu returns the existing claim, including its
+    /// terminal state, without claiming twice.
+    fn finalization_claim_id(&self, execution: &Execution) -> Result<String, ActivityError> {
+        match execution.hubu_claim_id.as_deref() {
+            Some(claim_id) => Ok(claim_id.to_owned()),
+            None => self.claim(execution),
         }
-        let claim_id = execution.hubu_claim_id.as_deref().ok_or_else(|| {
-            ActivityError::Proven("legacy_finalization_principal_unavailable".into())
-        })?;
-        let claim = self
-            .client
-            .inspect_claim(claim_id)
-            .map_err(map_activity_error)?;
-        if claim.operation_key != execution.operation_key
-            || claim.spend.account_id != execution.account_id
-            || claim.spend.spend_auth_token_id != execution.hubu_token_reference.as_str()
-            || !matches!(
-                claim.status.as_str(),
-                "claimed" | "active" | "settled" | "released"
-            )
-        {
-            return Err(ActivityError::Proven(
-                "legacy_claim_identity_mismatch".into(),
-            ));
-        }
-        Ok(claim.spend.agent_id)
     }
 }
 
@@ -269,7 +235,6 @@ impl HubuActivities for ProductionHubuActivities {
     fn claim(&self, execution: &Execution) -> Result<String, ActivityError> {
         self.client
             .claim(&ExecutorSpendClaimRequest {
-                operation_key: execution.operation_key.clone(),
                 spend: self.spend(execution),
             })
             .map(|claim| claim.claim_id)
@@ -310,8 +275,7 @@ impl HubuActivities for ProductionHubuActivities {
         }
         self.client
             .settle(&ExecutorSpendFinalizationRequest {
-                agent_id: self.agent_id_for(execution)?,
-                operation_key: execution.operation_key.clone(),
+                claim_id: self.finalization_claim_id(execution)?,
                 receipt: Some(ProviderReceipt {
                     actual_vendor_cost: receipt.actual_vendor_cost,
                     provider_request_id: receipt.provider_request_id,
@@ -326,8 +290,7 @@ impl HubuActivities for ProductionHubuActivities {
     fn release(&self, execution: &Execution) -> Result<(), ActivityError> {
         self.client
             .release(&ExecutorSpendFinalizationRequest {
-                agent_id: self.agent_id_for(execution)?,
-                operation_key: execution.operation_key.clone(),
+                claim_id: self.finalization_claim_id(execution)?,
                 receipt: None,
             })
             .map(|_| ())
@@ -463,8 +426,9 @@ pub struct ExecutorSpendResolveRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// v4.4 claim: the authorization token plus Gongbu's account, amount and
+/// scope assertions. Hubu derives the operation key from the stored decision.
 pub struct ExecutorSpendClaimRequest {
-    pub operation_key: String,
     #[serde(flatten)]
     pub spend: ExecutorSpendRequest,
 }
@@ -503,9 +467,9 @@ pub struct ExecutorSpendClaimResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// v4.4 settle/release, identified by the Hubu claim.
 pub struct ExecutorSpendFinalizationRequest {
-    pub agent_id: String,
-    pub operation_key: String,
+    pub claim_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub receipt: Option<ProviderReceipt>,
 }
@@ -586,34 +550,6 @@ mod tests {
         }
     }
 
-    fn persisted_execution(
-        repository: &crate::execution::Repository,
-        agent_id: &str,
-    ) -> crate::execution::Execution {
-        let params = execution_params();
-        let scope = params.execution_scope.clone().unwrap();
-        repository
-            .create_execution_with_authorization(
-                &params,
-                &crate::execution::HubuAuthorizationSnapshot {
-                    account_id: "account-1".into(),
-                    agent_id: agent_id.into(),
-                    operation_key: "operation-1".into(),
-                    decision_id: "decision-1".into(),
-                    spend_auth_token_id: "token-1".into(),
-                    amount_minor: 100,
-                    currency: "USD".into(),
-                    execution_scope: scope,
-                    lease_profile: "default".into(),
-                    expires_at: "2099-01-01T00:00:00Z".into(),
-                    authorization_status: "available".into(),
-                    task_id: None,
-                    reason: "test".into(),
-                },
-            )
-            .unwrap()
-    }
-
     #[test]
     fn ambiguous_claim_is_returned_without_retry() {
         let (client, paths) = fake_hubu(vec![None]);
@@ -627,18 +563,18 @@ mod tests {
     }
 
     #[test]
-    fn claim_request_omits_task_identity_for_hubu_to_resolve() {
+    fn claim_request_is_token_identified_and_omits_hubu_derived_identity() {
         let value = serde_json::to_value(claim_request()).unwrap();
+        assert_eq!(value["spend_auth_token_id"], "token-1");
         assert!(value.get("task_id").is_none());
-        assert_eq!(value["operation_key"], "platform:op-1");
+        assert!(value.get("operation_key").is_none());
     }
 
     #[test]
     fn settlement_wire_preserves_exact_cost_and_complete_frozen_snapshot() {
         let frozen = execution_params().pricing_snapshot;
         let request = ExecutorSpendFinalizationRequest {
-            agent_id: "agent-1".into(),
-            operation_key: "operation-1".into(),
+            claim_id: "claim-1".into(),
             receipt: Some(ProviderReceipt {
                 actual_vendor_cost: crate::provider_contract::ActualVendorCost::new(1, 4, "USD")
                     .unwrap(),
@@ -648,6 +584,8 @@ mod tests {
             }),
         };
         let wire = serde_json::to_value(request).unwrap();
+        assert_eq!(wire["claim_id"], "claim-1");
+        assert!(wire.get("agent_id").is_none() && wire.get("operation_key").is_none());
         assert_eq!(
             wire["receipt"]["actual_vendor_cost"],
             json!({"amount":1,"scale":4,"currency":"USD"})
@@ -695,27 +633,6 @@ mod tests {
     }
 
     #[test]
-    fn finalization_agent_is_loaded_from_persisted_snapshot_after_restart() {
-        let root = tempdir().unwrap();
-        let path = root.path().join("gongbu.sqlite3");
-        let repository =
-            crate::execution::Repository::open(&path, crate::redaction::Redactor::default())
-                .unwrap();
-        let execution = persisted_execution(&repository, "agent-from-authorization");
-        drop(repository);
-
-        let restarted =
-            crate::execution::Repository::open(&path, crate::redaction::Redactor::default())
-                .unwrap();
-        let activities =
-            ProductionHubuActivities::new(HubuClient::new("http://127.0.0.1:1"), restarted);
-        assert_eq!(
-            activities.agent_id_for(&execution).unwrap(),
-            "agent-from-authorization"
-        );
-    }
-
-    #[test]
     fn migrated_lost_response_retries_the_exact_legacy_receipt_payload() {
         let root = tempdir().unwrap();
         let path = root.path().join("legacy-lost-response.sqlite3");
@@ -738,39 +655,6 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = thread::spawn(move || {
-            let (mut inspection, _) = listener.accept().unwrap();
-            let mut raw = String::new();
-            inspection.read_to_string(&mut raw).unwrap();
-            assert!(raw.starts_with("GET /spend/executor/claim?claim_id=legacy-claim "));
-            let claim = json!({
-                "operation_key":"legacy-operation","claim_id":"legacy-claim",
-                "lease_profile":"default","status":"settled",
-                "claimed_at":"2026-08-05T20:00:00Z",
-                "claim_expires_at":"2099-01-01T00:00:00Z",
-                "finalized_at":"2026-08-05T20:00:31Z",
-                "settlement_id":"legacy-settlement","reconciliation_required":false,
-                "spend":{
-                    "operation_key":"legacy-operation","reason":"legacy execution",
-                    "spend_auth_token_id":"legacy-token","decision_id":"legacy-decision",
-                    "account_id":"account-a","agent_id":"legacy-agent","amount_cents":100,
-                    "currency":"USD","merchant":null,"execution_scope":null,"task_id":null,
-                    "lease_profile":"default","status":"settled",
-                    "expires_at":"2099-01-01T00:00:00Z",
-                    "budget_hold":{"hold_id":"legacy-hold","budget_id":"legacy-budget",
-                        "status":"settled","amount_cents":100,"consumed_amount_cents":7,
-                        "frozen_amount_cents":0,"remaining_amount_cents":93}
-                }
-            })
-            .to_string();
-            write!(
-                inspection,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                claim.len(),
-                claim
-            )
-            .unwrap();
-            drop(inspection);
-
             let (mut settlement, _) = listener.accept().unwrap();
             let mut raw = String::new();
             settlement.read_to_string(&mut raw).unwrap();
@@ -789,8 +673,10 @@ mod tests {
             .settle(&execution, "legacy-receipt", 7)
             .expect_err("the fixture drops the retried settlement response");
         let wire = server.join().unwrap();
-        assert_eq!(wire["agent_id"], "legacy-agent");
-        assert_eq!(wire["operation_key"], "legacy-operation");
+        // The pre-snapshot execution finalizes by its persisted token: no
+        // principal lookup or claim inspection precedes the settlement.
+        assert_eq!(wire["claim_id"], "legacy-claim");
+        assert!(wire.get("agent_id").is_none() && wire.get("operation_key").is_none());
         assert_eq!(
             wire["receipt"],
             json!({
@@ -806,50 +692,11 @@ mod tests {
     }
 
     #[test]
-    fn legacy_finalization_agent_uses_immutable_claim_inspection_without_resolve() {
-        let claim = json!({
-            "operation_key":"operation-1","claim_id":"claim-1","lease_profile":"default",
-            "status":"claimed","claimed_at":"2026-08-25T00:00:01Z",
-            "claim_expires_at":"2099-01-01T00:00:00Z","finalized_at":null,
-            "settlement_id":null,"reconciliation_required":false,
-            "spend":{
-                "operation_key":"operation-1","reason":"test","spend_auth_token_id":"token-1",
-                "decision_id":"decision-1","account_id":"account-1","agent_id":"claim-agent",
-                "amount_cents":100,"currency":"USD","merchant":null,
-                "execution_scope":crate::execution_scope::for_target("google", "gemini_developer_image"),
-                "task_id":null,"lease_profile":"default","status":"claimed",
-                "expires_at":"2099-01-01T00:00:00Z",
-                "budget_hold":{"hold_id":"hold-1","budget_id":"budget-1","status":"frozen",
-                    "amount_cents":100,"consumed_amount_cents":0,"frozen_amount_cents":100,
-                    "remaining_amount_cents":0}
-            }
-        });
-        let (client, paths) = fake_hubu(vec![Some(claim)]);
-        let root = tempdir().unwrap();
-        let repository = crate::execution::Repository::open(
-            root.path().join("gongbu.sqlite3"),
-            crate::redaction::Redactor::default(),
-        )
-        .unwrap();
-        let mut params = execution_params();
-        params.hubu_claim_id = Some("claim-1".into());
-        let execution = repository.create_execution(&params).unwrap();
-        let activities = ProductionHubuActivities::new(client, repository);
-
-        assert_eq!(activities.agent_id_for(&execution).unwrap(), "claim-agent");
-        assert_eq!(
-            paths.lock().unwrap().as_slice(),
-            ["/spend/executor/claim?claim_id=claim-1"]
-        );
-    }
-
-    #[test]
     fn ambiguous_settlement_is_returned_without_inspection_or_retry() {
         let (client, paths) = fake_hubu(vec![None]);
         client
             .settle(&ExecutorSpendFinalizationRequest {
-                agent_id: "agt_example".to_string(),
-                operation_key: "platform:op-1".to_string(),
+                claim_id: "claim-1".to_string(),
                 receipt: Some(ProviderReceipt {
                     actual_vendor_cost:
                         crate::provider_contract::ActualVendorCost::new(500, 2, "USD").unwrap(),
@@ -873,7 +720,6 @@ mod tests {
 
     fn claim_request() -> ExecutorSpendClaimRequest {
         ExecutorSpendClaimRequest {
-            operation_key: "platform:op-1".to_string(),
             spend: ExecutorSpendRequest {
                 spend_auth_token_id: "token-1".to_string(),
                 agent_id: Some("agt_example".to_string()),
@@ -884,6 +730,84 @@ mod tests {
                 task_id: None,
             },
         }
+    }
+
+    type RecordedRequests = Arc<Mutex<Vec<(String, serde_json::Value)>>>;
+
+    /// Fake Hubu that records each request's path and JSON body and drops
+    /// the connection without answering.
+    fn recording_hubu(requests: usize) -> (HubuClient, RecordedRequests) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind recording Hubu");
+        let addr = listener.local_addr().expect("recording Hubu address");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let thread_seen = Arc::clone(&seen);
+        thread::spawn(move || {
+            for _ in 0..requests {
+                let (mut stream, _) = listener.accept().expect("accept request");
+                let mut raw = String::new();
+                stream.read_to_string(&mut raw).expect("read request");
+                let path = raw
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .expect("request path")
+                    .to_string();
+                let body = serde_json::from_str(raw.split_once("\r\n\r\n").unwrap().1)
+                    .expect("JSON request body");
+                thread_seen.lock().expect("seen").push((path, body));
+            }
+        });
+        (HubuClient::new(format!("http://{addr}")), seen)
+    }
+
+    #[test]
+    fn production_activities_claim_by_token_and_finalize_by_claim_id() {
+        let (client, seen) = recording_hubu(3);
+        let root = tempdir().unwrap();
+        let repository = crate::execution::Repository::open(
+            root.path().join("gongbu.sqlite3"),
+            crate::redaction::Redactor::default(),
+        )
+        .unwrap();
+        let unrecorded = repository.create_execution(&execution_params()).unwrap();
+        let mut params = execution_params();
+        params.hubu_claim_id = Some("claim-1".into());
+        params.hubu_token_reference = crate::execution::HubuTokenReference::new("token-2").unwrap();
+        params.hubu_authorization_id = "token-2".into();
+        params.operation_key = "operation-2".into();
+        let recorded = repository.create_execution(&params).unwrap();
+        let activities = ProductionHubuActivities::new(client, repository);
+        activities
+            .claim(&unrecorded)
+            .expect_err("the recording Hubu drops the claim response");
+        // A lost claim response is recovered by replaying the claim, so the
+        // dropped replay stops the release before it is sent.
+        activities
+            .release(&unrecorded)
+            .expect_err("the recording Hubu drops the claim replay");
+        activities
+            .release(&recorded)
+            .expect_err("the recording Hubu drops the release response");
+
+        let seen = seen.lock().unwrap().clone();
+        let paths: Vec<_> = seen.iter().map(|(path, _)| path.as_str()).collect();
+        assert_eq!(
+            paths,
+            [
+                "/spend/executor/claim",
+                "/spend/executor/claim",
+                "/spend/executor/release"
+            ]
+        );
+        for (path, body) in &seen {
+            for private in ["operation_key", "agent_id", "executor_execution_id"] {
+                assert!(body.get(private).is_none(), "{path} sent {private}: {body}");
+            }
+        }
+        assert_eq!(seen[0].1["spend_auth_token_id"], "token-1");
+        assert_eq!(seen[0].1["account_id"], "account-1");
+        assert_eq!(seen[1].1, seen[0].1, "claim replay is identical");
+        assert_eq!(seen[2].1, json!({"claim_id": "claim-1"}));
     }
 
     fn fake_hubu(
