@@ -1368,9 +1368,8 @@ enum ExecutorFinalizationIdentity {
         agent_id: String,
         operation_key: String,
     },
-    /// v4.4: the authorization continuation Hubu issued.
-    SpendAuthToken(String),
-    /// v4.4: the claim Hubu returned.
+    /// v4.4: the claim Hubu returned. An executor that lost the claim
+    /// response recovers it by replaying the identical claim.
     Claim(String),
 }
 
@@ -1385,15 +1384,14 @@ struct ExecutorSpendAgentOperationFinalizeHttpRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ExecutorSpendTokenFinalizeHttpRequest {
-    spend_auth_token_id: Option<String>,
-    claim_id: Option<String>,
+struct ExecutorSpendClaimFinalizeHttpRequest {
+    claim_id: String,
     receipt: Option<SpendExecutorSettlementReceipt>,
 }
 
 const LEGACY_FINALIZATION_FIELDS: [&str; 3] =
     ["operation_key", "executor_execution_id", "agent_id"];
-const TOKEN_FINALIZATION_FIELDS: [&str; 2] = ["spend_auth_token_id", "claim_id"];
+const CLAIM_FINALIZATION_FIELDS: [&str; 1] = ["claim_id"];
 const RECONCILIATION_FINALIZATION_FIELDS: [&str; 2] = ["provider_reference", "evidence"];
 
 impl ExecutorSpendFinalizationHttpRequest {
@@ -1407,7 +1405,7 @@ impl ExecutorSpendFinalizationHttpRequest {
             .ok_or_else(|| anyhow!("executor finalization request must be a JSON object"))?;
         let has_any = |fields: &[&str]| fields.iter().any(|field| object.contains_key(*field));
         let legacy = has_any(&LEGACY_FINALIZATION_FIELDS);
-        let token = has_any(&TOKEN_FINALIZATION_FIELDS);
+        let claim = has_any(&CLAIM_FINALIZATION_FIELDS);
         if has_any(&RECONCILIATION_FINALIZATION_FIELDS) {
             if legacy || object.contains_key("spend_auth_token_id") {
                 return Err(anyhow!(
@@ -1416,9 +1414,14 @@ impl ExecutorSpendFinalizationHttpRequest {
             }
             return Ok(Self::Reconciliation(serde_json::from_value(value)?));
         }
-        match (legacy, token) {
+        if object.contains_key("spend_auth_token_id") {
+            return Err(anyhow!(
+                "executor finalization is identified by claim_id; to recover a lost claim_id, replay the identical claim with the same spend_auth_token_id"
+            ));
+        }
+        match (legacy, claim) {
             (true, true) => Err(anyhow!(
-                "executor finalization must identify the claim by spend_auth_token_id or claim_id, or by agent_id and operation_key, not both"
+                "executor finalization must identify the claim by claim_id, or by agent_id and operation_key, not both"
             )),
             (true, false) => {
                 let request: ExecutorSpendAgentOperationFinalizeHttpRequest =
@@ -1432,25 +1435,14 @@ impl ExecutorSpendFinalizationHttpRequest {
                 }))
             }
             (false, true) => {
-                let request: ExecutorSpendTokenFinalizeHttpRequest =
+                let request: ExecutorSpendClaimFinalizeHttpRequest =
                     serde_json::from_value(value)?;
-                let identity = match (request.spend_auth_token_id, request.claim_id) {
-                    (Some(token), None) => ExecutorFinalizationIdentity::SpendAuthToken(token),
-                    (None, Some(claim_id)) => ExecutorFinalizationIdentity::Claim(claim_id),
-                    _ => {
-                        return Err(anyhow!(
-                            "executor finalization requires exactly one of spend_auth_token_id or claim_id"
-                        ))
-                    }
-                };
                 Ok(Self::Executor(ExecutorSpendFinalizeHttpRequest {
-                    identity,
+                    identity: ExecutorFinalizationIdentity::Claim(request.claim_id),
                     receipt: request.receipt,
                 }))
             }
-            (false, false) => Err(anyhow!(
-                "executor finalization requires spend_auth_token_id or claim_id"
-            )),
+            (false, false) => Err(anyhow!("executor finalization requires claim_id")),
         }
     }
 }
@@ -4904,27 +4896,6 @@ fn executor_claim_validation_request(
                 resolve_agent_id_for_user(agent_pub_id, user, state)?,
                 operation_key.to_string(),
             )
-        }
-        ExecutorFinalizationIdentity::SpendAuthToken(token_id) => {
-            // The token keeps naming its decision after it expires, is used
-            // or is revoked, so an executor that lost the claim response can
-            // still finalize or replay by token.
-            let token_id: SpendAuthTokenId = token_id
-                .trim()
-                .parse()
-                .with_context(|| "parse spend_auth_token_id")?;
-            let spend = state
-                .spend
-                .lock()
-                .map_err(|_| anyhow!("spend manager lock poisoned"))?;
-            let token = spend
-                .auth_token_record(&token_id)
-                .filter(|token| token.owner_user_id == user.user_id)
-                .ok_or_else(|| anyhow!("unknown spend auth token"))?;
-            let decision = spend
-                .decision_record(&token.spend_decision_id)
-                .ok_or_else(|| anyhow!("spend decision is missing"))?;
-            (decision.request.agent_id, decision.operation_key)
         }
         ExecutorFinalizationIdentity::Claim(claim_id) => {
             let claim_id = claim_id
@@ -9000,10 +8971,9 @@ lease_profiles:
     }
 
     #[test]
-    fn token_identified_claim_and_settlement_replay_without_operation_key() {
+    fn token_identified_claim_and_claim_identified_settlement_replay() {
         let (path, state, agent, authorization) =
             setup_executor_authorization("executor-v44-settle");
-        let token = authorization.auth_token_id.clone().expect("token");
         let claim_request = token_identified_claim_request(&agent, &authorization);
 
         let claim = claim_executor_spend(claim_request.to_string(), &state)
@@ -9015,11 +8985,11 @@ lease_profiles:
         assert_eq!(claim_replay.claim_id, claim.claim_id);
 
         let settled = settle_executor_spend(
-            json!({"spend_auth_token_id": token, "receipt": settlement_receipt_json(400)})
+            json!({"claim_id": claim.claim_id, "receipt": settlement_receipt_json(400)})
                 .to_string(),
             &state,
         )
-        .expect("settle by token");
+        .expect("settle by claim id");
         assert_eq!(settled.claim_id, claim.claim_id);
         assert_eq!(settled.receipt.budget_charge_cents, 400);
         assert_eq!(settled.spend.budget_hold.consumed_amount_cents, 400);
@@ -9042,11 +9012,11 @@ lease_profiles:
         }
 
         let changed = settle_executor_spend(
-            json!({"spend_auth_token_id": token, "receipt": settlement_receipt_json(399)})
+            json!({"claim_id": claim.claim_id, "receipt": settlement_receipt_json(399)})
                 .to_string(),
             &state,
         )
-        .expect_err("a changed receipt must conflict by token too");
+        .expect_err("a changed receipt must conflict");
         assert!(changed
             .to_string()
             .contains("settlement receipt does not match the original settlement"));
@@ -9058,25 +9028,28 @@ lease_profiles:
     }
 
     #[test]
-    fn token_identified_release_recovers_lost_claim_response_after_token_expiry() {
+    fn claim_replay_recovers_lost_claim_id_after_token_expiry_for_release() {
         let lease_config = LeaseConfig {
             authorization_ttl_seconds: 1,
             ..LeaseConfig::default()
         };
         let (path, state, agent, authorization) =
             setup_executor_authorization_with_lease_config("executor-v44-release", lease_config);
-        let token = authorization.auth_token_id.clone().expect("token");
+        let claim_request = token_identified_claim_request(&agent, &authorization);
         // The executor never observes this claim response.
-        claim_executor_spend(
-            token_identified_claim_request(&agent, &authorization).to_string(),
-            &state,
-        )
-        .expect("claim before authorization expiry");
+        let lost = claim_executor_spend(claim_request.to_string(), &state)
+            .expect("claim before authorization expiry");
         std::thread::sleep(std::time::Duration::from_millis(1_100));
 
+        // Replaying the identical claim recovers the same claim after the
+        // authorization itself expired.
+        let recovered = claim_executor_spend(claim_request.to_string(), &state)
+            .expect("claim replay recovers the claim after authorization expiry");
+        assert_eq!(recovered.claim_id, lost.claim_id);
+        assert_eq!(recovered.claimed_at, lost.claimed_at);
         let released =
-            release_executor_spend(json!({"spend_auth_token_id": token}).to_string(), &state)
-                .expect("an expired token still names its active claim");
+            release_executor_spend(json!({"claim_id": recovered.claim_id}).to_string(), &state)
+                .expect("release by the recovered claim id");
         assert_eq!(released.status, "released");
         assert_eq!(released.spend.budget_hold.frozen_amount_cents, 0);
         assert_eq!(released.spend.budget_hold.remaining_amount_cents, 500);
@@ -9090,15 +9063,17 @@ lease_profiles:
     }
 
     #[test]
-    fn executor_finalization_identity_forms_are_exclusive_and_owner_scoped() {
+    fn executor_finalization_is_claim_identified_and_rejects_tokens() {
         let (path, state, agent, authorization) =
             setup_executor_authorization("executor-v44-identity");
         let token = authorization.auth_token_id.clone().expect("token");
 
-        let unclaimed =
-            release_executor_spend(json!({"spend_auth_token_id": token}).to_string(), &state)
-                .expect_err("an unclaimed authorization has nothing to finalize");
-        assert!(unclaimed.to_string().contains("unknown executor claim"));
+        let unknown = release_executor_spend(
+            json!({"claim_id": SpendExecutorClaimId::new().to_string()}).to_string(),
+            &state,
+        )
+        .expect_err("an unknown claim has nothing to finalize");
+        assert!(unknown.to_string().contains("unknown executor spend claim"), "{unknown}");
 
         let mismatched_key = claim_executor_spend(
             json!({
@@ -9122,25 +9097,25 @@ lease_profiles:
         .expect("claim");
         for (body, expected) in [
             (
+                json!({"spend_auth_token_id": token}),
+                "replay the identical claim with the same spend_auth_token_id",
+            ),
+            (
                 json!({"spend_auth_token_id": token, "claim_id": claim.claim_id}),
-                "exactly one of spend_auth_token_id or claim_id",
+                "is identified by claim_id",
             ),
             (
                 json!({
-                    "spend_auth_token_id": token,
+                    "claim_id": claim.claim_id,
                     "agent_id": agent.agent_id,
                     "operation_key": authorization.operation_key,
                 }),
                 "not both",
             ),
-            (json!({}), "requires spend_auth_token_id or claim_id"),
+            (json!({}), "requires claim_id"),
             (
-                json!({"spend_auth_token_id": SpendAuthTokenId::new().to_string()}),
-                "unknown spend auth token",
-            ),
-            (
-                json!({"spend_auth_token_id": token, "evidence": "not an executor field"}),
-                "must not be mixed",
+                json!({"claim_id": claim.claim_id, "evidence": "not an executor field"}),
+                "provider_reference",
             ),
         ] {
             let response = route(
