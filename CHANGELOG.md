@@ -23,7 +23,9 @@ Future release template
 - Describe only fixes that materially affect users or operators.
 -->
 
-## v0.2.2 — Unreleased
+## Unreleased
+
+## v0.2.2 — 2026-10-05
 
 ### Highlights
 
@@ -88,8 +90,6 @@ Future release template
 - `hubu-server` no longer fails to start with `UNIQUE constraint failed:
   spend_decisions.agent_id, spend_decisions.operation_key` after an agent
   corrected a denied authorization under the same operation key.
-
-## Unreleased
 
 ## v0.2.1 — 2026-09-04
 
