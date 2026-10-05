@@ -229,7 +229,7 @@ gh workflow run release.yml \
   --repo hacker-no-ice/hubu \
   --ref main \
   -f channel=candidate \
-  -f version=v0.2.1-rc.1 \
+  -f version=v0.2.2-rc.1 \
   -f source_commit=FULL_40_CHARACTER_COMMIT_SHA
 ```
 
@@ -247,7 +247,7 @@ gh workflow run release.yml \
   --repo hacker-no-ice/hubu \
   --ref main \
   -f channel=stable \
-  -f version=v0.2.1 \
+  -f version=v0.2.2 \
   -f source_commit=FULL_40_CHARACTER_COMMIT_SHA
 ```
 
