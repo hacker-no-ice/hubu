@@ -1,4 +1,4 @@
-# Ledger and spend history
+# Ledger and authorization records
 
 Hubu exposes one owner-scoped history model through HTTP, the CLI, and unified
 MCP. These are read operations: they never authorize, claim, settle, release,
@@ -23,7 +23,7 @@ is accepted.
 Each response has `schema_version: "hubu-history-v1"`, `transactions`, `coverage`,
 and `next_cursor`. Each transaction retains its canonical ID and exact debit and
 credit entries, source kind, public agent/account and budget/version IDs when
-supported by authentic ownership evidence, public workflow and settlement links,
+supported by authentic ownership evidence, public authorization record and settlement links,
 and correction predecessor/original IDs. Costs use a coefficient **string**,
 scale and currency: `{"amount":"1","scale":3,"currency":"USD"}` means USD
 0.001. Do not convert these values through floating point.
@@ -50,19 +50,21 @@ claiming aggregate reconciliation. Unknown historical attribution remains
 unassigned. Historical wallet reconciliation is explicitly incomplete; wallet
 atomicity and remaining legacy wallet validation are deferred in HUB-210.
 
-## Discover authorization workflows
+## Discover authorization records
 
 ```sh
-hubu spend history --agent-id agt_EXACT_AGENT_ID --status settled --limit 20
-hubu spend history --account-id aga_EXACT_ACCOUNT_ID
-hubu spend show --workflow-id PUBLIC_DECISION_UUID
+hubu spend authorizations --agent-id agt_EXACT_AGENT_ID --status settled --limit 20
+hubu spend authorizations --account-id aga_EXACT_ACCOUNT_ID
+hubu spend show --authorization-id PUBLIC_DECISION_UUID
 ```
 
-`GET /spend/workflows` accepts `agent_id`, `account_id`, `status`, `limit`, and
-`cursor`. Unified MCP exposes `hubu_list_spend_workflows` with those same fields.
-The list returns `schema_version`, `workflows`, and `next_cursor`. Discovery
+`GET /spend/authorizations` accepts `agent_id`, `account_id`, `status`, `limit`, and
+`cursor`. Unified MCP exposes `hubu_list_authorization_records` with those same fields.
+The list returns `schema_version`, `authorization_records`, and `next_cursor`. The
+show response returns `schema_version` and `authorization_record`. These are
+read-only, computed lifecycle views; Gongbu owns durable orchestration. Discovery
 selects the latest authorization revision for each independent agent-scoped
-operation. Two provider operations remain two workflows even if they came from
+operation. Two provider operations remain two authorization records even if they came from
 one higher-level task; a safe `task_reference` correlates their common task ID.
 Denied-request history is intentionally excluded.
 
@@ -72,24 +74,24 @@ outcome evidence is shown as `unknown`, never inferred as allowed. `decision`
 reflects the latest authorization outcome, including human approval; the
 immutable initial policy evaluation is separately `policy_decision`.
 
-A workflow shows the public decision identity, authorized maximum, currency,
+An authorization record shows the public decision identity, authorized maximum, currency,
 trusted provider/billing identity when known, hold and budget version, claim
 lease timestamps and terminal status, receipt with exact provider cost and
 rounded budget charge, linked ledger transaction IDs, and reconciliation outcome
 and evidence references. Release does not invent a receipt or expense posting.
 
-`GET /spend/workflows/show?workflow_id=PUBLIC_DECISION_UUID` and MCP
-`hubu_get_spend_workflow` inspect a known public workflow. Trusted HTTP/CLI callers
+`GET /spend/authorizations/show?authorization_id=PUBLIC_DECISION_UUID` and MCP
+`hubu_get_authorization_record` inspect a known public authorization record. Trusted HTTP/CLI callers
 may alternatively look up `agent_id` plus their existing private `operation_key`:
 
 ```sh
 hubu spend show --agent-id agt_EXACT_AGENT_ID --operation-key EXISTING_PRIVATE_KEY
 ```
 
-This read does not generate an operation key. MCP accepts only `workflow_id` for
+This read does not generate an operation key. MCP accepts only `authorization_id` for
 lookup; it neither accepts nor returns private operation keys. Query values use
 standard URL percent encoding. Do not put trusted private-key lookup URLs in
-shared screenshots or shell evidence; use the public workflow ID for sharing.
+shared screenshots or shell evidence; use the public authorization record ID for sharing.
 
 ## Pagination, evidence and compatibility
 
@@ -98,8 +100,8 @@ The default page size is 50; the maximum is 100. Return `next_cursor` unchanged
 with the same filters. Cursors bind the owner, resource kind and query filters,
 and carry a first-page upper bound; changing filters requires a new first page.
 Newer postings do not displace subsequent ledger pages. Each request uses one
-SQLite snapshot for postings, workflows, receipts and balances. Pages are not a
-persistent historical snapshot: workflow statuses, newly backfilled older
+SQLite snapshot for postings, authorization records, receipts and balances. Pages are not a
+persistent historical snapshot: authorization record statuses, newly backfilled older
 records and budget totals can change between requests. Restart from the first
 page to refresh. Store the schema version and cursor with dogfood evidence.
 

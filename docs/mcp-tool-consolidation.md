@@ -4,7 +4,7 @@ Hubu exposes one supported tool set through `hubu-unified-mcp`. Identity,
 spending authority, policy and budget management, approvals and recovery are
 available without adopting Gongbu. Managed execution is optional.
 
-The v0.2.2 catalog contains **39 tools**, with routing revision **12**. Backend
+The v0.2.2 catalog contains **39 tools**, with routing revision **13**. Backend
 availability and the existing human-approval gates determine which tools are
 usable. There are no standard/advanced exposure profiles or tool-exposure
 configuration flags. See the [unified MCP reference](unified-mcp.md) for schemas,
@@ -35,13 +35,13 @@ tool does not imply that a client has configured its human prompt.
 | `hubu_create_budget` | Hubu | Owner administration; human gate |
 | `hubu_feedback_guidance` | None | Offline support discovery |
 | `hubu_get_executor_claim` | Hubu | External executor settlement/recovery inspection |
-| `hubu_get_spend_workflow` | Hubu | Owner-scoped public workflow inspection |
+| `hubu_get_authorization_record` | Hubu | Owner-scoped public authorization record inspection |
 | `hubu_get_spend_approval` | Hubu | Immutable approval review |
 | `hubu_list_agents` | Hubu | Identity discovery |
 | `hubu_list_budgets` | Hubu | Budget visibility |
 | `hubu_list_claims_requiring_reconciliation` | Hubu | Find frozen claims without retained IDs |
 | `hubu_list_ledger` | Hubu | Canonical recorded spend, agent-budget filters and coverage |
-| `hubu_list_spend_workflows` | Hubu | Paginated owner-scoped authorization discovery |
+| `hubu_list_authorization_records` | Hubu | Paginated owner-scoped authorization discovery |
 | `hubu_list_users` | Hubu | Human identity selection |
 | `hubu_operation_status` | store | Observe a public operation handle in the MCP store |
 | `hubu_policy_diff` | Hubu | Compare immutable revisions |
@@ -139,11 +139,11 @@ terminal denial requires a new logical invocation for corrected work.
 
 A standalone authorization's status comes from Hubu. Any executor may consume
 the continuation through Hubu's executor API without the router seeing it, so
-`hubu_operation_status` reads the operation's Hubu workflow instead of its own
+`hubu_operation_status` reads the operation's Hubu authorization record instead of its own
 store. That applies to an allowed `hubu_authorize_spend` operation that was
 never handed to Gongbu:
 
-| Hubu workflow | `state` | `terminal` | `replacement_safe` |
+| Hubu authorization record | `state` | `terminal` | `replacement_safe` |
 | --- | --- | --- | --- |
 | authorized, unclaimed | `authorized` | no | yes |
 | claimed by an executor | `executing` | no | **no** |
@@ -152,7 +152,7 @@ never handed to Gongbu:
 | expired, never claimed | `expired` | yes | yes, as a new operation |
 | claim lease expired | `reconciliation_required` | no | **no** |
 
-The result carries `authority: {source: "hubu_workflow", verified}`. An
+The result carries `authority: {source: "hubu_authorization_record", verified}`. An
 executor's claim can outlive the authorization itself, so the router never
 reports such an operation as terminal from its own token expiry. If Hubu cannot
 be reached, or returns a status the router cannot interpret, the result is

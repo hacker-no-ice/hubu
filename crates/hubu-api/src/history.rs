@@ -308,7 +308,7 @@ fn transaction(
         "account_id":ids.as_ref().map(|i|&i.0),
         "budget_id":context.map(|c|public_budget_id(&c.budget_id)),
         "budget_version_id":context.map(|c|public_budget_version_id(&c.budget_version_id)),
-        "workflow_id":context.map(|c|c.spend_decision_id.to_string()),
+        "authorization_id":context.map(|c|c.spend_decision_id.to_string()),
         "claim_id":claim.map(|c|c.id.to_string()),
         "settlement_id":claim.and_then(|c|c.settlement_id.as_ref()).map(ToString::to_string),
         "provider":provider.as_ref().map(|p|&p["provider"]),
@@ -416,14 +416,14 @@ fn owned_decision(decision: &SpendDecisionRecord, data: &HistorySnapshot) -> boo
         == Some(&decision.request.agent_account_id)
 }
 
-fn workflow(
+fn authorization_record(
     decision: &SpendDecisionRecord,
     data: &HistorySnapshot,
     state: &ServerState,
     now: DateTime<Utc>,
 ) -> Result<Value> {
     if !owned_decision(decision, data) {
-        return Err(anyhow!("unknown owned workflow"));
+        return Err(anyhow!("unknown owned authorization record"));
     }
     let (account, agent) = public_ids_for_agent_account(
         &decision.request.agent_id,
@@ -498,7 +498,7 @@ fn workflow(
         "price_model_reference":reference(Some(&r.receipt.price_model_snapshot.to_string()))})
     });
     Ok(json!({"id":decision.id,
-        "workflow_id":decision.id,
+        "authorization_id":decision.id,
         "decision_id":decision.id,
         "created_at":decision.created_at.to_rfc3339(),
         "revision":decision.revision,
@@ -536,21 +536,25 @@ fn workflow(
         "raw_evidence_redacted":true}))
 }
 
-pub(super) fn workflows(request: &HttpRequest, state: &ServerState, show: bool) -> Result<Value> {
+pub(super) fn authorization_records(
+    request: &HttpRequest,
+    state: &ServerState,
+    show: bool,
+) -> Result<Value> {
     let allowed = if show {
-        vec!["workflow_id", "agent_id", "operation_key"]
+        vec!["authorization_id", "agent_id", "operation_key"]
     } else {
         vec!["agent_id", "account_id", "status", "limit", "cursor"]
     };
     let query = query(request, &allowed)?;
     if show
-        && !((query.len() == 1 && query.contains_key("workflow_id"))
+        && !((query.len() == 1 && query.contains_key("authorization_id"))
             || (query.len() == 2
                 && query.contains_key("agent_id")
                 && query.contains_key("operation_key")))
     {
         return Err(anyhow!(
-            "workflow lookup requires workflow_id or agent_id plus operation_key"
+            "authorization record lookup requires authorization_id or agent_id plus operation_key"
         ));
     }
     if let Some(status) = query.get("status") {
@@ -566,7 +570,7 @@ pub(super) fn workflows(request: &HttpRequest, state: &ServerState, show: bool) 
         ]
         .contains(&status.as_str())
         {
-            return Err(anyhow!("unknown workflow status"));
+            return Err(anyhow!("unknown authorization record status"));
         }
     }
     let user = authenticated_user_context(state)?;
@@ -588,7 +592,7 @@ pub(super) fn workflows(request: &HttpRequest, state: &ServerState, show: bool) 
             latest.insert(key, decision);
         }
     }
-    let candidates: Vec<_> = if query.contains_key("workflow_id") {
+    let candidates: Vec<_> = if query.contains_key("authorization_id") {
         data.decisions.iter().collect()
     } else {
         latest.into_values().collect()
@@ -611,19 +615,19 @@ pub(super) fn workflows(request: &HttpRequest, state: &ServerState, show: bool) 
         })
         .filter(|d| {
             query
-                .get("workflow_id")
+                .get("authorization_id")
                 .is_none_or(|id| d.id.to_string() == *id)
                 && query
                     .get("operation_key")
                     .is_none_or(|key| &d.operation_key == key)
         })
-        .map(|d| workflow(d, &data, state, now))
+        .map(|d| authorization_record(d, &data, state, now))
         .collect::<Result<Vec<_>>>()?;
     if show {
         return match records.as_slice() {
             [record] => Ok(json!({"schema_version":VERSION,
-        "workflow":record})),
-            _ => Err(anyhow!("unknown owned workflow")),
+        "authorization_record":record})),
+            _ => Err(anyhow!("unknown owned authorization record")),
         };
     }
     let records = records
@@ -634,9 +638,10 @@ pub(super) fn workflows(request: &HttpRequest, state: &ServerState, show: bool) 
                 .is_none_or(|s| r["status"].as_str() == Some(s))
         })
         .collect();
-    let (workflows, next_cursor) = page(records, &query, &user.user_id, "workflows")?;
+    let (authorization_records, next_cursor) =
+        page(records, &query, &user.user_id, "authorization_records")?;
     Ok(json!({"schema_version":VERSION,
-        "workflows":workflows,
+        "authorization_records":authorization_records,
         "next_cursor":next_cursor}))
 }
 
@@ -667,7 +672,7 @@ mod tests {
         let (second, cursor) = page(newer, &query, &owner, "ledger").unwrap();
         assert_eq!(second[0]["id"], "a");
         assert!(page(rows.clone(), &query, &UserId::new(), "ledger").is_err());
-        assert!(page(rows.clone(), &query, &owner, "workflows").is_err());
+        assert!(page(rows.clone(), &query, &owner, "authorization_records").is_err());
         let mut changed = query.clone();
         changed.insert("agent_id".into(), "other".into());
         assert!(page(rows.clone(), &changed, &owner, "ledger").is_err());

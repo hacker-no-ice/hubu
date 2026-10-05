@@ -10,7 +10,7 @@ guide follows one operation from the agent's MCP call to settlement.
 agent ──hubu_authorize_spend──▶ unified MCP ──▶ Hubu   (reserve the budget)
 agent ──continuation token────▶ your executor
 your executor ──resolve / claim / settle or release──▶ Hubu (HTTP, v4.4)
-agent ──hubu_operation_status─▶ unified MCP ──reads──▶ Hubu workflow
+agent ──hubu_operation_status─▶ unified MCP ──reads──▶ Hubu authorization record
 ```
 
 ## 1. The agent authorizes through MCP
@@ -76,7 +76,7 @@ with the separate reconciliation capability: `vendor_billed` with a receipt, or
 
 ## 5. The agent observes status by its handle
 
-`hubu_operation_status` reads the operation's Hubu workflow, so it reflects
+`hubu_operation_status` reads the operation's Hubu authorization record, so it reflects
 your executor's progress without any callback to the router:
 
 | Executor progress | `state` | `replacement_safe` |

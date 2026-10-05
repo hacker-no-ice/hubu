@@ -521,17 +521,17 @@ fn approved_hubu_routes_prepare_exact_static_requests() {
             HubuRequestCapabilityV1::None,
         ),
         (
-            "hubu_list_spend_workflows",
+            "hubu_list_authorization_records",
             empty.clone(),
             "GET",
-            "/spend/workflows",
+            "/spend/authorizations",
             HubuRequestCapabilityV1::None,
         ),
         (
-            "hubu_get_spend_workflow",
-            json!({"workflow_id":"public-workflow"}),
+            "hubu_get_authorization_record",
+            json!({"authorization_id":"public-authorization_record"}),
             "GET",
-            "/spend/workflows/show?workflow_id=public-workflow",
+            "/spend/authorizations/show?authorization_id=public-authorization_record",
             HubuRequestCapabilityV1::None,
         ),
         (
@@ -1753,17 +1753,26 @@ fn history_routes_filters_and_preserves_exact_values() {
 #[test]
 fn history_rejects_private_keys_and_invalid_filters_before_http() {
     for (name, args) in [
+        ("hubu_list_spend_workflows", json!({})),
+        ("hubu_get_spend_workflow", json!({"workflow_id":"public"})),
         (
-            "hubu_get_spend_workflow",
+            "hubu_get_authorization_record",
+            json!({"workflow_id":"public"}),
+        ),
+        (
+            "hubu_get_authorization_record",
             json!({"operation_key":"secret","agent_id":"agent"}),
         ),
         (
-            "hubu_get_spend_workflow",
-            json!({"workflow_id":"public","operation_key":"secret"}),
+            "hubu_get_authorization_record",
+            json!({"authorization_id":"public","operation_key":"secret"}),
         ),
         ("hubu_list_ledger", json!({"budget_id":"budget"})),
         ("hubu_list_ledger", json!({"limit":101})),
-        ("hubu_list_spend_workflows", json!({"status":"invalid"})),
+        (
+            "hubu_list_authorization_records",
+            json!({"status":"invalid"}),
+        ),
     ] {
         assert!(route_tool_call_v1(
             json!({"name":name,"arguments":args}),
@@ -1777,24 +1786,24 @@ fn history_rejects_private_keys_and_invalid_filters_before_http() {
 }
 
 #[test]
-fn workflow_detail_preserves_public_ids_and_only_accepts_public_lookup() {
-    let payload = json!({"schema_version":"hubu-history-v1","workflow":{"id":"workflow-public","claim_id":"claim-public"}});
+fn authorization_record_detail_preserves_public_ids_and_only_accepts_public_lookup() {
+    let payload = json!({"schema_version":"hubu-history-v1","authorization_record":{"id":"authorization_record-public","claim_id":"claim-public"}});
     let response = route_tool_call_v1(
-        json!({"name":"hubu_get_spend_workflow","arguments":{"workflow_id":"workflow-public"}}),
+        json!({"name":"hubu_get_authorization_record","arguments":{"authorization_id":"authorization_record-public"}}),
         false,
         false,
         None,
         |request| {
             assert_eq!(
                 request.path,
-                "/spend/workflows/show?workflow_id=workflow-public"
+                "/spend/authorizations/show?authorization_id=authorization_record-public"
             );
             Ok(payload.clone())
         },
     )
     .unwrap();
     assert_eq!(response["structuredContent"], payload);
-    assert!(route_tool_call_v1(json!({"name":"hubu_get_spend_workflow","arguments":{"workflow_id":"workflow-public","agent_id":"agent"}}), false, false, None, |_| panic!("mixed selector reached HTTP")).is_err());
+    assert!(route_tool_call_v1(json!({"name":"hubu_get_authorization_record","arguments":{"authorization_id":"authorization_record-public","agent_id":"agent"}}), false, false, None, |_| panic!("mixed selector reached HTTP")).is_err());
 }
 
 #[test]
@@ -1804,10 +1813,13 @@ fn history_routes_pass_transport_allowlist_and_support_unknown_legacy_status() {
             "hubu_list_ledger",
             json!({"agent_id":"agent","budget_id":"budget"}),
         ),
-        ("hubu_list_spend_workflows", json!({"status":"unknown"})),
         (
-            "hubu_get_spend_workflow",
-            json!({"workflow_id":"public-workflow"}),
+            "hubu_list_authorization_records",
+            json!({"status":"unknown"}),
+        ),
+        (
+            "hubu_get_authorization_record",
+            json!({"authorization_id":"public-authorization_record"}),
         ),
     ] {
         route_tool_call_v1(

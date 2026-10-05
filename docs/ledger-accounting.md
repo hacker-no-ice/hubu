@@ -136,7 +136,7 @@ cent-only compatibility projections re-exported from the ledger crate. Existing
 read API, CLI `hubu ledger list`, and unified MCP `hubu_list_ledger` support
 owner-wide and agent/account/budget inspection. See [ledger and spend
 history](ledger-history.md) for pagination, exact-value semantics, coverage and
-safe workflow/receipt inspection.
+safe authorization record/receipt inspection.
 
 Implementation: [ledger domain](../crates/hubu-ledger/src/domain.rs),
 [ledger facade](../crates/hubu-core/src/ledger.rs),
