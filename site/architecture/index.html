@@ -54,7 +54,7 @@
         <div class="overview-intro">
           <p class="section-label">FOLLOW ONE REQUEST</p>
           <h2 id="walkthrough-title">One governed request,<br />five steps.</h2>
-          <p>Every billable call follows the same path. Hubu, the control plane, decides and accounts. Gongbu, the execution plane, does the provider work. The agent never holds a provider key.</p>
+          <p>Here is one billable request run by Gongbu, the first-party executor. Hubu, the control plane, decides and accounts. Gongbu, the execution plane, does the provider work. The agent never holds a provider key. <a href="/docs/external-executor">Your own executor</a> can take Gongbu&rsquo;s place in step 4.</p>
         </div>
 
         <div class="system-widget">
@@ -91,7 +91,7 @@
               </li>
             </ol>
             <p class="flow-example"><b>Example</b> An image request reserves an illustrative $0.05 maximum. Gongbu runs it and reports a $0.03 receipt. Hubu settles $0.03 and releases the remaining $0.02.</p>
-            <p class="topology-note">Provider keys live only in Gongbu. Hubu never calls a provider, and Gongbu never runs work Hubu has not authorized.</p>
+            <p class="topology-note">Provider keys live only in the executor, never with the agent or Hubu. Hubu never calls a provider, and no executor runs billable work Hubu has not authorized.</p>
           </div>
         </div>
       </section>

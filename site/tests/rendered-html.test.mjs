@@ -441,6 +441,9 @@ test("leads the architecture page with a five-step single-request walkthrough", 
   assert.match(walkthrough, /HUBU · CONTROL PLANE/);
   assert.match(walkthrough, /GONGBU · EXECUTION PLANE/);
   assert.match(walkthrough, /never a provider key/);
+  assert.match(walkthrough, /run by Gongbu, the first-party executor/);
+  assert.match(walkthrough, /<a href="\/docs\/external-executor">Your own executor<\/a>/);
+  assert.doesNotMatch(walkthrough, /Every billable call follows|Provider keys live only in Gongbu/);
 
   const jumpLinks = [...html.matchAll(/<nav class="hero-meta"[\s\S]*?<\/nav>/g)][0][0];
   const targets = [...jumpLinks.matchAll(/href="#([^"]+)"/g)].map((match) => match[1]);

@@ -225,3 +225,5 @@ footer a:hover { color: white; }
   html { scroll-behavior: auto; }
   *, *::before, *::after { transition: none !important; }
 }
+.overview-intro p a { color: #babaff; text-decoration: underline; text-underline-offset: 3px; }
+.overview-intro p a:hover { color: white; }
