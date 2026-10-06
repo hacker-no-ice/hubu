@@ -4,8 +4,13 @@ This is the external operator entry point for billable Gongbu provider work.
 Hubu currently ships three live provider contracts: Gemini Developer API Lite,
 Gemini Developer API non-Lite, and FLUX.2. All use the same governance,
 credential, pricing, spend, retry, reconciliation, artifact, and qualification
-boundaries described here. Provider-specific sections contain only the
-authentication, transport, sizing, artifact, and recovery differences.
+boundaries described here. This page owns that shared operational procedure.
+Field definitions live in the
+[`providers.toml` reference](../configuration/local-stack/v1/providers-toml.md),
+and provider-specific behavior lives in the
+[Gemini](gemini-provider-contract.md) and [FLUX.2](flux-provider-contract.md)
+contract pages; the provider sections below summarize them and add the
+provider-specific qualification steps.
 
 Begin with the [complete Gemini + FLUX profile](../configuration/local-stack/v1/examples.md#live-gemini-developer-api-and-flux2)
 for the copyable `credentials.toml` and `providers.toml`, Keychain field
@@ -38,16 +43,26 @@ environment variables, command arguments, SQLite, Temporal payloads, fixtures,
 logs, source control, documentation, or support messages.
 
 Create or rotate the secret with Keychain Access so its value never appears on
-a command line. Run Gongbu as the macOS user allowed to access the item. A
-missing item or denied access fails before an authorization claim,
-`ProviderAttempt` creation, or provider traffic. Keep the lookup coordinates
-stable while submitted work can still resume, and restart Gongbu after rotating
-the value.
+a command line, and never paste it into Hubu. Run Gongbu as the macOS user
+allowed to access the item. A missing item, denied access, or missing
+credential reference fails before an authorization claim, `ProviderAttempt`
+creation, or provider traffic.
+
+Treat the selected Keychain `service` and `account` as part of the immutable
+provider-target revision. Do not change those coordinates while an execution
+can still resume: doing so would make its frozen target digest unavailable. To
+rotate, first let submitted work finish or preserve ambiguous work for
+reconciliation, stop the stack, and verify no execution still depends on the
+old credential. Then replace the value yourself in the same Keychain item,
+keeping its coordinates stable, restart Gongbu, and rerun catalog, doctor,
+render, review, and activation. Never make a replacement provider call merely
+to test recovery.
 
 ## Configure governance, pricing, and spend
 
 Use `mode = "live"` only after the topology is healthy in sandbox mode. Every
-live profile requires:
+live profile requires the following; each field is defined in the
+[`providers.toml` reference](../configuration/local-stack/v1/providers-toml.md):
 
 - one exact active, execution-enabled provider target or provider contract;
 - an opaque credential reference;
@@ -111,10 +126,22 @@ storage path, or raw provider body as safe public evidence.
 
 ## Readiness and live qualification
 
-The sanitized provider catalog reports independent facts for configuration,
-credential-reference presence, production validation, and live qualification.
+The sanitized provider catalog reports independent facts:
+
+- `configured`: source validation resolved the exact provider contract;
+- `credential_reference_present`: the referenced Keychain item exists for the
+  local process identity; neither its value nor its coordinates are returned;
+- `production_validated`: the rendered target, versioned policies, and frozen
+  pricing rules passed Gongbu's production validator;
+- `live_qualified` and `live_qualification`: whether a live qualification was
+  performed.
+
 Catalog, doctor, render, and production validation make no provider call and
-cannot establish live qualification.
+cannot establish live qualification. The running Gongbu service exposes the
+same sanitized schema-v1 projection through authenticated
+`GET /v1/provider-catalog` for operators. Agents use
+`gongbu_list_execution_targets` for selectable targets and pricing. Neither
+surface exposes Keychain coordinates or secret values.
 
 Ignored live tests are focused operator tools, not ordinary test-suite steps.
 Run one only with explicit human authorization, an exact confirmation string,
@@ -123,14 +150,11 @@ operator-owned output path. Never run live provider tests in CI.
 
 ## Gemini Developer API
 
-The [Gemini provider contract](gemini-provider-contract.md) freezes the stable
-Lite and non-Lite models, their resolution-specific prices, Developer API
-transport, zero retries, no
-fallback, and synchronous recovery policy. The adapter reads an AI Studio API key from
-Keychain and sends it only in the `x-goog-api-key` header to the configured
-Google API endpoint. The request returns synchronously; the focused test writes
-one validated image to an absolute operator-owned path and refuses to overwrite
-an existing file.
+The [Gemini provider contract](gemini-provider-contract.md) owns the frozen
+Lite and non-Lite models, resolution-specific prices, API-key transport,
+synchronous response, and recovery policy. The focused live test writes one
+validated image to an absolute operator-owned path and refuses to overwrite an
+existing file.
 
 After completing the shared checks above, an explicitly authorized operator can
 run the single ignored test with absolute paths:
@@ -149,40 +173,24 @@ cargo test -p gongbu-api \
   -- --ignored --exact
 ```
 
-The Lite model accepts only `1k`; the non-Lite model accepts `1k`, `2k`, and
-`4k`. The adapter verifies the
-selected size against the frozen schema-v2 pricing selector before calling the
-provider and never derives the authorized price from returned artifact
-dimensions. A synchronous timeout or ambiguous response has no pollable Gongbu
+Choose an `IMAGE_SIZE` the selected model supports (the Lite model is
+`1k`-only). A synchronous timeout or ambiguous response has no pollable Gongbu
 checkpoint, so reconcile rather than rerun.
 
 ## FLUX.2 Pro
 
-The FLUX provider contract uses the managed
-`hubu.flux-2-pro.text-to-image/v1` contract. It freezes the BFL target, certified
-dimensions, dated rational prices, zero generation retries, no fallback,
-polling, artifact-delivery, and durable-recovery policies. The operator supplies
-only an opaque Keychain credential alias and the two explicit spend choices.
+The [FLUX.2 provider contract](flux-provider-contract.md) owns the managed
+`hubu.flux-2-pro.text-to-image/v1` target: BFL authentication, certified
+dimensions, dated rational prices, settled-cost conversion, zero generation
+retries, no fallback, asynchronous submit-and-poll transport, delivery-host
+policy, activation, and durable recovery. The operator supplies only an opaque
+Keychain credential alias and the two explicit spend choices.
 
-FLUX submission is asynchronous. Gongbu sends one generation POST, checkpoints
-the safe request and operation identifiers, validated polling host, and original
-deadline, then performs bounded read-only polling. Restart resumes that same
-operation and never submits a replacement generation.
-The polling policy accepts the documented `api.bfl.ai` router and exact
-`api.<region-or-shard>.bfl.ai` hosts with one safe ASCII DNS label. BFL
-requires clients to use its returned polling URL, and live provider evidence
-confirmed `api.us7.bfl.ai` as one such shard. A rejected post-submit URL is
-checkpointed only as sanitized recovery evidence, with recovery-first,
-do-not-resubmit guidance; explicit reconciliation can poll the same operation
-after an approved policy correction.
-That same live recovery reached `Ready` and returned a signed
-`delivery.us7.bfl.ai` artifact without another generation submission. Polling
-receives `x-key`; delivery never does, and the signed artifact URL is fetched
-immediately without being logged or persisted.
-
-The shipped provider contract is production-validated but not live-qualified;
-its catalog reports `live_qualified = false` and
-`live_qualification = "not_performed"`. Ordinary demos and CI remain
-fixture-only. For BFL authentication, frozen dimensions and prices, settled
-cost conversion, delivery-host policy, activation, and recovery details, read
-the [FLUX.2 provider contract](flux-provider-contract.md).
+FLUX submission is asynchronous: Gongbu sends one generation POST, checkpoints
+the operation, and performs bounded read-only polling; restart resumes that same
+operation and never submits a replacement generation. The shipped contract is
+production-validated but not live-qualified; its catalog reports
+`live_qualified = false` and `live_qualification = "not_performed"`. Ordinary
+demos and CI remain fixture-only. Its opt-in live canary is described in the
+contract's [live canary](flux-provider-contract.md#live-canary-and-acceptance-fixture)
+section.
