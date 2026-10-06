@@ -35,13 +35,16 @@ contract.
 
 When a policy requires approval, Hubu holds the request and returns a review
 to your client. No payment, execution, or provider call happens yet. After you
-decide, the client sends your approve or deny decision through a protected
-tool, and your client shows its own confirmation prompt before it runs.
+decide, the agent forms a protected tool call carrying your approve or deny
+decision, and your client shows its own confirmation prompt before it runs.
 
+- Check that the confirmation prompt shows the decision you chose. The agent
+  writes the approve or deny value into the call, so confirm only if it
+  matches.
 - Canceling that prompt sends no decision. The request stays pending; it is
   never treated as approved or denied.
-- Your decision is never taken from an argument the model supplies. Approval
-  authority comes from a separate local credential.
+- The authority to resolve approvals comes from a separate local credential.
+  The model never sees or supplies it.
 - Administrative actions such as changing policies or budgets through MCP stay
   disabled unless you explicitly opt in.
 
@@ -81,8 +84,10 @@ never receive provider keys or payment authority.
 - If the billing result is uncertain, for example after a timeout, the
   reservation is kept and marked for reconciliation. It is never released just
   because a call timed out.
-- Retrying with the same request recovers the existing operation instead of
-  spending twice.
+- To recover after an uncertain result, continue with the public handle the
+  first call returned, for example by checking `hubu_operation_status`. Do not
+  submit the same request again as a new tool call: that creates a new
+  operation and can be charged again.
 
 See [failure and reconciliation](spend-lifecycle.md#failure-and-reconciliation-invariants).
 
