@@ -42,13 +42,15 @@ holds the API key.
 
 ## 3. A deployed Hubu for cloud agents and small teams
 
-Hubu runs on your own machine today, and only that machine can reach it. Some
-agents run persistently in their own cloud virtual machine, where they cannot
-reach a stack on your laptop, and teammates cannot share it either.
+Hubu runs on your own machine today, and only that machine can reach it.
+Persistent agents such as ChatGPT dots, xAI's Grok Bot, and Meta's Muse run in
+their own cloud computers, where they cannot reach a stack on your laptop, and
+teammates cannot share it either.
 
 - A deployed version of Hubu that these persistent cloud agents can connect
   to, so they get the same per-agent identity, policy, approval, budgets, and
   ledger.
+- Linux support, since a deployed Hubu runs on servers rather than a Mac.
 - Human approvals still come from you or the people you authorize, never from
   the agent's environment.
 - One deployment per team, so a few people can share budgets and approvals,
@@ -56,9 +58,12 @@ reach a stack on your laptop, and teammates cannot share it either.
 
 ## Not the focus right now
 
-These are reasonable requests, but they are not planned for the near term:
+These are reasonable requests, but they are not planned for the near term.
+If there is strong demand from people using Hubu, the focus can shift, so
+[tell us](#get-involved) what you need.
 
 - Broad provider coverage beyond the image and model workloads above.
+- Platforms beyond macOS and the Linux deployment above.
 - Guided setup for more local agent clients. Other MCP clients already work
   with [manual configuration](unified-mcp.md#setup).
 - A production payment rail.
