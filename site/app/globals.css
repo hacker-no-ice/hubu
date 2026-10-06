@@ -157,6 +157,8 @@ footer span { color: #d7d8da; font-weight: 620; } footer p { flex: 1; } footer a
 .markdown-body h1:hover .heading-anchor, .markdown-body h2:hover .heading-anchor, .markdown-body h3:hover .heading-anchor, .heading-anchor:focus { opacity: 1; }
 .markdown-body code { padding: 2px 5px; border: 1px solid #34363d; border-radius: 5px; background: #1c1e23; color: #d6d7e0; font: .86em var(--font-geist-mono), monospace; }
 .markdown-body pre { position: relative; margin: 22px 0; padding: 18px 20px; overflow-x: auto; border: 1px solid #2d3037; border-radius: 9px; background: #191b20; color: #d4d5e3; scrollbar-width: thin; }
+.markdown-body .code-block pre { padding-top: 44px; }
+.markdown-body :is(h1, h2, h3, h4) { scroll-margin-top: 88px; }
 .markdown-body pre code { padding: 0; border: 0; background: transparent; color: #c7c8ff; line-height: 1.65; }
 .code-block { position: relative; }
 .copy-code { flex: none; padding: 4px 9px; border: 1px solid #3a3d45; border-radius: 6px; background: #22242a; color: #b6b7bb; font: 11px/1.4 var(--font-geist-mono), monospace; cursor: pointer; }
@@ -218,6 +220,7 @@ footer span { color: #d7d8da; font-weight: 620; } footer p { flex: 1; } footer a
   .sidebar { display: none; }
   .mobile-nav { display: block; position: sticky; top: 68px; z-index: 20; border-bottom: 1px solid var(--line); background: #0a0b0d; }
   .mobile-nav summary { cursor: pointer; padding: 13px 20px; color: #b6b7bb; font-size: 12px; }
+  .markdown-body :is(h1, h2, h3, h4) { scroll-margin-top: 136px; }
   .mobile-nav .docs-nav { max-height: 65vh; overflow-y: auto; padding: 20px; border-top: 1px solid var(--line); }
   .doc-main { width: 100%; padding: 45px max(22px, 7vw) 80px; }
 }
