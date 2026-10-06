@@ -485,9 +485,12 @@ guidance.
    Hubu returns the authoritative authorization snapshot without claiming it.
    For a new execution, its account and agent are the authoritative attribution;
    the executor caller credential contributes no execution identity. The
-   executor independently derives its operator-controlled target, typed scope,
-   and catalog price and requires exact operation, price, currency, workload,
-   and scope agreement before persisting that attribution snapshot.
+   executor independently derives its operator-controlled target, workload,
+   typed scope, and catalog price. Before persisting that attribution snapshot,
+   it requires the authorized typed scope to equal its derived scope and the
+   authorized amount and currency to equal the catalog price. The executor
+   never receives the private operation key; Gongbu's request schema rejects
+   an `operation_key` field rather than comparing it.
 
    Before this resolution, the executor checks for a persisted execution by the
    same token. An exact immutable request replays locally even after the token

@@ -46,9 +46,14 @@ For a new execution, Gongbu then:
    frozen at this boundary.
 2. Resolves Hubu's read-only authorization snapshot, which is authoritative for
    account and agent attribution.
-3. Requires exact agreement on the operation key, amount, currency, lease
-   profile, expiry, and typed execution scope, and accepts account and agent
-   only from Hubu.
+3. Requires Hubu's authorization to be available, unexpired, and backed by a
+   frozen hold equal to the authorized amount; that amount and currency to equal
+   the catalog price; and Hubu's typed execution scope to equal the scope
+   Gongbu derived for the target. The `POST /v2/executions` request carries
+   only the schema version, `spend_auth_token_id`, input, input schema
+   version, and target ID; any other field, including an amount, currency,
+   scope, claim ID, or `operation_key`, is rejected. Account, agent, lease
+   profile, and expiry come only from Hubu.
 4. Persists the `Execution` aggregate and immutable Hubu authorization snapshot
    before scheduling work.
 5. Starts the stable Temporal workflow
@@ -100,7 +105,8 @@ value, raw error, or unknown diagnostic into that event.
 
 ## Recovery and reconciliation
 
-Execution identity, its persisted account and agent snapshot, operation key,
+Execution identity (Gongbu's `hubu-decision:<decision_id>` operation identity),
+its persisted account and agent snapshot,
 provider-attempt identity, Hubu claim, and Temporal workflow ID remain stable
 across recovery. New asynchronous workflow histories cross a Temporal patch
 before running `submit_provider` and then `poll_provider_operation`; histories
