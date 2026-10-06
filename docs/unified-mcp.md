@@ -1,41 +1,101 @@
 # Unified MCP surface
 
-The surface below is the implemented contract. The
-[core tool catalog](mcp-tool-consolidation.md) summarizes supported workflows,
-prerequisites, and removed-tool replacements.
-
-For bugs, ideas, billing or sensitive reports, use [Send feedback](feedback.md).
-`hubu feedback` and the unified `hubu_feedback_guidance` /
-`hubu_prepare_feedback` tools prepare local previews without sending reports.
-
-
 `hubu-unified-mcp` is Hubu's only supported agent-facing MCP server. It is a
 stdio adapter over the separate Hubu and Gongbu HTTP APIs. It owns only local
 harness-operation identity state; it does not own either backend's domain state
-or merge the backends.
-
-The implemented public contract is `hubu-gongbu-mcp-v1`. The server reports
+or merge the backends. The implemented public contract is
+`hubu-gongbu-mcp-v1`. The server reports
 `serverInfo.name = "hubu-unified-mcp"` and implements MCP protocol version
 `2024-11-05`.
 
-## Policy and health tool migration
+The [core MCP tool set](mcp-tool-consolidation.md) is the canonical catalog of
+supported tools, their prerequisites and their gates. This page describes
+setup, boundaries and the implemented behavior behind those tools.
 
-The v0.2.2 surface removes `hubu_add_policy`, `hubu_export_policy` and
-`hubu_health` outright. They are unknown tools, with no aliases or grace period.
+## Setup
 
-- Apply policy YAML with `hubu_apply_policy`. Human approval and optional
-  revision/hash compare-and-set checks still apply. For the old
-  `daily_limit_cents` shortcut, inspect the existing policy before migrating:
-  it encoded a **single-spend** threshold, a blocked-merchant denial and a
-  needs-approval fallback, not a cumulative daily budget.
-- Inspect with `hubu_show_policy`. Set `include_yaml: true` to also return
-  `policy_yaml` from the backend's canonical serializer, alongside the same
-  policy, metadata and assignments. False or omitted retains the existing
-  show response. Optional `policy_id` and `agent_id` are mutually exclusive;
-  omit both for the existing default selection. Non-boolean flags and unknown
-  fields are rejected before dispatch.
-- Inspect backend availability with `hubu_unified_capabilities`. Its structured
-  response differs from the removed health tool. HTTP health probes remain.
+Install the CLI, Hubu server, Gongbu server, and unified MCP binary from one
+release. The preferred Codex setup is:
+
+```sh
+hubu init codex
+```
+
+For a rendered local stack profile:
+
+```sh
+hubu init codex --stack-profile /absolute/path/to/profile
+```
+
+An explicitly gated workflow that uses the key-redacted preallocation bridge
+also supplies its non-secret, absolute helper-store coordinate:
+
+```sh
+hubu init codex \
+  --stack-profile /absolute/path/to/profile \
+  --operation-key-db /absolute/private/operation-keys.sqlite3
+```
+
+The option only renders `HUBU_UNIFIED_OPERATION_KEY_DB`; it does not create,
+inspect, or allocate a key. Omit it for ordinary operation. Create the private
+store and its first scoped record only after the workflow's separate human
+authorization gate.
+
+On first interactive run, `hubu init codex` asks once whether Codex may use the
+setup and administration tools (default: no). Re-runs keep the choice recorded
+in the managed Codex config block. `--trust-client-approval` and
+`--no-trust-client-approval` override it; with `--dry-run` or without a
+terminal, nothing is asked and the recorded choice (or off) is used.
+
+With `--stack-profile`, the command consumes the verified handoff from an
+already running stack and writes the managed MCP entry; managed startup has
+already created the required capabilities. The non-stack setup form may create
+or reuse its manual local defaults. Both forms generate per-tool approval
+settings alongside Hubu's tool approval annotations. The resolver is rendered with
+`approval_mode = "prompt"`; spend submission and public-handle resume retain
+their non-interactive client policy because Hubu's durable decision remains the
+authority. Restart Codex after changing the generated configuration.
+
+The lifecycle is:
+
+```text
+operator starts: hubu stack start (managed hubu-server and gongbu-server)
+client starts:   hubu-unified-mcp
+router calls:    separate Hubu and Gongbu HTTP endpoints
+agent sees:      eligible hubu_* and gongbu_* tools
+```
+
+The local stack does not start or own the stdio MCP process. The agent harness
+starts it from client configuration.
+
+Manual MCP clients configure these inputs for the router:
+
+- `HUBU_UNIFIED_OPERATION_STATE_PATH`, an absolute path to the router-owned
+  SQLite registry. Managed setup always renders it. A manual client may omit
+  it, but new billable Hubu operations are then unavailable.
+- `HUBU_UNIFIED_OPERATION_KEY_DB`, an optional absolute path to the private
+  operation-key helper database. Use it only for an explicitly gated,
+  human-authorized workflow.
+  When configured, new trusted Codex calls require exactly one active helper
+  record whose canonical tool name and arguments match; absence, mismatch,
+  reuse, or store failure rejects the call before backend access with no
+  allocator fallback. Exact redelivery and restart use the binding already in
+  the router registry and do not reread the helper database.
+- `HUBU_UNIFIED_HUBU_ENDPOINT`
+- `HUBU_UNIFIED_HUBU_BEARER_TOKEN` or
+  `HUBU_UNIFIED_HUBU_BEARER_TOKEN_FILE`
+- the corresponding Gongbu endpoint and installation-scoped caller token
+- `HUBU_APPROVAL_TOKEN` or `HUBU_APPROVAL_TOKEN_FILE` when protected approval
+  resolution is enabled
+- `HUBU_MCP_TRUST_SPEND_APPROVAL=1` only when the client shows a human prompt
+  that confirms the already chosen approve-or-deny resolver call
+- `HUBU_RECONCILIATION_TOKEN` or its file form when reconciliation is enabled
+
+Endpoint and credential values are never returned by capability discovery.
+The Gongbu caller token carries no execution identity claim. One configured
+installation caller may read known executions and artifacts across the owner's
+agents, but the API does not promise owner-wide browse/list and this local
+capability model is not strong multi-user or per-agent isolation.
 
 ## Ownership boundary
 
@@ -66,75 +126,61 @@ processes, or failure domains.
 
 ## Tool catalog
 
-The router exposes two local read-only tools:
-
-- `hubu_unified_capabilities`
-- `hubu_operation_status`
-
-It also exposes two router-owned workflow tools:
-
-- `hubu_submit_governed_execution`
-- `hubu_resume_operation`
-
-The composite is the preferred ordinary path when an agent has both spend
-authorization intent and an execution request. `hubu_resume_operation` resumes
-an approved pending normalized operation—primitive spend or composite—by its
-public handle without requiring the original harness call identity. The
-primitive Hubu and Gongbu tools remain available for recovery, diagnostics,
-and backward compatibility.
-
-Hubu-owned tools cover health, registration, policies, budgets, spending
-targets, spend authorization and submission, ledger reads, executor claims,
-and reconciliation:
-
-```text
-hubu_apply_policy
-hubu_authorize_spend
-hubu_budget_history
-hubu_create_budget
-hubu_get_executor_claim
-hubu_get_authorization_record
-hubu_get_spend_approval
-hubu_list_agents
-hubu_list_budgets
-hubu_list_claims_requiring_reconciliation
-hubu_list_ledger
-hubu_list_authorization_records
-hubu_list_users
-hubu_policy_diff
-hubu_policy_history
-hubu_reconcile_vendor_billed_claim
-hubu_reconcile_vendor_did_not_bill_claim
-hubu_register_agent
-hubu_register_human
-hubu_registration_guidance
-hubu_resolve_spend_approval
-hubu_revoke_budget
-hubu_revoke_spending_target
-hubu_set_spending_target
-hubu_show_policy
-hubu_show_spending_targets
-hubu_submit_spend
-hubu_update_budget
-```
-
-Gongbu-owned tools cover configured-target discovery, execution, and artifacts:
-
-```text
-gongbu_list_execution_targets
-gongbu_create_execution
-gongbu_get_execution
-gongbu_list_artifacts
-gongbu_get_artifact
-```
-
-Provider-contract diagnostics and guarded-FLUX attestation remain available
-through authenticated Gongbu operator endpoints.
+The router exposes its own capability, feedback, status, composite and resume
+tools alongside the Hubu-owned and Gongbu-owned tools it forwards. The
+[core MCP tool set](mcp-tool-consolidation.md) lists every supported tool by
+workflow, with its prerequisites and human gates; `hubu_unified_capabilities`
+reports the live set with each tool's owner and availability.
 
 The static ownership table is authoritative; prefix inference is not a routing
 rule. Unknown names fail closed until a routing revision assigns them. Exact
 input schemas are checked against the router's catalog and the Gongbu
 [golden fixture](../crates/hubu-unified-mcp/tests/fixtures/gongbu-tool-definitions-v2.json).
+
+## Approval boundary
+
+The MCP catalog distinguishes reads, spend submission, and protected human
+actions through tool annotations. Generated client configuration preserves
+the per-tool human prompts and separate trust/capability gates.
+
+Registration, policy mutation, spending-target changes, budget mutation, and
+claim reconciliation require a client-enforced human prompt. Those broad
+administrative tools remain disabled unless the process is started with
+`HUBU_MCP_TRUST_CLIENT_APPROVAL=1`. `hubu init codex` renders that variable
+only when the human answers yes at its one-time prompt or passes
+`--trust-client-approval`, and keeps the setting on re-runs unless
+`--no-trust-client-approval` is passed.
+
+Spend approval resolution uses the narrower
+`HUBU_MCP_TRUST_SPEND_APPROVAL=1` gate. `hubu init codex` always renders that
+gate together with the per-tool native prompt, without enabling the broader
+administrative surface. The broad gate also satisfies the resolver gate when
+an operator deliberately enables it. Approval authority is loaded from the
+separate local capability and is never accepted as a model-owned tool argument.
+
+Spend submission, authorization, and composite governed execution do not
+receive a generic pre-call prompt. Hubu evaluates policy and may return
+`requires_human_approval: true`; the composite projects that state as
+`approval_required` and returns immediately. In that case no payment, Gongbu
+execution, or provider work has occurred. The client shows the returned
+immutable review. After the human says approve or deny, the client forms the
+protected `hubu_resolve_spend_approval` call and shows its native MCP prompt.
+The composite never holds its MCP call open while the human decides. A canceled
+prompt submits no decision and leaves the request pending; it must not be
+reported as a Hubu denial. A successful resolution changes only Hubu and the
+router's durable approval projection. It never invokes Gongbu or a provider.
+After approval through MCP or an external owner-authorized surface,
+`hubu_operation_status` synchronizes the decision and
+`hubu_resume_operation` continues the same immutable intent by public handle.
+
+Reconciliation requires a separate server-side capability in addition to the
+MCP prompt. An executor with only the normal Hubu bearer credential cannot
+reconcile a claim.
+
+These controls define a local trust boundary. A same-user process that can read
+the capability files or control an authorized MCP client can act with that
+client's authority. Do not expose this configuration to an untrusted network or
+connect it to a real payment rail without a stronger authentication design.
 
 ## MCP behavior and responses
 
@@ -520,17 +566,18 @@ envelope without changing either backend's wire contract.
 
 Before `initialize`, and on a bounded interval afterward, the router probes
 Hubu and Gongbu independently. `hubu_unified_capabilities` returns a sanitized
-snapshot containing the unified contract and routing revision, each backend's
-state and compatible version metadata, and all 38 other tool names with owner
-and availability. Together with `hubu_unified_capabilities`, the stdio surface
-exposes 39 tools, 33 of which route to a backend.
+snapshot containing the unified `contract_version` and `routing_revision`, each
+backend's state and compatible version metadata, and every public tool name,
+including itself, with its `owner` (`hubu`, `gongbu`, or `router`),
+`available` flag, and `reason_code`. Use that snapshot, rather than a count
+recorded in documentation, to see which tools the running router exposes.
 
 The version-1 compatibility boundary requires:
 
 | Surface | Required value |
 | --- | --- |
 | Unified contract | `hubu-gongbu-mcp-v1` |
-| Routing revision | `13` |
+| Routing revision | Reported as `routing_revision` by `hubu_unified_capabilities` |
 | MCP protocol | `2024-11-05` |
 | Hubu and Gongbu executor contract | `hubu-spend-executor-v4.4` |
 | Gongbu API schema | `2` |
@@ -601,136 +648,6 @@ and 45000 milliseconds. Lower values principally reduce the time left for
 observation and artifact delivery; bounded synchronous pre-admission work may
 consume or briefly exceed a very low override. The setting does not change the
 durable worker or operation deadline.
-
-## Setup
-
-Install the CLI, Hubu server, Gongbu server, and unified MCP binary from one
-release. The preferred Codex setup is:
-
-```sh
-hubu init codex
-```
-
-For a rendered local stack profile:
-
-```sh
-hubu init codex --stack-profile /absolute/path/to/profile
-```
-
-An explicitly gated workflow that uses the key-redacted preallocation bridge
-also supplies its non-secret, absolute helper-store coordinate:
-
-```sh
-hubu init codex \
-  --stack-profile /absolute/path/to/profile \
-  --operation-key-db /absolute/private/operation-keys.sqlite3
-```
-
-The option only renders `HUBU_UNIFIED_OPERATION_KEY_DB`; it does not create,
-inspect, or allocate a key. Omit it for ordinary operation. Create the private
-store and its first scoped record only after the workflow's separate human
-authorization gate.
-
-On first interactive run, `hubu init codex` asks once whether Codex may use the
-setup and administration tools (default: no). Re-runs keep the choice recorded
-in the managed Codex config block. `--trust-client-approval` and
-`--no-trust-client-approval` override it; with `--dry-run` or without a
-terminal, nothing is asked and the recorded choice (or off) is used.
-
-With `--stack-profile`, the command consumes the verified handoff from an
-already running stack and writes the managed MCP entry; managed startup has
-already created the required capabilities. The non-stack setup form may create
-or reuse its manual local defaults. Both forms generate per-tool approval
-settings alongside Hubu's tool approval annotations. The resolver is rendered with
-`approval_mode = "prompt"`; spend submission and public-handle resume retain
-their non-interactive client policy because Hubu's durable decision remains the
-authority. Restart Codex after changing the generated configuration.
-
-The lifecycle is:
-
-```text
-operator starts: hubu stack start (managed hubu-server and gongbu-server)
-client starts:   hubu-unified-mcp
-router calls:    separate Hubu and Gongbu HTTP endpoints
-agent sees:      eligible hubu_* and gongbu_* tools
-```
-
-The local stack does not start or own the stdio MCP process. The agent harness
-starts it from client configuration.
-
-Manual MCP clients configure these inputs for the router:
-
-- `HUBU_UNIFIED_OPERATION_STATE_PATH`, an absolute path to the router-owned
-  SQLite registry. Managed setup always renders it. A manual client may omit
-  it, but new billable Hubu operations are then unavailable.
-- `HUBU_UNIFIED_OPERATION_KEY_DB`, an optional absolute path to the private
-  operation-key helper database. Use it only for an explicitly gated,
-  human-authorized workflow.
-  When configured, new trusted Codex calls require exactly one active helper
-  record whose canonical tool name and arguments match; absence, mismatch,
-  reuse, or store failure rejects the call before backend access with no
-  allocator fallback. Exact redelivery and restart use the binding already in
-  the router registry and do not reread the helper database.
-- `HUBU_UNIFIED_HUBU_ENDPOINT`
-- `HUBU_UNIFIED_HUBU_BEARER_TOKEN` or
-  `HUBU_UNIFIED_HUBU_BEARER_TOKEN_FILE`
-- the corresponding Gongbu endpoint and installation-scoped caller token
-- `HUBU_APPROVAL_TOKEN` or `HUBU_APPROVAL_TOKEN_FILE` when protected approval
-  resolution is enabled
-- `HUBU_MCP_TRUST_SPEND_APPROVAL=1` only when the client shows a human prompt
-  that confirms the already chosen approve-or-deny resolver call
-- `HUBU_RECONCILIATION_TOKEN` or its file form when reconciliation is enabled
-
-Endpoint and credential values are never returned by capability discovery.
-The Gongbu caller token carries no execution identity claim. One configured
-installation caller may read known executions and artifacts across the owner's
-agents, but the API does not promise owner-wide browse/list and this local
-capability model is not strong multi-user or per-agent isolation.
-
-## Approval boundary
-
-The MCP catalog distinguishes reads, spend submission, and protected human
-actions through tool annotations. Generated client configuration preserves
-the per-tool human prompts and separate trust/capability gates.
-
-Registration, policy mutation, spending-target changes, budget mutation, and
-claim reconciliation require a client-enforced human prompt. Those broad
-administrative tools remain disabled unless the process is started with
-`HUBU_MCP_TRUST_CLIENT_APPROVAL=1`. `hubu init codex` renders that variable
-only when the human answers yes at its one-time prompt or passes
-`--trust-client-approval`, and keeps the setting on re-runs unless
-`--no-trust-client-approval` is passed.
-
-Spend approval resolution uses the narrower
-`HUBU_MCP_TRUST_SPEND_APPROVAL=1` gate. `hubu init codex` always renders that
-gate together with the per-tool native prompt, without enabling the broader
-administrative surface. The broad gate also satisfies the resolver gate when
-an operator deliberately enables it. Approval authority is loaded from the
-separate local capability and is never accepted as a model-owned tool argument.
-
-Spend submission, authorization, and composite governed execution do not
-receive a generic pre-call prompt. Hubu evaluates policy and may return
-`requires_human_approval: true`; the composite projects that state as
-`approval_required` and returns immediately. In that case no payment, Gongbu
-execution, or provider work has occurred. The client shows the returned
-immutable review. After the human says approve or deny, the client forms the
-protected `hubu_resolve_spend_approval` call and shows its native MCP prompt.
-The composite never holds its MCP call open while the human decides. A canceled
-prompt submits no decision and leaves the request pending; it must not be
-reported as a Hubu denial. A successful resolution changes only Hubu and the
-router's durable approval projection. It never invokes Gongbu or a provider.
-After approval through MCP or an external owner-authorized surface,
-`hubu_operation_status` synchronizes the decision and
-`hubu_resume_operation` continues the same immutable intent by public handle.
-
-Reconciliation requires a separate server-side capability in addition to the
-MCP prompt. An executor with only the normal Hubu bearer credential cannot
-reconcile a claim.
-
-These controls define a local trust boundary. A same-user process that can read
-the capability files or control an authorized MCP client can act with that
-client's authority. Do not expose this configuration to an untrusted network or
-connect it to a real payment rail without a stronger authentication design.
 
 ## Trusted invocation metadata
 

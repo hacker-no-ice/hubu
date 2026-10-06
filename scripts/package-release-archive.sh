@@ -49,6 +49,7 @@ cp "${root_dir}/LICENSE-APACHE" "${package_dir}/LICENSE-APACHE"
 cp "${root_dir}/THIRD-PARTY-NOTICES.md" "${package_dir}/THIRD-PARTY-NOTICES.md"
 cp "${root_dir}/docs/local-stack.md" "${package_dir}/LOCAL-STACK.md"
 cp "${root_dir}/docs/unified-mcp.md" "${package_dir}/unified-mcp.md"
+cp "${root_dir}/docs/mcp-tool-consolidation.md" "${package_dir}/mcp-tool-consolidation.md"
 cp "${root_dir}/Cargo.lock" "${package_dir}/Cargo.lock"
 "${root_dir}/scripts/generate-third-party-licenses.sh" \
   "${target}" \
@@ -58,7 +59,7 @@ jq -n \
   --arg source_commit "${source_commit}" \
   --arg executor_contract "hubu-spend-executor-v4.4" \
   --arg target "${target}" \
-  '{schema_version: 2, product: "hubu", product_version: $product_version, source_commit: $source_commit, executor_contract: $executor_contract, target: $target, binaries: ["hubu", "hubu-server", "hubu-unified-mcp", "gongbu-server"], supported_agent_surfaces: ["hubu-unified-mcp"], development_tools_excluded: ["hubu-bench", "gongbu-sandbox"], files: ["Cargo.lock", "LICENSE-APACHE", "LICENSE-MIT", "LOCAL-STACK.md", "PROVENANCE.json", "SHA256SUMS", "THIRD-PARTY-LICENSES.txt", "THIRD-PARTY-NOTICES.md", "gongbu-server", "hubu", "hubu-server", "hubu-unified-mcp", "unified-mcp.md"]}' \
+  '{schema_version: 2, product: "hubu", product_version: $product_version, source_commit: $source_commit, executor_contract: $executor_contract, target: $target, binaries: ["hubu", "hubu-server", "hubu-unified-mcp", "gongbu-server"], supported_agent_surfaces: ["hubu-unified-mcp"], development_tools_excluded: ["hubu-bench", "gongbu-sandbox"], files: ["Cargo.lock", "LICENSE-APACHE", "LICENSE-MIT", "LOCAL-STACK.md", "PROVENANCE.json", "SHA256SUMS", "THIRD-PARTY-LICENSES.txt", "THIRD-PARTY-NOTICES.md", "gongbu-server", "hubu", "hubu-server", "hubu-unified-mcp", "mcp-tool-consolidation.md", "unified-mcp.md"]}' \
   > "${package_dir}/MANIFEST.json"
 jq -n \
   --arg product_version "${release_version}" \
@@ -83,6 +84,7 @@ checksum_files=(
   hubu
   hubu-server
   hubu-unified-mcp
+  mcp-tool-consolidation.md
   unified-mcp.md
 )
 (

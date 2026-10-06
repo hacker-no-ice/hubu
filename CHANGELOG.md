@@ -76,6 +76,35 @@ Future release template
   with explicit periods instead. Existing budgets retain their IDs, versions,
   balances, holds, and history and continue as independent budgets; no data
   migration or recurring-series lifecycle is introduced.
+- Consolidated the unified MCP tool set; see `docs/mcp-tool-consolidation.md`.
+  These tools are removed from discovery, capabilities and public dispatch.
+  Calls fail as unknown tools before backend access, with no hidden aliases,
+  compatibility handlers or grace period. Reconnect clients to refresh cached
+  discovery and update callers:
+  - `hubu_add_policy`: use `hubu_apply_policy` with explicit policy YAML.
+    Human approval and optional revision/hash compare-and-set checks still
+    apply. Inspect existing policies before replacing the old
+    `daily_limit_cents` shortcut: it encoded a **single-spend** threshold, a
+    blocked-merchant denial and a needs-approval fallback, not a cumulative
+    daily budget, so a cumulative daily budget is not an equivalent
+    translation.
+  - `hubu_export_policy`: use `hubu_show_policy` with `include_yaml: true`.
+  - `hubu_health`: use `hubu_unified_capabilities` and adopt its structured
+    response shape, which differs from the removed tool. HTTP health probes
+    remain.
+  - `gongbu_get_provider_catalog`: use `gongbu_list_execution_targets` for
+    agent-selectable targets and pricing; operators use `hubu stack catalog`,
+    `hubu stack doctor` or authenticated `GET /v1/provider-catalog`.
+  - `gongbu_get_redaction_attestation`: operators qualify through
+    authenticated `GET /v1/executions/{id}/redaction-attestation`.
+  - `hubu_client_approval_profile`: use tool approval annotations, generated
+    client configuration and the approval boundary in
+    `docs/unified-mcp.md`.
+
+  The operator endpoints retain their authentication, validation and safety
+  checks. Removing MCP wrappers does not remove stored policy records, backend
+  HTTP APIs or CLI functionality, and does not restore recurring-budget
+  creation.
 
 ### Important fixes
 
