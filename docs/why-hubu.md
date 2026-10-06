@@ -41,6 +41,7 @@ Hubu is worth running when you need more than a spending ceiling.
   infrastructure, and direct payments are a mock.
 - It runs on macOS only, guided setup exists only for Codex, and the supported
   live providers are Gemini and FLUX.2 Pro.
+- It is built for one person on one machine. There is no shared team setup yet.
 - You run the stack yourself. There is no hosted service.
 
 See the [FAQ](faq.md) for details and the [roadmap](roadmap.md) for what comes

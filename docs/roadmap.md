@@ -5,10 +5,10 @@ the sole maintainer. Themes are listed in the order they are planned. They are
 directions, not dated commitments, and they change as the project learns from
 people using it.
 
-## 1. Easy and safe for individuals and small teams
+## 1. Easy and safe for individuals
 
-The first priority is making Hubu easy and safe for one person or a small
-team.
+The first priority is making Hubu easy and safe for one person running it on
+their own machine.
 
 **Easier to use**
 
@@ -23,10 +23,6 @@ team.
   choose otherwise.
 - Clear previews of what a request will cost before you approve it.
 - Continued hardening of how keys and approval authority are handled.
-
-**Small teams**
-
-- Shared budgets and approvals for a few people working with the same agents.
 
 ## 2. Governed model calls
 
@@ -44,15 +40,19 @@ holds the API key.
 - No change to the architecture: Hubu governs, Gongbu executes, and agents use
   the same MCP surface.
 
-## 3. A deployed Hubu for cloud agents
+## 3. A deployed Hubu for cloud agents and small teams
 
-Hubu runs on your own machine today. Some agents run persistently in their own
-cloud virtual machine, where they cannot reach a stack on your laptop.
+Hubu runs on your own machine today, and only that machine can reach it. Some
+agents run persistently in their own cloud virtual machine, where they cannot
+reach a stack on your laptop, and teammates cannot share it either.
 
 - A deployed version of Hubu that these persistent cloud agents can connect
   to, so they get the same per-agent identity, policy, approval, budgets, and
   ledger.
-- Human approvals still come from you, not from the agent's environment.
+- Human approvals still come from you or the people you authorize, never from
+  the agent's environment.
+- One deployment per team, so a few people can share budgets and approvals,
+  with roles for who can approve spending or change budgets.
 
 ## Not the focus right now
 
@@ -62,6 +62,7 @@ These are reasonable requests, but they are not planned for the near term:
 - Guided setup for more local agent clients. Other MCP clients already work
   with [manual configuration](unified-mcp.md#setup).
 - A production payment rail.
+- Multi-tenant hosting, where many separate organizations share one service.
 
 ## Get involved
 
