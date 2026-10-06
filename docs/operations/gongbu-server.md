@@ -1,5 +1,9 @@
 # Gongbu server operations
 
+> **Advanced:** most operators run Gongbu through the managed local stack
+> (`hubu stack`); this page covers running `gongbu-server` by hand. See the
+> [local stack quick start](../local-stack.md).
+
 `gongbu-server` is the supported persistent local execution-plane runtime. It
 owns the Gongbu API, SQLite database, artifact store, Temporal worker, and—in
 `managed_local` mode—the local Temporal child. Hubu remains a separately
