@@ -43,7 +43,7 @@ holds the API key.
 ## 3. A deployed Hubu for cloud agents and small teams
 
 Hubu runs on your own machine today, and only that machine can reach it.
-Persistent agents such as ChatGPT dots, Grok Bot, and Meta's Muse run in
+Persistent agents such as ChatGPT dots, Grok Bot, and Muse run in
 their own cloud computers, where they cannot reach a stack on your laptop, and
 teammates cannot share it either.
 
