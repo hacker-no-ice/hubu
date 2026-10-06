@@ -211,7 +211,8 @@ tool returns one of these outcomes:
 See [Composite governed execution](unified-mcp.md#composite-governed-execution)
 for the full flow.
 
-Finally, inspect what Hubu recorded:
+Finally, for a request that ran (or was approved and resumed), inspect what
+Hubu recorded:
 
 ```sh
 hubu spend authorizations --limit 5
@@ -221,7 +222,8 @@ hubu ledger list --agent-id agt_EXACT_AGENT_ID --budget-id bgt_EXACT_BUDGET_ID -
 Both print versioned JSON. The authorization record shows the decision and its
 lifecycle status; the ledger shows recorded spend and how much of the budget is
 used. [Ledger and authorization records](ledger-history.md) explains the
-fields.
+fields. A `denied` request records no spend and is not listed in authorization
+history; ask the agent to check it with `hubu_operation_status` instead.
 
 ## Next steps
 
