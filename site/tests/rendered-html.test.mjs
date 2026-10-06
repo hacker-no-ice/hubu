@@ -441,6 +441,8 @@ test("leads the architecture page with a five-step single-request walkthrough", 
   assert.match(walkthrough, /HUBU · CONTROL PLANE/);
   assert.match(walkthrough, /GONGBU · EXECUTION PLANE/);
   assert.match(walkthrough, /never a provider key/);
+  assert.match(walkthrough, /which authenticates to Hubu on its behalf/);
+  assert.doesNotMatch(walkthrough, /carrying only its Hubu credential/);
   assert.match(walkthrough, /run by Gongbu, the first-party executor/);
   assert.match(walkthrough, /<a href="\/docs\/external-executor">Your own executor<\/a>/);
   assert.doesNotMatch(walkthrough, /Every billable call follows|Provider keys live only in Gongbu/);
