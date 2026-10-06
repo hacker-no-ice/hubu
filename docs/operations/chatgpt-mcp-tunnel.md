@@ -1,14 +1,20 @@
 # Use local Hubu tools in ChatGPT
 
+> **Experimental integration**
+>
+> This setup was last exercised with `tunnel-client v0.0.14` and Hubu
+> `v0.2.1-rc.3`. It has not been revalidated on Hubu v0.2.2. Discovery and
+> backend health worked, and adding the operation registry restored
+> billable-tool availability. Paid execution and protected approvals through
+> ChatGPT were not validated, and tool availability is not evidence that
+> execution succeeded. For a supported agent path, use
+> [Codex](../local-stack.md#connect-your-agent).
+
 Connect a local Hubu stack to ChatGPT with Secure MCP Tunnel. Use the configured
 MCP tools in Chat or Work, including on mobile where your account supports the
 connection, without opening an inbound port on your Mac or using Codex Remote.
 
-This runbook covers macOS with zsh. The setup was exercised with
-`tunnel-client v0.0.14` and Hubu `v0.2.1-rc.3`: discovery and backend health
-worked, and adding the operation registry restored billable-tool availability.
-Paid execution and protected approvals through ChatGPT were not validated.
-Tool availability is not evidence that execution succeeded.
+This runbook covers macOS with zsh.
 
 ## How it works
 

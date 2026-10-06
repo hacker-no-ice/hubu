@@ -338,10 +338,69 @@ test("publishes one live-provider operations entry point", async () => {
   assert.match(html, /Submission, retry, and reconciliation/);
   assert.doesNotMatch(html, /Vertex AI/);
 
-  const compatibility = await render("/docs/operations/live-provider-testing");
-  assert.equal(compatibility.status, 200);
-  const compatibilityHtml = await compatibility.text();
-  assert.match(compatibilityHtml, /href="\/docs\/operations\/live-providers"/);
+  const legacy = await render("/docs/operations/live-provider-testing?utm=old");
+  assert.equal(legacy.status, 308);
+  assert.equal(legacy.headers.get("location"), "http://localhost/docs/operations/live-providers?utm=old");
+  assert.ok(legacy.headers.get("x-hubustack-revision"));
+  assert.ok(legacy.headers.get("strict-transport-security"));
+});
+
+// Source paths of docs that stay in the repository but are not published. Keep
+// in sync with unpublishedSources in scripts/generate-content.mjs.
+const unpublishedDocs = [
+  ["docs/budget-architecture.md", "budget-architecture"],
+  ["docs/ledger-accounting.md", "ledger-accounting"],
+  ["docs/operations/repository-security.md", "operations/repository-security"],
+  ["docs/operations/benchmarking.md", "operations/benchmarking"],
+  ["docs/operations/gongbu-sandbox.md", "operations/gongbu-sandbox"],
+  ["docs/operations/live-provider-testing.md", "operations/live-provider-testing"],
+  ["docs/operations/publishing-releases.md", "operations/publishing-releases"],
+];
+
+async function generatedDocuments() {
+  const source = await readFile(new URL("../app/generated-docs.ts", import.meta.url), "utf8");
+  const json = source.replace(/^[\s\S]*?export const documents = /, "").replace(/ as const;\s*$/, "");
+  return JSON.parse(json);
+}
+
+test("every published document appears in the navigation", async () => {
+  const [documents, docsSource] = await Promise.all([
+    generatedDocuments(),
+    readFile(new URL("../app/lib/docs.ts", import.meta.url), "utf8"),
+  ]);
+  const navStart = docsSource.indexOf("export const navGroups");
+  const navBlock = docsSource.slice(navStart, docsSource.indexOf("] as const;", navStart));
+  const navSlugs = [...navBlock.matchAll(/\["[^"\]]+", "([^"\]]+)"\]/g)].map((match) => match[1]);
+  assert.ok(navSlugs.length > 10);
+  assert.equal(new Set(navSlugs).size, navSlugs.length, "navigation lists a document twice");
+  const published = documents.map((document) => document.slug);
+  for (const slug of published) assert.ok(navSlugs.includes(slug), `${slug} is published but missing from navGroups`);
+  for (const slug of navSlugs) assert.ok(published.includes(slug), `${slug} is in navGroups but not published`);
+});
+
+test("does not publish maintainer-only documents", async () => {
+  const [documents, sitemap] = await Promise.all([
+    generatedDocuments(),
+    readFile(new URL("../dist/client/sitemap.xml", import.meta.url), "utf8"),
+  ]);
+  for (const [sourcePath, slug] of unpublishedDocs) {
+    assert.ok(!documents.some((document) => document.slug === slug || document.sourcePath === sourcePath), `${slug} is generated`);
+    assert.ok(!sitemap.includes(`/docs/${slug}</loc>`), `${slug} is in the sitemap`);
+    if (slug !== "operations/live-provider-testing") {
+      const response = await render(`/docs/${slug}`);
+      assert.equal(response.status, 404, slug);
+    }
+  }
+});
+
+test("links from published pages to unpublished documents use GitHub blob URLs", async () => {
+  const response = await render("/docs/ledger-history");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /href="https:\/\/github\.com\/hacker-no-ice\/hubu\/blob\/main\/docs\/ledger-accounting\.md"/);
+  assert.doesNotMatch(html, /href="\/docs\/ledger-accounting"/);
+  const lifecycle = await (await render("/docs/spend-lifecycle")).text();
+  assert.match(lifecycle, /href="https:\/\/github\.com\/hacker-no-ice\/hubu\/blob\/main\/docs\/budget-architecture\.md"/);
 });
 
 test("keeps managed credential locations out of the first-run profile", async () => {
