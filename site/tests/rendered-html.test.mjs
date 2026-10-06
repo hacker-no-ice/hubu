@@ -24,7 +24,8 @@ test("server-renders the Hubu documentation home", async () => {
   assert.match(html, /Experimental and local-first/);
   assert.match(html, /Hubu governs AI-agent spend/);
   assert.match(html, /Gongbu executes only Hubu-authorized provider work/);
-  assert.match(html, /The ecosystem they form is the product/);
+  assert.match(html, /Agents get a budget, never your keys\./);
+  assert.doesNotMatch(html, /The ecosystem they form is the product/);
   assert.match(html, /Initialize a profile/);
   assert.match(html, /hubu stack select --profile/);
   assert.match(html, /hubu stack start/);
@@ -54,6 +55,52 @@ test("embeds the introduction below the hero without autoplay", async () => {
   assert.match(html, /href="https:\/\/youtu.be\/ufEgYjmxKWM"/);
   assert.ok(html.indexOf('class="hero"') < html.indexOf('id="intro-video-title"'));
   assert.ok(html.indexOf('id="intro-video-title"') < html.indexOf('class="warning-band"'));
+});
+
+test("home page walks through an illustrative governed image request", async () => {
+  const html = await (await render()).text();
+  assert.match(html, /<ol class="example-flow">/);
+  assert.match(html, /Agent asks for an image/);
+  assert.match(html, /Hubu checks policy and reserves \$0\.05/);
+  assert.match(html, /Gongbu calls the provider/);
+  assert.match(html, /reports a \$0\.03 receipt/);
+  assert.match(html, /Hubu settles \$0\.03 and releases \$0\.02/);
+  assert.match(html, /Illustrative amounts\./);
+  assert.ok(html.indexOf('class="hero"') < html.indexOf('id="worked-example-title"'));
+  assert.ok(html.indexOf('id="worked-example-title"') < html.indexOf('id="intro-video-title"'));
+});
+
+test("home page states that Gongbu is optional and links what works today", async () => {
+  const html = await (await render()).text();
+  assert.match(html, /Gongbu is the first-party executor, not a requirement/);
+  assert.match(html, /<code>hubu-only<\/code>/);
+  assert.match(html, /href="\/docs\/external-executor">bring your own executor/);
+  assert.match(html, /<section class="works-today" aria-labelledby="works-today-title">/);
+  assert.match(html, /<strong>macOS<\/strong> source install from a release tag/);
+  assert.match(html, /<strong>Gemini and FLUX\.2 Pro<\/strong> live providers/);
+  assert.match(html, /<strong>Sandbox<\/strong> with no provider credentials/);
+  assert.match(html, /href="\/docs\/overview#what-works-today"/);
+  assert.ok(html.indexOf('class="warning-band"') < html.indexOf('class="works-today"'));
+});
+
+test("home page starts the stack steps with an install step and routes topic cards to first steps", async () => {
+  const html = await (await render()).text();
+  assert.match(html, /<span>00<\/span><div><h3>Install from a release tag<\/h3><a class="step-link" href="\/docs\/local-stack#install">/);
+  assert.match(html, /Build the four binaries from an exact release tag on macOS\./);
+  assert.ok(html.indexOf("Install from a release tag") < html.indexOf("Initialize a profile"));
+  const topics = html.match(/<div class="topic-grid">[\s\S]*?<\/div>/)?.[0];
+  assert.ok(topics);
+  assert.deepEqual(
+    [...topics.matchAll(/<a href="([^"]+)"><small>[^<]+<\/small><h3>([^<]+)<\/h3>/g)].map(([, href, title]) => [href, title]),
+    [
+      ["/docs/local-stack", "Quick start"],
+      ["/docs/policy-engine", "Write a policy"],
+      ["/docs/unified-mcp#setup", "Connect your agent"],
+      ["/docs/external-executor", "Use your own executor"],
+    ],
+  );
+  assert.match(topics, /From install to your first governed request\./);
+  assert.doesNotMatch(topics, /Register an agent|Trace a spend|Understand Gongbu|Use unified MCP/);
 });
 
 test("home page offers copyable commands, a mobile menu, and anchored warning", async () => {
