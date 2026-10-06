@@ -2230,8 +2230,78 @@ ownership = "managed"
         let error = ensure_profile_stopped(profile).unwrap_err().to_string();
         assert!(error.contains("no ownership metadata"));
         assert!(error.contains("hubu-server"));
-        drop(listener);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn activation_allows_an_unreachable_unowned_managed_endpoint() {
+        let temp = tempdir().unwrap();
+        let profile = temp.path();
+        let (_port, endpoint) = refusing_loopback_endpoint();
+        let endpoint = toml::Value::String(endpoint).to_string();
+        fs::write(
+            profile.join("stack.toml"),
+            format!("schema_version = 1\n[hubu]\nownership = \"managed\"\nendpoint = {endpoint}\n"),
+        )
+        .unwrap();
         ensure_profile_stopped(profile).unwrap();
+    }
+
+    /// Reserves a loopback port that refuses connections for as long as the
+    /// returned socket lives. A dropped listener's port is not reliably closed
+    /// under parallel tests: another test can rebind it, and a probe whose
+    /// ephemeral source port equals the destination can self-connect. A bound
+    /// socket that never listens refuses connections and keeps the port out of
+    /// both bind and connect allocation.
+    #[cfg(unix)]
+    fn refusing_loopback_endpoint() -> (std::os::fd::OwnedFd, String) {
+        use std::net::Ipv4Addr;
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+        // SAFETY: socket returns a new descriptor or -1; OwnedFd takes sole ownership.
+        let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
+        assert!(fd >= 0, "socket: {}", std::io::Error::last_os_error());
+        let socket = unsafe { OwnedFd::from_raw_fd(fd) };
+        // SAFETY: fcntl only updates descriptor flags on the live socket.
+        assert_eq!(
+            unsafe { libc::fcntl(socket.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) },
+            0
+        );
+        // SAFETY: sockaddr_in is plain data; all-zero is a valid initial value.
+        let mut address: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "freebsd",
+            target_os = "openbsd",
+            target_os = "netbsd"
+        ))]
+        {
+            address.sin_len = std::mem::size_of::<libc::sockaddr_in>() as u8;
+        }
+        address.sin_family = libc::AF_INET as libc::sa_family_t;
+        address.sin_addr.s_addr = u32::from(Ipv4Addr::LOCALHOST).to_be();
+        let mut length = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+        // SAFETY: address and length describe a live, correctly sized sockaddr_in.
+        let bound = unsafe {
+            libc::bind(
+                socket.as_raw_fd(),
+                std::ptr::addr_of!(address).cast(),
+                length,
+            )
+        };
+        assert_eq!(bound, 0, "bind: {}", std::io::Error::last_os_error());
+        // SAFETY: getsockname writes at most `length` bytes into address.
+        let named = unsafe {
+            libc::getsockname(
+                socket.as_raw_fd(),
+                std::ptr::addr_of_mut!(address).cast(),
+                &mut length,
+            )
+        };
+        assert_eq!(named, 0, "getsockname: {}", std::io::Error::last_os_error());
+        let port = u16::from_be(address.sin_port);
+        (socket, format!("http://127.0.0.1:{port}"))
     }
 
     #[test]
@@ -2299,7 +2369,22 @@ ownership = "managed"
             .to_string()
             .contains("already operating"));
         drop(first);
-        acquire_lifecycle_lock(temp.path()).unwrap();
+        // A child that another test forks while `first` is open inherits the
+        // descriptor until it execs (close-on-exec), keeping the flock held for
+        // that window. Only the reacquire tolerates it, with a bounded retry.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match acquire_lifecycle_lock(temp.path()) {
+                Ok(_) => break,
+                Err(error)
+                    if error.to_string().contains("already operating")
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("lifecycle lock was not released on drop: {error:#}"),
+            }
+        }
     }
 
     #[test]
