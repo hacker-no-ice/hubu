@@ -355,6 +355,9 @@ test("renders the concise canonical overview", async () => {
   assert.match(html, /Why Hubu and Gongbu/);
   assert.match(html, /Hubu governs resources\. Gongbu performs the work\./);
   assert.match(html, /Experimental and local-first/);
+  assert.match(html, /What works today/);
+  assert.match(html, /href="\/docs\/external-executor"/);
+  assert.doesNotMatch(html, /budget administration/);
   assert.doesNotMatch(html, /What Hubu Does Today|Crates|Local Developer Tools/);
 });
 
@@ -385,7 +388,9 @@ test("publishes the high-level topology and four focused component drills", asyn
   assert.equal(publishedHtml, html);
   assert.match(html, /src="\/brand\/hubu-wordmark\.svg"/);
   assert.match(html, />\/ architecture</);
-  assert.match(html, /HIGH-LEVEL TOPOLOGY/);
+  assert.match(html, /FULL SERVICE TOPOLOGY/);
+  assert.doesNotMatch(html, /HIGH-LEVEL TOPOLOGY/);
+  assert.match(html, /Every process and owned store, for readers who want the detail\./);
   assert.match(html, /Hubu governs every billable operation/);
   assert.doesNotMatch(html, /Hubu governs every request/);
   assert.match(html, /AGENT ADAPTER PROCESS/);
@@ -431,6 +436,50 @@ test("publishes the high-level topology and four focused component drills", asyn
   assert.doesNotMatch(script, /asking Hubu to settle, release, or reconcile/);
   assert.doesNotMatch(html, /admin \+ lifecycle → Hubu/);
   assert.doesNotMatch(`${html}\n${script}`, /v4\.2|Unified MCP <code>|data-stage-button|play-flow|setInterval/);
+});
+
+test("leads the architecture page with a five-step single-request walkthrough", async () => {
+  const html = await readFile(new URL("../architecture/index.html", import.meta.url), "utf8");
+  const walkthroughStart = html.indexOf('<section id="walkthrough"');
+  const topologyStart = html.indexOf('<section id="topology"');
+  const componentsStart = html.indexOf('<section id="components"');
+  assert.ok(walkthroughStart > html.indexOf('<section class="hero">'), "walkthrough follows the hero");
+  assert.ok(topologyStart > walkthroughStart, "walkthrough appears before the full topology");
+  assert.ok(componentsStart > topologyStart, "component drills follow the full topology");
+
+  const walkthrough = html.slice(walkthroughStart, topologyStart);
+  assert.match(walkthrough, /FOLLOW ONE REQUEST/);
+  assert.match(walkthrough, /<h2 id="walkthrough-title">One governed request,<br \/>five steps\.<\/h2>/);
+  assert.match(walkthrough, /<ol class="request-flow" aria-label="Lifecycle of one governed request">/);
+  const steps = [...walkthrough.matchAll(/<li class="flow-step (agent|hubu|gongbu)">[\s\S]*?<strong>([^<]+)<\/strong>/g)];
+  assert.deepEqual(
+    steps.map((match) => [match[1], match[2]]),
+    [
+      ["agent", "Agent asks for work"],
+      ["hubu", "Check identity, policy, and budget"],
+      ["hubu", "Authorize and reserve"],
+      ["gongbu", "Execute with the provider"],
+      ["hubu", "Settle, release, or reconcile"],
+    ],
+  );
+  assert.match(walkthrough, /HUBU · CONTROL PLANE/);
+  assert.match(walkthrough, /GONGBU · EXECUTION PLANE/);
+  assert.match(walkthrough, /never a provider key/);
+  assert.match(walkthrough, /which authenticates to Hubu on its behalf/);
+  assert.doesNotMatch(walkthrough, /carrying only its Hubu credential/);
+  assert.match(walkthrough, /run by Gongbu, the first-party executor/);
+  assert.match(walkthrough, /<a href="\/docs\/external-executor">Your own executor<\/a>/);
+  assert.doesNotMatch(walkthrough, /Every billable call follows|Provider keys live only in Gongbu/);
+
+  const jumpLinks = [...html.matchAll(/<nav class="hero-meta"[\s\S]*?<\/nav>/g)][0][0];
+  const targets = [...jumpLinks.matchAll(/href="#([^"]+)"/g)].map((match) => match[1]);
+  assert.deepEqual(targets, ["walkthrough", "topology", "components"]);
+  for (const id of targets) assert.match(html, new RegExp(`id="${id}"`));
+
+  assert.match(
+    html,
+    /<a href="\/architecture\/internal\/">Engineering explorer <span class="nav-note">\(for contributors\)<\/span> ↗<\/a>/,
+  );
 });
 
 test("publishes the original engineering architecture explorer separately", async () => {

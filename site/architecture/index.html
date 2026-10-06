@@ -30,7 +30,7 @@
       </a>
       <nav aria-label="Primary navigation">
         <a href="/docs/overview">Documentation</a>
-        <a href="/architecture/internal/">Engineering explorer ↗</a>
+        <a href="/architecture/internal/">Engineering explorer <span class="nav-note">(for contributors)</span> ↗</a>
         <a href="https://github.com/hacker-no-ice/hubu">GitHub ↗</a>
       </nav>
     </header>
@@ -43,18 +43,64 @@
           Hubu decides whether agent spend is allowed. Gongbu performs provider work.
           A narrow executor contract connects them without merging credentials, state, or failure domains.
         </p>
-        <div class="hero-meta">
-          <span>Major services</span>
-          <span>Runtime topology</span>
-          <span>Data ownership</span>
+        <nav class="hero-meta" aria-label="On this page">
+          <a href="#walkthrough">Follow one request</a>
+          <a href="#topology">Full service topology</a>
+          <a href="#components">Component drills</a>
+        </nav>
+      </section>
+
+      <section id="walkthrough" class="architecture-overview walkthrough-section" aria-labelledby="walkthrough-title">
+        <div class="overview-intro">
+          <p class="section-label">FOLLOW ONE REQUEST</p>
+          <h2 id="walkthrough-title">One governed request,<br />five steps.</h2>
+          <p>Here is one billable request run by Gongbu, the first-party executor. Hubu, the control plane, decides and accounts. Gongbu, the execution plane, does the provider work. The agent never holds a provider key. <a href="/docs/external-executor">Your own executor</a> can take Gongbu&rsquo;s place in step 4.</p>
+        </div>
+
+        <div class="system-widget">
+          <div class="widget-header">
+            <div><span class="live-dot"></span><span>REQUEST LIFECYCLE</span></div>
+            <span>agent → hubu → gongbu → hubu</span>
+          </div>
+          <div class="request-map">
+            <ol class="request-flow" aria-label="Lifecycle of one governed request">
+              <li class="flow-step agent">
+                <small><b>01</b> AGENT</small>
+                <strong>Agent asks for work</strong>
+                <span>The agent sends structured intent to Unified MCP, which authenticates to Hubu on its behalf. The agent holds no Hubu credential and never a provider key.</span>
+              </li>
+              <li class="flow-step hubu">
+                <small><b>02</b> HUBU · CONTROL PLANE</small>
+                <strong>Check identity, policy, and budget</strong>
+                <span>Hubu confirms which registered agent is asking, evaluates every policy rule, and checks the active budget before any external work starts.</span>
+              </li>
+              <li class="flow-step hubu">
+                <small><b>03</b> HUBU · CONTROL PLANE</small>
+                <strong>Authorize and reserve</strong>
+                <span>An allow decision records a spend authorization and reserves the authorized maximum as a budget hold.</span>
+              </li>
+              <li class="flow-step gongbu">
+                <small><b>04</b> GONGBU · EXECUTION PLANE</small>
+                <strong>Execute with the provider</strong>
+                <span>Gongbu claims the authorization, calls the provider with credentials only it holds, and keeps the receipt and artifacts.</span>
+              </li>
+              <li class="flow-step hubu">
+                <small><b>05</b> HUBU · CONTROL PLANE</small>
+                <strong>Settle, release, or reconcile</strong>
+                <span>Hubu settles the actual cost, releases unused capacity, or keeps uncertain outcomes held for human reconciliation.</span>
+              </li>
+            </ol>
+            <p class="flow-example"><b>Example</b> An image request reserves an illustrative $0.05 maximum. Gongbu runs it and reports a $0.03 receipt. Hubu settles $0.03 and releases the remaining $0.02.</p>
+            <p class="topology-note">Provider keys live only in the executor, never with the agent or Hubu. Hubu never calls a provider, and no executor runs billable work Hubu has not authorized.</p>
+          </div>
         </div>
       </section>
 
-      <section class="architecture-overview" aria-labelledby="topology-title">
+      <section id="topology" class="architecture-overview" aria-labelledby="topology-title">
         <div class="overview-intro">
-          <p class="section-label">HIGH-LEVEL TOPOLOGY</p>
+          <p class="section-label">FULL SERVICE TOPOLOGY</p>
           <h2 id="topology-title">One product.<br />Two runtime planes.</h2>
-          <p>Humans and agents enter through separate surfaces. Hubu governs every billable operation; Gongbu executes only approved work and keeps provider operations isolated.</p>
+          <p>Every process and owned store, for readers who want the detail. Humans and agents enter through separate surfaces. Hubu governs every billable operation; Gongbu executes only approved work and keeps provider operations isolated.</p>
         </div>
 
         <div class="system-widget" aria-label="Hubu and Gongbu service topology">
@@ -137,7 +183,7 @@
         </div>
       </section>
 
-      <section class="component-section" aria-labelledby="component-title">
+      <section id="components" class="component-section" aria-labelledby="component-title">
         <div class="component-intro">
           <p class="section-label">COMPONENT DRILLS</p>
           <h2 id="component-title">Start with the control path.</h2>
