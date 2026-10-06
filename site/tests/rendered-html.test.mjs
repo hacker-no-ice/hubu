@@ -189,9 +189,28 @@ test("renders the command-focused local stack quick start", async () => {
   assert.match(html, /href="https:\/\/hubustack\.dev\/configuration\/local-stack\/v1\/"/);
   assert.doesNotMatch(html, /Component ownership|Clean-environment acceptance canary|Runtime and recovery boundaries/);
   assert.doesNotMatch(html, /not on main yet/i);
+  assert.match(html, /<h2 id="make-your-first-governed-request">Make your first governed request/);
+  assert.match(html, /hubu_submit_governed_execution/);
+  assert.match(html, /hubu spend authorizations/);
+  assert.match(html, /href="\/docs\/operations\/managing-a-stack"/);
+  assert.doesNotMatch(html, /Terminal color and automation|allow_development_builds|NO_COLOR|hubu stack rollback/);
   assert.match(html, /On this page/);
   assert.match(html, /src="\/brand\/hubu-wordmark\.svg"/);
   assert.match(html, /aria-label="Hubu documentation home"/);
+});
+
+test("renders the local stack management runbook", async () => {
+  const response = await render("/docs/operations/managing-a-stack");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /Managing a local stack/);
+  for (const id of ["routine-operations", "apply-a-configuration-change", "roll-back", "terminal-color-and-automation", "managed-logs"]) {
+    assert.match(html, new RegExp(`<h2 id="${id}">`), id);
+  }
+  assert.match(html, /hubu stack rollback --generation/);
+  assert.match(html, /href="\/docs\/local-stack"/);
+  const navigation = await readFile(new URL("../app/lib/docs.ts", import.meta.url), "utf8");
+  assert.match(navigation, /\["CLI administration", "cli"\], \["Managing a local stack", "operations\/managing-a-stack"\]/);
 });
 
 test("publishes the versioned local-stack configuration reference at stable public routes", async () => {
@@ -288,6 +307,8 @@ test("keeps managed credential locations out of the first-run profile", async ()
   assert.doesNotMatch(examples, /^\[files\]$/m);
   assert.doesNotMatch(examples, /^\[opaque\.gongbu_(hubu|caller)\]$/m);
   assert.doesNotMatch(`${localStack}\n${readme}`, /temporary Hubu process|pre-provision(?:ing)? workaround/i);
+  assert.match(localStack, /needs no provider\s+credentials/);
+  assert.doesNotMatch(localStack, /^\[files\]$|hubu_auth|\.auth-token/m);
   assert.match(credentials, /final managed `hubu-server` creates or\s+reuses those capabilities/i);
   assert.match(credentials, /Gongbu-owned bootstrap/i);
 });

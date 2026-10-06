@@ -67,7 +67,7 @@ done
 Choose `sandbox` for a complete non-billable first run, `local-stack` for
 operator-approved live provider targets, or `hubu-only` when you only need the
 governance service. This walkthrough uses sandbox mode; see the
-[local stack guide](docs/local-stack.md#choose-an-outcome-and-initialize) for
+[local stack guide](docs/local-stack.md#create-a-sandbox-profile) for
 the other modes and their configuration choices. The
 [complete local stack examples](docs/configuration/local-stack/v1/examples.md)
 show the zero-edit sandbox and Hubu-only outcomes plus one working Gemini +

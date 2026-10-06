@@ -1,62 +1,72 @@
 # Local stack quick start
 
-Use this guide to initialize, start, inspect, and connect a local Hubu stack.
-For configuration fields and design choices, use the public
-[schema-version-1 configuration reference](https://hubustack.dev/configuration/local-stack/v1/).
-For copyable sandbox, Hubu-only, and Gemini + FLUX live profiles, start with the
-[complete local stack examples](https://hubustack.dev/configuration/local-stack/v1/examples).
+This guide takes you from a fresh Mac to an agent making its first governed
+request against a local Hubu stack. The stack is three cooperating services:
+Hubu decides whether an agent may spend, Gongbu runs the approved provider
+work, and Temporal keeps that work durable. Your agent reaches them through one
+MCP server, `hubu-unified-mcp`.
 
-## Check the binaries
+## Before you start
 
-On macOS, install `hubu`, `hubu-server`, `gongbu-server`, and
-`hubu-unified-mcp` together from one exact tag with the repository's
-[source installer](operations/releases.md#install-an-exact-release-from-source-macos).
-Put the selected prefix's `bin` directory on `PATH`, and confirm that all four
-report the intended release:
+- **macOS only for now.** The supported install path builds from source on a
+  Mac.
+- **Prerequisites:** Git, Xcode Command Line Tools (`xcode-select -p` must
+  succeed), `rustup` (the checkout's `rust-toolchain.toml` pins the exact Rust
+  toolchain), and the Protocol Buffers compiler `protoc` (for example
+  `brew install protobuf`). The Temporal CLI is also required;
+  `hubu stack init --install-temporal` below can install it with Homebrew.
+- **Build time:** installation is a release build of the whole workspace, so
+  the first run downloads dependencies and can take a while.
+- **Cost:** this guide uses *sandbox* mode, which replaces the external AI
+  provider with a deterministic local fixture. It needs no provider
+  credentials and cannot incur charges.
+
+## Install
+
+Pick an exact release tag. On that tag's GitHub Release page, copy the full
+40-character `Source commit`, then clone the tag and run the installer:
 
 ```sh
+tag=vX.Y.Z
+expected_commit=FULL_40_CHARACTER_COMMIT_SHA
+
+git clone --depth 1 --branch "$tag" https://github.com/hacker-no-ice/hubu.git
+cd hubu
+./scripts/install-from-source.sh --expected-commit "$expected_commit"
+```
+
+The installer refuses to build if the checkout does not match that commit. It
+installs `hubu`, `hubu-server`, `gongbu-server`, and `hubu-unified-mcp` into
+`~/.local/bin` by default (`--prefix` chooses another absolute prefix). Put
+`PREFIX/bin` on your `PATH` and confirm that all four report the same release:
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"
 for binary in hubu hubu-server gongbu-server hubu-unified-mcp; do
   command -v "$binary"
   "$binary" --version
 done
 ```
 
-They must share one non-`unknown` full source commit and executor contract.
-Release-stamped source installations use the normal production lineage checks;
-do not enable `allow_development_builds`. The locally compiled executables are
-not Developer ID-signed, Apple-notarized, or Apple-verified.
+For updates, uninstalling, and the local-build trust model, see
+[release operations](operations/releases.md#install-an-exact-release-from-source-macos).
 
-If the profile will use managed-local Temporal, install the version-pinned
-Temporal CLI described in the
-[Temporal decision guide](https://hubustack.dev/configuration/local-stack/v1/decisions#managed-local-versus-external-temporal).
+## Create a sandbox profile
 
-## Choose an outcome and initialize
-
-Initialization asks for an outcome instead of exposing the complete topology
-up front:
-
-| Mode | Outcome |
-| --- | --- |
-| `sandbox` | Run the complete Hubu, Gongbu, and Temporal stack with real internal communication and a deterministic, non-billable fixture at the external provider edge. This is the default. |
-| `local-stack` | Run the complete ecosystem with one or more operator-approved real provider targets. Agents select among approved targets at runtime. |
-| `hubu-only` | Run registration, policy, authorization, and budget governance without Gongbu, Temporal, or provider execution. |
-
-Choose an absolute profile path, initialize it, and select it for later stack
-commands:
+A *profile* is a directory that holds one stack's configuration, databases,
+artifacts, and logs. Choose an absolute path, initialize it in sandbox mode,
+and select it so later commands use it by default:
 
 ```sh
-profile=/absolute/path/to/profile
+profile="$HOME/hubu-sandbox"
 hubu stack init --mode sandbox --install-temporal --profile "$profile"
 hubu stack select --profile "$profile"
 ```
 
-Initialization creates starter files without overwriting existing files or
-starting services:
-
-On macOS, `--install-temporal` invokes the official Homebrew package only when
-the Temporal CLI is absent. Initialization then discovers its absolute path
-and parses its exact CLI version into the profile; the operator never has to
-transcribe either value. Omit the flag to manage the dependency independently.
+On macOS, `--install-temporal` runs Homebrew's official Temporal package only
+when the Temporal CLI is missing, then records its path and exact version in
+the profile. Omit the flag if you manage Temporal yourself. Initialization
+never overwrites existing files and never starts services. It creates:
 
 ```text
 PROFILE_ROOT/
@@ -70,178 +80,153 @@ PROFILE_ROOT/
       .gitignore
 ```
 
-The three TOML files remain normal, editable operator-owned sources. Sandbox
-and Hubu-only profiles need no provider credential. Local-stack mode requires
-at least one approved real target and its opaque credential reference. Do not
-edit `generated/` or `state/`.
+| File | Purpose |
+| --- | --- |
+| `stack.toml` | Which binaries to run, service ports, Temporal, and local paths ([reference](https://hubustack.dev/configuration/local-stack/v1/stack-toml)) |
+| `credentials.toml` | References to provider secrets for live mode; empty in sandbox ([reference](https://hubustack.dev/configuration/local-stack/v1/credentials-toml)) |
+| `providers.toml` | Which provider targets agents may use and their prices; sandbox has one fixture target ([reference](https://hubustack.dev/configuration/local-stack/v1/providers-toml)) |
 
-Keep sandbox and live modes in separate profile directories. That isolates
-credentials, spend acknowledgement, generated state, databases, artifacts, and
-logs while making mode changes an explicit `hubu stack select` operation. See
-the [complete examples](https://hubustack.dev/configuration/local-stack/v1/examples#keep-sandbox-and-live-profiles-separate)
-for the recommended layout and switching flow.
+The sandbox profile works without edits. Never put API keys or tokens in these
+files, and do not edit `generated/` or `state/`; Hubu manages them.
 
-## Complete and validate the profile
+Other modes exist: `local-stack` uses real, billable providers you approve, and
+`hubu-only` runs governance without Gongbu or Temporal. Keep each mode in its
+own profile; the [complete examples](https://hubustack.dev/configuration/local-stack/v1/examples)
+show all three.
 
-Follow the comments in the starter files and use the detailed reference when a
-choice is unclear:
+## Start and check
 
-| File | What to choose | Detailed reference |
-| --- | --- | --- |
-| `stack.toml` | Binaries, managed or external services, Temporal, and local paths | [`stack.toml`](https://hubustack.dev/configuration/local-stack/v1/stack-toml) |
-| `credentials.toml` | Provider references or advanced external-service overrides | [`credentials.toml`](https://hubustack.dev/configuration/local-stack/v1/credentials-toml) |
-| `providers.toml` | Disabled, sandbox, or live mode; frozen provider-contract bindings, optional generic targets, pricing, and live spend gate where applicable | [`providers.toml`](https://hubustack.dev/configuration/local-stack/v1/providers-toml) |
-
-For a first local evaluation, use sandbox mode. It exercises the governed
-execution path without contacting an external provider or incurring cost.
-Never put bearer tokens, provider API keys, or other raw secrets in the TOML
-files. Live provider execution can incur charges.
-
-For billable targets, start with [live provider
-operations](operations/live-providers.md). The
-[complete Gemini + FLUX example](https://hubustack.dev/configuration/local-stack/v1/examples#live-gemini-developer-api-and-flux2)
-shows the two Keychain references and the complete contract selection. The
-[FLUX.2 provider contract](operations/flux-provider-contract.md) documents its
-frozen recipe and asynchronous recovery details. Inspect the sanitized
-catalog with `hubu stack catalog --json`; catalog, doctor, and render never call
-a provider or claim live qualification.
-
-Check the profile and follow the reported field paths until it is ready:
+Check the profile, start the stack, and confirm it is ready:
 
 ```sh
 hubu stack doctor
-```
-
-Doctor is read-only. An explicit `--profile "$profile"` can override the saved
-selection for any one stack command. `hubu stack doctor --json` emits the
-version-2 report contract, which adds the provider contract catalog and keeps
-configured, credential-reference-present, production-validated, and
-live-qualified state independent.
-
-## Start and inspect the stack
-
-Start the stack, then confirm that its managed components are ready:
-
-```sh
 hubu stack start
 hubu stack status
 ```
 
-`stack start` runs doctor and render when needed. For a fully managed profile,
-it starts the final Hubu process, completes Gongbu's managed credential
-bootstrap, and starts Gongbu and its managed Temporal runtime. The client-owned
-`hubu-unified-mcp` process is not part of the managed stack.
+`doctor` is read-only and reports any field that needs attention. A fresh
+sandbox profile should report `ready_to_render`. `start` validates the profile,
+then launches Hubu, Gongbu, and Temporal and provisions their internal
+credentials inside the profile. `status` should then look like this
+(illustrative and abbreviated):
 
-Once an active handoff exists, normal server-bound `hubu` commands take the
-Hubu endpoint and authentication, approval, and reconciliation credential file
-paths from the selected profile as one bundle. If there is no explicit
-selection, an active conventional `default` profile is used. Ambient
-`HUBU_URL` and token variables are ignored in either case. If a selected
-profile has no valid active handoff, the command fails instead of silently
-using another server. Pass an explicit global `--url` to opt into manual mode,
-where the existing environment and token-file precedence remains available.
-Local-only commands such as profile inspection and policy file creation do not
-require an active handoff.
+```text
+Hubu stack status
 
-### Terminal color and automation
+Summary
+  Profile               /Users/you/hubu-sandbox
+  Classification        running_ready
+  Generation            <64-character id>
+  Source/render drift   no
+  Restart impact        none
 
-Human-readable CLI output uses semantic color and emphasis when its destination
-is an interactive terminal. Status words remain present: green highlights
-ready or successful state, yellow highlights warnings or required action, red
-highlights failures, and dimmed text identifies inactive or secondary details.
-Color is not the only signal.
+Components
+  hubu
+    Ownership         managed
+    Lifecycle         owned_running
+    Ready             yes
+    ...
+  gongbu
+    Ownership         managed
+    Lifecycle         owned_running
+    Ready             yes
+    ...
 
-The global option `--color auto|always|never` controls rendering and may appear
-before or after the command. `auto` is the default, disables color for pipes and
-redirects, and also disables color when `TERM=dumb`. A non-empty `NO_COLOR`
-environment variable disables automatic color. An explicit `--color always` or
-`--color never` takes precedence over the environment.
+Temporal
+  Ownership             gongbu_managed_local
+  Worker ready          yes
+  Namespace             default
+  Task queue            gongbu-local-executions
+  UI                    http://127.0.0.1:8233
 
-Machine-readable and raw data paths bypass terminal styling. In particular,
-all `--json` reports, version and protocol JSON, exported policy content,
-client-configuration dry runs, and individual `stack logs` payload lines remain
-ANSI-free even when `--color always` is selected. Hubu-owned log section headers
-may still use terminal styling without changing the stored log lines.
+Unified MCP
+  Lifecycle             client_owned
+  Compatible            yes
+  Guidance              hubu init codex --stack-profile /Users/you/hubu-sandbox
+...
+```
 
-## Connect Codex
+If a component is not `owned_running`, its `Guidance` line names the recovery
+command, and `hubu stack logs` shows its recent log lines.
 
-After the stack is ready, write the managed MCP configuration:
+## Connect your agent
+
+Write Codex's MCP configuration from the running profile, then restart Codex:
 
 ```sh
 hubu init codex --stack-profile "$profile"
 ```
 
-Restart Codex so it launches the unified MCP process with the new handoff. See
-[Unified MCP setup](unified-mcp.md#setup) for discovery and compatibility
-details. When a governed request needs review, say `approve` or `deny` in the
-chat only after checking the immutable review. Codex then presents its native
-MCP prompt for the resolver. Canceling that prompt leaves the Hubu decision
-pending; it does not record a denial.
+Codex starts `hubu-unified-mcp` itself; the stack does not own that process.
+Other MCP clients can connect to `hubu-unified-mcp` with manual configuration;
+see [Unified MCP setup](unified-mcp.md#setup).
 
-## Routine operations
+## Make your first governed request
 
-```sh
-# List profiles and show machine-readable status.
-hubu stack profiles
-hubu stack status --json
-
-# Read launcher-owned logs.
-hubu stack logs --component all --lines 200
-hubu stack logs --component gongbu --execution-id EXECUTION_ID
-
-# Gracefully stop the complete managed stack.
-hubu stack stop
-```
-
-Managed Hubu omits routine request events for successful `GET /health`,
-`GET /version`, and Gongbu's marked
-`GET /agents?operational_probe=gongbu_credential_check` readiness probe.
-Unmarked agent-list reads and failed probes remain logged. The marker changes
-logging only; it conveys no caller identity or authorization. Structured logs
-remain bounded to one 10 MiB active file and four retained generations.
-
-There is no `hubu stack restart` command. For an unchanged unhealthy or partial
-managed stack, run `hubu stack stop`, then `hubu stack start`.
-
-## Apply a configuration change
-
-Render and review a changed profile before activating it:
+A *governed request* is one where Hubu checks a policy and a budget before any
+provider work starts. First create an owner, an agent, a policy, and a budget.
+The starter policy allows requests up to $100 and asks for approval otherwise;
+the sandbox fixture's synthetic price is one cent per image.
 
 ```sh
-hubu stack doctor
-hubu stack render
-# Review the generation ID, changed files, and affected components.
-hubu stack stop
-hubu stack activate --generation GENERATION_ID
-hubu stack start
-hubu stack status
+hubu register human --username alice-example --display-name "Alice Example"
+hubu register agent --name image-designer --version local-dev
+hubu policy new-template --path policies/policy.yaml
+hubu policy validate --path policies/policy.yaml
+hubu policy apply --path policies/policy.yaml --name "Starter policy"
+hubu budget create --agent-id agt_EXACT_AGENT_ID --amount 1
 ```
 
-For rollback, first restore the exact operator-owned TOML and compatible
-binaries for the retained generation, then run:
+`register agent` prints the `agent_id` (for budgets and policies) and the
+`account_id` (for spending). The [CLI administration reference](cli.md)
+explains each command.
+
+Then, in a new Codex thread, ask:
+
+```text
+Call gongbu_list_execution_targets and choose the sandbox fixture. Then use
+hubu_submit_governed_execution with account ID aga_EXACT_ACCOUNT_ID and the
+target's returned execution scope to generate one image of a blue circle.
+Show any approval request before asking me to approve or deny it, and return
+the resulting artifact.
+```
+
+The agent discovers the approved target, then submits one request. Hubu
+evaluates the policy and reserves budget before Gongbu runs the fixture. The
+tool returns one outcome:
+
+- `succeeded`: the image is returned in the same response when it fits.
+- `in_progress`: the work continues in the background; ask the agent to check
+  it with `hubu_operation_status`.
+- `approval_required`: nothing has run yet. Review the request, then say
+  `approve` or `deny` in the chat. Codex shows its own confirmation prompt
+  before recording your decision; canceling that prompt leaves the request
+  pending rather than denying it. After approval, the agent continues with
+  `hubu_resume_operation`.
+- `denied`: the policy refused the request and nothing ran.
+
+See [Composite governed execution](unified-mcp.md#composite-governed-execution)
+for the full flow.
+
+Finally, inspect what Hubu recorded:
 
 ```sh
-hubu stack generations
-hubu stack render
-hubu stack stop
-hubu stack rollback --generation PRIOR_GENERATION_ID
-hubu stack start
-hubu stack status
+hubu spend authorizations --limit 5
+hubu ledger list --agent-id agt_EXACT_AGENT_ID --budget-id bgt_EXACT_BUDGET_ID --limit 5
 ```
 
-If the rendered plan reports `hubu-unified-mcp-client-config` as affected,
-rerun
-`hubu init codex --stack-profile "$profile"` after the
-stack is ready and restart Codex.
+Both print versioned JSON. The authorization record shows the decision and its
+lifecycle status; the ledger shows recorded spend and how much of the budget is
+used. [Ledger and authorization records](ledger-history.md) explains the
+fields.
 
-The [active-profile change guide](https://hubustack.dev/configuration/local-stack/v1/decisions#changing-an-active-profile)
-explains staging, credential-reference changes, and rollback requirements.
+## Next steps
 
-## More detail
-
-Use the managed lifecycle commands above for the persistent execution plane.
-
+- [Managing a local stack](operations/managing-a-stack.md): logs, stopping,
+  configuration changes, and rollback.
+- [Live provider operations](operations/live-providers.md): move to real,
+  billable providers in a separate profile.
 - [Configuration reference](https://hubustack.dev/configuration/local-stack/v1/)
-- [Configuration decision guides](https://hubustack.dev/configuration/local-stack/v1/decisions)
-- [Complete profile examples](https://hubustack.dev/configuration/local-stack/v1/examples)
-- [Unified MCP surface](unified-mcp.md)
+  and [complete examples](https://hubustack.dev/configuration/local-stack/v1/examples).
+- [Policy engine](policy-engine.md): write your own spending rules.
+- [Unified MCP surface](unified-mcp.md): every agent-facing tool.
