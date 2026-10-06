@@ -43,6 +43,7 @@ expected_files=(
   THIRD-PARTY-LICENSES.txt
   THIRD-PARTY-NOTICES.md
   "${expected_binaries[@]}"
+  mcp-tool-consolidation.md
   unified-mcp.md
 )
 
@@ -96,7 +97,7 @@ jq -e \
    .target == $target and
    .binaries == ["hubu", "hubu-server", "hubu-unified-mcp", "gongbu-server"] and
    .supported_agent_surfaces == ["hubu-unified-mcp"] and
-   (.files | contains(["LOCAL-STACK.md", "unified-mcp.md"])) and
+   (.files | contains(["LOCAL-STACK.md", "mcp-tool-consolidation.md", "unified-mcp.md"])) and
    (.files | index("operations/gongbu-server.md") == null) and
    .development_tools_excluded == ["hubu-bench", "gongbu-sandbox"]' \
   "${package_dir}/MANIFEST.json" >/dev/null
