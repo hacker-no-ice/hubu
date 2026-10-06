@@ -46,6 +46,7 @@ verify_package() {
     hubu
     hubu-server
     hubu-unified-mcp
+    mcp-tool-consolidation.md
     unified-mcp.md
   )
   actual_files="$(cd "${package_dir}" && find . -type f -print | sed 's#^\./##' | LC_ALL=C sort)"
@@ -68,7 +69,7 @@ verify_package() {
      .target == $target and
      .binaries == ["hubu", "hubu-server", "hubu-unified-mcp", "gongbu-server"] and
      .supported_agent_surfaces == ["hubu-unified-mcp"] and
-     (.files | contains(["LOCAL-STACK.md", "unified-mcp.md"])) and
+     (.files | contains(["LOCAL-STACK.md", "mcp-tool-consolidation.md", "unified-mcp.md"])) and
      (.files | index("operations/gongbu-server.md") == null) and
      .development_tools_excluded == ["hubu-bench", "gongbu-sandbox"]' \
     "${package_dir}/MANIFEST.json" >/dev/null

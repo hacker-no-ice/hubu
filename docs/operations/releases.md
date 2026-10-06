@@ -51,8 +51,8 @@ Archives also include:
 
 `LOCAL-STACK.md` is the packaged, command-focused path for initializing,
 starting, inspecting, and connecting the four-binary stack outside a source
-checkout. Its linked `unified-mcp.md` guide is included at the same relative
-path. The standalone Gongbu operations guide remains in the source
+checkout. Its linked `unified-mcp.md` guide and that guide's canonical tool
+catalog, `mcp-tool-consolidation.md`, are included at the same relative paths. The standalone Gongbu operations guide remains in the source
 documentation but is intentionally excluded from the managed-stack archive.
 
 The GitHub Release publishes a top-level `SHA256SUMS` for its target archives.
