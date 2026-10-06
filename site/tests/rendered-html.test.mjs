@@ -137,7 +137,9 @@ test("publishes per-page canonical and share metadata", async () => {
   const description = html.match(/<meta name="description" content="([^"]*)"/)?.[1];
   assert.ok(description && description.length <= 160);
   assert.match(description, /\w…$/);
-  assert.match(html, /← Previous<\/small><strong>Overview<\/strong>/);
+  assert.match(html, /← Previous<\/small><strong>FAQ<\/strong>/);
+  const whyHubu = await (await render("/docs/why-hubu")).text();
+  assert.match(whyHubu, /← Previous<\/small><strong>Overview<\/strong>/);
 
   const missing = await render("/docs/nope");
   assert.equal(missing.status, 404);
