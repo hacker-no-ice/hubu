@@ -22,9 +22,20 @@ interface ExecutionContext {
   passThroughOnException(): void;
 }
 
+// Baseline headers for every Worker response. Static assets served directly by
+// Cloudflare get the same set from public/_headers. Only frame-ancestors is set
+// in the CSP because the site needs inline styles/scripts and a YouTube iframe.
+const SECURITY_HEADERS: Record<string, string> = {
+  "strict-transport-security": "max-age=31536000; includeSubDomains",
+  "x-content-type-options": "nosniff",
+  "referrer-policy": "strict-origin-when-cross-origin",
+  "content-security-policy": "frame-ancestors 'none'",
+};
+
 function withSourceRevision(response: Response): Response {
   const headers = new Headers(response.headers);
   headers.set("x-hubustack-revision", __HUBUSTACK_SOURCE_REVISION__);
+  for (const [name, value] of Object.entries(SECURITY_HEADERS)) headers.set(name, value);
   return new Response(response.body, {
     headers,
     status: response.status,

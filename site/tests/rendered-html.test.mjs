@@ -450,3 +450,33 @@ test("feedback is discoverable and renders usable public intake links", async ()
   assert.match(html, /Manual fallback/);
   assert.match(html, /explicit authorization/);
 });
+
+test("publishes canonical and share metadata for the static architecture page", async () => {
+  const html = await readFile(new URL("../dist/client/architecture/index.html", import.meta.url), "utf8");
+  assert.match(html, /<link rel="canonical" href="https:\/\/hubustack\.dev\/architecture\/"/);
+  assert.match(html, /<meta property="og:title" content="Architecture · Hubu Docs"/);
+  assert.match(html, /<meta property="og:image" content="https:\/\/hubustack\.dev\/og-architecture\.png"/);
+  assert.match(html, /<meta name="twitter:card" content="summary_large_image"/);
+  assert.match(html, /<link rel="icon" href="\/favicon\.svg" type="image\/svg\+xml"/);
+});
+
+test("applies baseline security headers to Worker responses and static assets", async () => {
+  const expected = {
+    "strict-transport-security": "max-age=31536000; includeSubDomains",
+    "x-content-type-options": "nosniff",
+    "referrer-policy": "strict-origin-when-cross-origin",
+    "content-security-policy": "frame-ancestors 'none'",
+  };
+  for (const pathname of ["/", "/docs/local-stack", "/docs/nope"]) {
+    const response = await render(pathname);
+    for (const [name, value] of Object.entries(expected)) {
+      assert.equal(response.headers.get(name), value, `${name} on ${pathname}`);
+    }
+  }
+  // Static assets are served by Cloudflare before the Worker, so they rely on _headers.
+  const rules = (await readFile(new URL("../dist/client/_headers", import.meta.url), "utf8")).toLowerCase();
+  assert.match(rules, /^\/\*$/m);
+  for (const [name, value] of Object.entries(expected)) {
+    assert.ok(rules.includes(`${name}: ${value.toLowerCase()}`), `_headers lacks ${name}`);
+  }
+});
