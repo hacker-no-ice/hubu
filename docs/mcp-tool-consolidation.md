@@ -12,7 +12,7 @@ At runtime, `tools/list` returns the currently callable tools, and
 public tool's owner, availability and reason code. See the
 [unified MCP reference](unified-mcp.md) for schemas, configuration and transport
 behavior. Tools removed in earlier releases, and their replacements, are listed
-in the [changelog](../CHANGELOG.md).
+in the [v0.2.2 changelog](https://github.com/hacker-no-ice/hubu/blob/main/CHANGELOG.md#v022--2026-10-05).
 
 ## Supported tools
 
