@@ -27,7 +27,9 @@ client may change scope under that key only when Hubu explicitly returns
 unified MCP agent surface does not expose or reuse the private key after denial:
 corrected work is a new tool call and logical operation. All other retries that
 change the account, amount, reason, lease profile, task correlation, or
-execution scope are rejected.
+execution scope are rejected. Key generation, storage, and revision rules are
+defined in
+[operation key generation and storage](spend-executor-contract.md#operation-key-generation-and-storage).
 
 `task_id` is optional trusted business correlation. `reason` is descriptive,
 model-visible audit context. Neither field owns a budget or replaces the
@@ -159,22 +161,22 @@ frozen -> settled
        -> released
 ```
 
-Settlement preserves exact external cost as an integer amount, decimal scale,
-and currency, then converts that value to budget cents with one checked ceiling
-operation. Any positive sub-cent charge therefore consumes at least one cent.
-A normal settlement consumes that conservative `budget_charge_cents` and
-releases any unused maximum. Failure, unused authorization, expiry, or a
-confirmed non-billable outcome releases the hold. Ambiguous provider outcomes
-and confirmed costs above the authorized maximum enter reconciliation instead
-of being released optimistically.
+Settlement preserves exact external cost and converts it to budget cents with
+one checked ceiling operation, so any positive sub-cent charge consumes at
+least one cent. A normal settlement consumes that conservative
+`budget_charge_cents` and releases any unused maximum. Failure, unused
+authorization, expiry, or a confirmed non-billable outcome releases the hold.
+Ambiguous provider outcomes and confirmed costs above the authorized maximum
+enter reconciliation instead of being released optimistically. The exact
+conversion rules are in
+[precise external cost and budget conversion](spend-executor-contract.md#precise-external-cost-and-budget-conversion).
 
-An executor cannot settle above its maximum. Once the claim lease expires, a
-human reviewing provider evidence may confirm a legitimate billed overrun.
-Hubu then consumes the full conservatively rounded charge, records the overrun
-separately, releases none of the hold, and allows the remaining balance to become negative. That is
-retrospective accounting for an external charge that already occurred; it does
-not grant new spending authority, and the exhausted budget rejects subsequent
-reservations.
+An executor cannot settle above its maximum. After the claim lease expires, a
+human reviewing provider evidence may confirm a legitimate billed overrun; Hubu
+then consumes the full charge and lets the remaining balance become negative.
+That is retrospective accounting, not new spending authority, and the exhausted
+budget rejects subsequent reservations. See
+[expired claims](spend-executor-contract.md#expired-claims).
 
 ## Authorization paths
 
@@ -197,19 +199,17 @@ Detailed external-executor rules are defined by the
 
 ## External execution
 
-For Gongbu and other external executors:
-
-1. The executor resolves the authorization snapshot without claiming it.
-2. It validates the account, amount, currency, workload, operation key, and
-   complete execution scope against its operator-controlled target and price.
-3. It persists its execution before scheduling provider work.
-4. Its durable workflow claims the authorization.
-5. It records a provider attempt before irreversible transmission.
-6. It persists the exact provider cost, currency, scale, complete frozen pricing
-   snapshot, and provider evidence.
-7. It settles with that stable receipt after confirmed billing, routes a
-   settlement overrun to reconciliation for human resolution after claim
-   expiry, or releases after confirmed non-billing.
+Gongbu and other external executors resolve the authorization without
+claiming it, validate it against their own operator-controlled target and
+price, persist their execution, claim before any irreversible provider work,
+and then settle with exact cost and frozen pricing evidence, route an overrun
+or ambiguous outcome to reconciliation, or release after confirmed
+non-billing. The normative step-by-step protocol is the
+[spend executor contract flow](spend-executor-contract.md#flow); Gongbu's
+implementation is described in
+[Gongbu execution](gongbu-execution.md#admission-and-execution-flow), and
+integrators can follow
+[use Hubu with your own executor](external-executor.md).
 
 Provider credentials, provider retries, artifacts, and provider pricing remain
 owned by the executor. Sharing a Rust workspace does not turn this wire
@@ -242,12 +242,15 @@ movement.
 
 ## Failure and reconciliation invariants
 
+The executor-facing rules are normative in the contract's
+[safety rules](spend-executor-contract.md#safety-rules). At the lifecycle level:
+
 - Never execute provider work before a durable claim.
-- Never accept a normal executor settlement above the authorized maximum.
-- Never discard exact cost or pricing evidence when a legitimate provider
-  charge exceeds that maximum; keep the hold claimed for human reconciliation.
+- Never accept a normal executor settlement above the authorized maximum, and
+  never discard exact cost or pricing evidence when a legitimate charge exceeds
+  it; keep the hold claimed for human reconciliation.
 - Never convert external cost through floating point or round budget consumption
-  down; apply one checked ceiling conversion to the final exact cost.
+  down.
 - Never release a hold merely because a timeout made billing ambiguous.
 - Never retry an ambiguous provider mutation under a new operation key.
 - Keep Hubu and executor databases, credentials, artifacts, and failure domains

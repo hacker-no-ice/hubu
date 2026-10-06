@@ -49,7 +49,11 @@ shape makes v4.3 intentionally startup-incompatible with v4.2.
 V4.2 introduced the read-only `POST /spend/executor/resolve` capability used
 for token-only executor admission.
 
-To run your own executor behind MCP authorization, follow
+This page is the single normative description of the executor protocol
+(authorize, resolve, claim, then settle or release). The
+[spend lifecycle](spend-lifecycle.md) gives the concept overview, and
+[Gongbu execution](gongbu-execution.md) describes how the first-party executor
+implements it. To run your own executor behind MCP authorization, follow
 [Use Hubu with your own executor](external-executor.md).
 
 Executors can check their lifecycle handling against the black-box
