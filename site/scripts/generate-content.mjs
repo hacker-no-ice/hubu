@@ -3,6 +3,7 @@ import { statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Marked, Renderer } from "marked";
+import { createSlugger, headingText } from "./heading-ids.mjs";
 
 const siteRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const repoRoot = path.resolve(siteRoot, "..");
@@ -77,20 +78,18 @@ function summarize(text, limit = 160) {
   return `${(boundary > limit / 2 ? cut.slice(0, boundary) : cut).replace(/[\s,;:.]+$/, "")}…`;
 }
 
-function headingId(text) {
-  return plainText(text).toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]+/g, "-").replace(/^-|-$/g, "") || "section";
-}
-
+// Returns the page HTML and its level-2 headings (for "On this page"), both
+// from one render pass so table-of-contents links always match heading ids.
 function renderMarkdown(markdown, sourcePath) {
   const renderer = new Renderer();
-  const usedIds = new Map();
+  const slug = createSlugger();
+  const headings = [];
   renderer.heading = function ({ tokens, depth }) {
     const inner = this.parser.parseInline(tokens);
-    const base = headingId(inner);
-    const count = usedIds.get(base) ?? 0;
-    usedIds.set(base, count + 1);
-    const id = count ? `${base}-${count + 1}` : base;
-    return `<h${depth} id="${id}">${inner}<a class="heading-anchor" href="#${id}" aria-label="Link to ${escapeAttribute(plainText(inner))}">#</a></h${depth}>`;
+    const text = headingText(this.parser, tokens);
+    const id = slug(text);
+    if (depth === 2) headings.push({ text, id });
+    return `<h${depth} id="${id}">${inner}<a class="heading-anchor" href="#${id}" aria-label="Link to ${escapeAttribute(text)}">#</a></h${depth}>`;
   };
   renderer.code = function (token) {
     const block = Renderer.prototype.code.call(this, token);
@@ -118,7 +117,8 @@ function renderMarkdown(markdown, sourcePath) {
     }
     return `<a href="${escapeAttribute(resolved)}"${title ? ` title="${escapeAttribute(title)}"` : ""}>${text}</a>`;
   };
-  return new Marked({ renderer, gfm: true }).parse(markdown);
+  const html = new Marked({ renderer, gfm: true }).parse(markdown);
+  return { html, headings };
 }
 
 const documents = [];
@@ -133,8 +133,7 @@ for (const file of sourceFiles) {
     title,
     excerpt: plainText(body).slice(0, 190),
     description: summarize(plainText(body)),
-    html: renderMarkdown(markdown, sourcePath),
-    headings: [...markdown.matchAll(/^##\s+(.+)$/gm)].map((match) => ({ text: plainText(match[1]), id: headingId(match[1]) })),
+    ...renderMarkdown(markdown, sourcePath),
     sourcePath,
     sourceUrl: `${githubRoot}${sourcePath}`,
   });
