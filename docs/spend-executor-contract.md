@@ -489,8 +489,8 @@ guidance.
    typed scope, and catalog price. Before persisting that attribution snapshot,
    it requires the authorized typed scope to equal its derived scope and the
    authorized amount and currency to equal the catalog price. The executor
-   never receives the private operation key; a caller-supplied
-   `operation_key` is rejected rather than compared.
+   never receives the private operation key; Gongbu's request schema rejects
+   an `operation_key` field rather than comparing it.
 
    Before this resolution, the executor checks for a persisted execution by the
    same token. An exact immutable request replays locally even after the token
