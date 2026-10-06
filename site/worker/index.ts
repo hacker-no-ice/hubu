@@ -69,6 +69,12 @@ const worker = {
       return withSourceRevision(Response.redirect(url, 308));
     }
 
+    // Superseded runbook; its content lives in the live provider operations guide.
+    if (url.pathname === "/docs/operations/live-provider-testing" || url.pathname === "/docs/operations/live-provider-testing/") {
+      url.pathname = "/docs/operations/live-providers";
+      return withSourceRevision(Response.redirect(url, 308));
+    }
+
     if (url.pathname === "/_vinext/image") {
       const allowedWidths = [...DEFAULT_DEVICE_SIZES, ...DEFAULT_IMAGE_SIZES];
       return withSourceRevision(await handleImageOptimization(request, {

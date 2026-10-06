@@ -19,7 +19,28 @@ async function markdownPaths(directory) {
   return nested.flat().sort();
 }
 
-const sourceFiles = await markdownPaths(docsRoot);
+// Maintainer-only or internal docs. They stay in the repository but are not
+// published: no page, search entry, sitemap URL, or navigation item. Because
+// they are absent from sourceToSlug, links from published pages to them fall
+// back to GitHub blob URLs.
+const unpublishedSources = new Set([
+  "docs/budget-architecture.md", // budget internals and lock order
+  "docs/ledger-accounting.md", // ledger posting internals
+  "docs/operations/repository-security.md", // repository/CI hardening for maintainers
+  "docs/operations/benchmarking.md", // developer benchmarking
+  "docs/operations/gongbu-sandbox.md", // developer manual-test sandbox
+  "docs/operations/live-provider-testing.md", // superseded; the site redirects to live-providers
+  "docs/operations/publishing-releases.md", // maintainer release publication runbook
+]);
+
+const repoRelative = (file) => path.relative(repoRoot, file).split(path.sep).join("/");
+const allSourceFiles = await markdownPaths(docsRoot);
+for (const excluded of unpublishedSources) {
+  if (!allSourceFiles.some((file) => repoRelative(file) === excluded)) {
+    throw new Error(`Unpublished docs list names a missing file: ${excluded}`);
+  }
+}
+const sourceFiles = allSourceFiles.filter((file) => !unpublishedSources.has(repoRelative(file)));
 const sourceToSlug = new Map(sourceFiles.map((file) => {
   const sourcePath = path.relative(repoRoot, file).split(path.sep).join("/");
   const slug = sourcePath

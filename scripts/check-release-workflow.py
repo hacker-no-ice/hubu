@@ -14,7 +14,7 @@ SMOKE_SCRIPT = ROOT / "scripts/verify-release-archive.sh"
 SOURCE_INSTALLER = ROOT / "scripts/install-from-source.sh"
 SOURCE_INSTALLER_TEST = ROOT / "scripts/test-install-from-source.sh"
 CHANGELOG = ROOT / "CHANGELOG.md"
-RELEASE_DOC = ROOT / "docs/operations/releases.md"
+RELEASE_DOC = ROOT / "docs/operations/publishing-releases.md"
 
 PRODUCTION_PACKAGE_MANIFESTS = {
     "gongbu-api": ROOT / "crates/gongbu-api/Cargo.toml",
