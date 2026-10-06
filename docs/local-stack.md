@@ -193,7 +193,7 @@ the resulting artifact.
 
 The agent discovers the approved target, then submits one request. Hubu
 evaluates the policy and reserves budget before Gongbu runs the fixture. The
-tool returns one outcome:
+tool returns one of these outcomes:
 
 - `succeeded`: the image is returned in the same response when it fits.
 - `in_progress`: the work continues in the background; ask the agent to check
@@ -204,6 +204,9 @@ tool returns one outcome:
   pending rather than denying it. After approval, the agent continues with
   `hubu_resume_operation`.
 - `denied`: the policy refused the request and nothing ran.
+- `failed`: the execution reached a terminal failure. Do not submit a
+  replacement request; ask the agent to check the existing operation with
+  `hubu_operation_status` and follow its recovery guidance.
 
 See [Composite governed execution](unified-mcp.md#composite-governed-execution)
 for the full flow.
