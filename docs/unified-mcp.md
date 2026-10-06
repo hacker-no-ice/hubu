@@ -631,6 +631,12 @@ inspect, or allocate a key. Omit it for ordinary operation. Create the private
 store and its first scoped record only after the workflow's separate human
 authorization gate.
 
+On first interactive run, `hubu init codex` asks once whether Codex may use the
+setup and administration tools (default: no). Re-runs keep the choice recorded
+in the managed Codex config block. `--trust-client-approval` and
+`--no-trust-client-approval` override it; with `--dry-run` or without a
+terminal, nothing is asked and the recorded choice (or off) is used.
+
 With `--stack-profile`, the command consumes the verified handoff from an
 already running stack and writes the managed MCP entry; managed startup has
 already created the required capabilities. The non-stack setup form may create
@@ -690,7 +696,10 @@ the per-tool human prompts and separate trust/capability gates.
 Registration, policy mutation, spending-target changes, budget mutation, and
 claim reconciliation require a client-enforced human prompt. Those broad
 administrative tools remain disabled unless the process is started with
-`HUBU_MCP_TRUST_CLIENT_APPROVAL=1`.
+`HUBU_MCP_TRUST_CLIENT_APPROVAL=1`. `hubu init codex` renders that variable
+only when the human answers yes at its one-time prompt or passes
+`--trust-client-approval`, and keeps the setting on re-runs unless
+`--no-trust-client-approval` is passed.
 
 Spend approval resolution uses the narrower
 `HUBU_MCP_TRUST_SPEND_APPROVAL=1` gate. `hubu init codex` always renders that

@@ -100,19 +100,23 @@ configured, its managed Temporal runtime.
 
 ### 4. Connect Codex
 
-Configure Codex from the active profile. The optional trust flag exposes setup
-and administration tools so the Codex walkthrough below can register identities,
-apply policies, and create budgets; Codex still asks for native confirmation
-before those tool calls.
+Configure Codex from the active profile:
 
 ```sh
-hubu init codex --stack-profile "$profile" --trust-client-approval
+hubu init codex --stack-profile "$profile"
 ```
 
+On first run in a terminal, the command asks once whether Codex may use Hubu
+setup and administration tools. Answering yes lets the Codex walkthrough below
+register identities, apply policies, and create budgets; Codex still asks for
+native confirmation before each of those tool calls. The choice is kept in the
+managed Codex config block on re-runs, and `--trust-client-approval` or
+`--no-trust-client-approval` overrides it.
+
 If you prefer to perform registration, policy, and budget administration in a
-terminal, omit `--trust-client-approval` and follow the
-[CLI administration reference](docs/cli.md) for example commands and detailed
-guidance. Governed workloads remain available through MCP.
+terminal, answer no and follow the [CLI administration reference](docs/cli.md)
+for example commands and detailed guidance. Governed workloads remain available
+through MCP.
 
 Restart Codex after the command completes.
 
