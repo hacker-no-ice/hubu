@@ -184,7 +184,7 @@ hubu stack doctor
 Use `--json` for the same authoritative results in automation. Do not replace
 doctor with a manual live-profile checklist. Review the generation before
 activation as described in
-[Local stack quick start](../../../local-stack.md#apply-a-configuration-change).
+[Managing a local stack](../../../operations/managing-a-stack.md#apply-a-configuration-change).
 
 Advanced raw-provider configuration, external Hubu/Gongbu/Temporal ownership,
 and provider-specific recovery details remain available in the
