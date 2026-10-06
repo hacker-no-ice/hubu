@@ -74,7 +74,9 @@ processes with separate storage, credentials, and failure domains.
 - macOS with Git and Xcode Command Line Tools
 - [`rustup`](https://rustup.rs/) (the checkout pins the exact toolchain)
 - `protoc`, for example `brew install protobuf`
-- The Temporal CLI (`hubu stack init --install-temporal` can install it)
+- The Temporal CLI: `hubu stack init --install-temporal` installs it with
+  [Homebrew](https://brew.sh/); without Homebrew, install it
+  [manually](https://docs.temporal.io/cli/setup-cli) and omit the flag
 - [Codex](https://github.com/openai/codex) for the guided path below, or any MCP
   client configured manually
 
