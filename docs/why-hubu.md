@@ -19,8 +19,10 @@ Hubu is worth running when you need more than a spending ceiling.
   [reserves](spend-lifecycle.md) its maximum cost before any provider work
   starts. The actual cost is settled afterwards and any unused amount is
   released, so agents running at the same time cannot overshoot the budget.
-- **One ledger across providers.** Decisions and money movement are recorded in
-  one [ledger](ledger-history.md), whichever provider did the work.
+- **One ledger across providers.** Every cost is recorded in one
+  [ledger](ledger-history.md), whichever provider did the work. Separate
+  authorization records show which spending was authorized and how it was
+  settled.
 - **Agents never hold keys.** Provider keys stay with
   [Gongbu](gongbu-execution.md), read from your macOS Keychain. Payment
   authority stays with Hubu. The agent only submits structured requests.

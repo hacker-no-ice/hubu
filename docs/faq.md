@@ -9,7 +9,8 @@ policies and strict budgets when you switch to live mode.
 
 ## Does Hubu hold my money?
 
-No. Hubu enforces budgets and keeps a ledger of decisions and money movement.
+No. Hubu enforces budgets, records costs in a ledger, and keeps records of
+authorized spending.
 Provider charges are billed to your own provider accounts. No production
 payment rail is supported yet.
 
