@@ -657,6 +657,25 @@ test("applies baseline security headers to Worker responses and static assets", 
   }
 });
 
+test("heading slugger matches github-slugger, including collisions with suffixed headings", async () => {
+  const { createSlugger, githubSlug, headingText } = await import("../scripts/heading-ids.mjs");
+  assert.equal(githubSlug("V4.4 Executor Request Identity"), "v44-executor-request-identity");
+  assert.equal(githubSlug("Edit credentials.toml"), "edit-credentialstoml");
+  assert.equal(githubSlug("schema_version"), "schema_version");
+  const slug = createSlugger();
+  assert.deepEqual(["Foo", "Foo-1", "Foo", "Foo"].map(slug), ["foo", "foo-1", "foo-2", "foo-3"]);
+
+  const { Marked, Renderer } = await import("marked");
+  const seen = [];
+  const renderer = new Renderer();
+  renderer.heading = function ({ tokens }) {
+    seen.push(headingText(this.parser, tokens));
+    return "";
+  };
+  new Marked({ renderer }).parse("## **Setup** with [a link](x), `code` &amp; *em*\n");
+  assert.deepEqual(seen, ["Setup with a link, code & em"]);
+});
+
 test("heading ids follow GitHub's slug rules and the table of contents matches them", async () => {
   const contract = await (await render("/docs/spend-executor-contract")).text();
   // GitHub drops "." rather than hyphenating it.

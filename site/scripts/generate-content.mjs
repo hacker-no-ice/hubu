@@ -2,7 +2,8 @@ import { cp, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { Marked, Renderer, TextRenderer } from "marked";
+import { Marked, Renderer } from "marked";
+import { createSlugger, headingText } from "./heading-ids.mjs";
 
 const siteRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const repoRoot = path.resolve(siteRoot, "..");
@@ -77,39 +78,16 @@ function summarize(text, limit = 160) {
   return `${(boundary > limit / 2 ? cut.slice(0, boundary) : cut).replace(/[\s,;:.]+$/, "")}…`;
 }
 
-function decodeEntities(text) {
-  return text
-    .replace(/&quot;/g, '"')
-    .replace(/&#0?39;/g, "'")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&amp;/g, "&");
-}
-
-// GitHub's heading slug (github-slugger): lowercase the rendered heading text,
-// drop everything except letters, marks, numbers, connector punctuation,
-// spaces and hyphens, then turn spaces into hyphens. Docs are written and read
-// on GitHub, so site ids must match GitHub's for in-repo #anchor links.
-function githubSlug(text) {
-  return text.toLowerCase().replace(/[^\p{L}\p{M}\p{N}\p{Pc}\- ]/gu, "").replace(/ /g, "-");
-}
-
-const textRenderer = new TextRenderer();
-
 // Returns the page HTML and its level-2 headings (for "On this page"), both
 // from one render pass so table-of-contents links always match heading ids.
 function renderMarkdown(markdown, sourcePath) {
   const renderer = new Renderer();
-  const usedIds = new Map();
+  const slug = createSlugger();
   const headings = [];
   renderer.heading = function ({ tokens, depth }) {
     const inner = this.parser.parseInline(tokens);
-    const text = decodeEntities(this.parser.parseInline(tokens, textRenderer)).trim();
-    // Like GitHub, the first occurrence keeps the bare slug and repeats get -1, -2, ...
-    const base = githubSlug(text) || "section";
-    const count = usedIds.get(base) ?? 0;
-    usedIds.set(base, count + 1);
-    const id = count ? `${base}-${count}` : base;
+    const text = headingText(this.parser, tokens);
+    const id = slug(text);
     if (depth === 2) headings.push({ text, id });
     return `<h${depth} id="${id}">${inner}<a class="heading-anchor" href="#${id}" aria-label="Link to ${escapeAttribute(text)}">#</a></h${depth}>`;
   };
