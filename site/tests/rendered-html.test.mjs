@@ -450,8 +450,8 @@ test("promotes complete mode-specific stack examples", async () => {
   assert.doesNotMatch(examples, /Live-profile review checklist/);
   assert.doesNotMatch(examples, /External-service variations/);
   assert.match(navigation, /Start here[^\n]*Complete stack examples/);
-  assert.match(examplesHtml, /id="edit-credentials-toml"/);
-  assert.match(credentialsHtml, /href="\/configuration\/local-stack\/v1\/examples#edit-credentials-toml"/);
+  assert.match(examplesHtml, /id="edit-credentialstoml"/);
+  assert.match(credentialsHtml, /href="\/configuration\/local-stack\/v1\/examples#edit-credentialstoml"/);
 });
 
 test("renders the concise canonical overview", async () => {
@@ -656,3 +656,26 @@ test("applies baseline security headers to Worker responses and static assets", 
     assert.ok(rules.includes(`${name}: ${value.toLowerCase()}`), `_headers lacks ${name}`);
   }
 });
+
+test("heading ids follow GitHub's slug rules and the table of contents matches them", async () => {
+  const contract = await (await render("/docs/spend-executor-contract")).text();
+  // GitHub drops "." rather than hyphenating it.
+  assert.match(contract, /id="v44-executor-request-identity"/);
+  assert.match(contract, /href="#v44-executor-request-identity"/);
+  assert.doesNotMatch(contract, /id="v4-4-executor-request-identity"/);
+
+  const providers = await (await render("/configuration/local-stack/v1/providers-toml")).text();
+  // Inline code headings use the code text, keeping underscores, with no "code-" wrapper.
+  assert.match(providers, /<h3 id="schema_version">/);
+  assert.doesNotMatch(providers, /id="code-/);
+
+  const source = await readFile(new URL("../app/generated-docs.ts", import.meta.url), "utf8");
+  const documents = JSON.parse(source.slice(source.indexOf("["), source.lastIndexOf("]") + 1));
+  for (const document of documents) {
+    const ids = new Set([...document.html.matchAll(/ id="([^"]+)"/g)].map((match) => match[1]));
+    for (const heading of document.headings) {
+      assert.ok(ids.has(heading.id), `${document.slug}: "On this page" entry #${heading.id} has no matching heading`);
+    }
+  }
+});
+
