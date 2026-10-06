@@ -2231,6 +2231,14 @@ ownership = "managed"
         assert!(error.contains("no ownership metadata"));
         assert!(error.contains("hubu-server"));
         drop(listener);
+
+        // A freed ephemeral port can be reused by a concurrently running test, so
+        // assert the unreachable case against port 0, which no listener can occupy.
+        fs::write(
+            profile.join("stack.toml"),
+            "schema_version = 1\n[hubu]\nownership = \"managed\"\nendpoint = \"http://127.0.0.1:0\"\n",
+        )
+        .unwrap();
         ensure_profile_stopped(profile).unwrap();
     }
 
@@ -2299,7 +2307,22 @@ ownership = "managed"
             .to_string()
             .contains("already operating"));
         drop(first);
-        acquire_lifecycle_lock(temp.path()).unwrap();
+
+        // A child spawned concurrently by another test inherits this lock's open file
+        // description between fork and exec, so the flock can briefly outlive the drop.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match acquire_lifecycle_lock(temp.path()) {
+                Ok(_) => break,
+                Err(error)
+                    if error.to_string().contains("already operating")
+                        && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("lifecycle lock was not released: {error:#}"),
+            }
+        }
     }
 
     #[test]
