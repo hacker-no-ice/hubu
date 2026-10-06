@@ -106,12 +106,16 @@ protocol rather than a single agent harness.
 
 ## Start exploring
 
+- [Why Hubu, compared with other approaches →](why-hubu.md)
+- [Frequently asked questions →](faq.md)
 - [Start the local Hubu stack →](local-stack.md)
 - [Operate supported live providers →](operations/live-providers.md)
 - [Understand policy, budgets, and spend lifecycle →](spend-lifecycle.md)
 - [See how Gongbu executes authorized work →](gongbu-execution.md)
 - [Use Hubu with your own executor →](external-executor.md)
 - [Integrate through unified MCP →](unified-mcp.md)
+
+See the [roadmap](roadmap.md) for what comes next.
 
 For operational procedures, protocol details, and troubleshooting, continue
 through the documentation navigation.
