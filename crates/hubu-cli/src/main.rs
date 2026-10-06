@@ -464,7 +464,7 @@ fn init_codex(base_url: &str, explicit_base_url: bool, mut args: Vec<String>) ->
         return Ok(());
     }
 
-    codex_mcp::write_config(&config_path, &existing_config, &block, force)
+    codex_mcp::write_config(&config_path, &block, force)
         .with_context(|| format!("update Codex config `{}`", config_path.display()))?;
 
     println!("Codex MCP configured for Hubu (unified)");

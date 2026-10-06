@@ -41,17 +41,15 @@ pub(crate) fn existing_trust_client_approval(existing: &str) -> Result<Option<bo
     Ok(Some(enabled))
 }
 
-pub(crate) fn write_config(
-    config_path: &Path,
-    existing: &str,
-    block: &str,
-    force: bool,
-) -> Result<()> {
+pub(crate) fn write_config(config_path: &Path, block: &str, force: bool) -> Result<()> {
     if let Some(parent) = config_path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("create Codex config directory `{}`", parent.display()))?;
     }
-    let updated = upsert(existing, block, force)?;
+    // Re-read immediately before writing so edits made while the trust prompt
+    // was open are preserved.
+    let existing = read_config(config_path)?;
+    let updated = upsert(&existing, block, force)?;
     fs::write(config_path, updated)
         .with_context(|| format!("write Codex config `{}`", config_path.display()))
 }
