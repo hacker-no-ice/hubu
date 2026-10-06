@@ -122,23 +122,21 @@ An ambiguous provider or settlement outcome becomes
 `reconciliation_required`. Gongbu does not blindly retry the provider call or
 release Hubu's hold merely because a response was lost. Gongbu claims with
 the execution's persisted Hubu authorization token and settles or releases by
-the Hubu `claim_id` (the v4.4 request shapes). If the claim response was lost
-and no claim ID was recorded, Gongbu replays the identical claim to recover it;
-Hubu returns the existing claim without claiming twice. Gongbu never receives
-or sends Hubu's private operation key: it identifies each new execution by
-Hubu's `decision_id` (`hubu-decision:<id>`), which also seeds the vendor
-idempotency key. Executions persisted before v4.4 keep the identity they were
-created with. With the persisted provider receipt, finalization remains
-idempotent under repeated delivery.
+the Hubu `claim_id`, following the v4.4 executor request identity rules in the
+[spend executor contract](spend-executor-contract.md), including replaying the identical claim to recover a lost `claim_id`.
+Gongbu never receives or sends Hubu's private operation key: it identifies each
+new execution by Hubu's `decision_id` (`hubu-decision:<id>`), which also seeds
+the vendor idempotency key. Executions persisted before v4.4 keep the identity
+they were created with. With the persisted provider receipt, finalization
+remains idempotent under repeated delivery.
 
 The same rule applies when an exact vendor charge rounds conservatively above
 the authorization. Gongbu persists the exact integer amount, scale, currency,
-provider identifiers, and full frozen pricing snapshot before finalization.
-Hubu's normal-settlement rejection leaves the hold claimed; Gongbu retains the
-exact provider-attempt cost, frozen snapshot, and evidence and routes the
-execution to reconciliation instead of repeating provider work or discarding
-the legitimate bill. Hubu permits the human billed resolution after the claim
-lease expires.
+provider identifiers, and full frozen pricing snapshot before finalization,
+and on Hubu's normal-settlement rejection routes the execution to
+reconciliation with that evidence intact instead of repeating provider work or
+discarding the legitimate bill. The human resolution path is defined in
+[expired claims](spend-executor-contract.md#expired-claims).
 
 ## Execution timing
 
@@ -195,187 +193,22 @@ or the live-spend gate is incomplete.
 
 Pricing and provider amounts never pass through floating point. Gongbu keeps
 the exact rational catalog calculation and any exact provider-reported decimal
-as checked integers. Hubu converts the final exact cost to budget cents once by
-ceiling, so any positive fractional-cent charge consumes at least one cent.
-Each operation keeps its own receipt and conversion; two independent provider
-settlements are never pooled before rounding.
+as checked integers. Hubu's single per-operation ceiling conversion to budget
+cents is defined in
+[precise external cost and budget conversion](spend-executor-contract.md#precise-external-cost-and-budget-conversion).
 
 Provider credentials belong to Gongbu's runtime identity. They are never
 accepted in execution requests, stored in repository records, included in
 fixtures, returned by APIs, written to Temporal payloads, or emitted in logs and
 errors.
 
-The managed-FLUX redaction-attestation contract additionally has one authenticated, bodyless
-read-only attestation endpoint at
-`GET /v1/executions/{id}/redaction-attestation`. It accepts only the exact
-successful frozen FLUX tuple and clean one-authorization-snapshot,
-one-claim-reference, one-attempt, one-artifact, one-receipt path. Gongbu
-revalidates the stored artifact bytes, resolves the currently registered key
-only after all fixed checks pass, and exact-matches it against named
-Gongbu-owned projections. A match fails closed. The response is an allowlisted
-set of booleans, counts, money facts, content digest, and canonical component
-hashes; it exposes no IDs, timestamps, coordinate, secret-derived hash, provider
-body, URL, or storage location and performs no provider work.
-
-The managed-stack contract `hubu.flux-2-pro.text-to-image/v1` binds the exact
-FLUX target, certified preset dimensions, three dated rational USD prices,
-poll/artifact/recovery policies, zero generation retries, and no fallback.
-Gongbu's production validator compares the rendered schema-v3 binding, target,
-and pricing against that shipped contract before serving. The sanitized catalog
-reports validation and Keychain-reference presence separately from live
-qualification; validation never calls BFL. See the
-[FLUX.2 provider contract runbook](operations/flux-provider-contract.md).
-
-### FLUX settled cost units
-
-Black Forest Labs defines settled generation cost as the top-level numeric
-`cost` field in its
-[Get Result response](https://docs.bfl.ai/api-reference/utility/get-result),
-not as `result.cost`. A missing or null top-level field means the response did
-not provide settled-cost evidence; an undocumented nested-only value is ignored.
-A malformed, negative, overflowing, or excessively precise top-level value
-fails closed into reconciliation with the provider request and operation
-identifiers preserved.
-
-BFL reports this value in credits and defines
-[one credit as exactly USD 0.01](https://docs.bfl.ai/quick_start/pricing). The
-`flux2_api` adapter parses the JSON number's decimal lexeme exactly and applies
-that conversion once as a decimal scale offset: a source coefficient with
-credit scale `s` becomes the same coefficient with USD scale `s + 2`. For
-example, `1.0001` credits becomes
-`{amount: 10001, scale: 6, currency: "USD"}`, or USD 0.010001. Retaining the
-coefficient and provider precision makes the source value and fixed conversion
-reviewable without binary floating point.
-
-The converted exact USD value is persisted on the provider attempt and receipt.
-Normal settlement, restart, replay, and reconciliation reuse that value and the
-receipt's already-derived budget-cent amount; they never apply the credit
-conversion or conservative cent ceiling a second time.
-
-### FLUX asynchronous transport and artifact delivery
-
-BFL's current
-[integration guide](https://docs.bfl.ai/api_integration/integration_guidelines)
-requires clients to poll the URL returned by a generation request and notes
-that artifact delivery regions can change. Gongbu keeps those two network
-policies separate. A provider-returned polling URL may receive `x-key` only
-when it is an HTTPS URL on `api.bfl.ai` or exactly
-`api.<region-or-shard>.bfl.ai`, where the variable portion is one safe ASCII
-DNS label. BFL documents that clients must use the returned polling URL; live
-provider evidence shows those URLs can use a one-label shard such as
-`api.us7.bfl.ai`. This is a narrow polling namespace, not a `*.bfl.ai`
-credential wildcard. User information, explicit ports, fragments, redirects,
-extra labels, IDNA labels, lookalikes, and all other origins are rejected
-before the credentialed request is sent.
-
-The generation POST is isolated in the patch-protected `submit_provider`
-activity and is never retried as provider generation work. A successful submit
-must be followed immediately by one atomic Gongbu SQLite checkpoint containing
-only the safe request ID when present, operation ID, normalized polling hostname, and
-the absolute adapter deadline. Before origin validation can terminate the
-execution, the same checkpoint also stores a versioned sanitized recovery
-record: normalized scheme/host/explicit port, fixed endpoint shape, query-key
-names, URL fingerprint, exact validation reason, and polling-policy version.
-It never stores the polling URL, arbitrary query values, userinfo, fragments,
-headers, credentials, provider bodies, signed artifact URLs, or storage paths.
-`poll_provider_operation` reconstructs the status request from frozen runtime
-configuration and that checkpoint, then issues only GET requests for the same
-operation. Worker restart and activity recovery reuse the checkpoint and its
-deadline rather than submitting again or granting a fresh timeout budget.
-
-The [Get Result OpenAPI](https://docs.bfl.ai/api-reference/utility/get-result)
-enumerates `Pending`, `Reasoning`, `Generating`, `Ready`, `Request Moderated`,
-`Content Moderated`, `Task not found`, and `Error`. Gongbu treats the first
-three as pollable, `Ready` as success, and every other state as immediately
-terminal; it never keeps polling a terminal response until timeout. Moderation
-and provider `Error` outcomes release the authorization because BFL's current
-[moderation guidance](https://help.bfl.ai/articles/4212278032-my-prompt-is-getting-moderated)
-says moderated requests are not charged and only `Ready` consumes credits.
-`Task not found`, malformed results, transport ambiguity after submission, and
-other outcomes that cannot prove whether work was accepted go to
-reconciliation. Before an operation is accepted, a
-definitive rejection releases the authorization; after acceptance, the same
-HTTP ambiguity reconciles. BFL's documented HTTP failures map `402` to
-insufficient credit, `403` to permission failure, and `429` to rate limiting;
-Gongbu also classifies `401` defensively as authentication failure. Raw provider
-bodies are not retained. Only compact, validated, non-secret request and
-operation identifiers may survive as reconciliation evidence.
-
-If a generation request may have reached BFL but its operation ID cannot be
-durably established, the workflow also reconciles. It does not infer safety
-from a missing checkpoint, retry the POST, or release the Hubu claim. Once the
-checkpoint exists, subsequent polling ambiguity retains that same safe
-operation evidence for recovery or reconciliation. Execution detail tells the
-agent not to resubmit, to recover first, and that artifact retrieval is
-time-sensitive. After a policy update, an explicit `reinspect` reconciliation
-action may reopen only that same ambiguous attempt and enter the GET-only
-poll-existing path while the original absolute polling deadline still leaves
-enough time to issue a status GET; the generation POST remains unreachable.
-Once that recovery window is exhausted, execution detail directs the operator
-to provider support instead, and Gongbu refuses to reopen polling or grant a
-fresh timeout budget.
-
-Artifact URLs follow a different, credential-free path. Gongbu accepts only
-HTTPS `delivery.<region>.bfl.ai` hosts with exactly one safe region label,
-rejects redirects and URL ambiguity, and never forwards `x-key`. Because BFL's
-[quick start](https://docs.bfl.ai/quick_start/generating_images) describes these
-as short-lived signed URLs, the adapter downloads them immediately within the
-invocation's byte and time limits. The signed URL is neither returned nor
-persisted. Gongbu decodes and validates the bounded response as PNG or JPEG
-before the downloaded bytes enter normalized artifact storage.
-Although the
-[`flux-2-pro` request contract](https://docs.bfl.ai/api-reference/models/generate-or-edit-an-image-with-flux2-%5Bpro%5D)
-offers JPEG, PNG, and WebP output, Gongbu's initial normalized FLUX subset is
-PNG and JPEG. The same contract defines `safety_tolerance` as the integer range
-`0..=5`; Gongbu rejects `6`, non-integers, and unsupported values before any
-provider request.
-
-### Certified FLUX.2 output dimensions
-
-The `flux2_api` adapter pins the non-preview `flux-2-pro` model described in the
-[official FLUX.2 overview](https://docs.bfl.ai/flux_2/flux2_overview). Its
-initial certified output profile is intentionally limited:
-
-| Normalized preset | Exact BFL width and height |
-| --- | --- |
-| `1k` | `1024` × `1024` |
-| `2k` | `1920` × `1088` (landscape) |
-| `4k` | `2048` × `2048` |
-
-These preset names belong to Hubu and Gongbu; BFL does not name these exact
-dimension pairs `1k`, `2k`, and `4k`. The mapping is deterministic and is not an
-automatic resolution-selection feature. Arbitrary dimensions, partial
-width/height overrides, and overrides that conflict with the selected preset
-are rejected during admission.
-
-The profile enforces BFL's documented minimum of `64` × `64`, requires each
-dimension to be a multiple of `16`, and caps output at the documented 4 MP
-maximum represented by `2048` × `2048`. See BFL's
-[official dimension guidance](https://help.bfl.ai/articles/8916739058-what-aspect-ratios-and-output-dimensions-are-supported).
-Each enabled FLUX profile must contain one operator-verified,
-selector-qualified price for every certified preset. Gongbu selects that rule,
-binds the exact dimensions, and freezes the preset, dimensions, and pricing
-snapshot before it resolves or claims Hubu authorization. Admission fails
-before persistence, `ProviderAttempt` creation, or provider network activity if
-the rule or dimension contract is missing or inconsistent.
-
-The adapter transmits only BFL's top-level integer `width` and `height` request
-fields documented by the
-[`flux-2-pro` API](https://docs.bfl.ai/api-reference/models/generate-or-edit-an-image-with-flux2-%5Bpro%5D).
-It never forwards Gongbu's generic `image_size` selector. The durable normalized
-input and pricing snapshot retain the selected preset and exact transmitted
-dimensions, so exact replay reconstructs the frozen request after catalog
-rotation or process restart instead of consulting the current catalog.
-
-For schema-v2 executions whose snapshot predates the additive
-`output_dimensions` field, recovery is limited to the same pinned FLUX target
-and a supported frozen selector. Gongbu derives the certified pair on a cloned
-request only when the persisted input selects that same preset and either omits
-both explicit dimensions or already contains the exact pair. Partial,
-conflicting, arbitrary, or unsupported legacy evidence still fails before
-claim, `ProviderAttempt` creation, credential resolution, or provider activity;
-the durable legacy record is not rewritten and the current catalog is not
-consulted.
+Provider-specific behavior is owned by the provider contract pages. The
+[FLUX.2 provider contract](operations/flux-provider-contract.md) covers the
+managed `hubu.flux-2-pro.text-to-image/v1` target, certified output dimensions,
+settled cost units, asynchronous transport and artifact delivery, and the
+managed-FLUX `GET /v1/executions/{id}/redaction-attestation` endpoint; the
+[Gemini provider contract](operations/gemini-provider-contract.md) covers the
+synchronous Gemini Developer API targets.
 
 ## Temporal ownership
 
@@ -436,12 +269,7 @@ use the shared [live provider operations](operations/live-providers.md) guide.
 The implementation lives in [`crates/gongbu-api`](../crates/gongbu-api).
 
 On repository open, Gongbu independently migrates legacy v4.3 minor-unit
-attempt and receipt amounts to exact amount with scale 2 and their stored
-currency. For an in-flight legacy receipt, it also reconstructs the exact v4.3
-wire evidence: the receipt ID remains the provider-request reference and the
-reduced price/model projection is derived from the unchanged frozen execution
-snapshot. New receipts instead persist the provider-reported reference and the
-complete snapshot. This keeps a lost-response retry immutable and idempotent.
-Hubu performs its corresponding migration only in the Hubu database; neither
-process opens or migrates the other's state. See
+attempt and receipt amounts to exact amounts with scale 2, keeping a
+lost-response retry immutable and idempotent; neither Hubu nor Gongbu opens or
+migrates the other's state. The exact mapping is defined in
 [persistence migration and v4 compatibility](spend-executor-contract.md#persistence-migration-and-v4-compatibility).

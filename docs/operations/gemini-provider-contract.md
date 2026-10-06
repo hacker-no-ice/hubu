@@ -5,6 +5,12 @@ FLUX contract. Operators select either or both contracts and provide only an
 opaque Keychain credential reference; the renderer supplies each immutable
 target, transport, capability, policy, and price.
 
+Start with [live provider operations](live-providers.md) for the shared
+credential, governance, pricing, spend, retry, reconciliation, artifact, and
+qualification procedure. This page is the canonical description of Gemini
+provider behavior; field definitions live in the
+[`providers.toml` reference](../configuration/local-stack/v1/providers-toml.md).
+
 | Frozen field | Value |
 | --- | --- |
 | Contracts | `hubu.gemini-3.1-flash-lite-image.text-to-image/v1`; `hubu.gemini-3.1-flash-image.text-to-image/v1` |
@@ -51,18 +57,22 @@ contract = "hubu.flux-2-pro.text-to-image/v1"
 credential = "bfl_flux"
 ```
 
-Credential coordinates must remain independent across providers.
-Readiness checks report configuration presence, credential-reference presence,
-production validation, and live qualification independently and do not call a
-provider.
+Credential coordinates must remain independent across providers. Readiness
+checks do not call a provider; see
+[readiness and live qualification](live-providers.md#readiness-and-live-qualification).
 
 ## Execute and recover
 
 Discover the target with `GET /v2/execution-targets` or
 `gongbu_list_execution_targets`, then submit only its opaque `target_id` plus
 a normalized request. Use the Lite target only for `1k`; use the non-Lite target
-for `1k`, `2k`, or `4k`. The default `ProviderAdapter` lifecycle performs one
-synchronous submission. A successful response completes immediately; an
+for `1k`, `2k`, or `4k`. The adapter verifies the selected size against the
+frozen schema-v2 pricing selector before calling the provider and never
+derives the authorized price from returned artifact dimensions.
+
+The adapter reads an AI Studio API key from Keychain and sends it only in the
+`x-goog-api-key` header to the configured Google API endpoint. The default
+`ProviderAdapter` lifecycle performs one synchronous submission. A successful response completes immediately; an
 ambiguous timeout has no pollable checkpoint and requires reconciliation, not
 automatic resubmission.
 
@@ -72,4 +82,6 @@ and redaction lifecycle but overrides submission and polling. See the
 transport.
 
 Ordinary tests and demos remain fixture-only. Do not perform paid qualification
-without a separate, explicit operator-authorized procedure.
+without a separate, explicit operator-authorized procedure; the focused live
+test is documented in
+[live provider operations](live-providers.md#gemini-developer-api).

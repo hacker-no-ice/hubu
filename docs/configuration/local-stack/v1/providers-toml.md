@@ -130,22 +130,12 @@ credential = "google_gemini_developer"
 entry from `credentials.toml`; it never contains a key. Both fields are
 required and unknown fields are rejected.
 
-The Gemini contracts pin the Developer API synchronous transport and zero
-retries. The Lite target supports only 1k at `336/100` cents; the non-Lite
-target supports 1k, 2k, and 4k at `67/10`, `101/10`, and `151/10` cents.
-See the [Gemini Developer API provider
-contract](../../../operations/gemini-provider-contract.md).
-
-The FLUX contract pins provider `flux`, adapter `flux2_api`, non-preview model
-`flux-2-pro`, one image, normalized PNG/JPEG, 1k=`1024x1024`,
-2k=`1920x1088`, 4k=`2048x2048`, zero generation retries, no fallback, the
-500 ms async poll policy, the one-label BFL delivery policy, durable async
-resume, and pricing version `bfl-flux-2-pro-usd-2026-08-28-v1`. Its frozen
-USD-cent rational rates are `3/1`, `45/10`, and `75/10` for 1k, 2k, and 4k.
-These are versioned configuration reviewed on 2026-08-28, not timeless current
-BFL prices. Apply the shared [live provider operations
-guide](../../../operations/live-providers.md), then review the
-[FLUX.2 provider contract](../../../operations/flux-provider-contract.md) before
+Each contract freezes its own model, transport, retry, dimension, and pricing
+behavior; the binding cannot change any of it. The
+[Gemini Developer API provider contract](../../../operations/gemini-provider-contract.md)
+and the [FLUX.2 provider contract](../../../operations/flux-provider-contract.md)
+are the canonical descriptions of those frozen values. Apply the shared
+[live provider operations guide](../../../operations/live-providers.md) before
 activation.
 
 Raw targets cannot duplicate or parallel a contract-bound provider/adapter
@@ -338,17 +328,13 @@ A selector-qualified rule must contain exactly one `image` price component. Defi
 
 **Defined by the provider's billable resolution tier and the normalized request contract.** Allowed current values are `1k`, `2k`, and `4k` after normalization. Do not use pixel dimensions unless the provider contract maps them to one of these selectors.
 
-For the `flux2_api` adapter, the only contract-bound target is BFL's non-preview `flux-2-pro` model from the [official FLUX.2 overview](https://docs.bfl.ai/flux_2/flux2_overview). Its intentionally small certified contract maps Gongbu's normalized selectors to exact BFL dimensions:
-
-| Gongbu selector | Exact BFL output |
-| --- | --- |
-| `1k` | `1024` × `1024` |
-| `2k` | `1920` × `1088` (landscape) |
-| `4k` | `2048` × `2048` |
-
-BFL does not name these dimension pairs `1k`, `2k`, and `4k`; they are Hubu/Gongbu preset aliases. Do not add arbitrary dimensions or automatic resolution selection. The adapter enforces BFL's [official constraints](https://help.bfl.ai/articles/8916739058-what-aspect-ratios-and-output-dimensions-are-supported): at least `64` × `64`, each dimension a multiple of `16`, and no more than the 4 MP ceiling represented by `2048` × `2048`.
-
-An enabled FLUX target must have one selector-qualified, operator-verified pricing rule for each of the three certified presets. A flat rule or partial pricing set is not enough. Gongbu chooses the matching rule and freezes its selector together with the exact dimensions before Hubu authorization resolution or claim. The provider request uses only the top-level integer `width` and `height` fields in BFL's [`flux-2-pro` request schema](https://docs.bfl.ai/api-reference/models/generate-or-edit-an-image-with-flux2-%5Bpro%5D); Gongbu's generic `image_size` selector is durable pricing and replay evidence and is never sent to BFL.
+For the `flux2_api` adapter, the selectors map to the certified exact BFL
+output dimensions defined in the
+[FLUX.2 provider contract](../../../operations/flux-provider-contract.md#certified-output-dimensions).
+An enabled FLUX target must have one selector-qualified, operator-verified
+pricing rule for each of the three certified presets; a flat rule or partial
+pricing set is not enough. The `image_size` selector is durable pricing and
+replay evidence and is never sent to BFL.
 
 ### `pricing_rules.components`
 
@@ -387,12 +373,12 @@ components = [
 ```
 
 Gongbu computes an exact rational estimate and rounds conservatively when
-producing an integer authorization amount. At settlement it preserves the final
-exact provider cost as an integer amount, decimal scale, and currency together
-with this complete frozen pricing snapshot. Hubu converts that final exact cost
-to budget cents once with checked ceiling, so it never understates a positive
-fractional-cent charge. Verify both the provider's unit and whether quoted
-prices include every billable component.
+producing an integer authorization amount. Settlement preserves the final exact
+provider cost with this complete frozen pricing snapshot and converts it to
+budget cents once, as defined in
+[precise external cost and budget conversion](../../../spend-executor-contract.md#precise-external-cost-and-budget-conversion).
+Verify both the provider's unit and whether quoted prices include every
+billable component.
 
 ## Matching and ambiguity rules
 
