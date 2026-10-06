@@ -334,6 +334,9 @@ test("renders the concise canonical overview", async () => {
   assert.match(html, /Why Hubu and Gongbu/);
   assert.match(html, /Hubu governs resources\. Gongbu performs the work\./);
   assert.match(html, /Experimental and local-first/);
+  assert.match(html, /What works today/);
+  assert.match(html, /href="\/docs\/external-executor"/);
+  assert.doesNotMatch(html, /budget administration/);
   assert.doesNotMatch(html, /What Hubu Does Today|Crates|Local Developer Tools/);
 });
 

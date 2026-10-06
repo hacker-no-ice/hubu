@@ -16,6 +16,18 @@ control of payment keys, provider credentials, or unrestricted budgets.
 > yet. The built-in direct payment path remains a mock, and Hubu is not approved
 > as money-grade production financial infrastructure.
 
+## What works today
+
+| Area | Status today |
+| --- | --- |
+| Platform and install | macOS, installed from an exact release tag with the [source installer](operations/releases.md#install-an-exact-release-from-source-macos). |
+| Agent clients | Codex through `hubu init codex`. Other MCP clients can connect to `hubu-unified-mcp` with [manual configuration](unified-mcp.md#setup). |
+| Live providers | Gemini Developer API and FLUX.2 Pro; see [live provider operations](operations/live-providers.md). |
+| Sandbox | The complete stack with a deterministic, non-billable provider fixture. |
+| Governance only | `hubu-only` mode runs registration, policy, authorization, and budgets without Gongbu. |
+| Your own executor | Any service that implements `hubu-spend-executor-v4.4`; see [external executor](external-executor.md). |
+| Direct payments | Mock only; no production payment rail. |
+
 ## Why Hubu and Gongbu?
 
 The names come from two ministries in imperial China.
@@ -35,9 +47,6 @@ work with the provider. The two cooperate, but retain separate responsibilities,
 credentials, storage, and failure boundaries.
 
 [Explore the interactive architecture →](../architecture/index.html)
-
-The [budget administration boundary](budget-architecture.md) documents the public
-manager, commit ordering, and shared lock policy.
 
 ## The core idea
 
@@ -101,6 +110,7 @@ protocol rather than a single agent harness.
 - [Operate supported live providers →](operations/live-providers.md)
 - [Understand policy, budgets, and spend lifecycle →](spend-lifecycle.md)
 - [See how Gongbu executes authorized work →](gongbu-execution.md)
+- [Use Hubu with your own executor →](external-executor.md)
 - [Integrate through unified MCP →](unified-mcp.md)
 
 For operational procedures, protocol details, and troubleshooting, continue
