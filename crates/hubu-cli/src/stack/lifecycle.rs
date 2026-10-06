@@ -2233,10 +2233,10 @@ ownership = "managed"
         drop(listener);
 
         // A freed ephemeral port can be reused by a concurrently running test, so
-        // assert the unreachable case against a port nothing in the suite binds.
+        // assert the unreachable case against port 0, which no listener can occupy.
         fs::write(
             profile.join("stack.toml"),
-            "schema_version = 1\n[hubu]\nownership = \"managed\"\nendpoint = \"http://127.0.0.1:1\"\n",
+            "schema_version = 1\n[hubu]\nownership = \"managed\"\nendpoint = \"http://127.0.0.1:0\"\n",
         )
         .unwrap();
         ensure_profile_stopped(profile).unwrap();
