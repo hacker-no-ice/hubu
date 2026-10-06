@@ -236,9 +236,28 @@ test("renders the command-focused local stack quick start", async () => {
   assert.match(html, /href="https:\/\/hubustack\.dev\/configuration\/local-stack\/v1\/"/);
   assert.doesNotMatch(html, /Component ownership|Clean-environment acceptance canary|Runtime and recovery boundaries/);
   assert.doesNotMatch(html, /not on main yet/i);
+  assert.match(html, /<h2 id="make-your-first-governed-request">Make your first governed request/);
+  assert.match(html, /hubu_submit_governed_execution/);
+  assert.match(html, /hubu spend authorizations/);
+  assert.match(html, /href="\/docs\/operations\/managing-a-stack"/);
+  assert.doesNotMatch(html, /Terminal color and automation|allow_development_builds|NO_COLOR|hubu stack rollback/);
   assert.match(html, /On this page/);
   assert.match(html, /src="\/brand\/hubu-wordmark\.svg"/);
   assert.match(html, /aria-label="Hubu documentation home"/);
+});
+
+test("renders the local stack management runbook", async () => {
+  const response = await render("/docs/operations/managing-a-stack");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /Managing a local stack/);
+  for (const id of ["routine-operations", "apply-a-configuration-change", "roll-back", "terminal-color-and-automation", "managed-logs"]) {
+    assert.match(html, new RegExp(`<h2 id="${id}">`), id);
+  }
+  assert.match(html, /hubu stack rollback --generation/);
+  assert.match(html, /href="\/docs\/local-stack"/);
+  const navigation = await readFile(new URL("../app/lib/docs.ts", import.meta.url), "utf8");
+  assert.match(navigation, /\["CLI administration", "cli"\], \["Managing a local stack", "operations\/managing-a-stack"\]/);
 });
 
 test("publishes the versioned local-stack configuration reference at stable public routes", async () => {
@@ -335,6 +354,8 @@ test("keeps managed credential locations out of the first-run profile", async ()
   assert.doesNotMatch(examples, /^\[files\]$/m);
   assert.doesNotMatch(examples, /^\[opaque\.gongbu_(hubu|caller)\]$/m);
   assert.doesNotMatch(`${localStack}\n${readme}`, /temporary Hubu process|pre-provision(?:ing)? workaround/i);
+  assert.match(localStack, /needs no provider\s+credentials/);
+  assert.doesNotMatch(localStack, /^\[files\]$|hubu_auth|\.auth-token/m);
   assert.match(credentials, /final managed `hubu-server` creates or\s+reuses those capabilities/i);
   assert.match(credentials, /Gongbu-owned bootstrap/i);
 });
@@ -381,6 +402,9 @@ test("renders the concise canonical overview", async () => {
   assert.match(html, /Why Hubu and Gongbu/);
   assert.match(html, /Hubu governs resources\. Gongbu performs the work\./);
   assert.match(html, /Experimental and local-first/);
+  assert.match(html, /What works today/);
+  assert.match(html, /href="\/docs\/external-executor"/);
+  assert.doesNotMatch(html, /budget administration/);
   assert.doesNotMatch(html, /What Hubu Does Today|Crates|Local Developer Tools/);
 });
 
@@ -411,7 +435,9 @@ test("publishes the high-level topology and four focused component drills", asyn
   assert.equal(publishedHtml, html);
   assert.match(html, /src="\/brand\/hubu-wordmark\.svg"/);
   assert.match(html, />\/ architecture</);
-  assert.match(html, /HIGH-LEVEL TOPOLOGY/);
+  assert.match(html, /FULL SERVICE TOPOLOGY/);
+  assert.doesNotMatch(html, /HIGH-LEVEL TOPOLOGY/);
+  assert.match(html, /Every process and owned store, for readers who want the detail\./);
   assert.match(html, /Hubu governs every billable operation/);
   assert.doesNotMatch(html, /Hubu governs every request/);
   assert.match(html, /AGENT ADAPTER PROCESS/);
@@ -457,6 +483,50 @@ test("publishes the high-level topology and four focused component drills", asyn
   assert.doesNotMatch(script, /asking Hubu to settle, release, or reconcile/);
   assert.doesNotMatch(html, /admin \+ lifecycle → Hubu/);
   assert.doesNotMatch(`${html}\n${script}`, /v4\.2|Unified MCP <code>|data-stage-button|play-flow|setInterval/);
+});
+
+test("leads the architecture page with a five-step single-request walkthrough", async () => {
+  const html = await readFile(new URL("../architecture/index.html", import.meta.url), "utf8");
+  const walkthroughStart = html.indexOf('<section id="walkthrough"');
+  const topologyStart = html.indexOf('<section id="topology"');
+  const componentsStart = html.indexOf('<section id="components"');
+  assert.ok(walkthroughStart > html.indexOf('<section class="hero">'), "walkthrough follows the hero");
+  assert.ok(topologyStart > walkthroughStart, "walkthrough appears before the full topology");
+  assert.ok(componentsStart > topologyStart, "component drills follow the full topology");
+
+  const walkthrough = html.slice(walkthroughStart, topologyStart);
+  assert.match(walkthrough, /FOLLOW ONE REQUEST/);
+  assert.match(walkthrough, /<h2 id="walkthrough-title">One governed request,<br \/>five steps\.<\/h2>/);
+  assert.match(walkthrough, /<ol class="request-flow" aria-label="Lifecycle of one governed request">/);
+  const steps = [...walkthrough.matchAll(/<li class="flow-step (agent|hubu|gongbu)">[\s\S]*?<strong>([^<]+)<\/strong>/g)];
+  assert.deepEqual(
+    steps.map((match) => [match[1], match[2]]),
+    [
+      ["agent", "Agent asks for work"],
+      ["hubu", "Check identity, policy, and budget"],
+      ["hubu", "Authorize and reserve"],
+      ["gongbu", "Execute with the provider"],
+      ["hubu", "Settle, release, or reconcile"],
+    ],
+  );
+  assert.match(walkthrough, /HUBU · CONTROL PLANE/);
+  assert.match(walkthrough, /GONGBU · EXECUTION PLANE/);
+  assert.match(walkthrough, /never a provider key/);
+  assert.match(walkthrough, /which authenticates to Hubu on its behalf/);
+  assert.doesNotMatch(walkthrough, /carrying only its Hubu credential/);
+  assert.match(walkthrough, /run by Gongbu, the first-party executor/);
+  assert.match(walkthrough, /<a href="\/docs\/external-executor">Your own executor<\/a>/);
+  assert.doesNotMatch(walkthrough, /Every billable call follows|Provider keys live only in Gongbu/);
+
+  const jumpLinks = [...html.matchAll(/<nav class="hero-meta"[\s\S]*?<\/nav>/g)][0][0];
+  const targets = [...jumpLinks.matchAll(/href="#([^"]+)"/g)].map((match) => match[1]);
+  assert.deepEqual(targets, ["walkthrough", "topology", "components"]);
+  for (const id of targets) assert.match(html, new RegExp(`id="${id}"`));
+
+  assert.match(
+    html,
+    /<a href="\/architecture\/internal\/">Engineering explorer <span class="nav-note">\(for contributors\)<\/span> ↗<\/a>/,
+  );
 });
 
 test("publishes the original engineering architecture explorer separately", async () => {
