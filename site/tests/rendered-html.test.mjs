@@ -84,7 +84,8 @@ test("links demos from home and publishes the sandbox video before its concise s
   const nav = html.match(/<nav class="docs-nav"[\s\S]*?<\/nav>/)?.[0];
   assert.ok(nav);
   assert.ok(nav.indexOf("<h2>Start here</h2>") < nav.indexOf("<h2>Demos</h2>"));
-  assert.ok(nav.indexOf("<h2>Demos</h2>") < nav.indexOf("<h2>Configure the stack</h2>"));
+  assert.ok(nav.indexOf("<h2>Demos</h2>") < nav.indexOf("<h2>Core concepts</h2>"));
+  assert.ok(nav.indexOf("<h2>Core concepts</h2>") < nav.indexOf("<h2>Configure the stack</h2>"));
   const startHere = nav.match(/<section><h2>Start here<\/h2>([\s\S]*?)<\/section>/)?.[1];
   assert.ok(startHere);
   assert.match(startHere, /href="\/docs\/faq">FAQ<\/a>$/);
@@ -117,6 +118,21 @@ test("home page states that Gongbu is optional and links what works today", asyn
   assert.match(html, /<strong>Sandbox<\/strong> with no provider credentials/);
   assert.match(html, /href="\/docs\/overview#what-works-today"/);
   assert.ok(html.indexOf('class="warning-band"') < html.indexOf('class="works-today"'));
+});
+
+test("roadmap shows three linked priorities without promising release dates", async () => {
+  const response = await render("/docs/roadmap");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  const diagram = html.match(/<figure class="roadmap-diagram"[\s\S]*?<\/figure>/)?.[0];
+  assert.ok(diagram);
+  assert.equal(diagram.match(/<li>/g)?.length, 3);
+  assert.equal(diagram.match(/aria-hidden="true"/g)?.length, 3);
+  assert.match(diagram, /Planned order, not release dates/);
+  for (const [, id] of diagram.matchAll(/href="#([^"]+)"/g)) {
+    assert.ok(html.includes(`id="${id}"`), `diagram links to ${id}`);
+  }
+  assert.ok(html.indexOf(diagram) < html.indexOf('id="1-easy-and-safe-for-individuals"'));
 });
 
 test("home page starts the stack steps with an install step and routes topic cards to first steps", async () => {
