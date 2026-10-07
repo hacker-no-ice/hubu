@@ -5,6 +5,15 @@ the sole maintainer. Themes are listed in the order they are planned. They are
 directions, not dated commitments, and they change as the project learns from
 people using it.
 
+<figure class="roadmap-diagram" aria-label="Three roadmap priorities in planned order">
+<ol>
+<li><a href="#1-easy-and-safe-for-individuals"><span class="roadmap-stage">01 · INDIVIDUALS</span><svg viewBox="0 0 48 48" width="48" height="48" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2"><rect x="7" y="8" width="34" height="24" rx="4"/><path d="M17 40h14M24 32v8M18 20l4 4 8-8"/></svg><strong>Easy &amp; safe locally</strong><span>Less setup friction.<br>Clear costs. Safe defaults.</span></a></li>
+<li><a href="#2-governed-model-calls"><span class="roadmap-stage">02 · WORKLOADS</span><svg viewBox="0 0 48 48" width="48" height="48" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2"><rect x="12" y="12" width="24" height="24" rx="5"/><path d="M18 5v7M30 5v7M18 36v7M30 36v7M5 18h7M5 30h7M36 18h7M36 30h7M19 24h10M24 19v10"/></svg><strong>Govern model calls</strong><span>Advanced models.<br>Same policy and ledger.</span></a></li>
+<li><a href="#3-a-deployed-hubu-for-cloud-agents-and-small-teams"><span class="roadmap-stage">03 · DEPLOYMENT</span><svg viewBox="0 0 48 48" width="48" height="48" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 30h22a7 7 0 0 0 1-14 12 12 0 0 0-23-1 8 8 0 0 0 0 15ZM24 30v9M12 39h24"/><circle cx="12" cy="40" r="3"/><circle cx="36" cy="40" r="3"/></svg><strong>Cloud agents &amp; teams</strong><span>Linux deployment.<br>Shared budgets and roles.</span></a></li>
+</ol>
+<figcaption>Planned order, not release dates. Each priority builds on the same spending boundaries.</figcaption>
+</figure>
+
 ## 1. Easy and safe for individuals
 
 The first priority is making Hubu easy and safe for one person running it on

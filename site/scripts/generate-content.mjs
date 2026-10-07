@@ -52,6 +52,8 @@ const sourceToSlug = new Map(sourceFiles.map((file) => {
 }));
 
 function publicHref(slug) {
+  if (slug === "demos") return "/demos";
+  if (slug.startsWith("demos/")) return `/${slug}`;
   return slug.startsWith("configuration/local-stack/v1") ? `/${slug}` : `/docs/${slug}`;
 }
 

@@ -22,6 +22,11 @@ navigation in `app/lib/docs.ts`. The page is searchable automatically after the
 next build. Relative Markdown links are translated to site routes; links to
 repository source files remain GitHub links.
 
+Demo companion scripts live under `docs/demos/`: `index.md` is served at
+`/demos`, and individual scripts at `/demos/<slug>`. They use the same content,
+search, navigation, and metadata pipeline as documentation. Keep each script
+concise and aligned with its recording, with the video before the script.
+
 Internal page changes intentionally use native document navigation. The current
 vinext client router fails on deployed dynamic documentation routes; the smoke
 tests guard this fallback until the upstream Link runtime is safe to restore.

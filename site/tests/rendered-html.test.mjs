@@ -70,6 +70,43 @@ test("home page walks through an illustrative governed image request", async () 
   assert.ok(html.indexOf('id="worked-example-title"') < html.indexOf('id="intro-video-title"'));
 });
 
+test("links demos from home and publishes the sandbox video before its concise script", async () => {
+  const home = await (await render()).text();
+  assert.match(home, /href="\/demos">Demos<\/a>/);
+  assert.match(home, /href="\/demos\/sandbox"/);
+  const index = await render("/demos");
+  assert.equal(index.status, 200);
+  assert.match(await index.text(), /href="\/demos\/sandbox"/);
+  const response = await render("/demos/sandbox");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /href="https:\/\/hubustack.dev\/demos\/sandbox"/);
+  const nav = html.match(/<nav class="docs-nav"[\s\S]*?<\/nav>/)?.[0];
+  assert.ok(nav);
+  assert.ok(nav.indexOf("<h2>Start here</h2>") < nav.indexOf("<h2>Demos</h2>"));
+  assert.ok(nav.indexOf("<h2>Demos</h2>") < nav.indexOf("<h2>Core concepts</h2>"));
+  assert.ok(nav.indexOf("<h2>Core concepts</h2>") < nav.indexOf("<h2>Configure the stack</h2>"));
+  const startHere = nav.match(/<section><h2>Start here<\/h2>([\s\S]*?)<\/section>/)?.[1];
+  assert.ok(startHere);
+  assert.match(startHere, /href="\/docs\/faq">FAQ<\/a>$/);
+  const iframe = html.match(/<iframe\b[^>]*><\/iframe>/)?.[0];
+  assert.ok(iframe);
+  assert.match(iframe, /youtube-nocookie.com\/embed\/01A1RemvK1A/);
+  assert.match(iframe, /title="Hubu Sandbox Demo: From Agent Registration to Spend Settlement"/);
+  assert.match(iframe, /loading="lazy"/);
+  assert.doesNotMatch(iframe, /autoplay/);
+  assert.ok(html.indexOf(iframe) < html.indexOf('id="the-short-version"'));
+  assert.match(html, /1×1 PNG fixture/);
+  assert.match(html, /USD 0\.99 remaining/);
+  assert.match(html, /denies unmatched requests/);
+  assert.match(html, /No real provider calls or charges/);
+  const missing = await render("/demos/not-a-demo");
+  assert.equal(missing.status, 404);
+  const legacy = await render("/docs/demos/sandbox");
+  assert.equal(legacy.status, 307);
+  assert.equal(legacy.headers.get("location"), "/demos/sandbox");
+});
+
 test("home page states that Gongbu is optional and links what works today", async () => {
   const html = await (await render()).text();
   assert.match(html, /Gongbu is the first-party executor, not a requirement/);
@@ -81,6 +118,21 @@ test("home page states that Gongbu is optional and links what works today", asyn
   assert.match(html, /<strong>Sandbox<\/strong> with no provider credentials/);
   assert.match(html, /href="\/docs\/overview#what-works-today"/);
   assert.ok(html.indexOf('class="warning-band"') < html.indexOf('class="works-today"'));
+});
+
+test("roadmap shows three linked priorities without promising release dates", async () => {
+  const response = await render("/docs/roadmap");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  const diagram = html.match(/<figure class="roadmap-diagram"[\s\S]*?<\/figure>/)?.[0];
+  assert.ok(diagram);
+  assert.equal(diagram.match(/<li>/g)?.length, 3);
+  assert.equal(diagram.match(/aria-hidden="true"/g)?.length, 3);
+  assert.match(diagram, /Planned order, not release dates/);
+  for (const [, id] of diagram.matchAll(/href="#([^"]+)"/g)) {
+    assert.ok(html.includes(`id="${id}"`), `diagram links to ${id}`);
+  }
+  assert.ok(html.indexOf(diagram) < html.indexOf('id="1-easy-and-safe-for-individuals"'));
 });
 
 test("home page starts the stack steps with an install step and routes topic cards to first steps", async () => {
@@ -137,7 +189,7 @@ test("publishes per-page canonical and share metadata", async () => {
   const description = html.match(/<meta name="description" content="([^"]*)"/)?.[1];
   assert.ok(description && description.length <= 160);
   assert.match(description, /\w…$/);
-  assert.match(html, /← Previous<\/small><strong>FAQ<\/strong>/);
+  assert.match(html, /← Previous<\/small><strong>Why Hubu<\/strong>/);
   const whyHubu = await (await render("/docs/why-hubu")).text();
   assert.match(whyHubu, /← Previous<\/small><strong>Overview<\/strong>/);
 
@@ -152,7 +204,7 @@ test("publishes a sitemap of every documentation route", async () => {
     readFile(new URL("../dist/client/robots.txt", import.meta.url), "utf8"),
   ]);
   assert.match(robots, /^Sitemap: https:\/\/hubustack.dev\/sitemap.xml$/m);
-  for (const pathname of ["/", "/architecture/", "/docs/overview", "/docs/local-stack", "/configuration/local-stack/v1", "/configuration/local-stack/v1/stack-toml"]) {
+  for (const pathname of ["/", "/demos", "/demos/sandbox", "/architecture/", "/docs/overview", "/docs/local-stack", "/configuration/local-stack/v1", "/configuration/local-stack/v1/stack-toml"]) {
     assert.ok(sitemap.includes(`<loc>https://hubustack.dev${pathname}</loc>`), pathname);
   }
 });
@@ -699,4 +751,3 @@ test("heading ids follow GitHub's slug rules and the table of contents matches t
     }
   }
 });
-
