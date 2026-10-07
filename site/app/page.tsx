@@ -69,6 +69,7 @@ export default function Home() {
             <div className="hero-actions">
               <a className="button primary" href="/docs/local-stack">Start with the local stack <span>→</span></a>
               <a className="button secondary" href="/architecture/">Explore the architecture</a>
+              <a className="button secondary" href="/demos">Watch a demo</a>
             </div>
           </div>
           <div className="boundary-card" aria-label="Hubu and Gongbu responsibility boundary">

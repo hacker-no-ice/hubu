@@ -73,7 +73,11 @@ test("home page walks through an illustrative governed image request", async () 
 test("links demos from home and publishes the sandbox video before its concise script", async () => {
   const home = await (await render()).text();
   assert.match(home, /href="\/demos">Demos<\/a>/);
+  const actions = home.match(/<div class="hero-actions">[\s\S]*?<\/div>/)?.[0];
+  assert.ok(actions);
+  assert.match(actions, /href="\/architecture\/">Explore the architecture<\/a>\s*<a class="button secondary" href="\/demos">Watch a demo<\/a>/);
   assert.match(home, /href="\/demos\/sandbox"/);
+  assert.match(home, /See Hubu in use: watch the sandbox demo and follow the walkthrough/);
   const index = await render("/demos");
   assert.equal(index.status, 200);
   assert.match(await index.text(), /href="\/demos\/sandbox"/);
