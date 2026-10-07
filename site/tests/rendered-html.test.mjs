@@ -81,6 +81,10 @@ test("links demos from home and publishes the sandbox video before its concise s
   assert.equal(response.status, 200);
   const html = await response.text();
   assert.match(html, /href="https:\/\/hubustack.dev\/demos\/sandbox"/);
+  const nav = html.match(/<nav class="docs-nav"[\s\S]*?<\/nav>/)?.[0];
+  assert.ok(nav);
+  assert.ok(nav.indexOf("<h2>Start here</h2>") < nav.indexOf("<h2>Demos</h2>"));
+  assert.ok(nav.indexOf("<h2>Demos</h2>") < nav.indexOf("<h2>Configure the stack</h2>"));
   const iframe = html.match(/<iframe\b[^>]*><\/iframe>/)?.[0];
   assert.ok(iframe);
   assert.match(iframe, /youtube-nocookie.com\/embed\/01A1RemvK1A/);
