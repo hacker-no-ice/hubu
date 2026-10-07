@@ -3,7 +3,7 @@ import { documents } from "../generated-docs";
 export type Doc = (typeof documents)[number];
 
 export const navGroups = [
-  { label: "Start here", items: [["Overview", "overview"], ["Why Hubu", "why-hubu"], ["FAQ", "faq"], ["Local stack quick start", "local-stack"], ["Complete stack examples", "configuration/local-stack/v1/examples"], ["Roadmap", "roadmap"], ["Send feedback", "feedback"]] },
+  { label: "Start here", items: [["Overview", "overview"], ["Why Hubu", "why-hubu"], ["Local stack quick start", "local-stack"], ["Complete stack examples", "configuration/local-stack/v1/examples"], ["Roadmap", "roadmap"], ["Send feedback", "feedback"], ["FAQ", "faq"]] },
   { label: "Demos", items: [["All demos", "demos"], ["Sandbox: registration to settlement", "demos/sandbox"]] },
   { label: "Configure the stack", items: [["Configuration reference", "configuration/local-stack/v1"], ["stack.toml", "configuration/local-stack/v1/stack-toml"], ["credentials.toml", "configuration/local-stack/v1/credentials-toml"], ["providers.toml", "configuration/local-stack/v1/providers-toml"], ["Decision guides", "configuration/local-stack/v1/decisions"]] },
   { label: "Core concepts", items: [["Agent registration", "agent-registration"], ["Policy engine", "policy-engine"], ["Spend lifecycle", "spend-lifecycle"], ["Gongbu execution", "gongbu-execution"], ["Unified MCP", "unified-mcp"], ["Use your own executor", "external-executor"], ["MCP tool catalog", "mcp-tool-consolidation"]] },

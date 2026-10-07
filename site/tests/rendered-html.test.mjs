@@ -85,6 +85,9 @@ test("links demos from home and publishes the sandbox video before its concise s
   assert.ok(nav);
   assert.ok(nav.indexOf("<h2>Start here</h2>") < nav.indexOf("<h2>Demos</h2>"));
   assert.ok(nav.indexOf("<h2>Demos</h2>") < nav.indexOf("<h2>Configure the stack</h2>"));
+  const startHere = nav.match(/<section><h2>Start here<\/h2>([\s\S]*?)<\/section>/)?.[1];
+  assert.ok(startHere);
+  assert.match(startHere, /href="\/docs\/faq">FAQ<\/a>$/);
   const iframe = html.match(/<iframe\b[^>]*><\/iframe>/)?.[0];
   assert.ok(iframe);
   assert.match(iframe, /youtube-nocookie.com\/embed\/01A1RemvK1A/);
@@ -170,7 +173,7 @@ test("publishes per-page canonical and share metadata", async () => {
   const description = html.match(/<meta name="description" content="([^"]*)"/)?.[1];
   assert.ok(description && description.length <= 160);
   assert.match(description, /\w…$/);
-  assert.match(html, /← Previous<\/small><strong>FAQ<\/strong>/);
+  assert.match(html, /← Previous<\/small><strong>Why Hubu<\/strong>/);
   const whyHubu = await (await render("/docs/why-hubu")).text();
   assert.match(whyHubu, /← Previous<\/small><strong>Overview<\/strong>/);
 
