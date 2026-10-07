@@ -29,6 +29,7 @@ const worksToday = [
 
 const primaryLinks = [
   ["Documentation", "/docs/overview"],
+  ["Demos", "/demos"],
   ["Architecture", "/architecture/"],
   ["Send feedback", "/docs/feedback"],
   ["GitHub", "https://github.com/hacker-no-ice/hubu"],
@@ -123,6 +124,7 @@ export default function Home() {
             />
           </div>
           <p className="intro-video-link"><a href="https://youtu.be/ufEgYjmxKWM">Watch on YouTube ↗</a></p>
+          <p className="intro-video-link"><a href="/demos/sandbox">See Hubu in use: watch the sandbox demo and follow the walkthrough →</a></p>
         </section>
 
         <section className="warning-band" aria-label="Project status warning">

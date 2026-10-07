@@ -70,6 +70,35 @@ test("home page walks through an illustrative governed image request", async () 
   assert.ok(html.indexOf('id="worked-example-title"') < html.indexOf('id="intro-video-title"'));
 });
 
+test("links demos from home and publishes the sandbox video before its concise script", async () => {
+  const home = await (await render()).text();
+  assert.match(home, /href="\/demos">Demos<\/a>/);
+  assert.match(home, /href="\/demos\/sandbox"/);
+  const index = await render("/demos");
+  assert.equal(index.status, 200);
+  assert.match(await index.text(), /href="\/demos\/sandbox"/);
+  const response = await render("/demos/sandbox");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /href="https:\/\/hubustack.dev\/demos\/sandbox"/);
+  const iframe = html.match(/<iframe\b[^>]*><\/iframe>/)?.[0];
+  assert.ok(iframe);
+  assert.match(iframe, /youtube-nocookie.com\/embed\/01A1RemvK1A/);
+  assert.match(iframe, /title="Hubu Sandbox Demo: From Agent Registration to Spend Settlement"/);
+  assert.match(iframe, /loading="lazy"/);
+  assert.doesNotMatch(iframe, /autoplay/);
+  assert.ok(html.indexOf(iframe) < html.indexOf('id="the-short-version"'));
+  assert.match(html, /1×1 PNG fixture/);
+  assert.match(html, /USD 0\.99 remaining/);
+  assert.match(html, /denies unmatched requests/);
+  assert.match(html, /No real provider calls or charges/);
+  const missing = await render("/demos/not-a-demo");
+  assert.equal(missing.status, 404);
+  const legacy = await render("/docs/demos/sandbox");
+  assert.equal(legacy.status, 307);
+  assert.equal(legacy.headers.get("location"), "/demos/sandbox");
+});
+
 test("home page states that Gongbu is optional and links what works today", async () => {
   const html = await (await render()).text();
   assert.match(html, /Gongbu is the first-party executor, not a requirement/);
@@ -152,7 +181,7 @@ test("publishes a sitemap of every documentation route", async () => {
     readFile(new URL("../dist/client/robots.txt", import.meta.url), "utf8"),
   ]);
   assert.match(robots, /^Sitemap: https:\/\/hubustack.dev\/sitemap.xml$/m);
-  for (const pathname of ["/", "/architecture/", "/docs/overview", "/docs/local-stack", "/configuration/local-stack/v1", "/configuration/local-stack/v1/stack-toml"]) {
+  for (const pathname of ["/", "/demos", "/demos/sandbox", "/architecture/", "/docs/overview", "/docs/local-stack", "/configuration/local-stack/v1", "/configuration/local-stack/v1/stack-toml"]) {
     assert.ok(sitemap.includes(`<loc>https://hubustack.dev${pathname}</loc>`), pathname);
   }
 });
@@ -699,4 +728,3 @@ test("heading ids follow GitHub's slug rules and the table of contents matches t
     }
   }
 });
-

@@ -1,21 +1,19 @@
 import type { Metadata } from "next";
-import { notFound, redirect } from "next/navigation";
+import { notFound } from "next/navigation";
 import { DocsShell } from "../../components/DocsShell";
 import { getDocument } from "../../lib/docs";
 import { documentMetadata } from "../../lib/metadata";
 
-type Props = { params: Promise<{ slug: string[] }> };
+type Props = { params: Promise<{ slug: string }> };
 
 export async function generateMetadata({ params }: Props): Promise<Metadata> {
   const { slug } = await params;
-  const document = getDocument(slug.join("/"));
-  return documentMetadata(document);
+  return documentMetadata(getDocument(`demos/${slug}`));
 }
 
-export default async function DocumentationPage({ params }: Props) {
+export default async function DemoPage({ params }: Props) {
   const { slug } = await params;
-  const document = getDocument(slug.join("/"));
+  const document = getDocument(`demos/${slug}`);
   if (!document) notFound();
-  if (document.slug === "demos" || document.slug.startsWith("demos/")) redirect(document.href);
   return <DocsShell document={document} />;
 }
