@@ -870,18 +870,24 @@ fn hud_pending_then_denied_names_rule_and_is_owner_scoped() {
 }
 
 #[test]
-fn hud_selects_operation_budget_and_never_sums_overlapping_or_revoked_caps() {
+fn hud_selects_operation_budget_and_excludes_revoked_historical_caps() {
     let (path, state, agent, auth) = setup_executor_authorization("hud-budget-selection");
-    let tighter = create_test_agent_budget(&state, &agent.agent_id, 200);
-    let revoked = create_test_agent_budget(&state, &agent.agent_id, 1);
+    // Normal creation forbids overlapping allocations for one agent/currency.
+    let past = create_budget(
+        json!({"agent_id":agent.agent_id, "amount_cents":200,
+        "starting_at":"2020-01-01T00:00:00Z", "ending_before":"2020-01-02T00:00:00Z"})
+        .to_string(),
+        &state,
+    )
+    .unwrap();
     revoke_budget(
-        json!({"budget_id":revoked.budget.budget_id}).to_string(),
+        json!({"budget_id":past.budget.budget_id}).to_string(),
         &state,
     )
     .unwrap();
     let snapshot = read(&state, "/hud?currency=USD");
     let row = &snapshot["rows"][0];
-    assert_eq!(row["budget_count"], 2);
+    assert_eq!(row["budget_count"], 1);
     assert_eq!(row["budget_selection"], "operation");
     assert_eq!(
         row["budget_id"],
@@ -889,6 +895,6 @@ fn hud_selects_operation_budget_and_never_sums_overlapping_or_revoked_caps() {
     );
     assert_eq!(row["frozen_cents"], 500);
     assert_eq!(row["available_cents"], 0);
-    assert_ne!(row["budget_id"], tighter.budget.budget_id);
+    assert_ne!(row["budget_id"], past.budget.budget_id);
     std::fs::remove_file(path).ok();
 }
