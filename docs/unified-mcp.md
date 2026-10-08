@@ -35,8 +35,9 @@ size/SHA-256, and reads exact Hubu ledger costs. An authorization re-read after
 artifact delivery catches corrections during pagination/fetching. The model
 receives local paths and safe receipt metadata, never image bytes or base64
 bundles. Exports use shared ordered provider/size/tier/cost filenames, exact
-fractional cents, atomic files and idempotent replay. `--size` must match the
-stored request; use `custom` if no image-size selector was submitted.
+fractional cents, atomic files and idempotent replay. `--size` is the caller's
+submitted `image_size` label (`custom` if none); receipts also record Gongbu's
+pixel width and height.
 
 Each filename shows the operation total at export time, including for operations
 with several images. Later corrections require explicit gallery reconciliation.

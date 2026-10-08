@@ -330,10 +330,9 @@ pub(crate) struct OperationRegistry {
 
 /// Gallery lookup deliberately bypasses registry opening, migrations, identity
 /// allocation and housekeeping. Only a completed, already-bound operation is read.
-pub(crate) fn gallery_context(
-    path: &Path,
-    handle: &str,
-) -> Result<(String, String, Option<String>)> {
+/// Request JSON is cleared once Gongbu reports the execution, so the submitted
+/// image size is not available here.
+pub(crate) fn gallery_context(path: &Path, handle: &str) -> Result<(String, String)> {
     validate_public_operation_handle(handle)?;
     if !path.is_absolute() || fs::symlink_metadata(path)?.file_type().is_symlink() {
         bail!("gallery requires an existing absolute regular operation registry");
@@ -346,12 +345,18 @@ pub(crate) fn gallery_context(
     if application_id != APPLICATION_ID || version != SCHEMA_VERSION {
         bail!("gallery requires the current unified operation registry schema; it never migrates state");
     }
-    let context = connection.query_row(
-        "SELECT decision_id, gongbu_execution_id, json_extract(gongbu_request_json, '$.input.image_size')
+    let context = connection
+        .query_row(
+            "SELECT decision_id, gongbu_execution_id
          FROM harness_operations WHERE operation_handle = ?1 AND operation_state = 'succeeded'
          AND tool_name = 'hubu_submit_governed_execution'",
-        [handle], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?)),
-    ).optional()?.ok_or_else(|| anyhow!("gallery operation is unknown, incomplete, or not a governed execution"))?;
+            [handle],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?
+        .ok_or_else(|| {
+            anyhow!("gallery operation is unknown, incomplete, or not a governed execution")
+        })?;
     Ok(context)
 }
 
@@ -5001,6 +5006,68 @@ mod tests {
         assert_eq!(terminal.result_code.as_deref(), Some("execution_succeeded"));
         assert!(terminal.terminal());
         assert!(registry.claim_due_operation().unwrap().is_none());
+    }
+
+    #[test]
+    fn gallery_context_reads_real_succeeded_governed_operation() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("router.sqlite3");
+        let mut registry = OperationRegistry::open(&path).unwrap();
+        let operation = registry
+            .resolve_or_allocate(
+                &codex("gallery-success"),
+                crate::governed_execution::TOOL_NAME,
+                &governed_arguments(),
+            )
+            .unwrap();
+        registry
+            .record_authorization_result(
+                &operation.operation_handle,
+                &json!({
+                    "decision": "allow",
+                    "decision_id": "decision-gallery",
+                    "auth_token_id": "token-gallery",
+                    "authorization_expires_at": "2099-01-01T00:00:00Z",
+                    "operation_handle": operation.operation_handle
+                }),
+            )
+            .unwrap();
+        let mut arguments = execution_arguments("token-gallery");
+        arguments["input"]["image_size"] = json!("2k");
+        let continuation = registry
+            .resolve_gongbu_continuation("token-gallery", &arguments)
+            .unwrap();
+        assert!(gallery_context(&path, &operation.operation_handle).is_err());
+        assert_eq!(registry.promote_accepted_operations().unwrap(), 1);
+        let claimed = registry.claim_due_operation().unwrap().unwrap();
+        registry
+            .record_durable_lifecycle(
+                &claimed,
+                &GongbuLifecycle {
+                    execution_id: "execution-gallery".into(),
+                    spend_auth_token_id: continuation.auth_token_id,
+                    status: "succeeded".into(),
+                    outcome: Some("succeeded".into()),
+                },
+                Duration::ZERO,
+                false,
+            )
+            .unwrap();
+        // The submitted size does not survive success, so gallery callers
+        // supply the size label themselves.
+        let request: Option<String> = registry
+            .connection
+            .query_row(
+                "SELECT gongbu_request_json FROM harness_operations WHERE operation_handle = ?1",
+                [&operation.operation_handle],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(request.is_none());
+        assert_eq!(
+            gallery_context(&path, &operation.operation_handle).unwrap(),
+            ("decision-gallery".into(), "execution-gallery".into())
+        );
     }
 
     #[test]

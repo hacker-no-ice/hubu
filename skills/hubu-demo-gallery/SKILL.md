@@ -47,9 +47,10 @@ hubu-unified-mcp gallery export \
 ```
 
 Use `draft`/`final` from the session's selected demo policy or generation intent.
-Use the submitted image size (`512`, `1k`, `2k`, `4k`); the client verifies it
-against the stored request. If the request omitted `image_size`, use `custom`
-rather than guessing the provider's default. The tier is a human-readable
+Use the `image_size` you submitted (`512`, `1k`, `2k`, `4k`). The registry does
+not keep it after success, so this label is yours; the receipt also records
+Gongbu's pixel width and height. If the request omitted `image_size`, use
+`custom` rather than guessing the provider's default. The tier is a human-readable
 session label, not a new policy decision.
 
 **Never write base64 or an artifact bundle.** Do not copy MCP image content,

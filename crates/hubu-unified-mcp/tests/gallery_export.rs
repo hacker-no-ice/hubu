@@ -41,8 +41,9 @@ impl Fixture {
               tool_name TEXT, decision_id TEXT, gongbu_execution_id TEXT, gongbu_request_json TEXT);").unwrap();
         // Matches only fields the read-only projection reads; queued decoys prove
         // the native process never starts a worker or allocates/changes state.
-        db.execute("INSERT INTO harness_operations VALUES (?1,'succeeded','hubu_submit_governed_execution','decision-1','execution-1',?2)",
-            rusqlite::params![HANDLE, json!({"input":{"image_size":"2k"}}).to_string()]).unwrap();
+        // Like the real registry, request JSON is already cleared on success.
+        db.execute("INSERT INTO harness_operations VALUES (?1,'succeeded','hubu_submit_governed_execution','decision-1','execution-1',NULL)",
+            [HANDLE]).unwrap();
         db.execute("INSERT INTO harness_operations VALUES ('hubu:public-operation:v1:queued','queued','hubu_submit_governed_execution',NULL,NULL,'{}')", []).unwrap();
         drop(db);
         let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
@@ -67,7 +68,8 @@ impl Fixture {
             "provider":identity,"ledger_transaction_ids":["ledger-1"],"receipt":{"settlement_id":"settlement-1","actual_vendor_cost":cost,"budget_charge_cents":1}});
         let transaction = json!({"id":"ledger-1","authorization_id":"decision-1","settlement_id":"settlement-1","provider":identity,"effective_cost":cost,"cost_semantics":"original_total"});
         let mut artifacts = vec![
-            json!({"artifact_id":"image-1","execution_id":"execution-1","kind":"image","media_type":media_type,"size_bytes":bytes.len(),"sha256":digest}),
+            json!({"artifact_id":"image-1","execution_id":"execution-1","kind":"image","media_type":media_type,"size_bytes":bytes.len(),"sha256":digest,
+                "metadata":{"width":2048,"height":2048}}),
         ];
         if fault == "foreign-artifact" {
             artifacts[0]["execution_id"] = json!("other-execution");
@@ -256,6 +258,10 @@ fn native_fetch_multi_megabyte_images_both_providers_and_replay() {
                     json!({"amount":"1","scale":3,"currency":"usd"})
                 );
                 assert_eq!(receipt["budget_charge_cents"], 1);
+                assert_eq!(
+                    (receipt["width"].clone(), receipt["height"].clone()),
+                    (json!(2048), json!(2048))
+                );
             }
         }
         assert_eq!(
@@ -293,9 +299,9 @@ fn native_final_accounting_read_rejects_correction_outside_cursor_snapshot() {
 }
 
 #[test]
-fn native_incomplete_or_size_mismatched_operation_never_calls_backend() {
+fn native_incomplete_operation_or_invalid_size_never_calls_backend() {
     let fixture = Fixture::new("flux", false, false);
-    for (handle, size) in [("hubu:public-operation:v1:queued", "2k"), (HANDLE, "4k")] {
+    for (handle, size) in [("hubu:public-operation:v1:queued", "2k"), (HANDLE, "3k")] {
         let result = fixture.command(handle, size);
         assert!(!result.status.success());
     }

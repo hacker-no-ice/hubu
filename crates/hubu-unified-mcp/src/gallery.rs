@@ -10,11 +10,14 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 const IMAGE_LIMIT: u64 = 64 * 1024 * 1024;
 const JSON_LIMIT: u64 = 16 * 1024 * 1024;
 const MAX_PAGES: usize = 1000;
+// The shared MCP client's 3s budget is for small JSON calls, not image bytes.
+const ARTIFACT_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Deserialize, Serialize, Clone, PartialEq, Eq)]
 struct Entry {
@@ -25,6 +28,9 @@ struct Entry {
     ledger_transaction_id: String,
     provider: String,
     size: String,
+    // Gongbu-recorded pixel dimensions; `size` is the caller's preset label.
+    width: Option<u64>,
+    height: Option<u64>,
     tier: String,
     settled_cost: Value,
     sha256: String,
@@ -330,6 +336,7 @@ fn artifact_bytes(
     let response = client
         .http_client()
         .get(url)
+        .timeout(ARTIFACT_TIMEOUT)
         .send()
         .map_err(|_| anyhow!("artifact backend unavailable"))?;
     ensure!(
@@ -372,15 +379,9 @@ fn export(config: Config, options: Options) -> Result<Value> {
         .operation_state_path
         .as_ref()
         .ok_or_else(|| anyhow!("gallery requires configured unified operation state"))?;
-    let (authorization_id, execution, requested_size) =
-        operation_registry::gallery_context(state, &options.handle)
-            .map_err(|_| anyhow!("gallery operation context unavailable or not succeeded"))?;
+    let (authorization_id, execution) = operation_registry::gallery_context(state, &options.handle)
+        .map_err(|_| anyhow!("gallery operation context unavailable or not succeeded"))?;
     ensure!(safe_id(&execution), "invalid bound execution identity");
-    let size = requested_size
-        .as_deref()
-        .unwrap_or("custom")
-        .to_ascii_lowercase();
-    ensure!(size == options.size, "gallery size does not match the stored submitted image size; use custom for an unspecified selector");
     let clients = BackendClients::new(config)?; // Constructs clients only: no Server, probes or workers.
     let hubu = clients
         .hubu
@@ -438,6 +439,8 @@ fn export(config: Config, options: Options) -> Result<Value> {
             ledger_transaction_id: transaction.clone(),
             provider: provider.into(),
             size: options.size.clone(),
+            width: artifact["metadata"]["width"].as_u64(),
+            height: artifact["metadata"]["height"].as_u64(),
             tier: options.tier.clone(),
             settled_cost: cost.clone(),
             sha256: string(&artifact, "sha256")?.into(),
@@ -602,6 +605,8 @@ mod tests {
             ledger_transaction_id: "ledger-1".into(),
             provider: "flux".into(),
             size: "2k".into(),
+            width: Some(2048),
+            height: Some(2048),
             tier: "draft".into(),
             settled_cost: json!({"amount":"6","scale":2,"currency":"usd"}),
             sha256: format!("{:x}", Sha256::digest(bytes)),

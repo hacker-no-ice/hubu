@@ -114,8 +114,9 @@ hubu gallery export \
 
 This can produce `01-flux-2k-draft-5.8c.png` with a receipt and hidden gallery
 manifest. The cost is the exact settled operation total, not a per-image price;
-Hubu may charge a rounded 6 cents against the budget. Size must match the stored
-submitted selector; use `custom` if no selector was submitted. The tier is your
+Hubu may charge a rounded 6 cents against the budget. Size is the `image_size`
+you submitted (`custom` if none); the receipt also records Gongbu's pixel
+dimensions. The tier is your
 reviewed local label. Re-exporting unchanged evidence reuses the same file.
 
 The command only reads backend state and does not submit, approve, or resume
