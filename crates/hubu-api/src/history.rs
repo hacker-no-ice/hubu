@@ -685,7 +685,7 @@ pub(super) fn watch(request: &HttpRequest, state: &ServerState) -> Result<Value>
             .ok_or_else(|| anyhow!("WATCH available balance overflow"))?;
     }
     let mut rows = Vec::new();
-    let mut recent_events = Vec::new();
+    let mut candidates = Vec::new();
     for agent in agents {
         let internal = resolve_agent_id_for_user(&agent.agent_id, &user, state)?;
         let budgets: Vec<_> = data
@@ -737,28 +737,11 @@ pub(super) fn watch(request: &HttpRequest, state: &ServerState) -> Result<Value>
         let blocked = newest.is_some_and(|d| {
             data.authorization_outcomes.get(&d.id) == Some(&SpendAuthorizationDecision::Denied)
         });
-        for d in latest.values() {
-            let record = authorization_record(d, &data, state, now)?;
-            let budget_denial = data.authorization_outcomes.get(&d.id)
-                == Some(&SpendAuthorizationDecision::Denied)
-                && d.evaluation.decision == Effect::Allow;
-            let rules: Vec<_> = d
-                .evaluation
-                .rule_results
-                .iter()
-                .filter(|r| !budget_denial && r.matched && r.effect == Some(d.evaluation.decision))
-                .map(|r| r.rule_id.clone())
-                .collect();
-            recent_events.push(json!({"id":d.id, "created_at":d.created_at.to_rfc3339(),
-                "agent_id":agent.agent_id, "agent_name":agent.display_name,
-                "denial_kind":if budget_denial {Some("budget")} else if data.authorization_outcomes.get(&d.id) == Some(&SpendAuthorizationDecision::Denied) {Some("policy")} else {None},
-                "provider":record["provider"], "rule_ids":rules,
-                "status":record["status"], "currency":record["currency"],
-                "reserved_cents":record["budget_hold"]["amount_cents"],
-                "requested_cents":d.request.amount_cents,
-                "settled_cost":record["receipt"]["actual_vendor_cost"],
-                "budget_charge_cents":record["receipt"]["budget_charge_cents"]}));
-        }
+        candidates.extend(
+            latest
+                .values()
+                .map(|d| (*d, agent.agent_id.clone(), agent.display_name.clone())),
+        );
         rows.push(json!({"agent_id":agent.agent_id, "name":agent.display_name,
             "currency":currency, "budget_id":selected.map(|(b,_)|public_budget_id(&b.id)),
             "budget_count":budgets.len(), "budget_selection":if operation_budget.is_some() {"operation"} else {"tightest"},
@@ -769,8 +752,34 @@ pub(super) fn watch(request: &HttpRequest, state: &ServerState) -> Result<Value>
             "state":if pending {"APPROVAL"} else if blocked || selected.is_none() || agent.status != "active" || agent.account_status != "active" {"BLOCKED"} else {"ALLOW"}}));
     }
     rows.sort_by_key(|row| row["agent_id"].as_str().unwrap_or_default().to_owned());
+    // Expanding an authorization record scans holds, receipts and ledger rows,
+    // so only the ten newest decisions across all agents are expanded per poll.
+    candidates.sort_by_key(|(d, _, _)| std::cmp::Reverse((d.created_at, d.id.to_string())));
+    candidates.truncate(10);
+    let mut recent_events = Vec::new();
+    for (d, agent_id, agent_name) in candidates {
+        let record = authorization_record(d, &data, state, now)?;
+        let budget_denial = data.authorization_outcomes.get(&d.id)
+            == Some(&SpendAuthorizationDecision::Denied)
+            && d.evaluation.decision == Effect::Allow;
+        let rules: Vec<_> = d
+            .evaluation
+            .rule_results
+            .iter()
+            .filter(|r| !budget_denial && r.matched && r.effect == Some(d.evaluation.decision))
+            .map(|r| r.rule_id.clone())
+            .collect();
+        recent_events.push(json!({"id":d.id, "created_at":d.created_at.to_rfc3339(),
+            "agent_id":agent_id, "agent_name":agent_name,
+            "denial_kind":if budget_denial {Some("budget")} else if data.authorization_outcomes.get(&d.id) == Some(&SpendAuthorizationDecision::Denied) {Some("policy")} else {None},
+            "provider":record["provider"], "rule_ids":rules,
+            "status":record["status"], "currency":record["currency"],
+            "reserved_cents":record["budget_hold"]["amount_cents"],
+            "requested_cents":d.request.amount_cents,
+            "settled_cost":record["receipt"]["actual_vendor_cost"],
+            "budget_charge_cents":record["receipt"]["budget_charge_cents"]}));
+    }
     sort_watch_events(&mut recent_events);
-    recent_events.truncate(10);
     Ok(
         json!({"schema_version":"hubu-watch-v1", "observed_at":now.to_rfc3339(), "currency":currency, "rows":rows, "recent_events":recent_events}),
     )
