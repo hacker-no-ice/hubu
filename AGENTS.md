@@ -105,9 +105,11 @@ reading PR metadata, requesting reviews, or adding PR comments:
 
 ## Pull request review comments
 
-Prefix every agent-authored review reply or PR comment with `🤖 **Codex:**`.
-Use `🤖 **Codex recommendation:**` when presenting a scope recommendation or
-requesting human judgment. Resolve a review thread only after its change is
+Prefix every agent-authored review reply or PR comment with
+`🤖 **<Agent>:**`, where `<Agent>` names the agent actually posting, such as
+`🤖 **Codex:**` or `🤖 **Claude:**`. Use `🤖 **<Agent> recommendation:**` when
+presenting a scope recommendation or requesting human judgment. Never post
+under another agent's name. Resolve a review thread only after its change is
 verified, committed, pushed, and described in a reply that includes the fix
 commit and verification. Leave ambiguous, conflicting, optional, or
 out-of-scope requests unresolved with concise technical reasoning.
