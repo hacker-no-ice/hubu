@@ -31,6 +31,13 @@ replays. Inline image previews are handled separately in HUB-201.
    Preserve the first page's response shape and append subsequent `transactions`
    to its array in the local bundle. Costs come from `effective_cost`, never
    an estimate, authorized maximum, reservation or rounded budget charge.
+   After pagination, call `hubu_get_authorization_record` again for the same ID
+   and retain it as `authorization_after_ledger`. Its receipt and ledger links
+   must match the first read; the helper refuses changed accounting or observed
+   postings outside those links. If accounting changed, refresh the entire
+   bundle once; if it changes again, report export pending reconciliation.
+   The export records point-in-time settled evidence; it does not monitor later
+   corrections or promise that a receipt can never be corrected.
 4. Call `gongbu_list_artifacts` with the completed operation's `execution_id`.
    For each image, call `gongbu_get_artifact` with its `artifact_id`. Preserve
    the full tool result, including text metadata and base64 `image` content.
@@ -43,6 +50,8 @@ replays. Inline image previews are handled separately in HUB-201.
      Its handle must match `operation`. Prefer the authorized resume result
      after human approval, since it can carry a newer authorization revision.
    - `authorization`: `hubu_get_authorization_record` result.
+   - `authorization_after_ledger`: fresh `hubu_get_authorization_record` result
+     read after ledger pagination (required, even when there is just one page).
    - `ledger`: combined `hubu_list_ledger` result from step 3.
    - `artifact_list`: `gongbu_list_artifacts` result.
    - `artifact`: one `gongbu_get_artifact` result.

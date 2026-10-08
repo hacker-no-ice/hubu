@@ -62,6 +62,12 @@ def validated_export(bundle):
     record = authorization['authorization_record']
     require(record.get('authorization_id') == authorization_id and record.get('status') == 'settled',
             'authorization is mismatched or not settled')
+    refreshed = public_json(bundle['authorization_after_ledger'])
+    require(refreshed.get('schema_version') == 'hubu-history-v1', 'unknown refreshed history schema')
+    refreshed_record = refreshed['authorization_record']
+    accounting_fields = ('authorization_id', 'status', 'provider', 'receipt', 'ledger_transaction_ids')
+    require(all(record.get(field) == refreshed_record.get(field) for field in accounting_fields),
+            'authorization accounting changed during pagination; refresh all evidence')
     receipt = record['receipt']
     settlement_id = receipt['settlement_id']
     require(isinstance(settlement_id, str) and settlement_id, 'missing settlement identity')
@@ -69,6 +75,10 @@ def validated_export(bundle):
     require(history.get('schema_version') == 'hubu-history-v1', 'unknown ledger schema')
     rows, linked_ids = history['transactions'], record['ledger_transaction_ids']
     require(linked_ids and len(set(linked_ids)) == len(linked_ids), 'missing/duplicate ledger links')
+    related = [row for row in rows if row.get('authorization_id') == authorization_id
+               or row.get('settlement_id') == settlement_id]
+    require(all(row['id'] in linked_ids for row in related),
+            'unlisted settlement posting/correction requires gallery reconciliation')
     linked = [row for row in rows if row['id'] in linked_ids]
     require(len(linked) == len(linked_ids), 'fetch remaining ledger pages before export')
     require(all(row.get('authorization_id') == authorization_id and

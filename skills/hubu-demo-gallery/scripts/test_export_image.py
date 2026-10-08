@@ -44,6 +44,7 @@ def bundle(provider='flux', cost=None, execution='exec-1', artifact='artifact-1'
                 'operation_handle': 'op-1', 'execution_id': execution,
                 'authorization': {'decision_id': 'decision-1'}}},
             'authorization': text_result({'schema_version': 'hubu-history-v1', 'authorization_record': record}),
+            'authorization_after_ledger': text_result({'schema_version': 'hubu-history-v1', 'authorization_record': record}),
             'ledger': text_result({'schema_version': 'hubu-history-v1', 'transactions': [row],
                                    'coverage': None, 'next_cursor': None}),
             'artifact_list': text_result({'schema_version': 1, 'execution_id': execution,
@@ -77,6 +78,7 @@ class GalleryTests(unittest.TestCase):
     def test_exact_fractional_cent_is_not_rounded_budget_charge(self):
         inputs = bundle('gemini', {'amount': '1', 'scale': 3, 'currency': 'USD'})
         edit_result(inputs, 'authorization', lambda v: v['authorization_record']['receipt'].update(budget_charge_cents=1))
+        inputs['authorization_after_ledger'] = copy.deepcopy(inputs['authorization'])
         path = export_image.export(inputs, self.output)
         self.assertEqual(path.name, '01-gemini-2k-draft-0.1c.png')
         self.assertEqual(export_image.exact_cost({'amount': '123456789012345678901234567890', 'scale': 18, 'currency': 'USD'}),
@@ -143,6 +145,33 @@ class GalleryTests(unittest.TestCase):
             edit_result(inputs, 'ledger', edit)
             with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
                 export_image.export(inputs, self.output)
+        self.assertFalse(self.output.exists())
+
+    def test_unlisted_correction_racing_initial_record_refuses(self):
+        inputs = bundle()
+        def add_correction(history):
+            correction = copy.deepcopy(history['transactions'][0])
+            correction.update(id='correction-1', cost_semantics='corrected_total',
+                              effective_cost={'amount': '8', 'scale': 2, 'currency': 'USD'})
+            history['transactions'].insert(0, correction)
+        edit_result(inputs, 'ledger', add_correction)
+        with self.assertRaisesRegex(ValueError, 'unlisted settlement posting'):
+            export_image.export(inputs, self.output)
+        self.assertFalse(self.output.exists())
+
+    def test_correction_outside_pagination_upper_bound_refuses(self):
+        inputs = bundle()
+        edit_result(inputs, 'authorization_after_ledger', lambda value:
+                    value['authorization_record']['ledger_transaction_ids'].append('new-correction'))
+        with self.assertRaisesRegex(ValueError, 'changed during pagination'):
+            export_image.export(inputs, self.output)
+        self.assertFalse(self.output.exists())
+
+    def test_missing_final_accounting_read_refuses(self):
+        inputs = bundle()
+        del inputs['authorization_after_ledger']
+        with self.assertRaises(KeyError):
+            export_image.export(inputs, self.output)
         self.assertFalse(self.output.exists())
 
     def test_foreign_artifact_and_corrupt_bytes_refuse(self):
