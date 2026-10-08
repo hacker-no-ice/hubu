@@ -287,3 +287,45 @@ fn legacy_environment_is_preserved_when_no_active_profile_exists() {
     let requests = server.finish();
     assert!(requests[0].contains("Authorization: Bearer legacy-auth\r\n"));
 }
+
+#[test]
+fn watch_once_uses_selected_profile_without_human_capabilities() {
+    let root = tempfile::tempdir().unwrap();
+    let hubu_home = root.path().join("watch-home");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let requests = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = Vec::new();
+        loop {
+            let mut byte = [0];
+            stream.read_exact(&mut byte).unwrap();
+            request.push(byte[0]);
+            if request.ends_with(b"\r\n\r\n") {
+                break;
+            }
+        }
+        let body = serde_json::to_string(&json!({"schema_version":"hubu-watch-v1", "observed_at":"2026-10-08T03:12:07Z", "currency":"usd", "rows":[{"agent_id":"agt_watch", "name":"image-agent", "currency":"usd", "budget_count":1,"budget_id":"bgt_watch", "limit_cents":200,"available_cents":192,"frozen_cents":8,"consumed_cents":0}],"recent_events":[{"id":"decision", "created_at":"2026-10-08T03:12:05Z", "agent_id":"agt_watch", "agent_name":"image-agent", "provider":{"id":"provider:black-forest-labs:flux","display_name":"Black Forest Labs FLUX"},"rule_ids":["draft_images"],"status":"claimed", "reserved_cents":8}]})).unwrap();
+        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        String::from_utf8(request).unwrap()
+    });
+    let (profile, _) = fixture_profile(&root, &endpoint);
+    select_profile(&hubu_home, &profile);
+    let output = stale_environment(clean_command(&hubu_home).args(["watch", "--once"]))
+        .output()
+        .unwrap();
+    assert_success(&output);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("FLUX"));
+    assert!(stdout.contains("draft_images"));
+    assert!(stdout.contains("reserved 8¢"));
+    assert!(stdout.contains("free $1.92"));
+    assert!(!stdout.contains('\u{001b}'));
+    assert!(stdout.lines().all(|line| line.chars().count() <= 70));
+    let request = requests.join().unwrap().to_ascii_lowercase();
+    assert!(request.starts_with("get /watch?currency=usd http/1.1"));
+    assert!(request.contains("authorization: bearer profile-auth"));
+    assert!(!request.contains("approval"));
+    assert!(!request.contains("reconciliation"));
+    assert!(!request.contains("stale-"));
+}

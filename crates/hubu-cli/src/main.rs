@@ -24,6 +24,7 @@ mod feedback;
 mod gallery;
 mod stack;
 mod terminal;
+mod watch;
 
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:8787";
 const AUTH_TOKEN_ENV: &str = "HUBU_AUTH_TOKEN";
@@ -257,6 +258,7 @@ fn run() -> Result<()> {
         "spend" => spend(&client, args),
         "ledger" => ledger(&client, args),
         "health" => health(&client),
+        "watch" => watch::command(&client, args),
         "feedback" => feedback::command(args),
         "gallery" => gallery::command(&client, args),
         "version" | "--version" | "-V" => version(),
@@ -3404,6 +3406,7 @@ Commands:
   agent      Read registered agents
   budget     Create, review, update, and list agent budgets
   spend      Test spend and reconcile uncertain executor claims
+  watch      Watch live agent budgets and recent decisions
   ledger     Read ledger transactions
   gallery    Export completed images to a local directory
   feedback   Send feedback: guidance and local report preview (hubu feedback --help)

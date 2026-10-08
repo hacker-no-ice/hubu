@@ -783,3 +783,282 @@ fn read_only_history_projects_unclaimed_expiry_consistently() {
     assert_eq!(status, "frozen");
     std::fs::remove_file(path).ok();
 }
+
+#[test]
+fn watch_is_read_only_and_projects_frozen_then_exact_settlement() {
+    let (path, state, agent, auth) = setup_executor_authorization("watch-settle");
+    let before = read(&state, "/watch");
+    let row = &before["rows"][0];
+    assert_eq!(row["agent_id"], agent.agent_id);
+    assert_eq!(row["state"], "ALLOW");
+    assert_eq!(row["frozen_cents"], 500);
+    assert_eq!(before["recent_events"][0]["reserved_cents"], 500);
+    assert_eq!(row["limit_cents"], 500);
+    assert_eq!(before["recent_events"].as_array().unwrap().len(), 1);
+    assert_eq!(read(&state, "/watch")["rows"], before["rows"]);
+    settle(&state, &agent, &auth, 1);
+    let after = read(&state, "/watch");
+    assert_eq!(after["rows"][0]["frozen_cents"], 0);
+    assert_eq!(after["rows"][0]["consumed_cents"], 1);
+    assert_eq!(after["recent_events"][0]["settled_cost"]["amount"], "1");
+    assert_eq!(after["recent_events"][0]["settled_cost"]["scale"], 3);
+    assert_eq!(after["recent_events"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        after["recent_events"][0]["id"],
+        before["recent_events"][0]["id"]
+    );
+    let serialized = after.to_string();
+    for secret in [
+        "VERY_PRIVATE",
+        "operation_key",
+        "auth_token",
+        "artifact_reference",
+        "purpose_reference",
+    ] {
+        assert!(!serialized.contains(secret), "{secret}");
+    }
+    std::fs::remove_file(path).ok();
+}
+
+#[test]
+fn watch_pending_then_denied_names_rule_and_is_owner_scoped() {
+    let (path, state, agent, pending) = setup_pending_approval_with_lease_config_and_merchant(
+        "watch-approval",
+        LeaseConfig::default(),
+        "/spend/authorize",
+        "gongbu.image",
+    );
+    let before = read(&state, "/watch");
+    assert_eq!(before["rows"][0]["state"], "APPROVAL");
+    assert_eq!(before["recent_events"][0]["rule_ids"], json!([]));
+    let denied = route(
+        approval_json_request(
+            json!({"approval_request_id":pending.body["decision_id"],"decision":"deny"}),
+        ),
+        &state,
+    );
+    assert_eq!(denied.status, 200);
+    let after = read(&state, "/watch");
+    assert_eq!(after["rows"][0]["state"], "BLOCKED");
+    assert_eq!(after["recent_events"][0]["status"], "denied");
+    assert_eq!(after["rows"][0]["agent_id"], agent.agent_id);
+    let allowed = route(
+        authenticated_json_request(
+            "/spend/authorize",
+            json!({"operation_key":"watch-after-denial", "account_id":agent.account_id, "amount_cents":100, "merchant":"gongbu.image", "reason":"draft"}),
+        ),
+        &state,
+    );
+    assert_eq!(allowed.status, 200);
+    assert_eq!(read(&state, "/watch")["rows"][0]["state"], "ALLOW");
+    let blocked = route(
+        authenticated_json_request(
+            "/spend/authorize",
+            json!({"operation_key":"watch-rule-denial", "account_id":agent.account_id, "amount_cents":100, "merchant":"blocked-merchant", "reason":"private reason"}),
+        ),
+        &state,
+    );
+    assert_eq!(blocked.status, 200);
+    let blocked_watch = read(&state, "/watch");
+    assert_eq!(blocked_watch["rows"][0]["state"], "BLOCKED");
+    assert_eq!(blocked_watch["recent_events"][0]["denial_kind"], "policy");
+    assert_eq!(
+        blocked_watch["recent_events"][0]["rule_ids"],
+        json!(["deny_blocked_merchant"])
+    );
+    init(
+        json!({"username":"watch-other", "display_name":"Other"}).to_string(),
+        &state,
+    )
+    .unwrap();
+    assert_eq!(read(&state, "/watch")["rows"], json!([]));
+    assert_eq!(read(&state, "/watch")["recent_events"], json!([]));
+    assert_ne!(route(public_request("GET", "/watch"), &state).status, 200);
+    std::fs::remove_file(path).ok();
+}
+
+#[test]
+fn watch_selects_operation_budget_and_excludes_revoked_historical_caps() {
+    let (path, state, agent, auth) = setup_executor_authorization("watch-budget-selection");
+    // Normal creation forbids overlapping allocations for one agent/currency.
+    let past = create_budget(
+        json!({"agent_id":agent.agent_id, "amount_cents":200,
+        "starting_at":"2020-01-01T00:00:00Z", "ending_before":"2020-01-02T00:00:00Z"})
+        .to_string(),
+        &state,
+    )
+    .unwrap();
+    revoke_budget(
+        json!({"budget_id":past.budget.budget_id}).to_string(),
+        &state,
+    )
+    .unwrap();
+    let snapshot = read(&state, "/watch?currency=USD");
+    let row = &snapshot["rows"][0];
+    assert_eq!(row["budget_count"], 1);
+    assert_eq!(row["budget_selection"], "operation");
+    assert_eq!(
+        row["budget_id"],
+        auth.budget_hold.as_ref().unwrap().budget_id
+    );
+    assert_eq!(row["frozen_cents"], 500);
+    assert_eq!(row["available_cents"], 0);
+    assert_ne!(row["budget_id"], past.budget.budget_id);
+    std::fs::remove_file(path).ok();
+}
+
+#[test]
+fn watch_projects_expired_unclaimed_capacity_without_housekeeping_writes() {
+    let config = LeaseConfig {
+        authorization_ttl_seconds: 1,
+        ..LeaseConfig::default()
+    };
+    let (path, state, _agent, _auth) =
+        setup_executor_authorization_with_lease_config("watch-unclaimed-expiry", config);
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let watch = read(&state, "/watch");
+    assert_eq!(watch["recent_events"][0]["status"], "expired");
+    assert_eq!(watch["rows"][0]["frozen_cents"], 0);
+    assert_eq!(watch["rows"][0]["available_cents"], 500);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let persisted: (String, i64, i64) = conn.query_row("SELECT h.status,b.frozen_amount_cents,b.remaining_amount_cents FROM budget_holds h JOIN budget_balances b ON b.budget_id=h.budget_id", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+    assert_eq!(persisted, ("frozen".into(), 500, 0));
+    std::fs::remove_file(path).ok();
+}
+
+#[test]
+fn watch_keeps_expired_claimed_uncertainty_frozen() {
+    let mut config = LeaseConfig::default();
+    config
+        .lease_profiles
+        .get_mut("default")
+        .unwrap()
+        .claim_ttl_seconds = 1;
+    let (path, state, agent, auth) =
+        setup_executor_authorization_with_lease_config("watch-claimed-expiry", config);
+    claim_executor_spend(json!({"spend_auth_token_id":auth.auth_token_id,"account_id":agent.account_id,"amount_cents":500,"merchant":"gongbu.image"}).to_string(), &state).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let watch = read(&state, "/watch");
+    assert_eq!(
+        watch["recent_events"][0]["status"],
+        "reconciliation_required"
+    );
+    assert_eq!(watch["rows"][0]["frozen_cents"], 500);
+    assert_eq!(watch["rows"][0]["available_cents"], 0);
+    std::fs::remove_file(path).ok();
+}
+
+#[test]
+fn watch_newer_reservation_remains_visible_with_older_pending_approval() {
+    let (path, state, agent, _pending) = setup_pending_approval_with_lease_config_and_merchant(
+        "watch-newest",
+        LeaseConfig::default(),
+        "/spend/authorize",
+        "gongbu.image",
+    );
+    let allowed = route(
+        authenticated_json_request(
+            "/spend/authorize",
+            json!({"operation_key":"watch-newer-allow", "account_id":agent.account_id, "amount_cents":100,"merchant":"gongbu.image", "reason":"draft"}),
+        ),
+        &state,
+    );
+    assert_eq!(allowed.body["decision"], "allow");
+    let watch = read(&state, "/watch");
+    assert_eq!(watch["rows"][0]["state"], "APPROVAL");
+    assert_eq!(watch["recent_events"][0]["id"], allowed.body["decision_id"]);
+    assert_eq!(watch["recent_events"][0]["reserved_cents"], 100);
+    assert_eq!(watch["recent_events"][0]["status"], "authorized");
+    std::fs::remove_file(path).ok();
+}
+
+#[test]
+fn watch_current_version_limit_and_global_feed_cap_budget_denials() {
+    let (path, state, agent, auth) = setup_executor_authorization("watch-feed-cap");
+    let budget_id = auth.budget_hold.as_ref().unwrap().budget_id.clone();
+    let updated = update_budget_limit_at(
+        &budget_id,
+        json!({"amount_limit_cents":700,"expected_revision":1}).to_string(),
+        &state,
+        Utc::now(),
+    )
+    .unwrap();
+    assert_eq!(updated.current_budget.current_revision, 2);
+    assert_eq!(read(&state, "/watch")["rows"][0]["limit_cents"], 700);
+    let second = register_agent(
+        json!({"name":"watch-second-agent","version":"v1"}).to_string(),
+        &state,
+    )
+    .unwrap();
+    add_policy(
+        json!({"agent_id":second.agent_id,"daily_limit_cents":500}).to_string(),
+        &state,
+    )
+    .unwrap();
+    create_test_agent_budget(&state, &second.agent_id, 500);
+    let second_auth = route(
+        authenticated_json_request(
+            "/spend/authorize",
+            json!({"operation_key":"watch-second","account_id":second.account_id,"amount_cents":10,"merchant":"gongbu.image","reason":"draft"}),
+        ),
+        &state,
+    );
+    assert_eq!(second_auth.status, 200);
+    let combined = read(&state, "/watch");
+    assert_eq!(combined["recent_events"].as_array().unwrap().len(), 2);
+    assert_eq!(combined["recent_events"][0]["agent_id"], second.agent_id);
+    assert_eq!(combined["recent_events"][1]["agent_id"], agent.agent_id);
+    for i in 0..12 {
+        let denied = route(
+            authenticated_json_request(
+                "/spend/authorize",
+                json!({"operation_key":format!("watch-cap-{i}"),"account_id":agent.account_id,"amount_cents":201,"merchant":"gongbu.image","reason":"draft"}),
+            ),
+            &state,
+        );
+        assert_eq!(denied.status, 200);
+        assert_eq!(denied.body["decision"], "deny");
+    }
+    let projection = read(&state, "/watch");
+    let events = projection["recent_events"].as_array().unwrap();
+    assert_eq!(events.len(), 10);
+    for event in events {
+        assert_eq!(event["denial_kind"], "budget");
+        assert_eq!(event["rule_ids"], json!([]));
+        assert_eq!(event["agent_id"], agent.agent_id);
+        assert!(event["agent_name"].is_string());
+        assert!(event["denial_reason"].is_null());
+    }
+    let dates: Vec<_> = events
+        .iter()
+        .map(|e| DateTime::parse_from_rfc3339(e["created_at"].as_str().unwrap()).unwrap())
+        .collect();
+    assert!(dates.windows(2).all(|p| p[0] >= p[1]));
+    assert_eq!(
+        route(authenticated_get_request("/watch?currency=eur"), &state).status,
+        400
+    );
+    std::fs::remove_file(path).ok();
+}
+
+#[test]
+fn watch_overrun_limit_is_version_limit_not_balance_sum() {
+    let (path, state, agent, auth) = setup_executor_authorization("watch-overrun");
+    settle(&state, &agent, &auth, 5000);
+    // Fault injection: an existing accounting overrun must not rewrite the
+    // configured limit merely because remaining capacity is saturated at zero.
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute("UPDATE budget_balances SET consumed_amount_cents=1000 WHERE budget_id IN (SELECT budget_id FROM budget_holds WHERE spend_decision_id=?1)",[auth.decision_id.clone()]).unwrap();
+    let projection = read(&state, "/watch");
+    let row = &projection["rows"][0];
+    assert_eq!(row["limit_cents"], 500);
+    assert_eq!(row["consumed_cents"], 1000);
+    assert_eq!(row["available_cents"], 0);
+    assert_ne!(
+        row["limit_cents"].as_i64().unwrap(),
+        row["consumed_cents"].as_i64().unwrap()
+            + row["frozen_cents"].as_i64().unwrap()
+            + row["available_cents"].as_i64().unwrap()
+    );
+    std::fs::remove_file(path).ok();
+}

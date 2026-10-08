@@ -14,6 +14,7 @@ pub struct HistorySnapshot {
     pub receipts: Vec<PersistedSpendExecutorSettlementReceipt>,
     pub budgets: Vec<Budget>,
     pub balances: Vec<BudgetBalance>,
+    pub current_budget_versions: Vec<BudgetVersion>,
     pub holds: Vec<BudgetHold>,
 }
 
@@ -89,6 +90,11 @@ impl SqliteGovernanceRepository {
             .collect();
         let budget_ids: std::collections::HashSet<_> =
             budgets.iter().map(|b| b.id.clone()).collect();
+        let current_budget_versions = {
+            let mut stmt = tx.prepare("SELECT v.id, v.budget_id, v.revision, v.predecessor_version_id, v.amount_limit_cents, v.effective_at, v.actor, v.source, v.reason, v.request_fingerprint, v.created_at FROM budget_versions v JOIN budget_current_versions c ON c.budget_id=v.budget_id AND c.version_id=v.id JOIN budgets b ON b.id=c.budget_id JOIN agent_accounts a ON a.agent_id=b.scope_id AND b.scope_type='agent' WHERE a.owner_user_id=?1")?;
+            let rows = collect_rows(stmt.query_map([owner.to_string()], budget_version_from_row)?)?;
+            rows
+        };
         let balances = load_budget_balances_from(&tx)?
             .into_iter()
             .filter(|b| budget_ids.contains(&b.budget_id))
@@ -107,6 +113,7 @@ impl SqliteGovernanceRepository {
             receipts,
             budgets,
             balances,
+            current_budget_versions,
             holds,
         })
     }
