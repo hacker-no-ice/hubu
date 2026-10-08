@@ -12,6 +12,17 @@ The [core MCP tool set](mcp-tool-consolidation.md) is the canonical catalog of
 supported tools, their prerequisites and their gates. This page describes
 setup, boundaries and the implemented behavior behind those tools.
 
+## Demo image gallery
+
+For a gallery pane without per-image save prompts, activate the repository's
+[Hubu demo gallery skill](../skills/hubu-demo-gallery/SKILL.md) once for the
+session with a dedicated absolute output directory. It uses the existing unified
+MCP artifact and history reads to save FLUX and Gemini images with ordered
+provider/size/tier/exact settled-cost filenames and receipt sidecars. The skill
+includes installation and Finder Gallery-view instructions. Export is local,
+idempotent, and grants no provider spend; ledger corrections require explicit
+reconciliation. It does not change MCP inline preview behavior.
+
 ## Setup
 
 Install the CLI, Hubu server, Gongbu server, and unified MCP binary from one
