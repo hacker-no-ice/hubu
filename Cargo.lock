@@ -1013,6 +1013,7 @@ dependencies = [
  "base64",
  "chrono",
  "hubu-feedback",
+ "libc",
  "reqwest",
  "rusqlite",
  "serde",

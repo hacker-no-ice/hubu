@@ -18,6 +18,17 @@ fn main() {
         return;
     }
 
+    if std::env::args().nth(1).as_deref() == Some("gallery") {
+        match hubu_unified_mcp::run_gallery_from_env(std::env::args().skip(2).collect()) {
+            Ok(result) => println!("{result}"),
+            Err(error) => {
+                eprintln!("hubu-unified-mcp gallery: {error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     if let Err(error) =
         hubu_unified_mcp::run_stdio_from_env(BufReader::new(io::stdin()), io::stdout().lock())
     {
