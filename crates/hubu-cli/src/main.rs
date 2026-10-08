@@ -21,9 +21,9 @@ use uuid::Uuid;
 
 mod codex_mcp;
 mod feedback;
-mod hud;
 mod stack;
 mod terminal;
+mod watch;
 
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:8787";
 const AUTH_TOKEN_ENV: &str = "HUBU_AUTH_TOKEN";
@@ -257,7 +257,7 @@ fn run() -> Result<()> {
         "spend" => spend(&client, args),
         "ledger" => ledger(&client, args),
         "health" => health(&client),
-        "hud" => hud::command(&client, args),
+        "watch" => watch::command(&client, args),
         "feedback" => feedback::command(args),
         "version" | "--version" | "-V" => version(),
         "-h" | "--help" | "help" => {
@@ -3404,7 +3404,7 @@ Commands:
   agent      Read registered agents
   budget     Create, review, update, and list agent budgets
   spend      Test spend and reconcile uncertain executor claims
-  hud        Watch live agent budget and governance state
+  watch      Watch live agent budgets and recent decisions
   ledger     Read ledger transactions
   feedback   Send feedback: guidance and local report preview (hubu feedback --help)
   health     Check the Hubu server

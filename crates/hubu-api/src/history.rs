@@ -647,7 +647,7 @@ pub(super) fn authorization_records(
 
 /// Demo-sized read-only projection. Unlike authorization discovery, denials
 /// are intentional here; raw request content and capabilities remain private.
-pub(super) fn hud(request: &HttpRequest, state: &ServerState) -> Result<Value> {
+pub(super) fn watch(request: &HttpRequest, state: &ServerState) -> Result<Value> {
     let query = query(request, &["currency"])?;
     let currency = query
         .get("currency")
@@ -672,19 +672,20 @@ pub(super) fn hud(request: &HttpRequest, state: &ServerState) -> Result<Value> {
             })
             .try_fold(0_i64, |sum, h| {
                 sum.checked_add(h.amount_cents)
-                    .ok_or_else(|| anyhow!("HUD expired hold total overflow"))
+                    .ok_or_else(|| anyhow!("WATCH expired hold total overflow"))
             })?;
         balance.frozen_amount_cents = balance
             .frozen_amount_cents
             .checked_sub(expired)
             .filter(|v| *v >= 0)
-            .ok_or_else(|| anyhow!("HUD frozen balance inconsistent with expired holds"))?;
+            .ok_or_else(|| anyhow!("WATCH frozen balance inconsistent with expired holds"))?;
         balance.remaining_amount_cents = balance
             .remaining_amount_cents
             .checked_add(expired)
-            .ok_or_else(|| anyhow!("HUD available balance overflow"))?;
+            .ok_or_else(|| anyhow!("WATCH available balance overflow"))?;
     }
     let mut rows = Vec::new();
+    let mut recent_events = Vec::new();
     for agent in agents {
         let internal = resolve_agent_id_for_user(&agent.agent_id, &user, state)?;
         let budgets: Vec<_> = data
@@ -736,46 +737,73 @@ pub(super) fn hud(request: &HttpRequest, state: &ServerState) -> Result<Value> {
         let blocked = newest.is_some_and(|d| {
             data.authorization_outcomes.get(&d.id) == Some(&SpendAuthorizationDecision::Denied)
         });
-        let event = newest
-            .map(|d| -> Result<Value> {
-                let record = authorization_record(d, &data, state, now)?;
-                let budget_denial = data.authorization_outcomes.get(&d.id)
-                    == Some(&SpendAuthorizationDecision::Denied)
-                    && d.evaluation.decision == Effect::Allow;
-                let rules: Vec<_> = d
-                    .evaluation
-                    .rule_results
-                    .iter()
-                    .filter(|r| {
-                        !budget_denial && r.matched && r.effect == Some(d.evaluation.decision)
-                    })
-                    .map(|r| r.rule_id.clone())
-                    .collect();
-                Ok(json!({"id":d.id, "created_at":d.created_at.to_rfc3339(),
-                "provider":record["provider"], "size":null, "rule_ids":rules,
+        for d in latest.values() {
+            let record = authorization_record(d, &data, state, now)?;
+            let budget_denial = data.authorization_outcomes.get(&d.id)
+                == Some(&SpendAuthorizationDecision::Denied)
+                && d.evaluation.decision == Effect::Allow;
+            let rules: Vec<_> = d
+                .evaluation
+                .rule_results
+                .iter()
+                .filter(|r| !budget_denial && r.matched && r.effect == Some(d.evaluation.decision))
+                .map(|r| r.rule_id.clone())
+                .collect();
+            recent_events.push(json!({"id":d.id, "created_at":d.created_at.to_rfc3339(),
+                "agent_id":agent.agent_id, "agent_name":agent.display_name,
+                "denial_kind":if budget_denial {Some("budget")} else if data.authorization_outcomes.get(&d.id) == Some(&SpendAuthorizationDecision::Denied) {Some("policy")} else {None},
+                "provider":record["provider"], "rule_ids":rules,
                 "status":record["status"], "currency":record["currency"],
                 "reserved_cents":record["budget_hold"]["amount_cents"],
                 "requested_cents":d.request.amount_cents,
                 "settled_cost":record["receipt"]["actual_vendor_cost"],
-                "budget_charge_cents":record["receipt"]["budget_charge_cents"]}))
-            })
-            .transpose()?;
+                "budget_charge_cents":record["receipt"]["budget_charge_cents"]}));
+        }
         rows.push(json!({"agent_id":agent.agent_id, "name":agent.display_name,
             "currency":currency, "budget_id":selected.map(|(b,_)|public_budget_id(&b.id)),
             "budget_count":budgets.len(), "budget_selection":if operation_budget.is_some() {"operation"} else {"tightest"},
+            "limit_cents":selected.and_then(|(b,_)|data.current_budget_versions.iter().find(|v|v.id==b.current_version_id).map(|v|v.amount_limit_cents)),
             "available_cents":selected.map(|(_,v)|v.remaining_amount_cents),
             "frozen_cents":selected.map(|(_,v)|v.frozen_amount_cents),
             "consumed_cents":selected.map(|(_,v)|v.consumed_amount_cents),
-            "state":if pending {"APPROVAL"} else if blocked || selected.is_none() || agent.status != "active" || agent.account_status != "active" {"BLOCKED"} else {"ALLOW"},
-            "event":event}));
+            "state":if pending {"APPROVAL"} else if blocked || selected.is_none() || agent.status != "active" || agent.account_status != "active" {"BLOCKED"} else {"ALLOW"}}));
     }
     rows.sort_by_key(|row| row["agent_id"].as_str().unwrap_or_default().to_owned());
-    Ok(json!({"schema_version":"hubu-hud-v1", "observed_at":now.to_rfc3339(), "rows":rows}))
+    sort_watch_events(&mut recent_events);
+    recent_events.truncate(10);
+    Ok(
+        json!({"schema_version":"hubu-watch-v1", "observed_at":now.to_rfc3339(), "currency":currency, "rows":rows, "recent_events":recent_events}),
+    )
+}
+
+fn sort_watch_events(events: &mut [Value]) {
+    events.sort_by_key(|e| {
+        std::cmp::Reverse((
+            DateTime::parse_from_rfc3339(e["created_at"].as_str().unwrap_or_default()).ok(),
+            e["id"].as_str().unwrap_or_default().to_owned(),
+        ))
+    });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn watch_events_sort_instant_then_id_not_timestamp_spelling() {
+        let mut events = vec![
+            json!({"id":"z","created_at":"2026-10-08T00:00:00Z"}),
+            json!({"id":"a","created_at":"2026-10-08T00:00:00.001Z"}),
+            json!({"id":"b","created_at":"2026-10-07T17:00:00.001-07:00"}),
+        ];
+        sort_watch_events(&mut events);
+        assert_eq!(
+            events
+                .iter()
+                .map(|e| e["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["b", "a", "z"]
+        );
+    }
     #[test]
     fn keyset_pages_bind_owner_filters_and_handle_ties_and_newer_rows() {
         let owner = UserId::new();

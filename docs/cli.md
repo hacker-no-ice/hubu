@@ -99,37 +99,47 @@ page with `--limit` and `--cursor`. `hubu spend authorizations` lists authorizat
 ## Watch budgets during the demo
 
 ```sh
-hubu hud
-hubu hud --once
-hubu hud --currency USD
+hubu watch
+hubu watch --compact
+hubu watch --events 10
+hubu watch --agent image-agent
+hubu watch --once --currency USD
 ```
 
-The HUD reads the selected profile's authenticated Hubu endpoint once per
-second. Each agent has available, frozen, consumed, and ALLOW / APPROVAL /
-BLOCKED columns, followed by its latest event. A `*` and the accent color mark
-changed values for one refresh; Ctrl-C exits. `--once` prints a plain snapshot
-for scripts. Failed polls retain the last snapshot with a STALE notice.
+`watch` reads the selected profile's authenticated endpoint about once per
+second. Bars show consumed (`█`), frozen (`▓`), and free (`░`) capacity. Frozen
+segments pulse amber; changed amounts and new or changed decision statuses use
+the accent color for one refresh. Ctrl-C exits. `--once` prints one snapshot;
+failed polls keep the last snapshot with `STALE · retrying` in the header.
 
-Amounts in the row describe the displayed operation's currently effective
-budget in the selected currency (USD by default), falling back to the tightest
-current cap when no operation allocation exists. Overlapping budget limits are
-never added; when several budgets exist, the display names the selected allocation. Revoked,
-scheduled, and expired budgets are excluded. An agent without a current budget
-shows unavailable amounts and BLOCKED. Expired unclaimed holds are projected
-back into available capacity without modifying storage; claimed provider
-uncertainty remains frozen until resolution. APPROVAL means at least one operation
-is still awaiting approval; otherwise the most recent operation's denial shows
-BLOCKED. ALLOW describes observed governance, not a guarantee for future spend.
+The default layout shows all agents and five recent decisions, trimmed to the
+terminal height. `--compact` shows bars only. `--events N` accepts 1–10;
+`--agent NAME|ID` selects exactly one agent and filters the feed locally. A
+single-agent view expands the bar and shows consumed, frozen, and free dollars.
+Color-free output retains the segment glyphs. Every line is at most 70 characters.
 
-The event shows trusted provider attribution, the deciding matched rule (or
-`default / budget`), the reservation, and exact settled vendor cost. The
-conservative rounded budget charge appears separately. Hubu does not persist
-image dimensions in its spend contract, so `size —` means unavailable; the HUD
-does not infer dimensions from prompts. No runtime, tokens, provider calls,
-approval actions, or process control are included.
+Each bar describes the latest operation's current effective budget in the
+selected currency (USD by default), falling back to the tightest current cap.
+Overlapping limits are never added. Revoked, scheduled, and expired budgets are
+excluded; agents without an allocation show `no current budget`. Expired
+unclaimed holds return to available capacity in the read-only projection;
+claimed provider uncertainty remains frozen until resolution. Used means
+consumed plus frozen; the percentage is floored against the selected budget's
+current version limit. Overruns fill the bar while retaining actual dollar
+amounts and percentages above 100%.
 
-The authenticated `GET /hud?currency=usd` endpoint returns `hubu-hud-v1`, an
-owner-scoped consistent budget/decision/hold/receipt snapshot. Denied decisions
-are intentionally included here while existing authorization-history discovery
-keeps its original behavior. Raw reasons, operation keys, authorization tokens,
+The combined feed shows the ten newest operation decisions available from the
+server, with current status updated in place: `◐` reservation, `✓` settlement,
+`⏸` approval, `✗` denial, `○` release/expiry, or `!` reconciliation. Settlements
+show exact vendor cost, including sub-cent precision. The first matched rule
+appears, or `budget` for capacity denials and `default` when no rule matched.
+No runtime telemetry, provider calls, approval actions, or process control are
+included.
+
+The authenticated `GET /watch?currency=usd` endpoint returns `hubu-watch-v1`, an
+owner-scoped consistent budget/version/decision/hold/receipt snapshot. Rows
+include `limit_cents` from the current selected budget version; `recent_events`
+is newest first and capped at ten across the owner's agents in that currency.
+Denied decisions are included while authorization-history discovery retains
+its existing behavior. Raw reasons, operation keys, authorization tokens,
 provider references, pricing evidence, and artifacts are excluded.

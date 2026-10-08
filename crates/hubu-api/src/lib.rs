@@ -1830,7 +1830,7 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
         }
         ("POST", "/spend") => spend_at(request.body, state, request_now).map(to_json),
         ("GET", "/ledger") => list_ledger(state).map(to_json),
-        ("GET", "/hud") => history::hud(&request, state),
+        ("GET", "/watch") => history::watch(&request, state),
         ("GET", "/ledger/transactions") => history::ledger(&request, state),
         ("GET", "/spend/authorizations") => history::authorization_records(&request, state, false),
         ("GET", "/spend/authorizations/show") => {
