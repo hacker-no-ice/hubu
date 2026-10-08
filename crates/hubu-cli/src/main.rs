@@ -21,6 +21,7 @@ use uuid::Uuid;
 
 mod codex_mcp;
 mod feedback;
+mod hud;
 mod stack;
 mod terminal;
 
@@ -256,6 +257,7 @@ fn run() -> Result<()> {
         "spend" => spend(&client, args),
         "ledger" => ledger(&client, args),
         "health" => health(&client),
+        "hud" => hud::command(&client, args),
         "feedback" => feedback::command(args),
         "version" | "--version" | "-V" => version(),
         "-h" | "--help" | "help" => {
@@ -3402,6 +3404,7 @@ Commands:
   agent      Read registered agents
   budget     Create, review, update, and list agent budgets
   spend      Test spend and reconcile uncertain executor claims
+  hud        Watch live agent budget and governance state
   ledger     Read ledger transactions
   feedback   Send feedback: guidance and local report preview (hubu feedback --help)
   health     Check the Hubu server

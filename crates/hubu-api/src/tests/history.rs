@@ -783,3 +783,112 @@ fn read_only_history_projects_unclaimed_expiry_consistently() {
     assert_eq!(status, "frozen");
     std::fs::remove_file(path).ok();
 }
+
+#[test]
+fn hud_is_read_only_and_projects_frozen_then_exact_settlement() {
+    let (path, state, agent, auth) = setup_executor_authorization("hud-settle");
+    let before = read(&state, "/hud");
+    let row = &before["rows"][0];
+    assert_eq!(row["agent_id"], agent.agent_id);
+    assert_eq!(row["state"], "ALLOW");
+    assert_eq!(row["frozen_cents"], 500);
+    assert_eq!(row["event"]["reserved_cents"], 500);
+    assert!(row["event"]["size"].is_null());
+    assert_eq!(read(&state, "/hud")["rows"], before["rows"]);
+    settle(&state, &agent, &auth, 1);
+    let after = read(&state, "/hud");
+    assert_eq!(after["rows"][0]["frozen_cents"], 0);
+    assert_eq!(after["rows"][0]["consumed_cents"], 1);
+    assert_eq!(after["rows"][0]["event"]["settled_cost"]["amount"], "1");
+    assert_eq!(after["rows"][0]["event"]["settled_cost"]["scale"], 3);
+    let serialized = after.to_string();
+    for secret in [
+        "VERY_PRIVATE",
+        "operation_key",
+        "auth_token",
+        "artifact_reference",
+        "purpose_reference",
+    ] {
+        assert!(!serialized.contains(secret), "{secret}");
+    }
+    std::fs::remove_file(path).ok();
+}
+
+#[test]
+fn hud_pending_then_denied_names_rule_and_is_owner_scoped() {
+    let (path, state, agent, pending) = setup_pending_approval_with_lease_config_and_merchant(
+        "hud-approval",
+        LeaseConfig::default(),
+        "/spend/authorize",
+        "gongbu.image",
+    );
+    let before = read(&state, "/hud");
+    assert_eq!(before["rows"][0]["state"], "APPROVAL");
+    assert_eq!(before["rows"][0]["event"]["rule_ids"], json!([]));
+    let denied = route(
+        approval_json_request(
+            json!({"approval_request_id":pending.body["decision_id"],"decision":"deny"}),
+        ),
+        &state,
+    );
+    assert_eq!(denied.status, 200);
+    let after = read(&state, "/hud");
+    assert_eq!(after["rows"][0]["state"], "BLOCKED");
+    assert_eq!(after["rows"][0]["event"]["status"], "denied");
+    assert_eq!(after["rows"][0]["agent_id"], agent.agent_id);
+    let allowed = route(
+        authenticated_json_request(
+            "/spend/authorize",
+            json!({"operation_key":"hud-after-denial", "account_id":agent.account_id, "amount_cents":100, "merchant":"gongbu.image", "reason":"draft"}),
+        ),
+        &state,
+    );
+    assert_eq!(allowed.status, 200);
+    assert_eq!(read(&state, "/hud")["rows"][0]["state"], "ALLOW");
+    let blocked = route(
+        authenticated_json_request(
+            "/spend/authorize",
+            json!({"operation_key":"hud-rule-denial", "account_id":agent.account_id, "amount_cents":100, "merchant":"blocked-merchant", "reason":"private reason"}),
+        ),
+        &state,
+    );
+    assert_eq!(blocked.status, 200);
+    let blocked_hud = read(&state, "/hud");
+    assert_eq!(blocked_hud["rows"][0]["state"], "BLOCKED");
+    assert_eq!(
+        blocked_hud["rows"][0]["event"]["rule_ids"],
+        json!(["deny_blocked_merchant"])
+    );
+    init(
+        json!({"username":"hud-other", "display_name":"Other"}).to_string(),
+        &state,
+    )
+    .unwrap();
+    assert_eq!(read(&state, "/hud")["rows"], json!([]));
+    assert_ne!(route(public_request("GET", "/hud"), &state).status, 200);
+    std::fs::remove_file(path).ok();
+}
+
+#[test]
+fn hud_selects_operation_budget_and_never_sums_overlapping_or_revoked_caps() {
+    let (path, state, agent, auth) = setup_executor_authorization("hud-budget-selection");
+    let tighter = create_test_agent_budget(&state, &agent.agent_id, 200);
+    let revoked = create_test_agent_budget(&state, &agent.agent_id, 1);
+    revoke_budget(
+        json!({"budget_id":revoked.budget.budget_id}).to_string(),
+        &state,
+    )
+    .unwrap();
+    let snapshot = read(&state, "/hud?currency=USD");
+    let row = &snapshot["rows"][0];
+    assert_eq!(row["budget_count"], 2);
+    assert_eq!(row["budget_selection"], "operation");
+    assert_eq!(
+        row["budget_id"],
+        auth.budget_hold.as_ref().unwrap().budget_id
+    );
+    assert_eq!(row["frozen_cents"], 500);
+    assert_eq!(row["available_cents"], 0);
+    assert_ne!(row["budget_id"], tighter.budget.budget_id);
+    std::fs::remove_file(path).ok();
+}

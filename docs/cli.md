@@ -95,3 +95,39 @@ and corrections. Select an agent budget with `--agent-id` and `--budget-id`, and
 page with `--limit` and `--cursor`. `hubu spend authorizations` lists authorization records;
 `hubu spend show --authorization-id ID` inspects one public authorization record. See
 [ledger and authorization records](ledger-history.md) for examples and cost semantics.
+
+## Watch budgets during the demo
+
+```sh
+hubu hud
+hubu hud --once
+hubu hud --currency USD
+```
+
+The HUD reads the selected profile's authenticated Hubu endpoint once per
+second. Each agent has available, frozen, consumed, and ALLOW / APPROVAL /
+BLOCKED columns, followed by its latest event. A `*` and the accent color mark
+changed values for one refresh; Ctrl-C exits. `--once` prints a plain snapshot
+for scripts. Failed polls retain the last snapshot with a STALE notice.
+
+Amounts in the row describe the displayed operation's currently effective
+budget in the selected currency (USD by default), falling back to the tightest
+current cap when no operation allocation exists. Overlapping budget limits are
+never added; when several budgets exist, the display names the selected allocation. Revoked,
+scheduled, and expired budgets are excluded. An agent without a current budget
+shows unavailable amounts and BLOCKED. APPROVAL means at least one operation
+is still awaiting approval; otherwise the most recent operation's denial shows
+BLOCKED. ALLOW describes observed governance, not a guarantee for future spend.
+
+The event shows trusted provider attribution, the deciding matched rule (or
+`default / budget`), the reservation, and exact settled vendor cost. The
+conservative rounded budget charge appears separately. Hubu does not persist
+image dimensions in its spend contract, so `size —` means unavailable; the HUD
+does not infer dimensions from prompts. No runtime, tokens, provider calls,
+approval actions, or process control are included.
+
+The authenticated `GET /hud?currency=usd` endpoint returns `hubu-hud-v1`, an
+owner-scoped consistent budget/decision/hold/receipt snapshot. Denied decisions
+are intentionally included here while existing authorization-history discovery
+keeps its original behavior. Raw reasons, operation keys, authorization tokens,
+provider references, pricing evidence, and artifacts are excluded.

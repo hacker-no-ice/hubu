@@ -287,3 +287,44 @@ fn legacy_environment_is_preserved_when_no_active_profile_exists() {
     let requests = server.finish();
     assert!(requests[0].contains("Authorization: Bearer legacy-auth\r\n"));
 }
+
+#[test]
+fn hud_once_uses_selected_profile_without_human_capabilities() {
+    let root = tempfile::tempdir().unwrap();
+    let hubu_home = root.path().join("hud-home");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let requests = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = Vec::new();
+        loop {
+            let mut byte = [0];
+            stream.read_exact(&mut byte).unwrap();
+            request.push(byte[0]);
+            if request.ends_with(b"\r\n\r\n") {
+                break;
+            }
+        }
+        let body = serde_json::to_string(&json!({"schema_version":"hubu-hud-v1", "rows":[{"agent_id":"agt_hud", "name":"image-agent", "currency":"usd", "budget_count":1,"budget_id":"bgt_hud", "available_cents":192,"frozen_cents":8,"consumed_cents":0,"state":"ALLOW", "event":{"provider":{"id":"provider:black-forest-labs:flux","display_name":"Black Forest Labs FLUX"},"rule_ids":["draft_images"],"status":"claimed", "currency":"usd","reserved_cents":8}}]})).unwrap();
+        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        String::from_utf8(request).unwrap()
+    });
+    let (profile, _) = fixture_profile(&root, &endpoint);
+    select_profile(&hubu_home, &profile);
+    let output = stale_environment(clean_command(&hubu_home).args(["hud", "--once"]))
+        .output()
+        .unwrap();
+    assert_success(&output);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("FLUX · size — · rule draft_images"));
+    assert!(stdout.contains("reserved 8¢ · claimed USD"));
+    assert!(stdout.contains("192¢"));
+    assert!(!stdout.contains('\u{001b}'));
+    assert!(stdout.lines().all(|line| line.chars().count() <= 70));
+    let request = requests.join().unwrap().to_ascii_lowercase();
+    assert!(request.starts_with("get /hud?currency=usd http/1.1"));
+    assert!(request.contains("authorization: bearer profile-auth"));
+    assert!(!request.contains("approval"));
+    assert!(!request.contains("reconciliation"));
+    assert!(!request.contains("stale-"));
+}

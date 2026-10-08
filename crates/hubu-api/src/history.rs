@@ -645,6 +645,116 @@ pub(super) fn authorization_records(
         "next_cursor":next_cursor}))
 }
 
+/// Demo-sized read-only projection. Unlike authorization discovery, denials
+/// are intentional here; raw request content and capabilities remain private.
+pub(super) fn hud(request: &HttpRequest, state: &ServerState) -> Result<Value> {
+    let query = query(request, &["currency"])?;
+    let currency = query
+        .get("currency")
+        .map(String::as_str)
+        .unwrap_or("usd")
+        .to_ascii_lowercase();
+    let _: Currency = currency.parse()?;
+    let user = authenticated_user_context(state)?;
+    let data = snapshot(state, &user.user_id)?;
+    let agents = list_agents_for_scope(state, false)?.agents;
+    let now = Utc::now();
+    let mut rows = Vec::new();
+    for agent in agents {
+        let internal = resolve_agent_id_for_user(&agent.agent_id, &user, state)?;
+        let budgets: Vec<_> = data
+            .budgets
+            .iter()
+            .filter(|b| {
+                b.agent_id == internal
+                    && b.currency.to_string() == currency
+                    && b.administrative_state.as_str() == "active"
+                    && b.period.contains(now)
+            })
+            .filter_map(|b| {
+                data.balances
+                    .iter()
+                    .find(|v| v.budget_id == b.id)
+                    .map(|v| (b, v))
+            })
+            .collect();
+        let mut latest = HashMap::new();
+        for d in data.decisions.iter().filter(|d| {
+            d.request.agent_id == internal
+                && d.request.currency.to_string() == currency
+                && owned_decision(d, &data)
+        }) {
+            let previous = latest.entry(&d.operation_key).or_insert(d);
+            if previous.revision < d.revision {
+                *previous = d;
+            }
+        }
+        let pending = latest.values().any(|d| {
+            data.authorization_outcomes.get(&d.id)
+                == Some(&SpendAuthorizationDecision::PendingApproval)
+        });
+        let newest = latest
+            .values()
+            .max_by_key(|d| {
+                (
+                    data.authorization_outcomes.get(&d.id)
+                        == Some(&SpendAuthorizationDecision::PendingApproval),
+                    d.created_at,
+                    d.id.to_string(),
+                )
+            })
+            .copied();
+        // Show the operation's actual allocation so a separate tighter cap
+        // cannot hide its reservation. Otherwise choose the tightest current cap.
+        // Neither overlapping allocations nor different currencies are additive.
+        let operation_budget = newest
+            .and_then(|d| data.holds.iter().find(|h| h.spend_decision_id == d.id))
+            .and_then(|h| budgets.iter().find(|(b, _)| b.id == h.budget_id));
+        let selected = operation_budget.or_else(|| {
+            budgets
+                .iter()
+                .min_by_key(|(b, v)| (v.remaining_amount_cents, b.id.to_string()))
+        });
+        let blocked = newest.is_some_and(|d| {
+            data.authorization_outcomes.get(&d.id) == Some(&SpendAuthorizationDecision::Denied)
+        });
+        let event = newest
+            .map(|d| -> Result<Value> {
+                let record = authorization_record(d, &data, state, now)?;
+                let budget_denial = data.authorization_outcomes.get(&d.id)
+                    == Some(&SpendAuthorizationDecision::Denied)
+                    && d.evaluation.decision == Effect::Allow;
+                let rules: Vec<_> = d
+                    .evaluation
+                    .rule_results
+                    .iter()
+                    .filter(|r| {
+                        !budget_denial && r.matched && r.effect == Some(d.evaluation.decision)
+                    })
+                    .map(|r| r.rule_id.clone())
+                    .collect();
+                Ok(json!({"id":d.id, "created_at":d.created_at.to_rfc3339(),
+                "provider":record["provider"], "size":null, "rule_ids":rules,
+                "status":record["status"], "currency":record["currency"],
+                "reserved_cents":record["budget_hold"]["amount_cents"],
+                "requested_cents":d.request.amount_cents,
+                "settled_cost":record["receipt"]["actual_vendor_cost"],
+                "budget_charge_cents":record["receipt"]["budget_charge_cents"]}))
+            })
+            .transpose()?;
+        rows.push(json!({"agent_id":agent.agent_id, "name":agent.display_name,
+            "currency":currency, "budget_id":selected.map(|(b,_)|public_budget_id(&b.id)),
+            "budget_count":budgets.len(), "budget_selection":if operation_budget.is_some() {"operation"} else {"tightest"},
+            "available_cents":selected.map(|(_,v)|v.remaining_amount_cents),
+            "frozen_cents":selected.map(|(_,v)|v.frozen_amount_cents),
+            "consumed_cents":selected.map(|(_,v)|v.consumed_amount_cents),
+            "state":if pending {"APPROVAL"} else if blocked || selected.is_none() || agent.status != "active" || agent.account_status != "active" {"BLOCKED"} else {"ALLOW"},
+            "event":event}));
+    }
+    rows.sort_by_key(|row| row["agent_id"].as_str().unwrap_or_default().to_owned());
+    Ok(json!({"schema_version":"hubu-hud-v1", "observed_at":now.to_rfc3339(), "rows":rows}))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
