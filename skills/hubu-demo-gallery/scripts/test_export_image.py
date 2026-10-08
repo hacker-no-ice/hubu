@@ -48,7 +48,9 @@ def bundle(provider='flux', cost=None, execution='exec-1', artifact='artifact-1'
             'ledger': text_result({'schema_version': 'hubu-history-v1', 'transactions': [row],
                                    'coverage': None, 'next_cursor': None}),
             'artifact_list': text_result({'schema_version': 1, 'execution_id': execution,
-                                          'artifacts': [dict(metadata, execution_id=execution, kind='image')]}),
+                                          # ArtifactService lists bare hex; MCP artifact_result prefixes it.
+                                          'artifacts': [dict(metadata, execution_id=execution, kind='image',
+                                                             sha256=metadata['sha256'][7:])]}),
             'artifact': result, 'size': '2k', 'tier': 'draft'}
 
 

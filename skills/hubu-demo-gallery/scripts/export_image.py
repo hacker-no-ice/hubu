@@ -115,7 +115,9 @@ def validated_export(bundle):
     digest = 'sha256:' + hashlib.sha256(payload).hexdigest()
     require(0 < len(payload) <= MAX_BYTES and len(payload) == metadata['size_bytes'] == item['size_bytes'],
             'artifact size mismatch')
-    require(metadata['sha256'] == item['sha256'] == digest, 'artifact digest mismatch')
+    # Gongbu stores/lists bare hex; the MCP getter computes a prefixed digest.
+    require(metadata['sha256'] == digest and item['sha256'] == digest[7:],
+            'artifact digest mismatch')
     require(payload.startswith(b'\x89PNG\r\n\x1a\n') if media_type == 'image/png'
             else payload.startswith(b'\xff\xd8\xff'), 'artifact file signature mismatch')
     summary = dict(execution_id=execution_id, artifact_id=metadata['artifact_id'],
