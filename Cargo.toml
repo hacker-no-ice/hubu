@@ -28,6 +28,7 @@ anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml_ng = "0.10"
+hmac = "0.12"
 sha2 = "0.10"
 thiserror = "1"
 tokio = { version = "1", features = ["macros", "net", "process", "rt-multi-thread", "signal", "time"] }

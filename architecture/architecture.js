@@ -178,7 +178,7 @@ function spendTraces() {
         {
           nodes: ["human", "cli", "api", "app"],
           edges: [["human", "cli"], ["cli", "api"]],
-          caption: "The owner reviews the snapshot and approves; a denial would end the operation here. Approval alone never starts provider work.",
+          caption: "The owner reviews the snapshot and approves; a denial would end the operation here. Approval alone never starts provider work. Optional private ntfy phone actions use signed, expiring one-use decision tokens; explicit resume retains the same public handle.",
         },
         {
           nodes: ["agent", "mcp", "api", "app"],
@@ -309,7 +309,8 @@ const components = {
       "The local server is a small TCP HTTP API. It authenticates protected local requests with a bearer token, owns the shared process state, exposes JSON routes, resolves public IDs, and leaves spend approval, payment, and claim state transitions to core app services.",
     responsibilities: [
       ["Bounded HTTP", "Strictly frames each request and caps header size, body size, and read time."],
-      ["Authentication", "Health and guidance are public. Other routes need the bearer token; approval and reconciliation also need separate human capabilities."],
+      ["Authentication", "Health and guidance are public. Other agent routes need the bearer token; approval and reconciliation also need separate human capabilities. Opt-in phone approval uses a callback-only private listener with signed actions."],
+      ["Private phone approval", "Optional ntfy delivery sends human-readable amount and trusted scope. Phone actions consume a signed decision token through a separate private listener; phone mode disables harness resolution. See crates/hubu-api/src/approval_push.rs."],
       ["Executors are not humans", "Holding the bearer token never grants approval or reconciliation authority."],
       ["Thin transport", "Parses public IDs and checks ownership, then delegates to `SpendApprovalService`, `ExecutorClaimService`, and `BudgetManager`."],
       ["Idempotent approvals", "Approve and deny are safe to repeat; a conflicting resolution is rejected."],

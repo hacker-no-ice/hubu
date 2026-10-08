@@ -1,3 +1,4 @@
+mod approval_push;
 mod history;
 use std::{
     collections::{BTreeMap, HashMap},
@@ -131,7 +132,25 @@ pub fn run_server(bind_addr: &str) -> Result<()> {
     );
     let listener =
         TcpListener::bind(bind_addr).with_context(|| format!("bind Hubu server to {bind_addr}"))?;
-    let state = ServerState::new()?;
+    let state = Arc::new(ServerState::new()?);
+    if let Some(push) = &state.approval_push {
+        // Ordinary agent/API traffic stays on its existing loopback listener.
+        let main_bind: std::net::SocketAddr = bind_addr.parse()?;
+        if !main_bind.ip().is_loopback() {
+            return Err(anyhow!("phone mode requires the ordinary API on loopback"));
+        }
+        let phone_bind = push.callback_bind();
+        push.validate_bind(&phone_bind)?;
+        let phone_listener =
+            TcpListener::bind(&phone_bind).context("bind private phone approval listener")?;
+        let phone_state = Arc::clone(&state);
+        std::thread::spawn(move || {
+            for stream in phone_listener.incoming().flatten() {
+                // Do not log transport error strings: they may contain private context.
+                let _ = handle_connection_on_listener(stream, &phone_state, true);
+            }
+        });
+    }
 
     log_event(
         "info",
@@ -183,6 +202,7 @@ fn configure_server_logging() -> Result<()> {
 }
 
 struct ServerState {
+    approval_push: Option<approval_push::ApprovalPush>,
     auth: LocalAuth,
     users: Mutex<UserManager>,
     registration: Mutex<RegistrationManager>,
@@ -305,6 +325,7 @@ impl ServerState {
         let governance = Arc::new(Mutex::new(governance));
         let budgets = budgets.with_repository(Arc::clone(&governance));
         let state = Self {
+            approval_push: approval_push::ApprovalPush::from_env()?,
             auth,
             users: Mutex::new(users),
             registration: Mutex::new(
@@ -1544,7 +1565,15 @@ struct LedgerEntryHttpResponse {
     currency: String,
 }
 
-fn handle_connection(mut stream: TcpStream, state: &ServerState) -> Result<()> {
+fn handle_connection(stream: TcpStream, state: &ServerState) -> Result<()> {
+    handle_connection_on_listener(stream, state, false)
+}
+
+fn handle_connection_on_listener(
+    mut stream: TcpStream,
+    state: &ServerState,
+    phone_only: bool,
+) -> Result<()> {
     let started_at = Instant::now();
     let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
     let raw = read_http_request(&mut stream, started_at + HTTP_READ_TIMEOUT)?;
@@ -1560,6 +1589,18 @@ fn handle_connection(mut stream: TcpStream, state: &ServerState) -> Result<()> {
     }
 
     let request = parse_request(&raw)?;
+    if phone_only != (request.path == approval_push::CALLBACK_PATH) {
+        return write_response(
+            &mut stream,
+            HttpResponse {
+                status: 404,
+                body: json!({"error":"not found"}),
+            },
+        );
+    }
+    if request.path == approval_push::CALLBACK_PATH {
+        approval_push::validate_peer(stream.peer_addr()?.ip())?;
+    }
     let operational_probe = is_operational_probe(&request);
     if !operational_probe {
         log_event(
@@ -1714,6 +1755,9 @@ fn declared_content_length(head: &str) -> Result<usize> {
 }
 
 fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
+    if request.path == approval_push::CALLBACK_PATH {
+        return approval_push::route_callback(request, state);
+    }
     if !is_public_route(&request) {
         if let Err(error) = authenticate_request(&request, state) {
             log_event(
@@ -1801,9 +1845,15 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
         )
         .map(to_json),
         ("POST", "/spend/approval/resolve") => {
-            authenticate_approval_capability(approval_capability, state).and_then(|()| {
-                resolve_spend_approval_at(request.body, state, request_now).map(to_json)
-            })
+            if state.approval_push.is_some() {
+                Err(anyhow!(
+                    "phone approval mode requires the out-of-band signed action"
+                ))
+            } else {
+                authenticate_approval_capability(approval_capability, state).and_then(|()| {
+                    resolve_spend_approval_at(request.body, state, request_now).map(to_json)
+                })
+            }
         }
         ("GET", "/spend/executor/guidance") | ("GET", "/.well-known/hubu-spend-executor.json") => {
             Ok(spend_executor_guidance(state))
@@ -5159,9 +5209,21 @@ fn evaluate_and_reserve_spend_at(
                 &rejection.evaluation,
                 false,
             );
-            Ok(SpendAuthorization::Response(Box::new(
-                spend_rejection_response(rejection, account_pub_id, agent_pub_id, scope_inputs),
-            )))
+            let response =
+                spend_rejection_response(rejection, account_pub_id, agent_pub_id, scope_inputs);
+            if response.decision == "needs_approval" {
+                if let Some(push) = &state.approval_push {
+                    if push.notify(&response.decision_id, state, now).is_err() {
+                        // Never log the push URL, topic, token, or backend response.
+                        log_event(
+                            "warn",
+                            "approval_push_delivery_failed",
+                            json!({"fallback": "disable phone mode and use owner terminal capability"}),
+                        );
+                    }
+                }
+            }
+            Ok(SpendAuthorization::Response(Box::new(response)))
         }
     }
 }
@@ -11319,4 +11381,5 @@ rules: []
             "/spend/health"
         )));
     }
+    mod phone_approval;
 }
