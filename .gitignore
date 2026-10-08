@@ -11,3 +11,4 @@ hubu.reconciliation-token
 /.config/
 /.rustc_info.json
 /debug/
+.claude/
