@@ -95,3 +95,31 @@ and corrections. Select an agent budget with `--agent-id` and `--budget-id`, and
 page with `--limit` and `--cursor`. `hubu spend authorizations` lists authorization records;
 `hubu spend show --authorization-id ID` inspects one public authorization record. See
 [ledger and authorization records](ledger-history.md) for examples and cost semantics.
+
+## Export completed images
+
+The native client reads an existing succeeded operation and saves its image
+bytes directly to your chosen local directory. Choose that directory once in
+your session instructions; it does not need to be configured before starting
+the stack. The selected profile supplies both backend credentials and the
+operation registry. An explicit `--stack-profile PATH` selects another profile.
+
+```sh
+hubu gallery export \
+  --operation-handle hubu:public-operation:v1:EXACT_COMPLETED_HANDLE \
+  --output /Users/alice/Pictures/hubu-demo \
+  --size 2k \
+  --tier draft
+```
+
+This can produce `01-flux-2k-draft-5.8c.png` with a receipt and hidden gallery
+manifest. The cost is the exact settled operation total, not a per-image price;
+Hubu may charge a rounded 6 cents against the budget. Size must match the stored
+submitted selector; use `custom` if no selector was submitted. The tier is your
+reviewed local label. Re-exporting unchanged evidence reuses the same file.
+
+The command only reads backend state and does not submit, approve, or resume
+provider work. Image bytes never pass through the model. For manual backend
+environment configuration, use `hubu-unified-mcp gallery export` with the same
+export arguments. See the [gallery skill](../skills/hubu-demo-gallery/SKILL.md)
+and [unified MCP reference](unified-mcp.md) for validation and supported formats.
