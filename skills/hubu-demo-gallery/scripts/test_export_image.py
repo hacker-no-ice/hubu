@@ -20,9 +20,17 @@ def text_result(value):
     return {'isError': False, 'content': [{'type': 'text', 'text': json.dumps(value)}]}
 
 
+def history_result(value):
+    return {'content': [{'type': 'text', 'text': json.dumps(value)}], 'structuredContent': copy.deepcopy(value)}
+
+
 def bundle(provider='flux', cost=None, execution='exec-1', artifact='artifact-1', jpeg=False):
-    """Current public unified-MCP schemas, including safe identities and exact costs."""
-    cost = cost or {'amount': '6', 'scale': 2, 'currency': 'USD'}
+    """Public producer schemas: history.rs receipt/project_transaction,
+    hubu-ledger/domain.rs ExactMoney + Currency snake_case, governed_execution.rs
+    composite_result/resume_operation.rs resumed_result, gongbu response.rs
+    ArtifactListResponse/artifact_result and ArtifactService's bare hex digest.
+    """
+    cost = cost or {'amount': '6', 'scale': 2, 'currency': 'usd'}
     identity = {'id': next(k for k, v in export_image.PROVIDERS.items() if v == provider),
                 'display_name': provider}
     data = JPEG if jpeg else PNG
@@ -43,9 +51,9 @@ def bundle(provider='flux', cost=None, execution='exec-1', artifact='artifact-1'
                 'schema_version': 1, 'state': 'succeeded', 'terminal': True,
                 'operation_handle': 'op-1', 'execution_id': execution,
                 'authorization': {'decision_id': 'decision-1'}}},
-            'authorization': text_result({'schema_version': 'hubu-history-v1', 'authorization_record': record}),
-            'authorization_after_ledger': text_result({'schema_version': 'hubu-history-v1', 'authorization_record': record}),
-            'ledger': text_result({'schema_version': 'hubu-history-v1', 'transactions': [row],
+            'authorization': history_result({'schema_version': 'hubu-history-v1', 'authorization_record': record}),
+            'authorization_after_ledger': history_result({'schema_version': 'hubu-history-v1', 'authorization_record': record}),
+            'ledger': history_result({'schema_version': 'hubu-history-v1', 'transactions': [row],
                                    'coverage': None, 'next_cursor': None}),
             'artifact_list': text_result({'schema_version': 1, 'execution_id': execution,
                                           # ArtifactService lists bare hex; MCP artifact_result prefixes it.
@@ -74,16 +82,16 @@ class GalleryTests(unittest.TestCase):
         self.assertEqual(a.read_bytes(), PNG)
         self.assertEqual(b.read_bytes(), JPEG)
         receipt = json.loads(b.with_suffix('.jpg.receipt.json').read_text())
-        self.assertEqual(receipt['settled_cost'], {'amount': '6', 'scale': 2, 'currency': 'USD'})
+        self.assertEqual(receipt['settled_cost'], {'amount': '6', 'scale': 2, 'currency': 'usd'})
         self.assertEqual(receipt['cost_semantics'], 'operation_total_not_per_image')
 
     def test_exact_fractional_cent_is_not_rounded_budget_charge(self):
-        inputs = bundle('gemini', {'amount': '1', 'scale': 3, 'currency': 'USD'})
+        inputs = bundle('gemini', {'amount': '1', 'scale': 3, 'currency': 'usd'})
         edit_result(inputs, 'authorization', lambda v: v['authorization_record']['receipt'].update(budget_charge_cents=1))
         inputs['authorization_after_ledger'] = copy.deepcopy(inputs['authorization'])
         path = export_image.export(inputs, self.output)
         self.assertEqual(path.name, '01-gemini-2k-draft-0.1c.png')
-        self.assertEqual(export_image.exact_cost({'amount': '123456789012345678901234567890', 'scale': 18, 'currency': 'USD'}),
+        self.assertEqual(export_image.exact_cost({'amount': '123456789012345678901234567890', 'scale': 18, 'currency': 'usd'}),
                          '12345678901234.567890123456789')
 
     def test_resumed_status_and_json_rpc_replay_are_idempotent(self):
@@ -141,7 +149,7 @@ class GalleryTests(unittest.TestCase):
     def test_mismatched_settlement_and_missing_ledger_refuse(self):
         for edit, message in [(lambda v: v['transactions'][0].update(settlement_id='other'), 'settlement'),
                               (lambda v: v.update(transactions=[]), 'remaining ledger pages'),
-                              (lambda v: v['transactions'][0].update(effective_cost={'amount': '7', 'scale': 2, 'currency': 'USD'}), 'cost mismatch'),
+                              (lambda v: v['transactions'][0].update(effective_cost={'amount': '7', 'scale': 2, 'currency': 'usd'}), 'cost mismatch'),
                               (lambda v: v['transactions'][0].update(cost_semantics='corrected_total'), 'reconciliation')]:
             inputs = bundle()
             edit_result(inputs, 'ledger', edit)
@@ -154,7 +162,7 @@ class GalleryTests(unittest.TestCase):
         def add_correction(history):
             correction = copy.deepcopy(history['transactions'][0])
             correction.update(id='correction-1', cost_semantics='corrected_total',
-                              effective_cost={'amount': '8', 'scale': 2, 'currency': 'USD'})
+                              effective_cost={'amount': '8', 'scale': 2, 'currency': 'usd'})
             history['transactions'].insert(0, correction)
         edit_result(inputs, 'ledger', add_correction)
         with self.assertRaisesRegex(ValueError, 'unlisted settlement posting'):

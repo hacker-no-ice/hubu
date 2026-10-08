@@ -31,7 +31,7 @@ def public_json(result):
 
 
 def exact_cost(cost):
-    require(cost.get('currency') == 'USD', 'demo filenames require USD')
+    require(cost.get('currency') == 'usd', 'demo filenames require USD')
     amount, scale = cost.get('amount'), cost.get('scale')
     require(isinstance(amount, str) and re.fullmatch(r'[0-9]{1,39}', amount),
             'cost must be a nonnegative coefficient string')

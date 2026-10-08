@@ -20,7 +20,7 @@ replays. Inline image previews are handled separately in HUB-201.
 1. Retain the exact result of `hubu_submit_governed_execution`. If approval is
    pending, retain its `operation_handle`, resolve approval by the session's
    authorized flow, and continue with `hubu_resume_operation`. Observe the same
-   handle using `hubu_get_operation_status` until `state: succeeded` and
+   handle using `hubu_operation_status` until `state: succeeded` and
    `terminal: true`. Never submit a replacement to obtain an image.
 2. Use the latest public `decision_id` from the submit result's
    `structuredContent.authorization` (or the resume result's
@@ -29,7 +29,8 @@ replays. Inline image previews are handled separately in HUB-201.
 3. Call `hubu_list_ledger` for the record's `agent_id` and `account_id`. Follow
    `next_cursor` until all `ledger_transaction_ids` from the record are present.
    Preserve the first page's response shape and append subsequent `transactions`
-   to its array in the local bundle. Costs come from `effective_cost`, never
+   to its array in the local bundle. The history schema uses lowercase `usd`; preserve that value in receipts.
+   Costs come from `effective_cost`, never
    an estimate, authorized maximum, reservation or rounded budget charge.
    After pagination, call `hubu_get_authorization_record` again for the same ID
    and retain it as `authorization_after_ledger`. Its receipt and ledger links
