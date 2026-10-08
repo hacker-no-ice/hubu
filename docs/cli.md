@@ -115,7 +115,9 @@ budget in the selected currency (USD by default), falling back to the tightest
 current cap when no operation allocation exists. Overlapping budget limits are
 never added; when several budgets exist, the display names the selected allocation. Revoked,
 scheduled, and expired budgets are excluded. An agent without a current budget
-shows unavailable amounts and BLOCKED. APPROVAL means at least one operation
+shows unavailable amounts and BLOCKED. Expired unclaimed holds are projected
+back into available capacity without modifying storage; claimed provider
+uncertainty remains frozen until resolution. APPROVAL means at least one operation
 is still awaiting approval; otherwise the most recent operation's denial shows
 BLOCKED. ALLOW describes observed governance, not a guarantee for future spend.
 

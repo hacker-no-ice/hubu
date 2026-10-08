@@ -656,9 +656,34 @@ pub(super) fn hud(request: &HttpRequest, state: &ServerState) -> Result<Value> {
         .to_ascii_lowercase();
     let _: Currency = currency.parse()?;
     let user = authenticated_user_context(state)?;
-    let data = snapshot(state, &user.user_id)?;
+    let mut data = snapshot(state, &user.user_id)?;
     let agents = list_agents_for_scope(state, false)?.agents;
     let now = Utc::now();
+    // Project automatic expiry without housekeeping writes. Claimed holds stay
+    // frozen, even after expiry: provider billing uncertainty needs resolution.
+    for balance in &mut data.balances {
+        let expired = data
+            .holds
+            .iter()
+            .filter(|h| {
+                h.budget_id == balance.budget_id
+                    && matches!(h.status, BudgetHoldStatus::Frozen)
+                    && h.expires_at <= now
+            })
+            .try_fold(0_i64, |sum, h| {
+                sum.checked_add(h.amount_cents)
+                    .ok_or_else(|| anyhow!("HUD expired hold total overflow"))
+            })?;
+        balance.frozen_amount_cents = balance
+            .frozen_amount_cents
+            .checked_sub(expired)
+            .filter(|v| *v >= 0)
+            .ok_or_else(|| anyhow!("HUD frozen balance inconsistent with expired holds"))?;
+        balance.remaining_amount_cents = balance
+            .remaining_amount_cents
+            .checked_add(expired)
+            .ok_or_else(|| anyhow!("HUD available balance overflow"))?;
+    }
     let mut rows = Vec::new();
     for agent in agents {
         let internal = resolve_agent_id_for_user(&agent.agent_id, &user, state)?;
@@ -695,14 +720,7 @@ pub(super) fn hud(request: &HttpRequest, state: &ServerState) -> Result<Value> {
         });
         let newest = latest
             .values()
-            .max_by_key(|d| {
-                (
-                    data.authorization_outcomes.get(&d.id)
-                        == Some(&SpendAuthorizationDecision::PendingApproval),
-                    d.created_at,
-                    d.id.to_string(),
-                )
-            })
+            .max_by_key(|d| (d.created_at, d.id.to_string()))
             .copied();
         // Show the operation's actual allocation so a separate tighter cap
         // cannot hide its reservation. Otherwise choose the tightest current cap.

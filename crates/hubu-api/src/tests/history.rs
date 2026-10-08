@@ -898,3 +898,65 @@ fn hud_selects_operation_budget_and_excludes_revoked_historical_caps() {
     assert_ne!(row["budget_id"], past.budget.budget_id);
     std::fs::remove_file(path).ok();
 }
+
+#[test]
+fn hud_projects_expired_unclaimed_capacity_without_housekeeping_writes() {
+    let config = LeaseConfig {
+        authorization_ttl_seconds: 1,
+        ..LeaseConfig::default()
+    };
+    let (path, state, _agent, _auth) =
+        setup_executor_authorization_with_lease_config("hud-unclaimed-expiry", config);
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let hud = read(&state, "/hud");
+    assert_eq!(hud["rows"][0]["event"]["status"], "expired");
+    assert_eq!(hud["rows"][0]["frozen_cents"], 0);
+    assert_eq!(hud["rows"][0]["available_cents"], 500);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let persisted: (String, i64, i64) = conn.query_row("SELECT h.status,b.frozen_amount_cents,b.remaining_amount_cents FROM budget_holds h JOIN budget_balances b ON b.budget_id=h.budget_id", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+    assert_eq!(persisted, ("frozen".into(), 500, 0));
+    std::fs::remove_file(path).ok();
+}
+
+#[test]
+fn hud_keeps_expired_claimed_uncertainty_frozen() {
+    let mut config = LeaseConfig::default();
+    config
+        .lease_profiles
+        .get_mut("default")
+        .unwrap()
+        .claim_ttl_seconds = 1;
+    let (path, state, agent, auth) =
+        setup_executor_authorization_with_lease_config("hud-claimed-expiry", config);
+    claim_executor_spend(json!({"spend_auth_token_id":auth.auth_token_id,"account_id":agent.account_id,"amount_cents":500,"merchant":"gongbu.image"}).to_string(), &state).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let hud = read(&state, "/hud");
+    assert_eq!(hud["rows"][0]["event"]["status"], "reconciliation_required");
+    assert_eq!(hud["rows"][0]["frozen_cents"], 500);
+    assert_eq!(hud["rows"][0]["available_cents"], 0);
+    std::fs::remove_file(path).ok();
+}
+
+#[test]
+fn hud_newer_reservation_remains_visible_with_older_pending_approval() {
+    let (path, state, agent, _pending) = setup_pending_approval_with_lease_config_and_merchant(
+        "hud-newest",
+        LeaseConfig::default(),
+        "/spend/authorize",
+        "gongbu.image",
+    );
+    let allowed = route(
+        authenticated_json_request(
+            "/spend/authorize",
+            json!({"operation_key":"hud-newer-allow", "account_id":agent.account_id, "amount_cents":100,"merchant":"gongbu.image", "reason":"draft"}),
+        ),
+        &state,
+    );
+    assert_eq!(allowed.body["decision"], "allow");
+    let hud = read(&state, "/hud");
+    assert_eq!(hud["rows"][0]["state"], "APPROVAL");
+    assert_eq!(hud["rows"][0]["event"]["id"], allowed.body["decision_id"]);
+    assert_eq!(hud["rows"][0]["event"]["reserved_cents"], 100);
+    assert_eq!(hud["rows"][0]["event"]["status"], "authorized");
+    std::fs::remove_file(path).ok();
+}
