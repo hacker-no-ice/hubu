@@ -52,9 +52,6 @@ jobs:
       - name: Test unified release packaging
         run: ./scripts/test-release-packaging.sh
 
-      - name: Test demo gallery exports without provider traffic
-        run: python3 -B -m unittest discover -s skills/hubu-demo-gallery/scripts -p 'test_*.py'
-
       - name: Test exact source installer
         run: ./scripts/test-install-from-source.sh
 

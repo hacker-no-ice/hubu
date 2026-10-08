@@ -6,7 +6,9 @@
 //! public, versioned adapter contracts without importing backend implementation
 //! crates.
 
+mod gallery;
 mod gongbu;
+pub use gallery::run_gallery_from_env;
 mod governed_execution;
 mod hubu;
 mod resume_operation;

@@ -14,14 +14,34 @@ setup, boundaries and the implemented behavior behind those tools.
 
 ## Demo image gallery
 
-For a gallery pane without per-image save prompts, activate the repository's
-[Hubu demo gallery skill](../skills/hubu-demo-gallery/SKILL.md) once for the
-session with a dedicated absolute output directory. It uses the existing unified
-MCP artifact and history reads to save FLUX and Gemini images with ordered
-provider/size/tier/exact settled-cost filenames and receipt sidecars. The skill
-includes installation and Finder Gallery-view instructions. Export is local,
-idempotent, and grants no provider spend; ledger corrections require explicit
-reconciliation. It does not change MCP inline preview behavior.
+Activate the [Hubu demo gallery skill](../skills/hubu-demo-gallery/SKILL.md) once
+with a dedicated absolute output directory. After each completed operation, the
+agent passes only the public handle and size/tier labels to the native client:
+
+```sh
+hubu gallery export --operation-handle 'hubu:public-operation:v1:EXACT_HANDLE' \
+  --output /absolute/demo/gallery --tier draft --size 2k
+```
+
+This uses the selected initialized stack profile; add `--stack-profile
+/absolute/profile` after `gallery export` for an explicit profile. A manually
+configured shell can instead invoke `hubu-unified-mcp gallery export` with the
+same arguments and backend/state environment as its unified MCP server.
+
+The adapter opens existing operation state read-only and starts no server,
+worker, key allocation, resume or provider execution. It fetches existing image
+bytes directly from Gongbu, verifies execution/settlement identities and
+size/SHA-256, and reads exact Hubu ledger costs. An authorization re-read after
+artifact delivery catches corrections during pagination/fetching. The model
+receives local paths and safe receipt metadata, never image bytes or base64
+bundles. Exports use shared ordered provider/size/tier/cost filenames, exact
+fractional cents, atomic files and idempotent replay. `--size` must match the
+stored request; use `custom` if no image-size selector was submitted.
+
+Each filename shows the operation total at export time, including for operations
+with several images. Later corrections require explicit gallery reconciliation.
+The skill includes installation and viewer setup. Native export currently
+supports macOS/Linux locking; inline previews remain deferred in HUB-201.
 
 ## Setup
 

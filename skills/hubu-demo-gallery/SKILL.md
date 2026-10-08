@@ -1,118 +1,112 @@
 ---
 name: hubu-demo-gallery
-description: Automatically save existing FLUX and Gemini results to a local demo gallery with exact Hubu settled costs during an activated gallery session. Does not authorize spend or execute providers.
+description: Automatically export existing FLUX and Gemini images to a local demo gallery with exact Hubu settled costs during an activated gallery session. Uses the native client; does not authorize spend or execute providers.
 ---
 
 # Hubu demo gallery
 
-Activate once when the user asks for a demo gallery session and gives an absolute
-output directory. Keep that directory for the session. After **every** successful
-FLUX or Gemini operation, export **every** image before completing the turn,
-without asking for another save prompt. Preserve the generation task's spend
-and approval rules. A gallery session grants local export permission only.
+Activate once when the user requests a demo gallery session and gives an
+absolute output directory. Keep that directory throughout the session. After
+**every** successful FLUX or Gemini operation, run the native export command
+before completing the turn, without asking for another save prompt. Preserve
+the generation task's spend and approval rules; gallery activation grants only
+local export of existing images.
 
-Use existing `hubu-unified-mcp` tools for all backend reads; no provider keys,
-Gongbu MCP surface, direct database reads, artifact URL downloads or provider
-replays. Inline image previews are handled separately in HUB-201.
+## Export a completed operation
 
-## Export each completed operation
+Retain the public `operation_handle` returned by
+`hubu_submit_governed_execution`. If approval is pending, resolve approval by
+the session's authorized flow and continue with `hubu_resume_operation` using
+that same handle. Observe it through `hubu_operation_status` until
+`state: succeeded` and `terminal: true`. Gallery export does **not** resume,
+execute, authorize, settle or reconcile work. Never rerun a provider to obtain
+an export.
 
-1. Retain the exact result of `hubu_submit_governed_execution`. If approval is
-   pending, retain its `operation_handle`, resolve approval by the session's
-   authorized flow, and continue with `hubu_resume_operation`. Observe the same
-   handle using `hubu_operation_status` until `state: succeeded` and
-   `terminal: true`. Never submit a replacement to obtain an image.
-2. Use the latest public `decision_id` from the submit result's
-   `structuredContent.authorization` (or the resume result's
-   `structuredContent.hubu_result`). Call `hubu_get_authorization_record` with
-   that `authorization_id`; wait until the record is `settled` with a receipt.
-3. Call `hubu_list_ledger` for the record's `agent_id` and `account_id`. Follow
-   `next_cursor` until all `ledger_transaction_ids` from the record are present.
-   Preserve the first page's response shape and append subsequent `transactions`
-   to its array in the local bundle. The history schema uses lowercase `usd`; preserve that value in receipts.
-   Costs come from `effective_cost`, never
-   an estimate, authorized maximum, reservation or rounded budget charge.
-   After pagination, call `hubu_get_authorization_record` again for the same ID
-   and retain it as `authorization_after_ledger`. Its receipt and ledger links
-   must match the first read; the helper refuses changed accounting or observed
-   postings outside those links. If accounting changed, refresh the entire
-   bundle once; if it changes again, report export pending reconciliation.
-   The export records point-in-time settled evidence; it does not monitor later
-   corrections or promise that a receipt can never be corrected.
-4. Call `gongbu_list_artifacts` with the completed operation's `execution_id`.
-   For each image, call `gongbu_get_artifact` with its `artifact_id`. Preserve
-   the full tool result, including text metadata and base64 `image` content.
-   The helper verifies size, SHA-256 and execution/settlement identities.
-5. Write a private local JSON bundle with these keys (values are exact MCP
-   tool result objects, or complete JSON-RPC responses containing `result`):
-   - `operation`: succeeded submit/resume/status result.
-   - `submission`: latest submit/resume result carrying the public decision ID;
-     required if a terminal status result has no authorization projection.
-     Its handle must match `operation`. Prefer the authorized resume result
-     after human approval, since it can carry a newer authorization revision.
-   - `authorization`: `hubu_get_authorization_record` result.
-   - `authorization_after_ledger`: fresh `hubu_get_authorization_record` result
-     read after ledger pagination (required, even when there is just one page).
-   - `ledger`: combined `hubu_list_ledger` result from step 3.
-   - `artifact_list`: `gongbu_list_artifacts` result.
-   - `artifact`: one `gongbu_get_artifact` result.
-   - `size`: actual requested size, normalized to `512`, `1k`, `2k`, `4k` or
-     `custom`. Get it from the submitted image arguments; do not invent a size.
-   - `tier`: `draft` or `final`, carried from the session's selected demo policy
-     or generation intent. Do not infer it from price alone.
-6. Run the bundled helper for every image, using the same output directory:
+Call the installed native command with only the public handle, output directory
+and the session's labels:
 
-   ```sh
-   python3 /ABSOLUTE/SKILL/PATH/scripts/export_image.py \
-     --input /ABSOLUTE/PRIVATE/operation-image.json \
-     --output /ABSOLUTE/DEMO/gallery
-   ```
+```sh
+hubu gallery export \
+  --operation-handle 'hubu:public-operation:v1:EXACT_HANDLE' \
+  --output /absolute/demo/gallery --tier draft --size 2k
+```
 
-Delete the temporary bundle after successful export. Keep `.gallery.json`,
-`.gallery.lock`, images and `.receipt.json` sidecars in the dedicated gallery.
-The helper makes no network calls. Its inputs must be faithful local copies of
-trusted tool responses; it checks their consistency, not their authenticity.
-If the harness only exposes truncated image content, stop export and report
-that limitation; never fabricate bytes or regenerate the image.
+The command uses the selected initialized stack profile. Use
+`--stack-profile /absolute/profile` after `gallery export` to select an explicit
+profile. The profile supplies its separate Hubu/Gongbu endpoints, credential
+files and existing unified operation registry. It does not grant provider keys
+or approval authority to the exporter.
 
-Retry local export from the same results if it is interrupted. Sequence numbers
-are shared across providers; `(execution_id, artifact_id)` is idempotent, including
-resumed operations. PNG and JPEG extensions match the returned media type.
-Example: `03-flux-2k-draft-6c.png`; fractional costs remain exact, such as
-`04-gemini-1k-draft-0.1c.png`. Filenames show the **operation's total expense**:
-when one operation returns multiple images, each carries that same total; do not
-sum those labels as per-image prices. Sidecars make this semantic explicit.
+For a manual setup whose shell already has the same backend configuration and
+`HUBU_UNIFIED_OPERATION_STATE_PATH` as the agent's unified MCP server, use:
 
-If evidence is missing, non-USD, mismatched, corrected, or multiple linked
-postings exist, report the export failure and keep the existing operation.
-Corrections need explicit gallery reconciliation; do not quietly relabel a prior
-receipt or claim an old filename reflects a corrected total. These demo helpers
-never settle or correct ledger entries.
+```sh
+hubu-unified-mcp gallery export \
+  --operation-handle 'hubu:public-operation:v1:EXACT_HANDLE' \
+  --output /absolute/demo/gallery --tier draft --size 2k
+```
+
+Use `draft`/`final` from the session's selected demo policy or generation intent.
+Use the submitted image size (`512`, `1k`, `2k`, `4k`); the client verifies it
+against the stored request. If the request omitted `image_size`, use `custom`
+rather than guessing the provider's default. The tier is a human-readable
+session label, not a new policy decision.
+
+**Never write base64 or an artifact bundle.** Do not copy MCP image content,
+construct image bytes, invoke `gongbu_get_artifact` for export, or download a
+provider artifact URL. The native client fetches existing bytes directly from
+Gongbu and keeps them out of the model. Its output contains only local paths
+and safe receipt metadata; no per-image save prompt or model-to-file image
+transfer is needed. Inline previews remain separate in HUB-201.
+
+The native client opens the operation registry read-only and starts no MCP
+server or worker. It obtains the bound execution and authorization IDs itself,
+reads canonical Hubu ledger pages, retrieves PNG/JPEG artifacts, verifies
+execution identity/size/SHA-256, and re-reads authorization accounting after the
+artifact fetches. Filenames use exact `effective_cost`, including fractional
+cents, rather than an estimate, reservation or rounded budget charge. The
+ledger and receipt use canonical lowercase `usd`.
+
+Retry the same export command after an interrupted local write; existing
+`(execution_id, artifact_id)` exports are idempotent. Shared sequence numbers,
+atomic image writes, `.gallery.json` and receipt sidecars are maintained by the
+client. Keep them together. Examples: `03-flux-2k-draft-6c.png` and
+`04-gemini-1k-draft-0.1c.png`.
+
+A filename carries the **operation's total expense at export time**. If one
+operation returns multiple images, every filename carries the same total; do
+not add those labels as per-image prices. Sidecars make this explicit. Later
+ledger corrections require explicit gallery reconciliation.
+
+If accounting changed during export, retry the read-only command once. If it
+changes again, or evidence is mismatched, corrected, non-USD, or missing, report
+export pending reconciliation and retain the existing operation. The native
+command never repairs financial state or fabricates a cost. If no export command
+is installed, report the missing release capability; do not fall back to
+copying image blocks through the model.
 
 ## Session activation and gallery pane
 
-From a checkout, this skill is discoverable through `.agents/skills`. To use it
-outside the repository, copy `skills/hubu-demo-gallery` to your harness's personal
-skills directory and start a new session. For example, with Codex:
+From a checkout this skill is discoverable through `.agents/skills`. Outside the
+repository, copy `skills/hubu-demo-gallery` to the harness's personal skills
+directory and start a new session, for example:
 
 ```sh
 cp -R skills/hubu-demo-gallery "${CODEX_HOME:-$HOME/.codex}/skills/hubu-demo-gallery"
 ```
 
-Activate it once with a standing instruction such as:
+Install Hubu and `hubu-unified-mcp` from the same release containing native gallery
+export. Activate once with a standing instruction such as:
 
-> Use $hubu-demo-gallery for this entire session. Save every FLUX and Gemini
-> output to /absolute/demo/gallery automatically. Use draft/final labels from
-> my selected demo policy. Narrate Hubu decisions and report export failures.
+> Use $hubu-demo-gallery throughout this session. Export every FLUX and Gemini
+> result automatically to /absolute/demo/gallery. Use draft/final from my demo
+> policy. Narrate Hubu decisions and report export failures.
 
-Create/select the dedicated directory before recording. On macOS, open it in
-Finder, use Gallery view (Command-4), and hide sidecars using the image Kind
-filter if desired. The image pane updates as atomic image writes land. Other
-platforms can use an auto-refreshing image folder viewer. Confirm refresh in the
-chosen viewer during rehearsal. The helper runs on macOS/Linux with Python 3;
-it uses POSIX file locks to serialize concurrent exports.
-
-Validate locally with `python3 -m unittest discover -s
-skills/hubu-demo-gallery/scripts -p 'test_*.py'`. Live acceptance still requires
-one authorized FLUX image, one authorized Gemini image and an approval/resume
-image in the configured demo profile; this skill does not grant provider spend.
+Before recording, open the dedicated folder in Finder Gallery view (Command-4)
+or another auto-refreshing image viewer. Filter to image Kind to hide receipt
+sidecars if desired. Confirm the selected viewer refreshes when images land.
+Native locking currently supports macOS/Linux. Mock native fetch-to-file tests
+run with `cargo test -p hubu-unified-mcp --test gallery_export --locked` from the
+repository root. Live provider/gallery acceptance still requires an authorized
+FLUX image, Gemini image and approval/resume operation in the recording profile;
+this skill grants no provider spend.

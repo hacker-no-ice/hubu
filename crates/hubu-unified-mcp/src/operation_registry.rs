@@ -328,6 +328,33 @@ pub(crate) struct OperationRegistry {
     preallocated_operation_key_path: Option<PathBuf>,
 }
 
+/// Gallery lookup deliberately bypasses registry opening, migrations, identity
+/// allocation and housekeeping. Only a completed, already-bound operation is read.
+pub(crate) fn gallery_context(
+    path: &Path,
+    handle: &str,
+) -> Result<(String, String, Option<String>)> {
+    validate_public_operation_handle(handle)?;
+    if !path.is_absolute() || fs::symlink_metadata(path)?.file_type().is_symlink() {
+        bail!("gallery requires an existing absolute regular operation registry");
+    }
+    let connection = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    connection.busy_timeout(Duration::from_secs(5))?;
+    let application_id: i64 =
+        connection.pragma_query_value(None, "application_id", |row| row.get(0))?;
+    let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if application_id != APPLICATION_ID || version != SCHEMA_VERSION {
+        bail!("gallery requires the current unified operation registry schema; it never migrates state");
+    }
+    let context = connection.query_row(
+        "SELECT decision_id, gongbu_execution_id, json_extract(gongbu_request_json, '$.input.image_size')
+         FROM harness_operations WHERE operation_handle = ?1 AND operation_state = 'succeeded'
+         AND tool_name = 'hubu_submit_governed_execution'",
+        [handle], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?)),
+    ).optional()?.ok_or_else(|| anyhow!("gallery operation is unknown, incomplete, or not a governed execution"))?;
+    Ok(context)
+}
+
 impl std::fmt::Debug for OperationRegistry {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
