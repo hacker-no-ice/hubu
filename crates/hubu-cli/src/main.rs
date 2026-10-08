@@ -21,6 +21,7 @@ use uuid::Uuid;
 
 mod codex_mcp;
 mod feedback;
+mod gallery;
 mod stack;
 mod terminal;
 
@@ -257,6 +258,7 @@ fn run() -> Result<()> {
         "ledger" => ledger(&client, args),
         "health" => health(&client),
         "feedback" => feedback::command(args),
+        "gallery" => gallery::command(&client, args),
         "version" | "--version" | "-V" => version(),
         "-h" | "--help" | "help" => {
             print_help();
@@ -3403,6 +3405,7 @@ Commands:
   budget     Create, review, update, and list agent budgets
   spend      Test spend and reconcile uncertain executor claims
   ledger     Read ledger transactions
+  gallery    Export completed images to a local directory
   feedback   Send feedback: guidance and local report preview (hubu feedback --help)
   health     Check the Hubu server
   version    Print product, source, and executor-contract versions
