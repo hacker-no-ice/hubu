@@ -21,6 +21,7 @@ use uuid::Uuid;
 
 mod codex_mcp;
 mod feedback;
+mod gallery;
 mod stack;
 mod terminal;
 mod watch;
@@ -259,6 +260,7 @@ fn run() -> Result<()> {
         "health" => health(&client),
         "watch" => watch::command(&client, args),
         "feedback" => feedback::command(args),
+        "gallery" => gallery::command(&client, args),
         "version" | "--version" | "-V" => version(),
         "-h" | "--help" | "help" => {
             print_help();
@@ -3406,6 +3408,7 @@ Commands:
   spend      Test spend and reconcile uncertain executor claims
   watch      Watch live agent budgets and recent decisions
   ledger     Read ledger transactions
+  gallery    Export completed images to a local directory
   feedback   Send feedback: guidance and local report preview (hubu feedback --help)
   health     Check the Hubu server
   version    Print product, source, and executor-contract versions

@@ -6,6 +6,8 @@ const sharedLinks = {
   budgetCoordinator: ["Private budget coordinator", "crates/hubu-core/src/budget/coordinator.rs"],
   cli: ["CLI", "crates/hubu-cli/src/main.rs"],
   watch: ["Read-only budget watch", "crates/hubu-cli/src/watch.rs"],
+  gallery: ["Native gallery export", "crates/hubu-unified-mcp/src/gallery.rs"],
+  galleryCli: ["Gallery CLI profile handoff", "crates/hubu-cli/src/gallery.rs"],
   stackProviderContract: ["Provider contract source", "contracts/provider-contracts-v1.json"],
   stackProviderDoctor: ["Provider contract doctor and catalog", "crates/hubu-cli/src/stack/doctor.rs"],
   stackLifecycle: ["Local stack lifecycle", "crates/hubu-cli/src/stack/lifecycle.rs"],
@@ -228,7 +230,7 @@ const components = {
     summary: "Agents request paid work through one MCP connection. Hubu decides whether money may be spent; Gongbu, a separate process, does the provider work. The two never share credentials, storage, or failures.",
     viewBox: "0 0 1440 900",
     copy:
-      "Agents use one default MCP surface. Its governed-execution tool can authorize, execute, observe, and deliver a normal auto-approved result in one bounded call; its router-owned resume workflow recovers approved primitive Hubu operations or continues stored governed intent by public handle. Provider integrations are frozen in versioned provider contracts and selected publicly only by opaque target IDs, sharing one governance lifecycle across synchronous and asynchronous provider transports. Hubu and Gongbu retain separate credentials, storage, provider work, artifacts, and failure domains.",
+      "Agents use one default MCP surface. Its governed-execution tool can authorize, execute, observe, and deliver a normal auto-approved result in one bounded call; its router-owned resume workflow recovers approved primitive Hubu operations or continues stored governed intent by public handle. Provider integrations are frozen in versioned provider contracts and selected publicly only by opaque target IDs, sharing one governance lifecycle across synchronous and asynchronous provider transports. Hubu and Gongbu retain separate credentials, storage, provider work, artifacts, and failure domains. Local gallery export reads settled Hubu accounting and Gongbu artifacts through the native client, writing files without a model byte handoff.",
     responsibilities: [
       ["Humans set the boundaries", "Owners register, attach policies, create agent budgets, approve or deny pending spend, and reconcile uncertain outcomes."],
       ["One agent surface", "Agents use only the unified MCP server; one governed call can authorize, execute, and return the result."],
@@ -641,6 +643,7 @@ const components = {
     copy:
       "The CLI is the human developer surface and local-stack launcher. For the Gemini Lite, Gemini non-Lite, and FLUX provider contracts it renders one explicitly versioned composite catalog, reports independent non-network readiness facts, and invokes Gongbu's production validator before activation. It stages updates for explicit activation, reconciles only launcher-owned services in dependency order, configures Codex MCP discovery, and preserves backend ownership boundaries.",
     responsibilities: [
+      ["Local gallery", "`hubu gallery export` uses the selected profile to read the operation registry, Hubu settlement history, and Gongbu artifact bytes directly into local files. It does not start the MCP server or provider worker."],
       ["Stack lifecycle", "`init`, `doctor`, `render`, `activate`, `rollback`, `start`, `status`, `logs`, and `stop`, in dependency order."],
       ["Configuration safety", "Operator TOML is authoritative. Updates are staged and activated only while the stack is stopped."],
       ["Readiness facts", "Reports configured, credential present, validated, and live-qualified separately, without reading secrets or calling providers."],
@@ -653,7 +656,7 @@ const components = {
     ],
     links: [sharedLinks.feedback, sharedLinks.cli, sharedLinks.watch, sharedLinks.stackProviderContract, sharedLinks.stackProviderDoctor, sharedLinks.stackLifecycle, sharedLinks.managedCredentialHandoff, sharedLinks.gongbuProviderContracts, sharedLinks.liveProviders, sharedLinks.fluxProviderContract, sharedLinks.localStack, sharedLinks.localStackAcceptance, sharedLinks.api, sharedLinks.registrationProtocol],
     nodes: [
-      { id: "commands", label: "Commands", sub: "init/admin/stack/watch/feedback", x: 35, y: 95, w: 220, h: 92, tone: "human" },
+      { id: "commands", label: "Commands", sub: "init/admin/stack/watch/gallery/feedback", x: 35, y: 95, w: 220, h: 92, tone: "human" },
       { id: "contract", label: "Provider contract source", sub: "FLUX contract + credential alias", x: 315, y: 70, w: 240, h: 92, tone: "data", path: "contracts/provider-contracts-v1.json" },
       { id: "doctor", label: "Source doctor", sub: "four independent readiness facts", x: 315, y: 220, w: 240, h: 92, tone: "core", path: "crates/hubu-cli/src/stack/doctor.rs" },
       { id: "render", label: "Immutable render", sub: "target + price + policies", x: 315, y: 370, w: 240, h: 92, tone: "core", path: "crates/hubu-cli/src/stack.rs" },
@@ -701,9 +704,9 @@ const components = {
       ["Durable worker", "Advances operations through their states, retrying only idempotent Gongbu creates and read-only status checks."],
       ["Fails closed", "Rejects unknown tools, attempts to override accounts, endpoints, or credentials, and mismatched backend versions."],
       ["Human gates", "Approval and reconciliation capabilities are sent only on those mutations, and tools carry approval annotations."],
-      ["Result delivery", "Returns PNG or JPEG artifacts up to 8 MiB, with timing that never labels waiting as provider time."],
+      ["Result delivery", "Returns PNG or JPEG artifacts up to 8 MiB, with timing that never labels waiting as provider time. Native gallery export downloads up to 64 MiB directly from Gongbu to a local directory, verifies Hubu settlement and registry binding, and avoids passing image bytes through the model."],
     ],
-    links: [sharedLinks.feedback, sharedLinks.unifiedMcp, sharedLinks.unifiedGovernedExecution, sharedLinks.unifiedResumeOperation, sharedLinks.unifiedMcpStdio, sharedLinks.unifiedMcpNotifications, sharedLinks.unifiedHubuCatalog, sharedLinks.unifiedHubuRouting, sharedLinks.unifiedOperationRegistry, sharedLinks.unifiedOperationWorker, sharedLinks.unifiedGongbuCatalog, sharedLinks.unifiedGongbuFixture, sharedLinks.unifiedMcpContract, sharedLinks.operationKeySkill, sharedLinks.operationKeyHelper, sharedLinks.liveProviders, sharedLinks.fluxProviderContract, sharedLinks.gongbuProviderContracts, sharedLinks.api, sharedLinks.gongbuApplication],
+    links: [sharedLinks.gallery, sharedLinks.galleryCli, sharedLinks.feedback, sharedLinks.unifiedMcp, sharedLinks.unifiedGovernedExecution, sharedLinks.unifiedResumeOperation, sharedLinks.unifiedMcpStdio, sharedLinks.unifiedMcpNotifications, sharedLinks.unifiedHubuCatalog, sharedLinks.unifiedHubuRouting, sharedLinks.unifiedOperationRegistry, sharedLinks.unifiedOperationWorker, sharedLinks.unifiedGongbuCatalog, sharedLinks.unifiedGongbuFixture, sharedLinks.unifiedMcpContract, sharedLinks.operationKeySkill, sharedLinks.operationKeyHelper, sharedLinks.liveProviders, sharedLinks.fluxProviderContract, sharedLinks.gongbuProviderContracts, sharedLinks.api, sharedLinks.gongbuApplication],
     zones: [
       { label: "hubu-unified-mcp process", x: 286, y: 44, w: 596, h: 670 },
       { label: "Hubu process + failure domain", x: 940, y: 44, w: 292, h: 280 },
@@ -756,7 +759,7 @@ const components = {
       ["Expiry ends the operation", "If authorization expires before resume, no provider work runs and a new operation is needed."],
       ["Long jobs keep running", "If the wait budget runs out, it keeps watching the same handle while the worker continues."],
     ],
-    links: [sharedLinks.feedback, sharedLinks.unifiedMcp, sharedLinks.cli, sharedLinks.spend, sharedLinks.registrationProtocol, sharedLinks.operationKeySkill, sharedLinks.operationKeyHelper],
+    links: [sharedLinks.gallery, sharedLinks.galleryCli, sharedLinks.feedback, sharedLinks.unifiedMcp, sharedLinks.cli, sharedLinks.spend, sharedLinks.registrationProtocol, sharedLinks.operationKeySkill, sharedLinks.operationKeyHelper],
     nodes: [
       { id: "register", label: "Register", sub: "identity/session", x: 60, y: 92, w: 220, h: 92, tone: "agent" },
       { id: "policy", label: "User policy", sub: "human-authored", x: 390, y: 92, w: 220, h: 92, tone: "human" },
@@ -789,7 +792,7 @@ const components = {
       ["Decide explicitly", "Says approve or deny in chat, then confirms the prompt; canceling leaves the request pending."],
       ["Safe decisions", "Repeating a decision is harmless, conflicting decisions are rejected, and approval never calls a provider by itself."],
     ],
-    links: [sharedLinks.cli, sharedLinks.unifiedMcp, sharedLinks.registrationProtocol, sharedLinks.budget],
+    links: [sharedLinks.galleryCli, sharedLinks.gallery, sharedLinks.cli, sharedLinks.unifiedMcp, sharedLinks.registrationProtocol, sharedLinks.budget],
     nodes: [
       { id: "user", label: "User", sub: "username + public id", x: 90, y: 126, w: 210, h: 92, tone: "human" },
       { id: "review", label: "Review", sub: "chat choice + MCP prompt", x: 430, y: 126, w: 220, h: 92, tone: "human" },
