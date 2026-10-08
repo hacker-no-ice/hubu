@@ -55,7 +55,6 @@ pub(super) fn command(context: &CliContext, mut args: Vec<String>) -> Result<()>
     url.query_pairs_mut()
         .append_pair("currency", &opts.currency);
     let mut previous: Option<Value> = None;
-    let mut tick = 0;
     loop {
         let started = Instant::now();
         let mut request = client.get(url.clone());
@@ -79,7 +78,6 @@ pub(super) fn command(context: &CliContext, mut args: Vec<String>) -> Result<()>
                     previous.as_ref(),
                     &opts,
                     terminal::stdout(),
-                    tick,
                     false,
                     terminal_height(),
                 )?;
@@ -87,16 +85,8 @@ pub(super) fn command(context: &CliContext, mut args: Vec<String>) -> Result<()>
                 output
             }
             Err(_) if !opts.once => match &previous {
-                Some(s) => render(
-                    s,
-                    None,
-                    &opts,
-                    terminal::stdout(),
-                    tick,
-                    true,
-                    terminal_height(),
-                )?,
-                None => terminal::stdout().warning(" HUBU WATCH · STALE · retrying\n"),
+                Some(s) => render(s, None, &opts, terminal::stdout(), true, terminal_height())?,
+                None => terminal::stdout().heading(" HUBU WATCH · STALE · retrying\n"),
             },
             Err(error) => return Err(error.without_url().into()),
         };
@@ -110,7 +100,6 @@ pub(super) fn command(context: &CliContext, mut args: Vec<String>) -> Result<()>
         if opts.once {
             return Ok(());
         }
-        tick += 1;
         std::thread::sleep(Duration::from_secs(1).saturating_sub(started.elapsed()));
     }
 }
@@ -278,7 +267,7 @@ fn event_status(event: &Value, single: bool) -> (&'static str, String) {
             ),
         ),
         Some("needs_approval") => (
-            "⏸",
+            "‖",
             format!(
                 "{} {}",
                 cents(&event["requested_cents"]),
@@ -338,7 +327,6 @@ fn render(
     previous: Option<&Value>,
     opts: &Options,
     style: terminal::TerminalStyle,
-    tick: usize,
     stale: bool,
     height: usize,
 ) -> Result<String> {
@@ -380,7 +368,7 @@ fn render(
         &[(
             header,
             if stale {
-                Some(terminal::Role::Warning)
+                Some(terminal::Role::Heading)
             } else {
                 None
             },
@@ -404,7 +392,7 @@ fn render(
                 .any(|k| old[*k] != row[*k])
             });
         let highlight = if changed {
-            Some(terminal::Role::Accent)
+            Some(terminal::Role::Heading)
         } else {
             None
         };
@@ -451,27 +439,25 @@ fn render(
         } else {
             format!(" {} ", pad(&name, 12))
         };
-        let detail = format!(
-            "  {} of {}{} {}%",
-            dollars(used),
-            dollars(limit),
-            if single { " used ·" } else { "" },
-            pct
-        );
+        // Multi-agent percentages right-align so rows read as a column.
+        let detail = if single {
+            format!("  {} of {} used · {}%", dollars(used), dollars(limit), pct)
+        } else {
+            format!(
+                "  {} of {}{:>6}",
+                dollars(used),
+                dollars(limit),
+                format!("{pct}%")
+            )
+        };
         line(
             &mut out,
             &[
                 (label, highlight),
-                ("█".repeat(cells[0]), Some(terminal::Role::Success)),
-                (
-                    "▓".repeat(cells[1]),
-                    Some(if tick.is_multiple_of(2) {
-                        terminal::Role::Warning
-                    } else {
-                        terminal::Role::FrozenDim
-                    }),
-                ),
-                ("░".repeat(cells[2]), Some(terminal::Role::Muted)),
+                // Monochrome by design: segments differ by glyph texture only.
+                ("█".repeat(cells[0]), None),
+                ("▓".repeat(cells[1]), None),
+                ("░".repeat(cells[2]), None),
                 (detail, highlight),
             ],
             style,
@@ -503,10 +489,7 @@ fn render(
         if !single && !rows.is_empty() {
             line(
                 &mut out,
-                &[(
-                    "               █ consumed  ▓ frozen  ░ free".into(),
-                    Some(terminal::Role::Muted),
-                )],
+                &[("               █ consumed  ▓ frozen  ░ free".into(), None)],
                 style,
             );
         }
@@ -537,7 +520,7 @@ fn render(
                     &[(
                         event_line(event, single),
                         if changed {
-                            Some(terminal::Role::Accent)
+                            Some(terminal::Role::Heading)
                         } else {
                             None
                         },
@@ -561,7 +544,7 @@ mod tests {
         json!({"schema_version":"hubu-watch-v1","currency":"usd","observed_at":"2026-10-08T03:12:07Z","rows":[{"agent_id":"a","name":"image-agent","budget_id":"b","limit_cents":200,"consumed_cents":6,"frozen_cents":8,"available_cents":186}],"recent_events":[{"id":"d","agent_id":"a","agent_name":"image-agent","created_at":"2026-10-08T03:12:05Z","provider":{"id":"provider:black-forest-labs:flux","display_name":"untrusted"},"status":"settled","requested_cents":8,"reserved_cents":8,"settled_cost":{"amount":"58","scale":3},"budget_charge_cents":6,"rule_ids":["draft_images"]}]})
     }
     fn output(s: &Value, o: &Options) -> String {
-        render(s, None, o, terminal::TerminalStyle::plain(), 0, false, 100).unwrap()
+        render(s, None, o, terminal::TerminalStyle::plain(), false, 100).unwrap()
     }
     #[test]
     fn single_multi_and_compact_layouts() {
@@ -597,7 +580,6 @@ mod tests {
             None,
             &options(vec!["--agent".into(), "image-agent".into()]).unwrap(),
             terminal::TerminalStyle::plain(),
-            0,
             false,
             24
         )
@@ -630,7 +612,7 @@ mod tests {
             ("authorized", "◐", "reserved"),
             ("claimed", "◐", "reserved"),
             ("settled", "✓", "settled"),
-            ("needs_approval", "⏸", "awaiting approval"),
+            ("needs_approval", "‖", "awaiting approval"),
             ("denied", "✗", "blocked"),
             ("released", "○", "released"),
             ("expired", "○", "released"),
@@ -695,52 +677,32 @@ mod tests {
         assert!(result.contains("evil?[2J?"));
         assert_eq!(exact_cents(&json!({"amount":"1","scale":3})), "0.1¢");
         assert_eq!(exact_cents(&json!({"amount":"1234","scale":4})), "12.34¢");
-        let stale = render(&s, None, &o, terminal::TerminalStyle::plain(), 0, true, 100).unwrap();
+        let stale = render(&s, None, &o, terminal::TerminalStyle::plain(), true, 100).unwrap();
         assert!(stale.lines().next().unwrap().contains("STALE · retrying"));
         assert!(!stale.lines().next().unwrap().contains("USD"));
     }
     #[test]
-    fn highlights_only_amount_changes_or_new_changed_status_and_pulses_frozen() {
+    fn monochrome_bold_highlights_only_amount_or_status_changes() {
         let s = snapshot();
         let o = options(vec![]).unwrap();
-        let same = render(
-            &s,
-            Some(&s),
-            &o,
-            terminal::TerminalStyle::colored(),
-            0,
-            false,
-            100,
-        )
-        .unwrap();
-        let pulse = render(
-            &s,
-            Some(&s),
-            &o,
-            terminal::TerminalStyle::colored(),
-            1,
-            false,
-            100,
-        )
-        .unwrap();
-        assert_ne!(same, pulse);
+        let colored = terminal::TerminalStyle::colored();
+        let same = render(&s, Some(&s), &o, colored, false, 100).unwrap();
         let mut changed = s.clone();
         changed["rows"][0]["frozen_cents"] = json!(9);
         changed["recent_events"][0]["status"] = json!("claimed");
-        let highlighted = render(
-            &changed,
-            Some(&s),
-            &o,
-            terminal::TerminalStyle::colored(),
-            0,
-            false,
-            100,
-        )
-        .unwrap();
-        assert!(highlighted.contains("\u{1b}[96m"));
+        let highlighted = render(&changed, Some(&s), &o, colored, false, 100).unwrap();
+        let stale = render(&s, None, &o, colored, true, 100).unwrap();
+        for output in [&same, &highlighted, &stale] {
+            // No foreground colors (30-37, 90-97) anywhere; emphasis is bold only.
+            assert!(
+                !output.contains("\u{1b}[3") && !output.contains("\u{1b}[9"),
+                "{output:?}"
+            );
+        }
+        assert!(highlighted.matches("\u{1b}[1m").count() > same.matches("\u{1b}[1m").count());
         assert!(!highlighted.contains('*'));
         assert!(
-            render(&s, None, &o, terminal::TerminalStyle::plain(), 0, false, 5)
+            render(&s, None, &o, terminal::TerminalStyle::plain(), false, 5)
                 .unwrap()
                 .lines()
                 .count()

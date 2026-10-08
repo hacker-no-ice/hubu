@@ -40,7 +40,6 @@ pub(crate) enum Role {
     Muted,
     Accent,
     Command,
-    FrozenDim,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -190,9 +189,6 @@ fn style_for(role: Role) -> Style {
         Role::Error => Style::new().fg_color(Some(AnsiColor::Red.into())).bold(),
         Role::Muted => Style::new().dimmed(),
         Role::Accent => Style::new().fg_color(Some(AnsiColor::BrightCyan.into())),
-        Role::FrozenDim => Style::new()
-            .fg_color(Some(AnsiColor::Yellow.into()))
-            .dimmed(),
         Role::Command => Style::new().fg_color(Some(AnsiColor::Cyan.into())),
     }
 }
