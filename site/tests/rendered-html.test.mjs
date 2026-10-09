@@ -47,12 +47,13 @@ test("embeds the introduction below the hero without autoplay", async () => {
   assert.match(html, /Meet Hubu in 3 min/);
   const iframe = html.match(/<iframe\b[^>]*><\/iframe>/)?.[0];
   assert.ok(iframe);
-  assert.match(iframe, /src="https:\/\/www.youtube-nocookie.com\/embed\/ufEgYjmxKWM"/);
+  assert.match(iframe, /src="https:\/\/www.youtube-nocookie.com\/embed\/SlJbC_hcl9U"/);
   assert.match(iframe, /title="Introducing Hubu: bounded spending power for AI agents"/);
   assert.match(iframe, /loading="lazy"/);
   assert.match(iframe, /referrerPolicy="strict-origin-when-cross-origin"/i);
   assert.doesNotMatch(iframe, /autoplay/);
-  assert.match(html, /href="https:\/\/youtu.be\/ufEgYjmxKWM"/);
+  assert.match(html, /href="https:\/\/youtu.be\/SlJbC_hcl9U"/);
+  assert.doesNotMatch(html, /ufEgYjmxKWM/);
   assert.ok(html.indexOf('class="hero"') < html.indexOf('id="intro-video-title"'));
   assert.ok(html.indexOf('id="intro-video-title"') < html.indexOf('class="warning-band"'));
 });
