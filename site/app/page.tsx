@@ -121,7 +121,7 @@ export default function Home() {
           </div>
           <div className="intro-video-player">
             <iframe
-              src="https://www.youtube-nocookie.com/embed/ufEgYjmxKWM"
+              src="https://www.youtube-nocookie.com/embed/SlJbC_hcl9U"
               title="Introducing Hubu: bounded spending power for AI agents"
               width="960"
               height="540"
@@ -131,7 +131,7 @@ export default function Home() {
               allowFullScreen
             />
           </div>
-          <p className="intro-video-link"><a href="https://youtu.be/ufEgYjmxKWM">Watch on YouTube ↗</a></p>
+          <p className="intro-video-link"><a href="https://youtu.be/SlJbC_hcl9U">Watch on YouTube ↗</a></p>
           <p className="intro-video-link"><a href="/demos/sandbox">See Hubu in use: watch the sandbox demo and follow the walkthrough →</a></p>
         </section>
 
