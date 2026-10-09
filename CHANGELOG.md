@@ -25,6 +25,15 @@ Future release template
 
 ## Unreleased
 
+### Highlights
+
+- Human owners can rename an agent with `hubu agent rename` while keeping its
+  `agt_...` ID, account, budgets, policy assignments, and ledger history.
+  `hubu agent history` shows the append-only revision audit. Clients that
+  still register under a previous name resolve to the same agent and receive a
+  `stale_agent_identity` warning. Rename requires the human approval
+  capability and is not exposed through the unified MCP.
+
 ## v0.2.2 — 2026-10-05
 
 ### Highlights

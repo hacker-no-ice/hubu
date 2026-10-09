@@ -2024,3 +2024,34 @@ fn execution_lookup_survives_unavailable_operation_store() {
         .starts_with("GET /v1/executions/exec-recovery "));
     worker.join().unwrap();
 }
+
+#[test]
+fn agent_rename_and_identity_history_are_not_reachable_through_unified_mcp() {
+    for (method, path) in [
+        ("POST", "/agents/rename"),
+        ("GET", "/agents/rename"),
+        ("GET", "/agents/history"),
+        ("GET", "/agents/history?agent_id=agt_0123456789ab"),
+    ] {
+        assert!(
+            !super::transport::is_approved_http_route(method, path),
+            "{method} {path}"
+        );
+    }
+    assert!(crate::DOMAIN_TOOLS
+        .iter()
+        .all(|(name, _)| !name.contains("rename") && !name.contains("identity")));
+
+    let error = route_tool_call_v1(
+        json!({
+            "name": "hubu_rename_agent",
+            "arguments": {"agent_id": "agt_0123456789ab", "name": "renamed", "reason": "dodge review"}
+        }),
+        true,
+        true,
+        None,
+        |_| panic!("agent rename must never reach the Hubu backend through MCP"),
+    )
+    .unwrap_err();
+    assert!(!error.to_string().is_empty());
+}

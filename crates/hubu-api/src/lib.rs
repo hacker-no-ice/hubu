@@ -1,3 +1,4 @@
+mod agent_identity;
 mod history;
 use std::{
     collections::{BTreeMap, HashMap},
@@ -926,6 +927,11 @@ struct RegisterAgentHttpResponse {
     version_id: String,
     account_id: String,
     session_id: String,
+    /// `alias` when the identity fingerprint resolved through an owner rename.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    identity_resolution: Option<&'static str>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    warnings: Vec<agent_identity::RegistrationWarningHttpResponse>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1758,6 +1764,12 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
             revoke_spending_target(request.body, state).map(to_json)
         }
         ("POST", "/agents/register") => register_agent(request.body, state).map(to_json),
+        ("POST", agent_identity::AGENT_RENAME_ROUTE) => {
+            return agent_identity::rename_agent_http(&request.body, approval_capability, state);
+        }
+        ("GET", agent_identity::AGENT_IDENTITY_HISTORY_ROUTE) => {
+            agent_identity::agent_identity_history(&request, state)
+        }
         ("GET", "/agents") if query_flag(&request, "all") => {
             list_agents_for_scope(state, true).map(to_json)
         }
@@ -2418,7 +2430,31 @@ fn registration_guidance() -> Value {
             "runtime.provider",
             "runtime.environment",
             "code.repository_url"
-        ]
+        ],
+        "identity_resolution": {
+            "stable_agent_id": "agt_ IDs never change; budgets, holds, policy assignments, accounts, and ledger rows stay keyed by them",
+            "duplicate_registration": "re-registering the identity fingerprint of a never-renamed agent is rejected as already registered",
+            "after_rename": {
+                "current_name": "resolves through the fingerprint alias table to the same agent; identical version payloads reuse the same agv_ and aga_ records; no warning",
+                "previous_name": "resolves to the same agent and returns a `stale_agent_identity` warning; no identity, name change, or revision is created",
+                "response_fields": ["identity_resolution", "warnings"]
+            },
+            "client_action_on_warning": "show the warning to the human and update the configured agent_name to warnings[].current_display_name",
+            "name_normalization": "trimmed, case-insensitive",
+            "reserved_names": "a previous name stays reserved for its agent; another agent of the same owner cannot register or be renamed into it",
+            "protocol_unchanged": "canonicalization, hashing, and server-side fingerprint recompute-and-reject are identical to protocol v1"
+        },
+        "rename": {
+            "actor": "human_owner_only",
+            "endpoint": "POST /agents/rename",
+            "body": ["agent_id", "name", "reason"],
+            "capability_header": APPROVAL_CAPABILITY_HEADER,
+            "history_endpoint": "GET /agents/history?agent_id=agt_...",
+            "cli": ["hubu agent rename --agent-id agt_... --name NEW_NAME --reason TEXT", "hubu agent history --agent-id agt_..."],
+            "agents_must_not": "agents and agent sessions must not rename themselves; rename is not exposed through hubu-unified-mcp",
+            "immutable": ["owner", "agent_kind", "version payloads (agv_)"],
+            "collisions": "a rename whose fingerprint or normalized name belongs to another agent is rejected; agents are never merged"
+        }
     })
 }
 
@@ -2515,13 +2551,48 @@ fn register_agent(body: String, state: &ServerState) -> Result<RegisterAgentHttp
     );
     let user = authenticated_user(state)?;
     let registration_request = registration_request_from_envelope(envelope, &user)?;
-    ensure_agent_not_already_registered(&registration_request, state)?;
+    let submitted_fingerprint = registration_request.identity_fingerprint.clone();
 
-    let response = state
-        .registration
-        .lock()
-        .map_err(|_| anyhow!("registration manager lock poisoned"))?
-        .register_agent(registration_request)?;
+    // One lock for resolve + register so a concurrent rename cannot slip between.
+    let response = {
+        let mut registration = state
+            .registration
+            .lock()
+            .map_err(|_| anyhow!("registration manager lock poisoned"))?;
+        // A plain duplicate of a never-renamed identity stays rejected. Once an
+        // owner rename has recorded aliases, both the current and previous
+        // fingerprints resolve to the same agent instead.
+        let resolution = registration.resolve_identity_fingerprint(
+            &registration_request.owner_user_id,
+            &submitted_fingerprint,
+        )?;
+        if resolution.is_some_and(|resolution| !resolution.via_alias) {
+            return Err(anyhow!("agent is already registered for this owner"));
+        }
+        registration.register_agent(registration_request)?
+    };
+    let warnings =
+        if response.resolved_via_alias && response.agent.fingerprint != submitted_fingerprint {
+            let warning = agent_identity::stale_identity_warning(
+                &response.agent.pub_id,
+                &submitted_fingerprint,
+                &response.agent.fingerprint,
+                &response.agent.display_name,
+            );
+            log_event(
+                "warn",
+                "agent_registration_previous_name",
+                json!({
+                    "user_id": user.id.to_string(),
+                    "agent_pub_id": response.agent.pub_id,
+                    "submitted_identity_fingerprint": submitted_fingerprint,
+                    "current_identity_fingerprint": response.agent.fingerprint,
+                }),
+            );
+            vec![warning]
+        } else {
+            Vec::new()
+        };
 
     log_event(
         "info",
@@ -2546,24 +2617,9 @@ fn register_agent(body: String, state: &ServerState) -> Result<RegisterAgentHttp
         version_id: response.version.pub_id,
         account_id: response.account.pub_id,
         session_id: response.session.pub_id,
+        identity_resolution: response.resolved_via_alias.then_some("alias"),
+        warnings,
     })
-}
-
-fn ensure_agent_not_already_registered(
-    request: &RegisterAgentRequest,
-    state: &ServerState,
-) -> Result<()> {
-    let already_registered = state
-        .registration
-        .lock()
-        .map_err(|_| anyhow!("registration manager lock poisoned"))?
-        .agents_for_user(&request.owner_user_id)?
-        .into_iter()
-        .any(|agent| agent.agent.fingerprint == request.identity_fingerprint);
-    if already_registered {
-        return Err(anyhow!("agent is already registered for this owner"));
-    }
-    Ok(())
 }
 
 fn simple_registration_envelope(
@@ -2677,6 +2733,7 @@ fn registration_request_from_envelope(
     };
     let version_label = string_field(&envelope.version.payload, "version_label")?;
 
+    let identity_payload = envelope.identity.payload.clone();
     let review = envelope.review;
     let display_name = review
         .as_ref()
@@ -2703,6 +2760,7 @@ fn registration_request_from_envelope(
             "version",
         )
         .or(Some(version_label)),
+        identity_payload: Some(identity_payload),
     })
 }
 
@@ -6451,6 +6509,365 @@ lease_profiles:
             state,
         )
         .expect("agent budget should be created")
+    }
+
+    fn rename_http_request(body: Value) -> HttpRequest {
+        let mut request = authenticated_json_request("/agents/rename", body);
+        request.headers.insert(
+            APPROVAL_CAPABILITY_HEADER.to_string(),
+            TEST_APPROVAL_TOKEN.to_string(),
+        );
+        request
+    }
+
+    fn rename_test_state(label: &str) -> (std::path::PathBuf, ServerState, InitHttpResponse) {
+        let path = std::env::temp_dir().join(format!("hubu-api-{label}-{}.sqlite", UserId::new()));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        let user = init(
+            json!({
+                "username": "alice-example",
+                "display_name": "Alice Example",
+                "email": "alice@example.com",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("init should create user");
+        (path, state, user)
+    }
+
+    fn register_named(state: &ServerState, user: &InitHttpResponse, name: &str) -> Result<Value> {
+        let envelope = simple_registration_envelope(name, "dev", &user.user_id);
+        register_agent(serde_json::to_string(&envelope)?, state).map(to_json)
+    }
+
+    fn rename_via_route(state: &ServerState, agent_id: &str, name: &str) -> HttpResponse {
+        route(
+            rename_http_request(json!({
+                "agent_id": agent_id,
+                "name": name,
+                "reason": "fix typo",
+            })),
+            state,
+        )
+    }
+
+    #[test]
+    fn owner_rename_preserves_agent_account_budgets_policies_and_ledger() {
+        let (path, state, user) = rename_test_state("rename-preserves");
+        let registered = register_named(&state, &user, "reserch-agent").unwrap();
+        let agent_id = registered["agent_id"].as_str().unwrap().to_string();
+        let account_id = registered["account_id"].as_str().unwrap().to_string();
+        add_policy(
+            json!({ "agent_id": agent_id, "daily_limit_cents": 5_000 }).to_string(),
+            &state,
+        )
+        .expect("agent policy should attach");
+        create_test_agent_budget(&state, &agent_id, 10_000);
+        spend(
+            json!({
+                "operation_key": "before-rename",
+                "account_id": account_id,
+                "amount_cents": 1_000,
+                "reason": "test purchase",
+                "merchant": "Acme Cafe",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("spend before rename should pay");
+        let snapshot = |state: &ServerState| {
+            ["/budgets", "/policies", "/ledger"].map(|path| {
+                let response = route(authenticated_get_request(path), state);
+                assert_eq!(response.status, 200, "{path}");
+                response.body
+            })
+        };
+        let before = snapshot(&state);
+
+        let renamed = rename_via_route(&state, &agent_id, "research-agent");
+        assert_eq!(renamed.status, 200, "{}", renamed.body);
+        assert_eq!(renamed.body["agent_id"], agent_id);
+        assert_eq!(renamed.body["account_id"], account_id);
+        assert_eq!(renamed.body["display_name"], "research-agent");
+        assert_eq!(renamed.body["previous_display_name"], "reserch-agent");
+        assert_eq!(renamed.body["revision"]["revision"], 1);
+
+        assert_eq!(snapshot(&state), before);
+        let agents = route(authenticated_get_request("/agents"), &state).body;
+        assert_eq!(agents["agents"].as_array().unwrap().len(), 1);
+        assert_eq!(agents["agents"][0]["agent_id"], agent_id);
+        assert_eq!(agents["agents"][0]["display_name"], "research-agent");
+        assert_eq!(agents["agents"][0]["account_id"], account_id);
+
+        spend(
+            json!({
+                "operation_key": "after-rename",
+                "account_id": account_id,
+                "amount_cents": 1_000,
+                "reason": "test purchase",
+                "merchant": "Acme Cafe",
+            })
+            .to_string(),
+            &state,
+        )
+        .expect("the same account and budget keep working after rename");
+        assert_eq!(list_ledger(&state).unwrap().transactions.len(), 2);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn rename_revision_audit_is_visible_in_identity_history() {
+        let (path, state, user) = rename_test_state("rename-history");
+        let registered = register_named(&state, &user, "reserch-agent").unwrap();
+        let agent_id = registered["agent_id"].as_str().unwrap();
+        assert_eq!(
+            rename_via_route(&state, agent_id, "research-agent").status,
+            200
+        );
+
+        let history = route(
+            authenticated_get_request(&format!("/agents/history?agent_id={agent_id}")),
+            &state,
+        );
+        assert_eq!(history.status, 200, "{}", history.body);
+        let body = history.body;
+        assert_eq!(body["agent_id"], agent_id);
+        assert_eq!(body["display_name"], "research-agent");
+        assert_eq!(body["current_revision"], 1);
+        let revision = &body["revisions"][0];
+        assert_eq!(revision["actor"], user.user_id);
+        assert_eq!(revision["reason"], "fix typo");
+        assert!(revision["created_at"].as_str().is_some());
+        assert_eq!(
+            revision["changes"],
+            json!([
+                {"field": "agent_name", "old_value": "reserch-agent", "new_value": "research-agent"},
+                {"field": "display_name", "old_value": "reserch-agent", "new_value": "research-agent"}
+            ])
+        );
+        let aliases = body["fingerprint_aliases"].as_array().unwrap();
+        assert_eq!(aliases.len(), 2);
+        assert_eq!(aliases[0]["source"], "registration");
+        assert_eq!(aliases[1]["source"], "rename");
+        assert_eq!(
+            aliases[1]["identity_fingerprint"],
+            body["identity_fingerprint"]
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn reregistering_with_current_name_after_rename_is_idempotent_without_warning() {
+        let (path, state, user) = rename_test_state("rename-current");
+        let registered = register_named(&state, &user, "reserch-agent").unwrap();
+        let agent_id = registered["agent_id"].as_str().unwrap();
+        assert_eq!(
+            rename_via_route(&state, agent_id, "research-agent").status,
+            200
+        );
+
+        let first = register_named(&state, &user, "research-agent").unwrap();
+        let second = register_named(&state, &user, "research-agent").unwrap();
+        for resumed in [&first, &second] {
+            assert_eq!(resumed["agent_id"], agent_id);
+            assert_eq!(resumed["account_id"], registered["account_id"]);
+            assert_eq!(resumed["identity_resolution"], "alias");
+            assert!(resumed.get("warnings").is_none(), "{resumed}");
+        }
+        assert_eq!(first["version_id"], second["version_id"]);
+        assert_eq!(
+            route(authenticated_get_request("/agents"), &state).body["agents"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn reregistering_with_previous_name_resolves_with_warning_and_changes_nothing() {
+        let (path, state, user) = rename_test_state("rename-previous");
+        let registered = register_named(&state, &user, "reserch-agent").unwrap();
+        let agent_id = registered["agent_id"].as_str().unwrap();
+        assert_eq!(
+            rename_via_route(&state, agent_id, "research-agent").status,
+            200
+        );
+
+        let stale = register_named(&state, &user, "reserch-agent").unwrap();
+        assert_eq!(stale["agent_id"], agent_id);
+        assert_eq!(stale["account_id"], registered["account_id"]);
+        assert_eq!(stale["version_id"], registered["version_id"]);
+        assert_eq!(stale["identity_resolution"], "alias");
+        let warning = &stale["warnings"][0];
+        assert_eq!(warning["code"], "stale_agent_identity");
+        assert_eq!(warning["current_display_name"], "research-agent");
+        assert!(warning["message"]
+            .as_str()
+            .unwrap()
+            .contains("research-agent"));
+
+        let history = route(
+            authenticated_get_request(&format!("/agents/history?agent_id={agent_id}")),
+            &state,
+        )
+        .body;
+        assert_eq!(history["display_name"], "research-agent");
+        assert_eq!(history["current_revision"], 1);
+        assert_eq!(history["fingerprint_aliases"].as_array().unwrap().len(), 2);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn plain_duplicate_registration_without_rename_is_still_rejected() {
+        let (path, state, user) = rename_test_state("rename-duplicate");
+        register_named(&state, &user, "plain-agent").unwrap();
+        let error = register_named(&state, &user, "plain-agent").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "agent is already registered for this owner"
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn rename_rejects_collisions_with_other_agents_and_never_merges() {
+        let (path, state, user) = rename_test_state("rename-collision");
+        let alpha = register_named(&state, &user, "alpha-agent").unwrap();
+        let beta = register_named(&state, &user, "beta-agent").unwrap();
+        let alpha_id = alpha["agent_id"].as_str().unwrap();
+        let beta_id = beta["agent_id"].as_str().unwrap();
+
+        let fingerprint_collision = rename_via_route(&state, alpha_id, "beta-agent");
+        assert_eq!(fingerprint_collision.status, 409);
+        assert_eq!(
+            fingerprint_collision.body["error_code"],
+            "agent_rename_identity_collision"
+        );
+
+        let name_collision = rename_via_route(&state, alpha_id, "  Beta-Agent ");
+        assert_eq!(name_collision.status, 409);
+        assert_eq!(
+            name_collision.body["error_code"],
+            "agent_rename_name_conflict"
+        );
+
+        // beta's previous name stays reserved for beta.
+        assert_eq!(rename_via_route(&state, beta_id, "gamma-agent").status, 200);
+        let reserved = rename_via_route(&state, alpha_id, "BETA-agent");
+        assert_eq!(reserved.status, 409);
+        assert_eq!(reserved.body["error_code"], "agent_rename_name_reserved");
+        let reserved_registration = register_named(&state, &user, "Beta-Agent").unwrap_err();
+        assert!(reserved_registration
+            .to_string()
+            .contains("reserved as a previous name"));
+
+        let agents = route(authenticated_get_request("/agents"), &state).body;
+        let names = agents["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|agent| agent["display_name"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["alpha-agent", "gamma-agent"]);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn rename_requires_human_owner_capability_and_only_accepts_labels() {
+        let (path, state, user) = rename_test_state("rename-guard");
+        let registered = register_named(&state, &user, "guarded-agent").unwrap();
+        let agent_id = registered["agent_id"].as_str().unwrap();
+        let body = json!({ "agent_id": agent_id, "name": "renamed", "reason": "x" });
+
+        // Bearer-only callers (agent sessions, the unified MCP) cannot rename.
+        let bearer_only = route(
+            authenticated_json_request("/agents/rename", body.clone()),
+            &state,
+        );
+        assert_eq!(bearer_only.status, 403);
+        assert_eq!(
+            bearer_only.body["error_code"],
+            "agent_rename_requires_human_owner"
+        );
+        let mut wrong_capability = authenticated_json_request("/agents/rename", body.clone());
+        wrong_capability.headers.insert(
+            APPROVAL_CAPABILITY_HEADER.to_string(),
+            "not-the-capability".to_string(),
+        );
+        assert_eq!(route(wrong_capability, &state).status, 403);
+        let mut no_bearer = rename_http_request(body);
+        no_bearer.headers.remove("authorization");
+        assert_eq!(route(no_bearer, &state).status, 401);
+
+        for immutable in [
+            json!({ "agent_id": agent_id, "name": "renamed", "reason": "x", "owner": "usr_other" }),
+            json!({ "agent_id": agent_id, "name": "renamed", "reason": "x", "agent_kind": "other" }),
+            json!({ "agent_id": agent_id, "name": "renamed", "reason": "x", "version_label": "v2" }),
+            json!({ "agent_id": agent_id, "name": " ", "reason": "x" }),
+            json!({ "agent_id": agent_id, "name": "renamed", "reason": "" }),
+            json!({ "agent_id": agent_id, "name": "guarded-agent", "reason": "no-op" }),
+        ] {
+            let response = route(rename_http_request(immutable.clone()), &state);
+            assert_eq!(response.status, 400, "{immutable}: {}", response.body);
+        }
+        let missing = route(
+            rename_http_request(
+                json!({ "agent_id": "agt_missing00000", "name": "n", "reason": "x" }),
+            ),
+            &state,
+        );
+        assert_eq!(missing.status, 404);
+
+        // Another owner cannot rename or read history for this agent.
+        init(
+            json!({ "username": "bob-example", "display_name": "Bob", "email": "bob@example.com" })
+                .to_string(),
+            &state,
+        )
+        .expect("init should select bob");
+        assert_eq!(rename_via_route(&state, agent_id, "bobs-agent").status, 404);
+        assert_eq!(
+            route(
+                authenticated_get_request(&format!("/agents/history?agent_id={agent_id}")),
+                &state
+            )
+            .status,
+            400
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn registration_guidance_documents_rename_and_alias_resolution() {
+        let path =
+            std::env::temp_dir().join(format!("hubu-api-guidance-rename-{}.sqlite", UserId::new()));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        let guidance = route(
+            public_request("GET", "/.well-known/hubu-agent-registration.json"),
+            &state,
+        )
+        .body;
+        assert_eq!(guidance["protocol_version"], "hubu-agent-registration-v1");
+        assert_eq!(guidance["rename"]["actor"], "human_owner_only");
+        assert_eq!(guidance["rename"]["endpoint"], "POST /agents/rename");
+        assert_eq!(
+            guidance["rename"]["capability_header"],
+            APPROVAL_CAPABILITY_HEADER
+        );
+        assert!(
+            guidance["identity_resolution"]["after_rename"]["previous_name"]
+                .as_str()
+                .unwrap()
+                .contains("stale_agent_identity")
+        );
+        assert_eq!(
+            guidance["identity_resolution"]["name_normalization"],
+            "trimmed, case-insensitive"
+        );
+        std::fs::remove_file(path).ok();
     }
 
     #[test]

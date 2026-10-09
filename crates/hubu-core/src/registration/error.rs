@@ -17,6 +17,29 @@ pub enum RegistrationError {
     #[error("agent account is suspended")]
     SuspendedAccount,
 
+    #[error("invalid rename: {0}")]
+    InvalidRename(&'static str),
+
+    #[error("agent not found")]
+    AgentNotFound,
+
+    #[error(
+        "agent identity changed since the rename was prepared; review the current name and retry"
+    )]
+    RenameConflict,
+
+    #[error("rename does not change the agent identity")]
+    NoIdentityChange,
+
+    #[error("renamed identity fingerprint already belongs to a different agent")]
+    IdentityFingerprintCollision,
+
+    #[error("agent name is already used by another agent of this owner")]
+    AgentNameConflict,
+
+    #[error("agent name is reserved as a previous name of another agent of this owner")]
+    AgentNameReserved,
+
     #[error(transparent)]
     Storage(#[from] StorageError),
 }

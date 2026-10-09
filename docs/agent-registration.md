@@ -150,6 +150,70 @@ Registration fails when:
 Matching identity and version content is reused. Conflicting content is never
 silently merged or overwritten.
 
+## Renaming an agent
+
+An agent's public `agt_...` ID is permanent. The agent name is part of the
+fingerprinted identity payload, so before HUB-250 a corrected name could only be
+registered as a separate identity. A human owner can now relabel an agent in
+place:
+
+```sh
+hubu agent rename --agent-id agt_EXACT_AGENT_ID --name research-agent --reason "fix typo"
+hubu agent history --agent-id agt_EXACT_AGENT_ID
+```
+
+The CLI calls `POST /agents/rename` with `agent_id`, `name`, and `reason` only.
+The route requires the human approval capability
+(`X-Hubu-Approval-Capability`, from `HUBU_APPROVAL_TOKEN` or
+`HUBU_APPROVAL_TOKEN_FILE`) in addition to the local bearer token, so agent
+sessions cannot rename themselves. Rename is not exposed through
+`hubu-unified-mcp`: there is no rename tool and the unified MCP route allowlist
+excludes `/agents/rename` and `/agents/history`.
+
+A rename:
+
+- keeps the internal agent ID and `agt_...`, and therefore the account,
+  budgets, holds, policy assignments, versions, sessions, and ledger history;
+- copies the stored identity payload, replaces only `agent_name`, and computes
+  the new identity fingerprint with the unchanged v1 canonicalization and
+  hashing;
+- records the previous and the new fingerprint as aliases of the same agent;
+- appends an identity revision with the revision number, changed fields
+  (old -> new), actor (`usr_...`), timestamp, and reason; and
+- updates the current display name shown by `hubu agent list`.
+
+Owner and `agent_kind` cannot be edited; the request rejects any field other
+than `agent_id`, `name`, and `reason`. Version payloads (`agv_...`) stay
+immutable: model or runtime changes are a new version, not an edit.
+
+A rename is rejected (HTTP 409) when the new identity fingerprint, or the
+normalized new name, already belongs to a different agent of the same owner.
+Names are normalized by trimming and comparing case-insensitively
+(`hubu_core::registration::normalize_agent_name`). Previous names stay
+reserved for their agent: another agent of the same owner cannot be renamed
+into one, and registration cannot create a new agent under one. An agent may
+rename back to one of its own previous names. Agents are never merged.
+
+### Re-registration after a rename
+
+Registration resolves the submitted identity fingerprint through the alias
+table before creating anything:
+
+| Submitted identity | Result |
+| --- | --- |
+| Current name of a renamed agent | Same agent and account; identical version payloads reuse the same `agv_...`. `identity_resolution: "alias"`, no warning. |
+| A previous name of a renamed agent | Same agent and account, `identity_resolution: "alias"`, plus a `stale_agent_identity` warning naming the current name. No identity, name change, or revision is created. |
+| Fingerprint of a never-renamed agent | Rejected as `agent is already registered for this owner` (unchanged). |
+
+Clients should show the warning to the human and update their configured agent
+name. The registration guidance exposes these rules under
+`identity_resolution` and `rename`.
+
+Agents registered before identity payloads were stored are renamed by
+rebuilding the payload Hubu's own clients send and accepting it only when it
+reproduces the stored fingerprint exactly. Otherwise the rename fails with
+`agent_rename_identity_payload_unavailable`.
+
 ## Persistence flow
 
 The server flow is:
@@ -157,6 +221,7 @@ The server flow is:
 ```text
 validate envelope
   -> recompute fingerprints
+  -> resolve identity fingerprint through rename aliases
   -> resolve or create AgentIdentity
   -> resolve or create AgentVersion
   -> resolve or create AgentAccount
@@ -166,6 +231,9 @@ validate envelope
 
 The local server persists registration records in the SQLite database selected
 by `HUBU_DB_PATH`, defaulting to `hubu.sqlite3` in the server working directory.
+Rename support adds `agent_identities.identity_payload_json` and two
+append-only tables, `agent_identity_aliases` and `agent_identity_revisions`,
+created idempotently at startup; triggers reject updates and deletes.
 The core manager also has an in-memory store for tests and embedded experiments.
 
 The implementation entry point is
