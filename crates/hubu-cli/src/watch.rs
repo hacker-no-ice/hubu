@@ -1,7 +1,8 @@
 //! Passive budget display: all balances and decisions come from Hubu.
 use super::*;
 use std::time::{Duration, Instant};
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 #[derive(Debug)]
 struct Options {
@@ -151,25 +152,19 @@ fn clean(value: &str) -> String {
         .map(|c| if c.is_control() { '?' } else { c })
         .collect()
 }
-// Terminal cells, not chars: CJK and emoji occupy two columns. A base char
-// plus its zero-width followers (variation selectors, keycaps, combining marks,
-// and anything joined by ZWJ) is measured and kept together as one unit.
+// Terminal cells, not chars: CJK and emoji occupy two columns. Text is split
+// into grapheme clusters, the units a terminal draws (flags, ZWJ sequences,
+// keycaps, variation selectors and combining marks stay whole), and each is
+// measured as a string.
 fn units(s: &str) -> Vec<(&str, usize)> {
-    let mut out: Vec<(&str, usize)> = Vec::new();
-    let mut start = 0;
-    let mut joined = false;
-    for (i, c) in s.char_indices() {
-        let attach = i > 0 && (joined || c.width().unwrap_or(0) == 0);
-        if !attach && i > start {
-            out.push((&s[start..i], s[start..i].width()));
-            start = i;
-        }
-        joined = c == '\u{200d}';
-    }
-    if start < s.len() {
-        out.push((&s[start..], s[start..].width()));
-    }
-    out
+    s.graphemes(true)
+        .map(|g| {
+            // A regional-indicator pair is one two-cell flag.
+            let flag = g.chars().count() == 2
+                && g.chars().all(|c| ('\u{1F1E6}'..='\u{1F1FF}').contains(&c));
+            (g, if flag { 2 } else { g.width() })
+        })
+        .collect()
 }
 fn display_width(s: &str) -> usize {
     units(s).iter().map(|(_, w)| w).sum()
@@ -934,6 +929,12 @@ mod tests {
         assert_eq!(display_width("❤️"), 2);
         assert_eq!(display_width("1️⃣"), 2);
         assert_eq!(display_width("a❤️b"), 4);
+        assert_eq!(display_width("🇺🇸🇯🇵"), 4);
+        assert_eq!(
+            text(&json!("🇺🇸".repeat(8)), 12),
+            format!("{}…", "🇺🇸".repeat(5))
+        );
+        assert_eq!(display_width("👩‍💻"), 2);
         assert_eq!(text(&json!("❤️❤️❤️❤️"), 5), "❤️❤️…");
         let name = "❤️".repeat(20);
         let mut s = snapshot();
