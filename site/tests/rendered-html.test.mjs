@@ -152,6 +152,7 @@ test("publishes the live-provider demo with a video-first companion and clear co
   assert.match(html, /10:53/);
   assert.match(html, /Real provider calls and charges/);
   assert.match(html, /needs_approval/);
+  assert.match(html, /precise provider cost of 6\.7¢; USD budget accounting rounds up to 7¢/);
   assert.match(html, /href="\/demos\/sandbox"/);
   assert.match(html, /href="\/docs\/operations\/live-providers"/);
   assert.match(html, /id="mascot-gallery"/);

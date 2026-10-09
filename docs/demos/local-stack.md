@@ -40,7 +40,7 @@ This is a per-request policy limit, not an exhausted budget. Having money remain
 
 A 1K Gemini variation needs a 7¢ cap, so Hubu returns `needs_approval`. A phone notification alerts the user, and the operation waits for an explicit decision.
 
-After approval, that operation proceeds. The recorded provider cost is 6.7¢, below the 7¢ authorization cap. The notification is an alert; approval is a separate decision.
+After approval, that operation proceeds. The receipt preserves the precise provider cost of 6.7¢; USD budget accounting rounds up to 7¢. The notification is an alert; approval is a separate decision.
 
 ### 6. Inspect the evidence
 
