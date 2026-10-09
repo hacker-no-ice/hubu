@@ -1,6 +1,7 @@
 //! Passive budget display: all balances and decisions come from Hubu.
 use super::*;
 use std::time::{Duration, Instant};
+use unicode_width::UnicodeWidthChar;
 
 #[derive(Debug)]
 struct Options {
@@ -150,21 +151,34 @@ fn clean(value: &str) -> String {
         .map(|c| if c.is_control() { '?' } else { c })
         .collect()
 }
+// Terminal cells, not chars: CJK and other wide glyphs occupy two columns.
+fn cells(c: char) -> usize {
+    c.width().unwrap_or(0)
+}
+fn display_width(s: &str) -> usize {
+    s.chars().map(cells).sum()
+}
 fn text(value: &Value, width: usize) -> String {
     let s = clean(value.as_str().unwrap_or("—"));
-    if s.chars().count() > width {
-        s.chars()
-            .take(width.saturating_sub(1))
-            .chain(['…'])
-            .collect()
-    } else {
-        s
+    if display_width(&s) <= width {
+        return s;
     }
+    let mut out = String::new();
+    let mut used = 0;
+    for c in s.chars() {
+        if used + cells(c) > width.saturating_sub(1) {
+            break;
+        }
+        used += cells(c);
+        out.push(c);
+    }
+    out.push('…');
+    out
 }
 fn pad(value: &str, width: usize) -> String {
     format!(
         "{value}{}",
-        " ".repeat(width.saturating_sub(value.chars().count()))
+        " ".repeat(width.saturating_sub(display_width(value)))
     )
 }
 fn cents(value: &Value) -> String {
@@ -238,7 +252,7 @@ fn line(
     for (s, role) in segments {
         let mut chunk = String::new();
         for c in s.chars() {
-            if column == width {
+            if column + cells(c) > width {
                 out.push_str(
                     &role
                         .map(|r| style.paint(r, &chunk))
@@ -249,7 +263,7 @@ fn line(
                 column = 0;
             }
             chunk.push(c);
-            column += 1;
+            column += cells(c);
         }
         out.push_str(&role.map(|r| style.paint(r, &chunk)).unwrap_or(chunk));
     }
@@ -391,7 +405,7 @@ fn render(
                 .flatten()
                 .map(|e| &e["agent_name"]),
         )
-        .map(|n| clean(n.as_str().unwrap_or("—")).chars().count())
+        .map(|n| display_width(&clean(n.as_str().unwrap_or("—"))))
         .max()
         .unwrap_or(0);
     // Feed lines keep at least 14 columns for the rule after the name, which
@@ -416,7 +430,7 @@ fn render(
     };
     let header = format!(
         "{}{}",
-        pad(&title, content.saturating_sub(right.chars().count())),
+        pad(&title, content.saturating_sub(display_width(&right))),
         right
     );
     line(
@@ -749,7 +763,7 @@ mod tests {
         let o = options(vec![]).unwrap();
         let result = output(&s, &o);
         assert!(!result.contains('\u{1b}'));
-        assert!(result.lines().all(|l| l.chars().count() <= 70));
+        assert!(result.lines().all(|l| display_width(l) <= 70));
         assert!(result.contains("922.3372036854775807¢"));
         assert!(result.contains("evil?[2J?"));
         assert_eq!(exact_cents(&json!({"amount":"1","scale":3})), "0.1¢");
@@ -819,7 +833,7 @@ mod tests {
         )
         .unwrap();
         assert!(narrow.contains("research-ag…"));
-        assert!(narrow.lines().all(|l| l.chars().count() <= 70), "{narrow}");
+        assert!(narrow.lines().all(|l| display_width(l) <= 70), "{narrow}");
         let wide = render(
             &s,
             None,
@@ -835,7 +849,7 @@ mod tests {
             "{wide}"
         );
         assert!(wide.contains("allow_under_40_cents_drafts"), "{wide}");
-        assert!(wide.lines().all(|l| l.chars().count() <= 100), "{wide}");
+        assert!(wide.lines().all(|l| display_width(l) <= 100), "{wide}");
         // Bars widen with the terminal: the wide row is longer than the narrow one.
         let bar = |out: &str| {
             out.lines()
@@ -848,5 +862,54 @@ mod tests {
         assert!(bar(&wide) > bar(&narrow));
         assert_eq!(layout_width(40), 70);
         assert_eq!(layout_width(500), 100);
+    }
+
+    #[test]
+    fn wide_glyphs_and_single_view_stay_within_width() {
+        let wide_name = "設計エージェント研究用設計エージェント研究用"; // 22 wide glyphs = 44 cells
+        let mut s = snapshot();
+        let mut second = s["rows"][0].clone();
+        second["agent_id"] = json!("b");
+        second["name"] = json!(wide_name);
+        s["rows"].as_array_mut().unwrap().push(second);
+        s["recent_events"][0]["agent_id"] = json!("b");
+        s["recent_events"][0]["agent_name"] = json!(wide_name);
+        s["recent_events"][0]["rule_ids"] = json!(["上限四十セント以下の下書き画像"]);
+        let o = options(vec![]).unwrap();
+        for width in [70, 85, 100] {
+            let out = render(
+                &s,
+                None,
+                &o,
+                terminal::TerminalStyle::plain(),
+                false,
+                100,
+                width,
+            )
+            .unwrap();
+            assert!(
+                out.lines().all(|l| display_width(l) <= width),
+                "{width}: {out}"
+            );
+            assert!(out.contains('…'), "{out}");
+        }
+        // The single-agent view puts the name on its own line, so even at 70
+        // columns a long name is shown in full while staying within the width.
+        let long = "research-agent-for-quarterly-campaigns";
+        let mut one = snapshot();
+        one["rows"][0]["name"] = json!(long);
+        one["recent_events"][0]["rule_ids"] = json!(["allow_under_40c_drafts"]);
+        let out = render(
+            &one,
+            None,
+            &o,
+            terminal::TerminalStyle::plain(),
+            false,
+            100,
+            70,
+        )
+        .unwrap();
+        assert!(out.contains(long), "{out}");
+        assert!(out.lines().all(|l| display_width(l) <= 70), "{out}");
     }
 }

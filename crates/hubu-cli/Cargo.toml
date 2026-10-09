@@ -23,6 +23,7 @@ path = "src/main.rs"
 hubu-feedback.workspace = true
 anstyle.workspace = true
 anyhow.workspace = true
+unicode-width.workspace = true
 chrono.workspace = true
 dirs.workspace = true
 hubu-common.workspace = true
