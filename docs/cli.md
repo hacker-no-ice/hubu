@@ -116,7 +116,9 @@ The default layout shows all agents and five recent decisions, trimmed to the
 terminal height. `--compact` shows bars only. `--events N` accepts 1–10;
 `--agent NAME|ID` selects exactly one agent and filters the feed locally. A
 single-agent view expands the bar and shows consumed, frozen, and free dollars.
-Every line is at most 70 characters.
+The layout fits the terminal width, from 70 to 100 columns: wider terminals
+show longer agent names (up to 24 characters), rule names and bars. Output that
+is not a terminal, such as `--once` piped to a file, uses 70 columns.
 
 Each bar describes the latest operation's current effective budget in the
 selected currency (USD by default), falling back to the tightest current cap.
