@@ -927,9 +927,9 @@ struct RegisterAgentHttpResponse {
     version_id: String,
     account_id: String,
     session_id: String,
-    /// `alias` when the identity fingerprint resolved through an owner rename.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    identity_resolution: Option<&'static str>,
+    /// `created` for a new identity, `reused` for an existing identity
+    /// fingerprint, or `alias` when it resolved through an owner rename.
+    identity_resolution: &'static str,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     warnings: Vec<agent_identity::RegistrationWarningHttpResponse>,
 }
@@ -2433,7 +2433,8 @@ fn registration_guidance() -> Value {
         ],
         "identity_resolution": {
             "stable_agent_id": "agt_ IDs never change; budgets, holds, policy assignments, accounts, and ledger rows stay keyed by them",
-            "duplicate_registration": "re-registering the identity fingerprint of a never-renamed agent is rejected as already registered",
+            "idempotent_registration": "matching identity and version content reuses the existing agt_, agv_, and aga_ records and creates a new session; identity_resolution is created, reused, or alias",
+            "conflicts": "an existing identity fingerprint with a different owner or agent type, or an existing version fingerprint with different version content, is rejected",
             "after_rename": {
                 "current_name": "resolves through the fingerprint alias table to the same agent; identical version payloads reuse the same agv_ and aga_ records; no warning",
                 "previous_name": "resolves to the same agent and returns a `stale_agent_identity` warning; no identity, name change, or revision is created",
@@ -2559,18 +2560,23 @@ fn register_agent(body: String, state: &ServerState) -> Result<RegisterAgentHttp
             .registration
             .lock()
             .map_err(|_| anyhow!("registration manager lock poisoned"))?;
-        // A plain duplicate of a never-renamed identity stays rejected. Once an
-        // owner rename has recorded aliases, both the current and previous
-        // fingerprints resolve to the same agent instead.
-        let resolution = registration.resolve_identity_fingerprint(
+        // Registration is idempotent: matching identity and version content
+        // reuses the existing records (directly or through a rename alias) and
+        // only opens a new session. Owner, agent-type, and version-content
+        // conflicts are still rejected by the registration manager.
+        let existing = registration.resolve_identity_fingerprint(
             &registration_request.owner_user_id,
             &submitted_fingerprint,
         )?;
-        if resolution.is_some_and(|resolution| !resolution.via_alias) {
-            return Err(anyhow!("agent is already registered for this owner"));
-        }
-        registration.register_agent(registration_request)?
+        let response = registration.register_agent(registration_request)?;
+        let identity_resolution = match existing {
+            None => "created",
+            Some(_) if response.resolved_via_alias => "alias",
+            Some(_) => "reused",
+        };
+        (response, identity_resolution)
     };
+    let (response, identity_resolution) = response;
     let warnings =
         if response.resolved_via_alias && response.agent.fingerprint != submitted_fingerprint {
             let warning = agent_identity::stale_identity_warning(
@@ -2617,7 +2623,7 @@ fn register_agent(body: String, state: &ServerState) -> Result<RegisterAgentHttp
         version_id: response.version.pub_id,
         account_id: response.account.pub_id,
         session_id: response.session.pub_id,
-        identity_resolution: response.resolved_via_alias.then_some("alias"),
+        identity_resolution,
         warnings,
     })
 }
@@ -6721,14 +6727,34 @@ lease_profiles:
     }
 
     #[test]
-    fn plain_duplicate_registration_without_rename_is_still_rejected() {
-        let (path, state, user) = rename_test_state("rename-duplicate");
-        register_named(&state, &user, "plain-agent").unwrap();
-        let error = register_named(&state, &user, "plain-agent").unwrap_err();
+    fn reregistering_a_never_renamed_agent_is_idempotent() {
+        let (path, state, user) = rename_test_state("register-idempotent");
+        let first = register_named(&state, &user, "plain-agent").unwrap();
+        assert_eq!(first["identity_resolution"], "created");
+        let second = register_named(&state, &user, "plain-agent").unwrap();
+
+        assert_eq!(second["identity_resolution"], "reused");
+        assert_eq!(second["agent_id"], first["agent_id"]);
+        assert_eq!(second["version_id"], first["version_id"]);
+        assert_eq!(second["account_id"], first["account_id"]);
+        assert_ne!(second["session_id"], first["session_id"]);
+        assert!(second.get("warnings").is_none(), "{second}");
         assert_eq!(
-            error.to_string(),
-            "agent is already registered for this owner"
+            route(authenticated_get_request("/agents"), &state).body["agents"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
         );
+
+        // A new version label under the same identity reuses the agent and
+        // account but records a distinct immutable version.
+        let envelope = simple_registration_envelope("plain-agent", "v2", &user.user_id);
+        let next_version =
+            to_json(register_agent(serde_json::to_string(&envelope).unwrap(), &state).unwrap());
+        assert_eq!(next_version["identity_resolution"], "reused");
+        assert_eq!(next_version["agent_id"], first["agent_id"]);
+        assert_ne!(next_version["version_id"], first["version_id"]);
         std::fs::remove_file(path).ok();
     }
 
@@ -7274,7 +7300,7 @@ lease_profiles:
     }
 
     #[test]
-    fn duplicate_agent_registration_returns_concise_error() {
+    fn duplicate_agent_registration_reuses_existing_records() {
         let path =
             std::env::temp_dir().join(format!("hubu-api-duplicate-agent-{}.sqlite", UserId::new()));
         let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
@@ -7289,21 +7315,23 @@ lease_profiles:
         .expect("init should create user");
         let envelope = simple_registration_envelope("protocol-agent", "dev", &user.user_id);
 
-        register_agent(
+        let first = register_agent(
             serde_json::to_string(&envelope).expect("envelope should serialize"),
             &state,
         )
         .expect("first registration should succeed");
-        let error = register_agent(
+        let second = register_agent(
             serde_json::to_string(&envelope).expect("envelope should serialize"),
             &state,
         )
-        .expect_err("duplicate registration should fail");
+        .expect("matching registration should reuse the existing agent");
 
-        assert_eq!(
-            error.to_string(),
-            "agent is already registered for this owner"
-        );
+        assert_eq!(first.identity_resolution, "created");
+        assert_eq!(second.identity_resolution, "reused");
+        assert_eq!(second.agent_id, first.agent_id);
+        assert_eq!(second.version_id, first.version_id);
+        assert_eq!(second.account_id, first.account_id);
+        assert_ne!(second.session_id, first.session_id);
         std::fs::remove_file(path).ok();
     }
 
@@ -11295,9 +11323,9 @@ rules: []
     }
 
     #[test]
-    fn duplicate_agent_registration_remains_blocked_after_restart() {
+    fn duplicate_agent_registration_reuses_records_after_restart() {
         let path = std::env::temp_dir().join(format!("hubu-api-restart-{}.sqlite", UserId::new()));
-        let _user = {
+        let (_user, first_agent) = {
             let state =
                 ServerState::new_with_db_path(&path).expect("server state should initialize");
             let user = init(
@@ -11320,12 +11348,12 @@ rules: []
             )
             .expect("agent should register under initialized user");
             assert_eq!(agent.user_id, user.user_id);
-            user
+            (user, agent)
         };
 
         let restarted =
             ServerState::new_with_db_path(&path).expect("server state should reload from storage");
-        let error = register_agent(
+        let reused = register_agent(
             json!({
                 "name": "settlement-agent",
                 "version": "v1",
@@ -11333,12 +11361,12 @@ rules: []
             .to_string(),
             &restarted,
         )
-        .expect_err("duplicate agent registration should remain blocked after restart");
+        .expect("matching agent registration should reuse records after restart");
 
-        assert_eq!(
-            error.to_string(),
-            "agent is already registered for this owner"
-        );
+        assert_eq!(reused.identity_resolution, "reused");
+        assert_eq!(reused.agent_id, first_agent.agent_id);
+        assert_eq!(reused.version_id, first_agent.version_id);
+        assert_eq!(reused.account_id, first_agent.account_id);
         std::fs::remove_file(path).ok();
     }
 

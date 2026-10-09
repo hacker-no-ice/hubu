@@ -31,7 +31,10 @@ use public IDs such as `agt_...`, `agv_...`, `aga_...`, and `ags_...`; public
 IDs do not encode names, fingerprints, ownership, or model metadata.
 
 Registration is idempotent for identity, version, and account. Each successful
-registration creates a new session.
+registration creates a new session. The response's `identity_resolution` is
+`created` for a new identity, `reused` when the identity fingerprint already
+belongs to the owner's agent, or `alias` when it resolved through an owner
+rename (see [Renaming an agent](#renaming-an-agent)).
 
 Registration is governance state, not execution-plane startup configuration.
 After the stack is running, registering a new agent requires no stack render,
@@ -147,8 +150,11 @@ Registration fails when:
 - an existing version fingerprint for the same agent resolves to different
   version content.
 
-Matching identity and version content is reused. Conflicting content is never
-silently merged or overwritten.
+Matching identity and version content is reused: registering the same agent
+again returns the existing `agt_...`, `agv_...`, and `aga_...` records and a new
+`ags_...` session. Before HUB-250 the HTTP API rejected such a repeat with
+`agent is already registered for this owner`; it now reuses the records.
+Conflicting content is never silently merged or overwritten.
 
 ## Renaming an agent
 
@@ -203,7 +209,7 @@ table before creating anything:
 | --- | --- |
 | Current name of a renamed agent | Same agent and account; identical version payloads reuse the same `agv_...`. `identity_resolution: "alias"`, no warning. |
 | A previous name of a renamed agent | Same agent and account, `identity_resolution: "alias"`, plus a `stale_agent_identity` warning naming the current name. No identity, name change, or revision is created. |
-| Fingerprint of a never-renamed agent | Rejected as `agent is already registered for this owner` (unchanged). |
+| Fingerprint of a never-renamed agent | Same agent, version, and account (`identity_resolution: "reused"`), new session, no warning. |
 
 Clients should show the warning to the human and update their configured agent
 name. The registration guidance exposes these rules under

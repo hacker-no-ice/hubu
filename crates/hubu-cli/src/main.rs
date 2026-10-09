@@ -1135,7 +1135,11 @@ fn register_agent(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
     let response = post_json(base_url, "/agents/register", prepared.envelope.clone())?;
 
     print_registration_review(&prepared);
-    println!("{}", terminal::stdout().success("Agent registered"));
+    let headline = match response.get("identity_resolution").and_then(Value::as_str) {
+        Some("reused") | Some("alias") => "Agent already registered; reused existing records",
+        _ => "Agent registered",
+    };
+    println!("{}", terminal::stdout().success(headline));
     println!("  agent_id: {}", string_at(&response, "agent_id")?);
     print_registration_warnings(&response)?;
     println!("  version_id: {}", string_at(&response, "version_id")?);
