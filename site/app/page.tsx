@@ -95,15 +95,22 @@ export default function Home() {
             <h2 id="worked-example-title">One image request, end to end</h2>
             <p>Illustrative amounts.</p>
           </div>
-          <ol className="example-flow">
-            {exampleSteps.map(([title, copy], index) => (
-              <li key={title}>
-                <span>{`0${index + 1}`}</span>
-                <strong>{title}</strong>
-                <p>{copy}</p>
-              </li>
-            ))}
-          </ol>
+          <div className="worked-example-content">
+            <ol className="example-flow">
+              {exampleSteps.map(([title, copy], index) => (
+                <li key={title}>
+                  <span>{`0${index + 1}`}</span>
+                  <strong>{title}</strong>
+                  <p>{copy}</p>
+                </li>
+              ))}
+            </ol>
+            <figure className="example-mascot">
+              {/* eslint-disable-next-line @next/next/no-img-element -- Static artwork is served directly by the site worker. */}
+              <img src="/brand/hubu-mascot.png" width="1388" height="1133" alt="Hubu's cream-and-jade seal mascot on a cinnabar base" loading="lazy" decoding="async" />
+              <figcaption>Hubu&apos;s mascot<a href="/demos/local-stack">Watch the agent create variations →</a></figcaption>
+            </figure>
+          </div>
         </section>
 
         <section className="intro-video section-wrap" aria-labelledby="intro-video-title">

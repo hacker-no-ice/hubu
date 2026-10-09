@@ -68,6 +68,12 @@ test("home page walks through an illustrative governed image request", async () 
   assert.match(html, /Illustrative amounts\./);
   assert.ok(html.indexOf('class="hero"') < html.indexOf('id="worked-example-title"'));
   assert.ok(html.indexOf('id="worked-example-title"') < html.indexOf('id="intro-video-title"'));
+  const mascot = html.match(/<figure class="example-mascot">[\s\S]*?<\/figure>/)?.[0];
+  assert.ok(mascot);
+  assert.match(mascot, /src="\/brand\/hubu-mascot.png"/);
+  assert.match(mascot, /loading="lazy"/);
+  assert.match(mascot, /alt="Hubu&#x27;s cream-and-jade seal mascot on a cinnabar base"/);
+  assert.match(mascot, /href="\/demos\/local-stack"/);
 });
 
 test("links demos from home and publishes the sandbox video before its concise script", async () => {
@@ -122,6 +128,44 @@ test("home page states that Gongbu is optional and links what works today", asyn
   assert.match(html, /<strong>Sandbox<\/strong> with no provider credentials/);
   assert.match(html, /href="\/docs\/overview#what-works-today"/);
   assert.ok(html.indexOf('class="warning-band"') < html.indexOf('class="works-today"'));
+});
+
+test("publishes the live-provider demo with a video-first companion and clear cost boundary", async () => {
+  const index = await (await render("/demos")).text();
+  assert.match(index, /href="\/demos\/sandbox"/);
+  assert.match(index, /href="\/demos\/local-stack"/);
+  assert.match(index, /No real charges/);
+  assert.match(index, /Real provider charges/);
+  const response = await render("/demos/local-stack");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /href="https:\/\/hubustack.dev\/demos\/local-stack"/);
+  assert.match(html, /<a(?=[^>]*href="\/demos\/local-stack")(?=[^>]*aria-current="page")[^>]*>/);
+  const iframe = html.match(/<iframe\b[^>]*><\/iframe>/)?.[0];
+  assert.ok(iframe);
+  assert.match(iframe, /youtube-nocookie.com\/embed\/2lLNKL6ykjY/);
+  assert.match(iframe, /title="Hubu Local Stack Demo: Real Providers, Governed Spend"/);
+  assert.match(iframe, /loading="lazy"/);
+  assert.match(iframe, /referrerpolicy="strict-origin-when-cross-origin"/i);
+  assert.doesNotMatch(iframe, /autoplay/);
+  assert.ok(html.indexOf(iframe) < html.indexOf('id="the-short-version"'));
+  assert.match(html, /10:53/);
+  assert.match(html, /Real provider calls and charges/);
+  assert.match(html, /needs_approval/);
+  assert.match(html, /href="\/demos\/sandbox"/);
+  assert.match(html, /href="\/docs\/operations\/live-providers"/);
+  assert.match(html, /id="mascot-gallery"/);
+  const galleries = [...html.matchAll(/<div class="demo-gallery">[\s\S]*?<\/div>/g)].map(([gallery]) => gallery).join("");
+  assert.equal(galleries.match(/<figure\b/g)?.length, 6);
+  assert.equal(galleries.match(/loading="lazy"/g)?.length, 6);
+  assert.match(html, /not additional executions shown in the video/);
+  for (const image of ["brand/hubu-mascot.png", "demos/local-stack/mascot-flux-ledger.jpg", "demos/local-stack/mascot-gemini-blocked.jpg", "demos/local-stack/concepts-builtin.png", "demos/local-stack/concepts-flux.jpg", "demos/local-stack/concepts-gemini.jpg"]) {
+    assert.ok(galleries.includes(`src="/${image}"`), image);
+    await access(new URL(`../dist/client/${image}`, import.meta.url));
+  }
+  const legacy = await render("/docs/demos/local-stack");
+  assert.equal(legacy.status, 307);
+  assert.equal(legacy.headers.get("location"), "/demos/local-stack");
 });
 
 test("roadmap shows three linked priorities without promising release dates", async () => {
@@ -208,7 +252,7 @@ test("publishes a sitemap of every documentation route", async () => {
     readFile(new URL("../dist/client/robots.txt", import.meta.url), "utf8"),
   ]);
   assert.match(robots, /^Sitemap: https:\/\/hubustack.dev\/sitemap.xml$/m);
-  for (const pathname of ["/", "/demos", "/demos/sandbox", "/architecture/", "/docs/overview", "/docs/local-stack", "/configuration/local-stack/v1", "/configuration/local-stack/v1/stack-toml"]) {
+  for (const pathname of ["/", "/demos", "/demos/sandbox", "/demos/local-stack", "/architecture/", "/docs/overview", "/docs/local-stack", "/configuration/local-stack/v1", "/configuration/local-stack/v1/stack-toml"]) {
     assert.ok(sitemap.includes(`<loc>https://hubustack.dev${pathname}</loc>`), pathname);
   }
 });

@@ -59,6 +59,6 @@ The recorded cost is one simulated cent: USD 0.01 consumed, nothing frozen, and 
 
 People set the boundaries. Agents work within them. Results stay inspectable.
 
-Follow the [local stack quick start](../local-stack.md) to prepare your own sandbox. This video begins with a running stack and focuses on the happy path. Real providers, approval flows, and failure handling will get separate demos.
+Follow the [local stack quick start](../local-stack.md) to prepare your own sandbox. This video begins with a running stack and focuses on the happy path. For real providers and approval decisions, continue with the [local-stack demo](local-stack.md). Failure handling will get a separate demo.
 
 [Explore the source on GitHub ↗](https://github.com/hacker-no-ice/hubu)
