@@ -73,19 +73,32 @@ pub(super) fn command(context: &CliContext, mut args: Vec<String>) -> Result<()>
                 {
                     bail!("Hubu returned an unsupported watch projection");
                 }
+                let (height, columns) = terminal_size();
                 let output = render(
                     &snapshot,
                     previous.as_ref(),
                     &opts,
                     terminal::stdout(),
                     false,
-                    terminal_height(),
+                    height,
+                    layout_width(columns),
                 )?;
                 previous = Some(snapshot);
                 output
             }
             Err(_) if !opts.once => match &previous {
-                Some(s) => render(s, None, &opts, terminal::stdout(), true, terminal_height())?,
+                Some(s) => {
+                    let (height, columns) = terminal_size();
+                    render(
+                        s,
+                        None,
+                        &opts,
+                        terminal::stdout(),
+                        true,
+                        height,
+                        layout_width(columns),
+                    )?
+                }
                 None => terminal::stdout().heading(" HUBU WATCH · STALE · retrying\n"),
             },
             Err(error) => return Err(error.without_url().into()),
@@ -103,7 +116,8 @@ pub(super) fn command(context: &CliContext, mut args: Vec<String>) -> Result<()>
         std::thread::sleep(Duration::from_secs(1).saturating_sub(started.elapsed()));
     }
 }
-fn terminal_height() -> usize {
+/// Terminal rows and columns, defaulting to 24x70 when stdout is not a terminal.
+fn terminal_size() -> (usize, usize) {
     #[cfg(unix)]
     {
         let mut size: libc::winsize = unsafe { std::mem::zeroed() };
@@ -111,10 +125,24 @@ fn terminal_height() -> usize {
         if unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut size) } == 0
             && size.ws_row > 0
         {
-            return size.ws_row as usize;
+            let columns = if size.ws_col > 0 {
+                size.ws_col as usize
+            } else {
+                MIN_WIDTH
+            };
+            return (size.ws_row as usize, columns);
         }
     }
-    24
+    (24, MIN_WIDTH)
+}
+// The layout never shrinks below its 70-column design or stretches past
+// where bars stop reading well; agent names get the space in between.
+const MIN_WIDTH: usize = 70;
+const MAX_WIDTH: usize = 100;
+const MIN_NAME: usize = 12;
+const MAX_NAME: usize = 24;
+fn layout_width(columns: usize) -> usize {
+    columns.clamp(MIN_WIDTH, MAX_WIDTH)
 }
 fn clean(value: &str) -> String {
     value
@@ -204,12 +232,13 @@ fn line(
     out: &mut String,
     segments: &[(String, Option<terminal::Role>)],
     style: terminal::TerminalStyle,
+    width: usize,
 ) {
     let mut column = 0;
     for (s, role) in segments {
         let mut chunk = String::new();
         for c in s.chars() {
-            if column == 70 {
+            if column == width {
                 out.push_str(
                     &role
                         .map(|r| style.paint(r, &chunk))
@@ -294,26 +323,32 @@ fn event_status(event: &Value, single: bool) -> (&'static str, String) {
         _ => ("?", text(&event["status"], 24)),
     }
 }
-fn event_line(event: &Value, single: bool) -> String {
+fn event_line(event: &Value, single: bool, name_width: usize, width: usize) -> String {
     let provider = match event["provider"]["id"].as_str() {
         Some("provider:black-forest-labs:flux") => "FLUX".into(),
         Some("provider:google:gemini-developer") => "Gemini".into(),
         _ => text(&event["provider"]["display_name"], 6),
     };
+    // Fixed columns: time, glyph, agent, provider and status; the rule takes the rest.
+    let fixed = if single { 43 } else { 35 + name_width };
+    let rule_width = (width - 9).saturating_sub(fixed).max(14);
     let rule = if event["denial_kind"] == "budget" {
         "budget".into()
     } else {
         event["rule_ids"]
             .as_array()
             .and_then(|r| r.first())
-            .map(|r| text(r, 14))
+            .map(|r| text(r, rule_width))
             .unwrap_or_else(|| "default".into())
     };
     let (glyph, status) = event_status(event, single);
     let agent = if single {
         String::new()
     } else {
-        format!("{} ", pad(&text(&event["agent_name"], 12), 12))
+        format!(
+            "{} ",
+            pad(&text(&event["agent_name"], name_width), name_width)
+        )
     };
     format!(
         " {}  {glyph} {agent}{} {} {rule}",
@@ -329,6 +364,7 @@ fn render(
     style: terminal::TerminalStyle,
     stale: bool,
     height: usize,
+    width: usize,
 ) -> Result<String> {
     let all = snapshot["rows"].as_array().expect("validated rows");
     let rows: Vec<_> = all
@@ -343,6 +379,26 @@ fn render(
         bail!("--agent must identify exactly one agent by name or ID");
     }
     let single = rows.len() == 1;
+    // Content spans the width minus a margin (60 columns at the 70-column minimum).
+    let content = width - 10;
+    let longest = rows
+        .iter()
+        .map(|r| &r["name"])
+        .chain(
+            snapshot["recent_events"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|e| &e["agent_name"]),
+        )
+        .map(|n| clean(n.as_str().unwrap_or("—")).chars().count())
+        .max()
+        .unwrap_or(0);
+    // Feed lines keep at least 14 columns for the rule after the name, which
+    // also leaves bars at least 10 cells; 70 columns therefore keep 12.
+    let name_width = longest
+        .clamp(MIN_NAME, MAX_NAME)
+        .min(content.saturating_sub(48).max(MIN_NAME));
     let mut out = String::new();
     let title = if rows.len() > 1 {
         format!(" HUBU WATCH · {} agents", rows.len())
@@ -360,7 +416,7 @@ fn render(
     };
     let header = format!(
         "{}{}",
-        pad(&title, 60usize.saturating_sub(right.chars().count())),
+        pad(&title, content.saturating_sub(right.chars().count())),
         right
     );
     line(
@@ -374,10 +430,16 @@ fn render(
             },
         )],
         style,
+        width,
     );
-    line(&mut out, &[(format!(" {}", "─".repeat(60)), None)], style);
+    line(
+        &mut out,
+        &[(format!(" {}", "─".repeat(content)), None)],
+        style,
+        width,
+    );
     for row in &rows {
-        let name = text(&row["name"], 12);
+        let name = text(&row["name"], if single { content } else { name_width });
         let changed = previous
             .and_then(|s| s["rows"].as_array())
             .and_then(|rs| rs.iter().find(|r| r["agent_id"] == row["agent_id"]))
@@ -397,7 +459,7 @@ fn render(
             None
         };
         if single {
-            line(&mut out, &[(format!(" {name}"), highlight)], style);
+            line(&mut out, &[(format!(" {name}"), highlight)], style, width);
         }
         if row["budget_id"].is_null() || row["limit_cents"].is_null() {
             line(
@@ -408,12 +470,13 @@ fn render(
                         if single {
                             String::new()
                         } else {
-                            format!("{} ", pad(&name, 12))
+                            format!("{} ", pad(&name, name_width))
                         }
                     ),
                     highlight,
                 )],
                 style,
+                width,
             );
             continue;
         }
@@ -432,12 +495,16 @@ fn render(
             frozen,
             available,
             limit,
-            if single { 31 } else { 23 },
+            if single {
+                content - 29
+            } else {
+                content - 25 - name_width
+            },
         );
         let label = if single {
             " ".into()
         } else {
-            format!(" {} ", pad(&name, 12))
+            format!(" {} ", pad(&name, name_width))
         };
         // Multi-agent percentages right-align so rows read as a column.
         let detail = if single {
@@ -461,6 +528,7 @@ fn render(
                 (detail, highlight),
             ],
             style,
+            width,
         );
         if single {
             line(
@@ -475,6 +543,7 @@ fn render(
                     highlight,
                 )],
                 style,
+                width,
             );
         }
     }
@@ -483,14 +552,19 @@ fn render(
             &mut out,
             &[(" No registered agents for the active user.".into(), None)],
             style,
+            width,
         );
     }
     if !opts.compact {
         if !single && !rows.is_empty() {
             line(
                 &mut out,
-                &[("               █ consumed  ▓ frozen  ░ free".into(), None)],
+                &[(
+                    format!("{}█ consumed  ▓ frozen  ░ free", " ".repeat(name_width + 3)),
+                    None,
+                )],
                 style,
+                width,
             );
         }
         let events: Vec<_> = snapshot["recent_events"]
@@ -506,6 +580,7 @@ fn render(
                 &mut out,
                 &[(" RECENT DECISIONS".into(), Some(terminal::Role::Heading))],
                 style,
+                width,
             );
             for event in events {
                 let changed = previous.is_some_and(|s| {
@@ -518,7 +593,7 @@ fn render(
                 line(
                     &mut rendered,
                     &[(
-                        event_line(event, single),
+                        event_line(event, single, name_width, width),
                         if changed {
                             Some(terminal::Role::Heading)
                         } else {
@@ -526,6 +601,7 @@ fn render(
                         },
                     )],
                     style,
+                    width,
                 );
                 if out.lines().count() + rendered.lines().count() >= height {
                     break;
@@ -544,7 +620,7 @@ mod tests {
         json!({"schema_version":"hubu-watch-v1","currency":"usd","observed_at":"2026-10-08T03:12:07Z","rows":[{"agent_id":"a","name":"image-agent","budget_id":"b","limit_cents":200,"consumed_cents":6,"frozen_cents":8,"available_cents":186}],"recent_events":[{"id":"d","agent_id":"a","agent_name":"image-agent","created_at":"2026-10-08T03:12:05Z","provider":{"id":"provider:black-forest-labs:flux","display_name":"untrusted"},"status":"settled","requested_cents":8,"reserved_cents":8,"settled_cost":{"amount":"58","scale":3},"budget_charge_cents":6,"rule_ids":["draft_images"]}]})
     }
     fn output(s: &Value, o: &Options) -> String {
-        render(s, None, o, terminal::TerminalStyle::plain(), false, 100).unwrap()
+        render(s, None, o, terminal::TerminalStyle::plain(), false, 100, 70).unwrap()
     }
     #[test]
     fn single_multi_and_compact_layouts() {
@@ -581,7 +657,8 @@ mod tests {
             &options(vec!["--agent".into(), "image-agent".into()]).unwrap(),
             terminal::TerminalStyle::plain(),
             false,
-            24
+            24,
+            70
         )
         .is_err());
     }
@@ -619,17 +696,17 @@ mod tests {
             ("reconciliation_required", "!", "needs reconciliation"),
         ] {
             e["status"] = json!(status);
-            let line = event_line(&e, true);
+            let line = event_line(&e, true, 12, 70);
             assert!(line.contains(glyph) && line.contains(word), "{line}");
         }
         e["denial_kind"] = json!("budget");
-        assert!(event_line(&e, true).ends_with("budget"));
+        assert!(event_line(&e, true, 12, 70).ends_with("budget"));
         e["denial_kind"] = Value::Null;
         e["rule_ids"] = json!([]);
-        assert!(event_line(&e, true).ends_with("default"));
+        assert!(event_line(&e, true, 12, 70).ends_with("default"));
         e["provider"]["id"] = json!("unknown");
         e["provider"]["display_name"] = json!("longprovider");
-        assert!(event_line(&e, true).contains("longp…"));
+        assert!(event_line(&e, true, 12, 70).contains("longp…"));
     }
     #[test]
     fn bar_visibility_width_overrun_and_no_budget() {
@@ -677,7 +754,16 @@ mod tests {
         assert!(result.contains("evil?[2J?"));
         assert_eq!(exact_cents(&json!({"amount":"1","scale":3})), "0.1¢");
         assert_eq!(exact_cents(&json!({"amount":"1234","scale":4})), "12.34¢");
-        let stale = render(&s, None, &o, terminal::TerminalStyle::plain(), true, 100).unwrap();
+        let stale = render(
+            &s,
+            None,
+            &o,
+            terminal::TerminalStyle::plain(),
+            true,
+            100,
+            70,
+        )
+        .unwrap();
         assert!(stale.lines().next().unwrap().contains("STALE · retrying"));
         assert!(!stale.lines().next().unwrap().contains("USD"));
     }
@@ -686,12 +772,12 @@ mod tests {
         let s = snapshot();
         let o = options(vec![]).unwrap();
         let colored = terminal::TerminalStyle::colored();
-        let same = render(&s, Some(&s), &o, colored, false, 100).unwrap();
+        let same = render(&s, Some(&s), &o, colored, false, 100, 70).unwrap();
         let mut changed = s.clone();
         changed["rows"][0]["frozen_cents"] = json!(9);
         changed["recent_events"][0]["status"] = json!("claimed");
-        let highlighted = render(&changed, Some(&s), &o, colored, false, 100).unwrap();
-        let stale = render(&s, None, &o, colored, true, 100).unwrap();
+        let highlighted = render(&changed, Some(&s), &o, colored, false, 100, 70).unwrap();
+        let stale = render(&s, None, &o, colored, true, 100, 70).unwrap();
         for output in [&same, &highlighted, &stale] {
             // No foreground colors (30-37, 90-97) anywhere; emphasis is bold only.
             assert!(
@@ -702,11 +788,65 @@ mod tests {
         assert!(highlighted.matches("\u{1b}[1m").count() > same.matches("\u{1b}[1m").count());
         assert!(!highlighted.contains('*'));
         assert!(
-            render(&s, None, &o, terminal::TerminalStyle::plain(), false, 5)
+            render(&s, None, &o, terminal::TerminalStyle::plain(), false, 5, 70)
                 .unwrap()
                 .lines()
                 .count()
                 <= 5
         );
+    }
+
+    #[test]
+    fn wide_terminals_show_full_names_and_rules_within_width() {
+        let mut s = snapshot();
+        let long = "research-agent-campaigns";
+        let mut second = s["rows"][0].clone();
+        second["agent_id"] = json!("b");
+        second["name"] = json!(long);
+        s["rows"].as_array_mut().unwrap().push(second);
+        s["recent_events"][0]["agent_id"] = json!("b");
+        s["recent_events"][0]["agent_name"] = json!(long);
+        s["recent_events"][0]["rule_ids"] = json!(["allow_under_40_cents_drafts"]);
+        let o = options(vec![]).unwrap();
+        let narrow = render(
+            &s,
+            None,
+            &o,
+            terminal::TerminalStyle::plain(),
+            false,
+            100,
+            70,
+        )
+        .unwrap();
+        assert!(narrow.contains("research-ag…"));
+        assert!(narrow.lines().all(|l| l.chars().count() <= 70), "{narrow}");
+        let wide = render(
+            &s,
+            None,
+            &o,
+            terminal::TerminalStyle::plain(),
+            false,
+            100,
+            layout_width(120),
+        )
+        .unwrap();
+        assert!(
+            wide.contains(long) && !wide.contains("research-ag…"),
+            "{wide}"
+        );
+        assert!(wide.contains("allow_under_40_cents_drafts"), "{wide}");
+        assert!(wide.lines().all(|l| l.chars().count() <= 100), "{wide}");
+        // Bars widen with the terminal: the wide row is longer than the narrow one.
+        let bar = |out: &str| {
+            out.lines()
+                .find(|l| l.contains(long) || l.contains("research-ag…"))
+                .unwrap()
+                .chars()
+                .filter(|c| "█▓░".contains(*c))
+                .count()
+        };
+        assert!(bar(&wide) > bar(&narrow));
+        assert_eq!(layout_width(40), 70);
+        assert_eq!(layout_width(500), 100);
     }
 }
