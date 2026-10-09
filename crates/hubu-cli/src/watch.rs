@@ -1,7 +1,7 @@
 //! Passive budget display: all balances and decisions come from Hubu.
 use super::*;
 use std::time::{Duration, Instant};
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 #[derive(Debug)]
 struct Options {
@@ -151,12 +151,28 @@ fn clean(value: &str) -> String {
         .map(|c| if c.is_control() { '?' } else { c })
         .collect()
 }
-// Terminal cells, not chars: CJK and other wide glyphs occupy two columns.
-fn cells(c: char) -> usize {
-    c.width().unwrap_or(0)
+// Terminal cells, not chars: CJK and emoji occupy two columns. A base char
+// plus its zero-width followers (variation selectors, keycaps, combining marks,
+// and anything joined by ZWJ) is measured and kept together as one unit.
+fn units(s: &str) -> Vec<(&str, usize)> {
+    let mut out: Vec<(&str, usize)> = Vec::new();
+    let mut start = 0;
+    let mut joined = false;
+    for (i, c) in s.char_indices() {
+        let attach = i > 0 && (joined || c.width().unwrap_or(0) == 0);
+        if !attach && i > start {
+            out.push((&s[start..i], s[start..i].width()));
+            start = i;
+        }
+        joined = c == '\u{200d}';
+    }
+    if start < s.len() {
+        out.push((&s[start..], s[start..].width()));
+    }
+    out
 }
 fn display_width(s: &str) -> usize {
-    s.chars().map(cells).sum()
+    units(s).iter().map(|(_, w)| w).sum()
 }
 fn text(value: &Value, width: usize) -> String {
     let s = clean(value.as_str().unwrap_or("—"));
@@ -165,12 +181,12 @@ fn text(value: &Value, width: usize) -> String {
     }
     let mut out = String::new();
     let mut used = 0;
-    for c in s.chars() {
-        if used + cells(c) > width.saturating_sub(1) {
+    for (unit, cells) in units(&s) {
+        if used + cells > width.saturating_sub(1) {
             break;
         }
-        used += cells(c);
-        out.push(c);
+        used += cells;
+        out.push_str(unit);
     }
     out.push('…');
     out
@@ -251,8 +267,8 @@ fn line(
     let mut column = 0;
     for (s, role) in segments {
         let mut chunk = String::new();
-        for c in s.chars() {
-            if column + cells(c) > width {
+        for (unit, cells) in units(s) {
+            if column + cells > width {
                 out.push_str(
                     &role
                         .map(|r| style.paint(r, &chunk))
@@ -262,8 +278,8 @@ fn line(
                 out.push('\n');
                 column = 0;
             }
-            chunk.push(c);
-            column += cells(c);
+            chunk.push_str(unit);
+            column += cells;
         }
         out.push_str(&role.map(|r| style.paint(r, &chunk)).unwrap_or(chunk));
     }
@@ -911,5 +927,40 @@ mod tests {
         .unwrap();
         assert!(out.contains(long), "{out}");
         assert!(out.lines().all(|l| display_width(l) <= 70), "{out}");
+    }
+
+    #[test]
+    fn emoji_sequences_measure_as_one_wide_unit() {
+        assert_eq!(display_width("❤️"), 2);
+        assert_eq!(display_width("1️⃣"), 2);
+        assert_eq!(display_width("a❤️b"), 4);
+        assert_eq!(text(&json!("❤️❤️❤️❤️"), 5), "❤️❤️…");
+        let name = "❤️".repeat(20);
+        let mut s = snapshot();
+        let mut second = s["rows"][0].clone();
+        second["agent_id"] = json!("b");
+        second["name"] = json!(name);
+        s["rows"].as_array_mut().unwrap().push(second);
+        s["recent_events"][0]["agent_name"] = json!(name);
+        s["recent_events"][0]["rule_ids"] = json!(["1️⃣".repeat(30)]);
+        let o = options(vec![]).unwrap();
+        for width in [70, 100] {
+            let out = render(
+                &s,
+                None,
+                &o,
+                terminal::TerminalStyle::plain(),
+                false,
+                100,
+                width,
+            )
+            .unwrap();
+            assert!(
+                out.lines().all(|l| display_width(l) <= width),
+                "{width}: {out}"
+            );
+            // Truncation never splits a sequence from its variation selector.
+            assert!(!out.contains("\u{2764}…"), "{out}");
+        }
     }
 }
