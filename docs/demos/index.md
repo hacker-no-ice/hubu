@@ -6,7 +6,7 @@ Watch Hubu in use, then read the concise companion script. Each demo focuses on 
 
 [Watch the sandbox demo and follow along →](sandbox.md)
 
-**14:40 · CLI + Codex MCP · No real charges**
+**10:42 · CLI + Codex MCP · No real charges**
 
 Register a user and agent, define policy and budget, submit one governed request from Codex, and inspect execution, the artifact, settlement, and ledger. The full stack runs locally with a deterministic mock provider.
 
