@@ -1,0 +1,4 @@
+interface:
+  display_name: "Hubu Creative Routing"
+  short_description: "Pick the right image model, and spend only when a specialist is needed"
+  default_prompt: "Use $hubu-creative-routing to choose image models for this design task under Hubu, drafting cheaply before any final."

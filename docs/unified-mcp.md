@@ -44,6 +44,15 @@ with several images. Later corrections require explicit gallery reconciliation.
 The skill includes installation and viewer setup. Native export currently
 supports macOS/Linux locking; inline previews remain deferred in HUB-201.
 
+## Choosing image models
+
+Activate the [Hubu creative routing skill](../skills/hubu-creative-routing/SKILL.md)
+for design tasks. It tells the agent to use only targets that
+`gongbu_list_execution_targets` reports, to prefer a client's built-in image
+tool for early exploration, to match the task to a model family, and to move
+from cheap drafts to a human-picked final. It never grants spend authority and
+treats a Hubu denial as final.
+
 ## Setup
 
 Install the CLI, Hubu server, Gongbu server, and unified MCP binary from one
