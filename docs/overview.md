@@ -23,10 +23,15 @@ control of payment keys, provider credentials, or unrestricted budgets.
 | Platform and install | macOS, installed from an exact release tag with the [source installer](operations/releases.md#install-an-exact-release-from-source-macos). |
 | Agent clients | Codex through `hubu init codex`. Other MCP clients can connect to `hubu-unified-mcp` with [manual configuration](unified-mcp.md#setup). |
 | Live providers | Gemini Developer API and FLUX.2 Pro; see [live provider operations](operations/live-providers.md). |
-| Sandbox | The complete stack with a deterministic, non-billable provider fixture. |
-| Governance only | `hubu-only` mode runs registration, policy, authorization, and budgets without Gongbu. |
-| Your own executor | Any service that implements `hubu-spend-executor-v4.4`; see [external executor](external-executor.md). |
+| Stack modes | `sandbox` with a non-billable fixture and `live` with approved real providers; both start Gongbu by default. |
 | Direct payments | Mock only; no production payment rail. |
+
+## Advanced integrations
+
+Custom executors can implement the [versioned executor contract](external-executor.md).
+This is an advanced integration point, rather than a starting stack mode.
+Decisions-only is a future advanced concept and is not currently supported.
+Both supported modes retain reservation-and-settlement accounting through Gongbu.
 
 ## Why Hubu and Gongbu?
 

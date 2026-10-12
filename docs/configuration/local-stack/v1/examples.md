@@ -41,28 +41,6 @@ credential, live-spend ceiling, or live-spend acknowledgement. When doctor
 reports `ready_to_render`, the profile is ready for `hubu stack start` without
 an operator edit.
 
-## Hubu-only: governance without an execution plane
-
-Hubu-only is also a zero-edit outcome:
-
-```sh
-hubu stack init --mode hubu-only --profile /absolute/path/to/hubu-only
-hubu stack select --profile /absolute/path/to/hubu-only
-hubu stack doctor
-```
-
-The generated `stack.toml` deliberately omits Gongbu and Temporal. Its
-`providers.toml` is:
-
-```toml
-schema_version = 1
-mode = "disabled"
-```
-
-Doctor reports Gongbu, Temporal, and provider execution as intentionally
-absent rather than unhealthy. This profile supports registration, policy,
-authorization, and budget administration without adopting provider execution.
-
 ## Live: Gemini Developer API and FLUX.2
 
 Use live mode only in its own profile after the sandbox profile is healthy.
@@ -71,7 +49,7 @@ writes the complete managed `stack.toml`; the operator edits only the provider
 references and selections shown below:
 
 ```sh
-hubu stack init --mode local-stack --install-temporal \
+hubu stack init --mode live --install-temporal \
   --profile /absolute/path/to/hubu-live
 hubu stack select --profile /absolute/path/to/hubu-live
 ```
@@ -190,3 +168,17 @@ Advanced raw-provider configuration, external Hubu/Gongbu/Temporal ownership,
 and provider-specific recovery details remain available in the
 [configuration decisions](decisions.md), [provider reference](providers-toml.md),
 and [live provider operations](../../../operations/live-providers.md).
+
+## Advanced and legacy configurations
+
+Decisions-only is a future advanced concept and is not currently supported.
+Both supported modes use Gongbu and the existing reservation-and-settlement
+accounting lifecycle. There is no supported `executor = "none"` configuration.
+[Custom executors](../../../external-executor.md) on the v4.4 contract remain an
+advanced integration point rather than a starting stack mode.
+
+Legacy `local-stack` is accepted as a deprecated alias for `live`. Change
+`mode = "local-stack"` to `mode = "live"` in an existing full-stack profile;
+new profiles use the canonical name. Existing `hubu-only` profiles are rejected
+with migration guidance. Preserve their files and create a separate sandbox or
+reviewed live profile; do not automatically switch them to billable execution.

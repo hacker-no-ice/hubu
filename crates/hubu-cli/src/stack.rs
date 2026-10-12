@@ -25,6 +25,7 @@ const PROFILE_REGISTRY_SCHEMA_VERSION: u32 = 1;
 const PROFILE_LIST_SCHEMA_VERSION: u32 = 1;
 const PROFILE_REGISTRY_FILE: &str = "stack-profiles.json";
 const LIVE_SPEND_ACKNOWLEDGEMENT: &str = "I_ACKNOWLEDGE_LIVE_PROVIDER_SPEND";
+const DECISIONS_ONLY_UNSUPPORTED: &str = "decisions-only (legacy hubu-only) is not supported; create a separate sandbox profile, or explicitly configure a new live profile with Gongbu and approved providers; existing profiles are not migrated automatically";
 const MANAGED_GONGBU_SECRET_SERVICE: &str = "hubu.managed-stack.v1";
 const MANAGED_GONGBU_HUBU_ACCOUNT: &str = "hubu-executor";
 const MANAGED_GONGBU_CALLER_ACCOUNT: &str = "gongbu-caller";
@@ -78,24 +79,18 @@ struct StackSource {
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
+#[serde(try_from = "String")]
 enum StackMode {
     Sandbox,
     #[default]
-    LocalStack,
-    HubuOnly,
+    Live,
 }
 
 impl StackMode {
-    fn includes_gongbu(self) -> bool {
-        !matches!(self, Self::HubuOnly)
-    }
-
     fn id(self) -> &'static str {
         match self {
             Self::Sandbox => "sandbox",
-            Self::LocalStack => "local-stack",
-            Self::HubuOnly => "hubu-only",
+            Self::Live => "live",
         }
     }
 }
@@ -106,12 +101,18 @@ impl FromStr for StackMode {
     fn from_str(value: &str) -> Result<Self> {
         match value {
             "sandbox" => Ok(Self::Sandbox),
-            "local-stack" => Ok(Self::LocalStack),
-            "hubu-only" => Ok(Self::HubuOnly),
-            _ => bail!(
-                "unsupported stack mode `{value}`; expected sandbox, local-stack, or hubu-only"
-            ),
+            "live" | "local-stack" => Ok(Self::Live),
+            "hubu-only" | "decisions-only" => bail!(DECISIONS_ONLY_UNSUPPORTED),
+            _ => bail!("unsupported stack mode `{value}`; expected sandbox or live"),
         }
+    }
+}
+
+impl TryFrom<String> for StackMode {
+    type Error = anyhow::Error;
+
+    fn try_from(value: String) -> Result<Self> {
+        value.parse()
     }
 }
 
@@ -341,18 +342,12 @@ fn resolve_credential_paths(
         &hubu_root.join("reconciliation"),
         "credentials.toml:files.hubu_reconciliation",
     )?;
-    let gongbu_caller = stack
-        .mode
-        .includes_gongbu()
-        .then(|| {
-            resolve_credential_path(
-                files.and_then(|value| value.gongbu_caller.as_deref()),
-                gongbu_handoff_managed,
-                &gongbu_root.join("caller"),
-                "credentials.toml:files.gongbu_caller",
-            )
-        })
-        .transpose()?;
+    let gongbu_caller = Some(resolve_credential_path(
+        files.and_then(|value| value.gongbu_caller.as_deref()),
+        gongbu_handoff_managed,
+        &gongbu_root.join("caller"),
+        "credentials.toml:files.gongbu_caller",
+    )?);
     let gongbu_secret_dir = resolve_existing_prefix(&gongbu_root)?;
     let gongbu_hubu = resolve_existing_prefix(&gongbu_root.join("hubu-executor"))?;
     let managed_gongbu_caller = gongbu_secret_dir.join("caller");
@@ -850,13 +845,17 @@ fn init(mut args: Vec<String>, hubu_home: &Path) -> Result<()> {
         return Ok(());
     }
     let install_temporal = take_flag(&mut args, "--install-temporal");
-    let mode = take_option_value(&mut args, "--mode")?
+    let mode_value = take_option_value(&mut args, "--mode")?;
+    if mode_value.as_deref() == Some("local-stack") {
+        eprintln!("warning: --mode local-stack is deprecated; use --mode live");
+    }
+    let mode = mode_value
         .map(|value| value.parse())
         .transpose()?
         .unwrap_or(StackMode::Sandbox);
     let profile = take_profile(&mut args, hubu_home)?;
     ensure_no_args(args)?;
-    prepare_temporal_dependency(mode, install_temporal)?;
+    prepare_temporal_dependency(install_temporal)?;
     let style = crate::terminal::stdout();
     create_secure_dir(&profile)?;
     create_secure_dir(&profile.join("generated"))?;
@@ -922,12 +921,9 @@ fn init(mut args: Vec<String>, hubu_home: &Path) -> Result<()> {
     Ok(())
 }
 
-fn prepare_temporal_dependency(mode: StackMode, install: bool) -> Result<()> {
+fn prepare_temporal_dependency(install: bool) -> Result<()> {
     if !install {
         return Ok(());
-    }
-    if !mode.includes_gongbu() {
-        bail!("--install-temporal does not apply to hubu-only mode");
     }
     if discover_binary("temporal").is_some() {
         return Ok(());
@@ -2572,11 +2568,8 @@ fn validate_stack_mode(stack: &StackSource, providers: &ProvidersSource) -> Resu
         StackMode::Sandbox if providers.mode != Some(ProviderMode::Sandbox) => {
             bail!("sandbox stack mode requires providers.toml sandbox mode")
         }
-        StackMode::HubuOnly if providers.mode != Some(ProviderMode::Disabled) => {
-            bail!("hubu-only stack mode requires providers.toml disabled mode")
-        }
-        StackMode::LocalStack if providers.mode == Some(ProviderMode::Sandbox) => {
-            bail!("local-stack mode cannot use sandbox provider mode")
+        StackMode::Live if providers.mode == Some(ProviderMode::Sandbox) => {
+            bail!("live mode cannot use sandbox provider mode")
         }
         _ => Ok(()),
     }
@@ -2585,9 +2578,6 @@ fn validate_stack_mode(stack: &StackSource, providers: &ProvidersSource) -> Resu
 fn validate_topology(stack: &StackSource) -> Result<()> {
     let hubu = stack.hubu.as_ref().expect("checked");
     validate_loopback_endpoint(hubu.endpoint.as_deref().expect("checked"), "hubu.endpoint")?;
-    if stack.mode == StackMode::HubuOnly && (stack.gongbu.is_some() || stack.temporal.is_some()) {
-        bail!("hubu-only mode must omit Gongbu and Temporal configuration");
-    }
     if hubu.ownership == Some(Ownership::Managed) {
         validate_endpoint_matches_listen(
             hubu.endpoint.as_deref().expect("checked"),
@@ -3092,9 +3082,7 @@ fn missing_fields(
         missing.push("stack.toml:binaries".into());
     }
     check_service_missing(stack.hubu.as_ref(), "hubu", &mut missing);
-    if stack.mode.includes_gongbu() {
-        check_gongbu_missing(stack.gongbu.as_ref(), &mut missing);
-    }
+    check_gongbu_missing(stack.gongbu.as_ref(), &mut missing);
     if stack.gongbu.as_ref().and_then(|v| v.ownership) == Some(Ownership::Managed) {
         check_temporal_missing(stack.temporal.as_ref(), &mut missing);
     }
@@ -3884,9 +3872,8 @@ fn parse_temporal_cli_version(output: &str) -> Option<String> {
 
 fn stack_template(profile: &Path, mode: StackMode) -> Result<String> {
     let state = profile.join("state");
-    let gongbu = if mode.includes_gongbu() {
-        format!(
-            r#"
+    let gongbu = format!(
+        r#"
 [gongbu]
 ownership = "managed"
 endpoint = "http://127.0.0.1:8788"
@@ -3905,15 +3892,12 @@ namespace = "default"
 task_queue = "gongbu-local-executions"
 ui_url = "http://127.0.0.1:8233"
 "#,
-            quote(state.join("gongbu/gongbu.sqlite3").display().to_string()),
-            quote(state.join("gongbu/artifacts").display().to_string()),
-            quote(state.join("gongbu/gongbu.jsonl").display().to_string()),
-            temporal_lines(),
-            quote(state.join("temporal").display().to_string()),
-        )
-    } else {
-        String::new()
-    };
+        quote(state.join("gongbu/gongbu.sqlite3").display().to_string()),
+        quote(state.join("gongbu/artifacts").display().to_string()),
+        quote(state.join("gongbu/gongbu.jsonl").display().to_string()),
+        temporal_lines(),
+        quote(state.join("temporal").display().to_string()),
+    );
     Ok(format!(
         r#"# Hubu outcome-oriented stack source.
 # Reference: https://hubustack.dev/configuration/local-stack/v1/stack-toml
@@ -3954,11 +3938,7 @@ log_format = "text"
         mode.id(),
         binary_line("hubu", "hubu"),
         binary_line("hubu_server", "hubu-server"),
-        if mode.includes_gongbu() {
-            binary_line("gongbu_server", "gongbu-server")
-        } else {
-            "# gongbu_server is intentionally omitted in hubu-only mode".into()
-        },
+        binary_line("gongbu_server", "gongbu-server"),
         binary_line("hubu_unified_mcp", "hubu-unified-mcp"),
         quote(state.join("hubu/hubu.sqlite3").display().to_string()),
         quote(state.join("hubu/hubu.jsonl").display().to_string()),
@@ -4033,20 +4013,13 @@ components = [{ unit = "image", rate_numerator_minor = 1, rate_denominator = 1 }
 "#
         .into();
     }
-    if mode == StackMode::HubuOnly {
-        return r#"# Hubu-only mode has no Gongbu provider execution plane.
-schema_version = 1
-mode = "disabled"
-"#
-        .into();
-    }
-    r#"# Approve at least one real provider target for local-stack mode.
+    r#"# Approve at least one real provider target for live mode.
 # Reference: https://hubustack.dev/configuration/local-stack/v1/providers-toml
 schema_version = 1
 
 mode = "live"
 
-# Local-stack mode accepts one or more approved real provider targets. Repeat
+# Live mode accepts one or more approved real provider targets. Repeat
 # target and pricing blocks for every approved provider/model combination;
 # agents discover and select among them at runtime.
 # Live mode additionally requires an explicit spend ceiling and acknowledgement.
@@ -4100,8 +4073,7 @@ mode = "live"
 fn readme_template(mode: StackMode) -> String {
     let outcome = match mode {
         StackMode::Sandbox => "The sandbox runs the complete local ecosystem while replacing only the external provider edge with a deterministic, non-billable fixture.",
-        StackMode::LocalStack => "The local stack runs the complete ecosystem with one or more operator-approved real provider targets.",
-        StackMode::HubuOnly => "The Hubu-only stack runs registration, policy, authorization, and budget governance without Gongbu, Temporal, or provider execution.",
+        StackMode::Live => "The live stack runs the complete ecosystem with one or more operator-approved real provider targets.",
     };
     format!(
         r#"# Hubu {} profile
@@ -4115,9 +4087,12 @@ files and never starts a service.
 - `credentials.toml`: provider references and advanced external-service
   credential overrides; never raw secret values. Managed-local service
   credentials and their locations are selected internally during start.
-- `providers.toml`: disabled or live provider mode, contract bindings or raw
+- `providers.toml`: sandbox or live provider mode, contract bindings or raw
   targets, frozen pricing, spend ceiling, and the explicit live-spend gate.
 - `generated/`: validated implementation output; do not edit it.
+
+Both supported modes start Gongbu by default and preserve reservation-and-settlement
+accounting. Decisions-only is a future advanced concept and is not supported.
 
 Review any fields marked as needing input. Then run
 `hubu stack select --profile /absolute/path/to/this/profile`, followed by
@@ -4158,13 +4133,13 @@ https://hubustack.dev/configuration/local-stack/v1/
 
 fn print_help() {
     println!(
-        "Manage local Hubu stack profiles\n\nUsage:\n  hubu stack init [--mode sandbox|local-stack|hubu-only] [--install-temporal] [--profile ABSOLUTE_DIR]\n  hubu stack select --profile ABSOLUTE_DIR\n  hubu stack profiles [--json]\n  hubu stack catalog [--profile ABSOLUTE_DIR] [--json]\n  hubu stack doctor [--profile ABSOLUTE_DIR] [--json]\n  hubu stack render [--profile ABSOLUTE_DIR]\n  hubu stack activate --generation ID [--profile ABSOLUTE_DIR]\n  hubu stack rollback --generation ID [--profile ABSOLUTE_DIR]\n  hubu stack generations [--profile ABSOLUTE_DIR]\n  hubu stack start [--profile ABSOLUTE_DIR]\n  hubu stack status [--profile ABSOLUTE_DIR] [--json]\n  hubu stack logs [--profile ABSOLUTE_DIR] [--component hubu|gongbu|all] [--execution-id ID] [--lines N]\n  hubu stack stop [--profile ABSOLUTE_DIR] [--forget-stale]\n\nProfile precedence:\n  explicit --profile, selected profile, platform default"
+        "Manage local Hubu stack profiles\n\nUsage:\n  hubu stack init [--mode sandbox|live] [--install-temporal] [--profile ABSOLUTE_DIR]\n  hubu stack select --profile ABSOLUTE_DIR\n  hubu stack profiles [--json]\n  hubu stack catalog [--profile ABSOLUTE_DIR] [--json]\n  hubu stack doctor [--profile ABSOLUTE_DIR] [--json]\n  hubu stack render [--profile ABSOLUTE_DIR]\n  hubu stack activate --generation ID [--profile ABSOLUTE_DIR]\n  hubu stack rollback --generation ID [--profile ABSOLUTE_DIR]\n  hubu stack generations [--profile ABSOLUTE_DIR]\n  hubu stack start [--profile ABSOLUTE_DIR]\n  hubu stack status [--profile ABSOLUTE_DIR] [--json]\n  hubu stack logs [--profile ABSOLUTE_DIR] [--component hubu|gongbu|all] [--execution-id ID] [--lines N]\n  hubu stack stop [--profile ABSOLUTE_DIR] [--forget-stale]\n\nProfile precedence:\n  explicit --profile, selected profile, platform default"
     );
 }
 
 fn print_init_help() {
     println!(
-        "Create an outcome-oriented stack profile without overwriting input or starting services\n\nUsage:\n  hubu stack init [--mode sandbox|local-stack|hubu-only] [--install-temporal] [--profile ABSOLUTE_DIR]\n\nModes:\n  sandbox     Complete ecosystem with a deterministic, non-billable provider fixture (default)\n  local-stack Complete ecosystem with one or more operator-approved real provider targets\n  hubu-only   Hubu governance without Gongbu, Temporal, or provider execution\n\nDependency assistance:\n  --install-temporal  On macOS, use Homebrew's official Temporal package when the CLI is missing, then discover and pin its path and exact version"
+        "Create an outcome-oriented stack profile without overwriting input or starting services\n\nUsage:\n  hubu stack init [--mode sandbox|live] [--install-temporal] [--profile ABSOLUTE_DIR]\n\nModes:\n  sandbox     Complete ecosystem with a deterministic, non-billable provider fixture (default)\n  live        Complete ecosystem with Gongbu and operator-approved real provider targets\n\nCompatibility:\n  local-stack is a deprecated alias for live. Legacy hubu-only profiles require explicit migration.\n  Decisions-only is a future advanced concept and is not supported.\n\nDependency assistance:\n  --install-temporal  On macOS, use Homebrew's official Temporal package when the CLI is missing, then discover and pin its path and exact version"
     );
 }
 
@@ -4331,11 +4306,7 @@ mod tests {
     #[test]
     fn outcome_modes_generate_only_their_required_topology() {
         let root = tempdir().unwrap();
-        for (mode, has_gongbu, provider_mode) in [
-            ("sandbox", true, "sandbox"),
-            ("local-stack", true, "live"),
-            ("hubu-only", false, "disabled"),
-        ] {
+        for (mode, provider_mode) in [("sandbox", "sandbox"), ("live", "live")] {
             let profile = root.path().join(mode);
             init(
                 vec![
@@ -4350,9 +4321,20 @@ mod tests {
             let stack = fs::read_to_string(profile.join("stack.toml")).unwrap();
             let providers = fs::read_to_string(profile.join("providers.toml")).unwrap();
             assert!(stack.contains(&format!("mode = \"{mode}\"")));
-            assert_eq!(stack.contains("[gongbu]"), has_gongbu);
-            assert_eq!(stack.contains("[temporal]"), has_gongbu);
+            assert!(stack.contains("[gongbu]"));
+            assert!(stack.contains("[temporal]"));
             assert!(providers.contains(&format!("mode = \"{provider_mode}\"")));
+            let mut without_executor: StackSource = toml::from_str(&stack).unwrap();
+            without_executor.gongbu = None;
+            let credentials: CredentialsSource = toml::from_str(&credentials_template()).unwrap();
+            let providers_source: ProvidersSource = toml::from_str(&providers).unwrap();
+            assert!(
+                missing_fields(&without_executor, &credentials, &providers_source)
+                    .contains(&"stack.toml:gongbu".into())
+            );
+            assert!(
+                toml::from_str::<StackSource>(&format!("executor = \"none\"\n{stack}")).is_err()
+            );
             if mode == "sandbox" {
                 let mut stack_source: StackSource = toml::from_str(&stack).unwrap();
                 stack_source.gongbu.as_mut().unwrap().ownership = Some(Ownership::External);
@@ -5353,63 +5335,28 @@ gongbu_caller = {}
         );
     }
 
-    #[cfg(unix)]
     #[test]
-    fn hubu_only_renders_a_first_class_handoff_without_gongbu_or_temporal() {
+    fn legacy_modes_require_explicit_migration_without_changing_inputs() {
         let root = tempdir().unwrap();
-        let profile = root.path().join("profile");
-        let binaries = root.path().join("bin");
+        let profile = root.path().join("legacy");
         fs::create_dir(&profile).unwrap();
-        fs::create_dir(&binaries).unwrap();
-        for name in ["hubu", "hubu-server", "hubu-unified-mcp"] {
-            write_fake_binary(&binaries.join(name), false);
-        }
-        fs::write(
-            profile.join("stack.toml"),
-            format!(
-                r#"schema_version = 1
-mode = "hubu-only"
-allow_development_builds = true
-[binaries]
-hubu = {}
-hubu_server = {}
-hubu_unified_mcp = {}
-[hubu]
-ownership = "managed"
-endpoint = "http://127.0.0.1:42001"
-listen = "127.0.0.1:42001"
-database_path = {}
-"#,
-                quote(binaries.join("hubu").display().to_string()),
-                quote(binaries.join("hubu-server").display().to_string()),
-                quote(binaries.join("hubu-unified-mcp").display().to_string()),
-                quote(profile.join("state/hubu.sqlite3").display().to_string()),
-            ),
-        )
-        .unwrap();
-        fs::write(profile.join("credentials.toml"), "schema_version = 1\n").unwrap();
-        fs::write(
-            profile.join("providers.toml"),
-            "schema_version = 1\nmode = \"disabled\"\n",
-        )
-        .unwrap();
-
-        render_profile_with_renderer(&profile, &binaries.join("hubu")).unwrap();
-        let manifest: ActiveManifest =
-            read_json(&profile.join("generated/active-manifest.json")).unwrap();
+        let source = "schema_version = 1\nmode = \"hubu-only\"\n";
+        fs::write(profile.join("stack.toml"), source).unwrap();
+        let error = toml::from_str::<StackSource>(source)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not supported"));
+        assert!(error.contains("not migrated automatically"));
         assert_eq!(
-            manifest
-                .generated_file_digests
-                .keys()
-                .map(String::as_str)
-                .collect::<Vec<_>>(),
-            ["client-handoff.json", "hubu-launch.json"]
+            fs::read_to_string(profile.join("stack.toml")).unwrap(),
+            source
         );
-        let generation = active_generation_path(&profile.join("generated"), &manifest).unwrap();
-        let handoff: CodexHandoff = read_json(&generation.join("client-handoff.json")).unwrap();
-        assert!(handoff.gongbu_endpoint.is_none());
-        assert!(handoff.gongbu_token_file.is_none());
-        assert!(!generation.join("gongbu-server.json").exists());
+        assert!(!profile.join("generated").exists());
+        assert!("decisions-only".parse::<StackMode>().is_err());
+        let alias: StackSource =
+            toml::from_str("schema_version = 1\nmode = \"local-stack\"\n").unwrap();
+        assert_eq!(alias.mode, StackMode::Live);
+        assert_eq!(alias.mode.id(), "live");
     }
 
     #[cfg(unix)]

@@ -1,10 +1,15 @@
-# Use Hubu with Your Own Executor
+# Advanced: Use Hubu with Your Own Executor
 
 Hubu controls spend; executors do the work. Gongbu is the first-party executor,
 but it can't cover every provider or workload. Any service can act as the
 executor for Hubu-authorized work. It needs only the normal Hubu bearer and the
 [`hubu-spend-executor-v4.4`](spend-executor-contract.md) HTTP contract. This
 guide follows one operation from the agent's MCP call to settlement.
+
+The supported stack modes are sandbox and live, both starting Gongbu by default.
+This guide describes an advanced executor integration, not a third starting
+mode. Decisions-only without an executor is a future concept and is not
+currently supported. The reservation-and-settlement lifecycle remains required.
 
 ```text
 agent ──hubu_authorize_spend──▶ unified MCP ──▶ Hubu   (reserve the budget)

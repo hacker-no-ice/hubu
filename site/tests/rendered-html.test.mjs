@@ -126,11 +126,13 @@ test("links demos from home and publishes the sandbox video before its concise s
   assert.equal(legacy.headers.get("location"), "/demos/sandbox");
 });
 
-test("home page states that Gongbu is optional and links what works today", async () => {
+test("home page presents two supported modes with Gongbu and links what works today", async () => {
   const html = await (await render()).text();
-  assert.match(html, /Gongbu is the first-party executor, not a requirement/);
-  assert.match(html, /<code>hubu-only<\/code>/);
-  assert.match(html, /href="\/docs\/external-executor">bring your own executor/);
+  assert.match(html, /<code>sandbox<\/code> and <code>live<\/code>/);
+  assert.match(html, /Both start Gongbu by default/);
+  assert.match(html, /Decisions-only is a future advanced concept and is not supported/);
+  assert.doesNotMatch(html, /<code>hubu-only<\/code>/);
+  assert.match(html, /href="\/docs\/external-executor">Advanced: custom executors/);
   assert.match(html, /<section class="works-today" aria-labelledby="works-today-title">/);
   assert.match(html, /<strong>macOS<\/strong> source install from a release tag/);
   assert.match(html, /<strong>Gemini and FLUX\.2 Pro<\/strong> live providers/);
@@ -544,12 +546,14 @@ test("promotes complete mode-specific stack examples", async () => {
   ]);
 
   assert.match(examples, /## Sandbox: complete stack without live spend/);
-  assert.match(examples, /## Hubu-only: governance without an execution plane/);
+  assert.doesNotMatch(examples, /## Hubu-only: governance without an execution plane|--mode hubu-only/);
+  assert.match(examples, /hubu stack init --mode live/);
+  assert.match(examples, /Decisions-only is a future advanced concept and is not currently supported/);
   assert.match(examples, /## Live: Gemini Developer API and FLUX\.2/);
   assert.match(examples, /service` maps to the Keychain Access \*\*Where\*\* field/);
   assert.match(examples, /account` maps to the Keychain Access \*\*Account\*\* field/);
   assert.match(examples, /matching \*\*Name\*\* alone is insufficient/);
-  assert.equal((examples.match(/hubu stack select --profile/g) ?? []).length, 3);
+  assert.equal((examples.match(/hubu stack select --profile/g) ?? []).length, 2);
   assert.doesNotMatch(examples, /security find-generic-password/);
   assert.match(examples, /hubu\.gemini-3\.1-flash-lite-image\.text-to-image\/v1/);
   assert.match(examples, /hubu\.gemini-3\.1-flash-image\.text-to-image\/v1/);

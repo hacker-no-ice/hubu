@@ -28,13 +28,20 @@ schema_version = 1
 | --- | --- |
 | Required | No for existing schema-v1 files; generated profiles always include it |
 | Supplied by | Chosen as the initialization outcome |
-| Allowed values | `sandbox`, `local-stack`, `hubu-only` |
-| Default when omitted | `local-stack` for backward compatibility |
+| Allowed values | `sandbox`, `live`; legacy `local-stack` is a deprecated alias for `live` |
+| Default when omitted | `live` for backward compatibility; `stack init` defaults to `sandbox` |
 
-The mode selects the smallest coherent topology for the operator's outcome.
-Sandbox and local-stack modes include Hubu, Gongbu, and Temporal. Hubu-only
-mode intentionally omits Gongbu, Temporal, provider execution, and artifact
-storage. It is not represented as an unavailable external Gongbu endpoint.
+Both supported modes include Hubu, Gongbu, and Temporal. Sandbox uses a
+non-billable fixture; live uses operator-approved real provider targets.
+Gongbu starts by default and the reservation-and-settlement accounting lifecycle
+is unchanged. `local-stack` remains readable as a deprecated alias for `live`;
+doctor reports a warning and new profiles always write `live`.
+
+Legacy `hubu-only` profiles are rejected with an actionable migration message.
+Create a separate sandbox profile, or explicitly configure a new live profile
+with Gongbu and approved providers. No automatic migration enables billable
+execution. Decisions-only is a future advanced concept, not supported today;
+there is no usable `executor = "none"` setting.
 
 ```toml
 mode = "sandbox"
@@ -78,8 +85,7 @@ Required when `hubu.ownership = "managed"`; omit it for external Hubu. It identi
 
 ### `binaries.gongbu_server`
 
-Required when `gongbu.ownership = "managed"`; omit it for external Gongbu and
-in Hubu-only mode. Gongbu remains a separate process and owns its provider
+Required when `gongbu.ownership = "managed"`; omit it for external Gongbu. Gongbu remains a separate process and owns its provider
 execution, worker, database, and artifacts.
 
 ### `binaries.hubu_unified_mcp`
@@ -147,9 +153,8 @@ Optional absolute path for managed Hubu structured logs. Use a file distinct fro
 
 ## `[gongbu]`
 
-The complete section is required in sandbox and local-stack modes. Omit it in
-Hubu-only mode; doctor, lifecycle status, and unified MCP then treat Gongbu as
-intentionally absent rather than unhealthy.
+The complete section is required in both sandbox and live modes. Gongbu is
+started by default; decisions-only is not a supported stack topology.
 
 ### `gongbu.ownership`
 
@@ -184,8 +189,7 @@ Optional absolute path for managed Gongbu structured logs. Keep it separate from
 
 ## `[temporal]`
 
-Required only when Gongbu is present. Hubu-only mode omits the entire section
-and never installs, starts, probes, or reports Temporal.
+Both supported modes include Gongbu.
 
 The Temporal section is required when Gongbu is managed. It is not a second worker configuration: Gongbu always owns and starts its worker.
 

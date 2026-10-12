@@ -5,7 +5,7 @@ Schema version 1 is the operator-owned configuration contract for the local Hubu
 > **Start safely:** `hubu stack init --mode sandbox` creates the complete local ecosystem with real internal governance and execution communication while replacing only the external provider edge with a deterministic, non-billable fixture.
 
 Start with the [complete local stack examples](examples.md) for the generated
-sandbox and Hubu-only outcomes, one working Gemini + FLUX live profile, and the
+sandbox outcome, one working Gemini + FLUX live profile, and the
 recommended separate-profile switching model.
 
 ## The three source files
@@ -15,14 +15,19 @@ recommended separate-profile switching model.
 | Stack mode | Components and outcome |
 | --- | --- |
 | `sandbox` | Managed Hubu, Gongbu, and Temporal with fixture-only external provider behavior. |
-| `local-stack` | Managed Hubu, Gongbu, and Temporal with one or more operator-approved live targets. |
-| `hubu-only` | Managed Hubu governance; Gongbu, Temporal, providers, and artifacts are intentionally absent. |
+| `live` | Managed Hubu, Gongbu, and Temporal with one or more operator-approved live targets. |
+
+Both modes start Gongbu by default and use reservation-and-settlement accounting.
+Decisions-only is a future advanced concept, not a supported configuration.
+Legacy `local-stack` is a deprecated alias for `live`. Legacy `hubu-only` profiles
+are rejected with migration guidance; create and review a separate sandbox or
+live profile rather than silently changing an existing spend boundary.
 
 | File | Controls | Typical value sources | Detailed reference |
 | --- | --- | --- | --- |
 | `stack.toml` | Binaries, topology, Temporal, state paths, lifecycle, and runtime limits | Hubu discovery and explicit operator choices | [`stack.toml`](stack-toml.md) |
 | `credentials.toml` | Provider references plus optional external-service credential overrides | Gongbu/provider setup; managed service references are derived internally | [`credentials.toml`](credentials-toml.md) |
-| `providers.toml` | Disabled/live mode, provider targets, frozen pricing, spend ceiling, and the live-spend gate | Provider documentation and explicit operator approval | [`providers.toml`](providers-toml.md) |
+| `providers.toml` | Sandbox/live provider mode, provider targets, frozen pricing, spend ceiling, and the live-spend gate | Provider documentation and explicit operator approval | [`providers.toml`](providers-toml.md) |
 
 All three files use `schema_version = 1` and reject unknown fields. A value that parses as TOML can still be incomplete or unsafe; always run doctor before rendering.
 

@@ -27,10 +27,14 @@ The [overview](overview.md#what-works-today) keeps the full list current.
 
 ## Can I use Hubu without Gongbu?
 
-Yes. `hubu-only` mode runs registration, policy, authorization, and budgets
-without Gongbu or provider execution. You can also connect
-[your own executor](external-executor.md) through the versioned executor
-contract.
+Both supported stack modes, `sandbox` and `live`, start Gongbu by default.
+Decisions-only is a future advanced concept and is not currently supported.
+We do not infer decisions-only behavior when Gongbu is unavailable, and
+authorization continues to reserve budget until executor settlement or release.
+
+As an advanced integration, you can implement the
+[versioned executor contract](external-executor.md) with your own executor.
+This is not a third starting stack mode.
 
 ## How do approvals work in my agent client?
 

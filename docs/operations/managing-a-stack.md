@@ -40,7 +40,7 @@ logs while making mode changes an explicit `hubu stack select` operation. See
 the [complete examples](https://hubustack.dev/configuration/local-stack/v1/examples#keep-sandbox-and-live-profiles-separate)
 for the recommended layout and switching flow.
 
-Local-stack mode requires at least one approved real target and its opaque
+Live mode requires at least one approved real target and its opaque
 credential reference. Inspect the sanitized provider catalog with
 `hubu stack catalog --json`; catalog, doctor, and render never call a provider
 or claim live qualification. Live provider execution can incur charges; start
