@@ -24,9 +24,18 @@ impl Policy {
     /// Useful for tests, embedded defaults, and API payloads that have already
     /// been read into memory.
     pub fn from_yaml_str(yaml: &str) -> Result<Self, PolicyLoadError> {
-        let policy: Policy = serde_yaml_ng::from_str(yaml)?;
+        let policy: Policy = serde_saphyr::from_str(yaml)?;
         validate_policy(&policy)?;
         Ok(policy)
+    }
+
+    /// Serialize a policy as canonical export YAML.
+    ///
+    /// Enum values use the same nested-map form policy authors write
+    /// (`value: {money_cents: 500}`), not YAML tags, and the output parses
+    /// back with [`Policy::from_yaml_str`].
+    pub fn to_yaml_string(&self) -> Result<String, PolicyLoadError> {
+        Ok(serde_saphyr::to_string(self)?)
     }
 }
 
@@ -242,5 +251,71 @@ rules:
 
         assert!(matches!(error, PolicyLoadError::ParseYaml { .. }));
         assert_eq!(error.to_string(), "failed to parse policy yaml");
+    }
+    fn policy_json(policy: &Policy) -> serde_json::Value {
+        serde_json::to_value(policy).expect("policy should serialize as json")
+    }
+
+    #[test]
+    fn export_yaml_uses_authored_map_form_and_round_trips() {
+        for yaml in [valid_policy_yaml(), STARTER_POLICY_YAML, TEST_POLICY_YAML] {
+            let policy = Policy::from_yaml_str(yaml).unwrap();
+            let exported = policy.to_yaml_string().unwrap();
+
+            assert!(
+                !exported.contains('!'),
+                "export must not use YAML tags:\n{exported}"
+            );
+            let reparsed = Policy::from_yaml_str(&exported).unwrap();
+            assert_eq!(policy_json(&reparsed), policy_json(&policy));
+        }
+        let exported = Policy::from_yaml_str(valid_policy_yaml())
+            .unwrap()
+            .to_yaml_string()
+            .unwrap();
+        assert!(exported.contains("money_cents: 50000"), "{exported}");
+        assert!(exported.contains("string: meals"), "{exported}");
+    }
+
+    #[test]
+    fn legacy_tagged_export_still_parses() {
+        // Exports produced by the previous YAML library used tags for enum
+        // values; files saved from them must keep loading.
+        let legacy = valid_policy_yaml().replace(
+            "      value:\n        money_cents: 50000",
+            "      value: !money_cents 50000",
+        );
+        assert!(legacy.contains("!money_cents 50000"));
+        let current = Policy::from_yaml_str(valid_policy_yaml()).unwrap();
+        let parsed = Policy::from_yaml_str(&legacy).unwrap();
+        assert_eq!(policy_json(&parsed), policy_json(&current));
+    }
+
+    #[test]
+    fn null_duplicate_and_multi_document_yaml_are_rejected() {
+        for (label, yaml) in [
+            (
+                "tilde id",
+                valid_policy_yaml().replacen("id: base_spending_policy", "id: ~", 1),
+            ),
+            (
+                "null version",
+                valid_policy_yaml().replacen("version: 2026-05-22.1", "version: null", 1),
+            ),
+            (
+                "duplicate key",
+                format!("default_effect: allow\n{}", valid_policy_yaml()),
+            ),
+            (
+                "multi document",
+                format!("{}\n---\n{}", valid_policy_yaml(), valid_policy_yaml()),
+            ),
+        ] {
+            let error = Policy::from_yaml_str(&yaml).unwrap_err();
+            assert!(
+                matches!(error, PolicyLoadError::ParseYaml { .. }),
+                "{label}: {error:?}"
+            );
+        }
     }
 }

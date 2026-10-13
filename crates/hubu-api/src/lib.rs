@@ -350,7 +350,7 @@ fn load_lease_config() -> Result<LeaseConfig> {
 }
 
 fn parse_lease_config(yaml: &str, path: &str) -> Result<LeaseConfig> {
-    serde_yaml_ng::from_str(yaml).with_context(|| format!("parse lease config `{path}`"))
+    serde_saphyr::from_str(yaml).with_context(|| format!("parse lease config `{path}`"))
 }
 
 /// Local API authority for the current Hubu process.
@@ -3259,7 +3259,7 @@ fn inspect_policy(request: &HttpRequest, state: &ServerState, export: bool) -> R
         "assignments": assignments,
     });
     if export {
-        response["policy_yaml"] = Value::String(serde_yaml_ng::to_string(&resource.policy)?);
+        response["policy_yaml"] = Value::String(resource.policy.to_yaml_string()?);
     }
     Ok(response)
 }
@@ -3352,6 +3352,9 @@ fn policy_load_error_message(error: PolicyLoadError) -> String {
         }
         PolicyLoadError::ParseYaml { source } => {
             format!("failed to parse policy yaml: {source}")
+        }
+        PolicyLoadError::SerializeYaml { source } => {
+            format!("failed to serialize policy yaml: {source}")
         }
         PolicyLoadError::Validation { source } => {
             format!("invalid policy: {source}")
@@ -10379,10 +10382,13 @@ rules: []
             &state,
         );
         assert_eq!(export.status, 200);
-        assert!(export.body["policy_yaml"]
-            .as_str()
-            .unwrap()
-            .contains("default_effect: deny"));
+        let exported_yaml = export.body["policy_yaml"].as_str().unwrap();
+        assert!(exported_yaml.contains("default_effect: deny"));
+        let reloaded = Policy::from_yaml_str(exported_yaml).expect("export reloads");
+        assert_eq!(
+            serde_json::to_value(&reloaded).unwrap(),
+            show.body["policy"]
+        );
 
         let history = route(
             authenticated_get_request(&format!("/policies/history?policy_id={}", first.policy_id)),
