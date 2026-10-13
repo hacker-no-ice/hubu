@@ -49,6 +49,15 @@ Future release template
   409 `display_name_conflict` naming the existing `agt_...`. Existing local
   databases that already contain duplicate names are not migrated: the server
   refuses to start and lists the conflicting agents.
+- Policy and lease-config YAML now use `serde-saphyr` (pure Rust) instead of
+  `serde_yaml_ng`, removing the unmaintained `unsafe-libyaml`
+  (RUSTSEC-2024-0449) and its `cargo deny` exception. Policy exports
+  (`GET /policies/export`, `hubu_show_policy` with `include_yaml`) now write
+  enum values in the authored map form (`value: {money_cents: 500}` as a
+  nested block) instead of YAML tags (`value: !money_cents 500`); older
+  tagged exports still load. String fields no longer accept `null`, `Null`,
+  or `~` as literal text, `10_000`-style integers are accepted, and parse
+  errors include the line, column, and a source excerpt.
 
 ## v0.2.2 — 2026-10-05
 

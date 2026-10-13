@@ -3,14 +3,7 @@
 # make CI green.
 
 [advisories]
-ignore = [
-    # unsafe-libyaml 0.2.11 is unmaintained (not a known vulnerability). It is
-    # reached only via serde_yaml_ng 0.10.0 for policy YAML (API, CLI files,
-    # export serialization) and the HUBU_LEASE_CONFIG file.
-    # Owner: Yizheng Zhang. Review by 2026-11-12. Remove when HUB-270 replaces
-    # serde_yaml_ng. See docs/operations/repository-security.md.
-    { id = "RUSTSEC-2024-0449", reason = "unmaintained unsafe-libyaml via serde_yaml_ng (policy YAML, lease config); replacement tracked in HUB-270" },
-]
+ignore = []
 
 [licenses]
 confidence-threshold = 0.8

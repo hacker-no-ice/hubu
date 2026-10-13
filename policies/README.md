@@ -37,10 +37,23 @@ hubu policy diff --policy-id pol_... --from-revision 1
 
 ## YAML compatibility
 
-Hubu policy files use the YAML 1.1 syntax supported by `serde_yaml_ng`. Existing
-starter and test policies are migration fixtures. Policy, rule, and condition
-objects reject unknown fields; required fields and semantic validation remain
-enforced after parsing.
+Hubu parses policy files with `serde-saphyr`, a pure-Rust YAML 1.2 parser.
+Existing starter and test policies are migration fixtures. Policy, rule, and
+condition objects reject unknown fields; required fields and semantic
+validation remain enforced after parsing.
+
+- Write enum values as nested maps, for example `value:` then
+  `money_cents: 500` on the next indented line. `hubu policy export` emits
+  this form. Older exports that used YAML tags (`value: !money_cents 500`)
+  still load.
+- A document must be a single YAML document. Duplicate keys, tab
+  indentation, and unknown fields are rejected.
+- String fields such as `id` and `version` must not be `null`, `Null`, or
+  `~`; quote them if you need that literal text. Words such as `no`, `yes`,
+  or `on` stay strings.
+- Integer values accept `_` digit separators, so `money_cents: 10_000` means
+  10000. Floating-point and quoted numbers are rejected for integer fields.
+- Anchors and aliases are allowed, but expansion is bounded.
 
 Callers may rely on Hubu's top-level errors (`failed to parse policy yaml` and
 `invalid policy`), but the parser's detailed source diagnostic is not a stable
