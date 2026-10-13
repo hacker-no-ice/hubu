@@ -95,7 +95,7 @@ exec $(quote "${real_hubu_server_bin}") "\$@"
 EOF
 chmod 700 "${hubu_server_bin}"
 
-init_output="$("${hubu_bin}" stack init --mode local-stack --profile "${profile}")"
+init_output="$("${hubu_bin}" stack init --mode live --profile "${profile}")"
 "${hubu_bin}" stack select --profile "${profile}" >/dev/null
 profile_canonical="$(cd "${profile}" && pwd -P)"
 managed_credential_root="${profile_canonical}/state/credentials"

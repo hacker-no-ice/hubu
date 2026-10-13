@@ -58,6 +58,8 @@ struct StackStatusReport {
     schema_version: u32,
     profile: PathBuf,
     classification: String,
+    mode: Option<&'static str>,
+    executor: Option<&'static str>,
     generation_id: Option<String>,
     source_or_render_drift: bool,
     restart_impact: Vec<String>,
@@ -179,21 +181,16 @@ fn inspect_status(profile: &Path) -> Result<StackStatusReport> {
         doctor.component_ready("hubu"),
         state.as_ref(),
     )];
-    if stack
-        .as_ref()
-        .is_none_or(|value| value.mode.includes_gongbu())
-    {
-        components.push(component_status(
-            "gongbu-server",
-            "gongbu",
-            stack
-                .as_ref()
-                .and_then(|value| value.gongbu.as_ref())
-                .and_then(|value| value.ownership),
-            doctor.component_ready("gongbu"),
-            state.as_ref(),
-        ));
-    }
+    components.push(component_status(
+        "gongbu-server",
+        "gongbu",
+        stack
+            .as_ref()
+            .and_then(|value| value.gongbu.as_ref())
+            .and_then(|value| value.ownership),
+        doctor.component_ready("gongbu"),
+        state.as_ref(),
+    ));
     let temporal = stack.as_ref().and_then(|value| value.temporal.as_ref());
     let gongbu_ownership = stack
         .as_ref()
@@ -222,19 +219,14 @@ fn inspect_status(profile: &Path) -> Result<StackStatusReport> {
             format!("hubu init codex --stack-profile {profile_arg}"),
         ),
     ]);
-    if stack
-        .as_ref()
-        .is_none_or(|value| value.mode.includes_gongbu())
-    {
-        commands.insert(
-            "temporal_workflows".into(),
-            temporal_workflow_command(temporal, gongbu_ownership),
-        );
-        commands.insert(
-            "artifact_retrieval".into(),
-            "use the authenticated Gongbu artifact endpoint for the execution artifact id".into(),
-        );
-    }
+    commands.insert(
+        "temporal_workflows".into(),
+        temporal_workflow_command(temporal, gongbu_ownership),
+    );
+    commands.insert(
+        "artifact_retrieval".into(),
+        "use the authenticated Gongbu artifact endpoint for the execution artifact id".into(),
+    );
     let generation_id = manifest.as_ref().map(|value| value.generation_id.clone());
     let source_or_render_drift = manifest.as_ref().is_none_or(|value| {
         source_digests(profile)
@@ -252,6 +244,8 @@ fn inspect_status(profile: &Path) -> Result<StackStatusReport> {
         schema_version: STATUS_SCHEMA_VERSION,
         profile: profile.to_path_buf(),
         classification: classification_name(doctor.classification).into(),
+        mode: stack.as_ref().map(|value| value.mode.id()),
+        executor: stack.as_ref().map(|_| "gongbu"),
         generation_id,
         source_or_render_drift,
         restart_impact,
@@ -262,7 +256,6 @@ fn inspect_status(profile: &Path) -> Result<StackStatusReport> {
                 gongbu_ownership,
                 temporal.and_then(|value| value.mode),
             ) {
-                (Some(StackMode::HubuOnly), _, _) => "not_applicable",
                 (_, Some(Ownership::External), _) => "external_gongbu",
                 (_, _, Some(TemporalMode::ManagedLocal)) => "gongbu_managed_local",
                 (_, _, Some(TemporalMode::External)) => "external_temporal",
@@ -390,6 +383,13 @@ fn render_status(style: crate::terminal::TerminalStyle, report: &StackStatusRepo
         style,
         "Profile",
         style.accent(report.profile.display()),
+    );
+    write_status_field(&mut output, style, "Mode", report.mode.unwrap_or("invalid"));
+    write_status_field(
+        &mut output,
+        style,
+        "Executor",
+        report.executor.unwrap_or("unconfigured"),
     );
     write_status_field(
         &mut output,
@@ -1931,6 +1931,8 @@ mod tests {
             schema_version: STATUS_SCHEMA_VERSION,
             profile: PathBuf::from("/profiles/demo"),
             classification: "running_ready".into(),
+            mode: Some("live"),
+            executor: Some("gongbu"),
             generation_id: Some("a".repeat(64)),
             source_or_render_drift: true,
             restart_impact: vec!["gongbu-server".into()],

@@ -241,18 +241,18 @@ const components = {
       ["Separate failure domains", "Hubu and Gongbu share source and releases, but never a process, database, credential, or backend client."],
       ["Exact, replay-safe accounting", "Gongbu reports the exact cost and Hubu charges within the authorized maximum. Retries return stored state; overruns go to a human."],
       ["Provider contracts", "Each provider target is a frozen, versioned contract covering model, pricing, retries, and polling. Agents select it only by opaque ID."],
-      ["Three stack modes", "Sandbox and local-stack run Hubu, Gongbu, and Temporal together; Hubu-only runs governance without the execution plane."],
+      ["Two supported stack modes", "Sandbox and live run Hubu, Gongbu, and Temporal together. Sandbox uses a non-billable fixture; live uses approved real providers. Decisions-only is deferred and unsupported."],
     ],
     links: [sharedLinks.readme, sharedLinks.api, sharedLinks.appSpend, sharedLinks.appClaims, sharedLinks.cli, sharedLinks.stackConfiguration, sharedLinks.stackProviderContract, sharedLinks.stackProviderDoctor, sharedLinks.liveProviders, sharedLinks.localStack, sharedLinks.localStackAcceptance, sharedLinks.gongbuOverview, sharedLinks.gongbuApplication, sharedLinks.gongbuProviderContracts, sharedLinks.unifiedMcp, sharedLinks.unifiedMcpContract, sharedLinks.releases, sharedLinks.releaseWorkflow, sharedLinks.spendExecutor, sharedLinks.executionScope, sharedLinks.scopeModel],
     zones: [
       { label: "Hubu control-plane process + owned state", x: 650, y: 48, w: 730, h: 366, labelX: 682, labelY: 84 },
-      { label: "Gongbu execution plane — sandbox + local-stack modes", x: 650, y: 484, w: 730, h: 366, labelX: 682, labelY: 520 },
+      { label: "Gongbu execution plane — sandbox + live modes", x: 650, y: 484, w: 730, h: 366, labelX: 682, labelY: 520 },
     ],
     nodes: [
       { id: "human", label: "Human owner", sub: "setup + decisions", x: 42, y: 108, w: 212, h: 100, tone: "human" },
       { id: "agent", label: "AI agent", sub: "one MCP connection", x: 42, y: 380, w: 212, h: 100, tone: "agent" },
       { id: "cli", label: "Hubu CLI", sub: "init + catalog + read-only WATCH", x: 340, y: 110, w: 230, h: 96, tone: "surface" },
-      { id: "mcp", label: "Unified MCP", sub: "Hubu-only or governed execution", x: 340, y: 382, w: 230, h: 96, tone: "surface", path: "crates/hubu-unified-mcp/src/lib.rs" },
+      { id: "mcp", label: "Unified MCP", sub: "governance + governed execution", x: 340, y: 382, w: 230, h: 96, tone: "surface", path: "crates/hubu-unified-mcp/src/lib.rs" },
       { id: "release", label: "Versioned install", sub: "exact tag + full SHA", x: 340, y: 708, w: 230, h: 96, tone: "surface" },
       { id: "api", label: "Hubu HTTP API", sub: "Hubu bearer", x: 706, y: 132, w: 226, h: 104, tone: "core" },
       { id: "app", label: "Governance + budgets", sub: "BudgetManager + spend services", x: 1010, y: 132, w: 250, h: 104, tone: "core", path: "crates/hubu-core/src/app/mod.rs" },
@@ -704,7 +704,7 @@ const components = {
     summary: "The single server agents connect to. It routes governance calls to Hubu and execution calls to Gongbu, and lets paused or approved operations resume by a public handle.",
     viewBox: "0 0 1280 760",
     copy:
-      "The agent harness launches one default stdio server. The router offers bounded governed submission plus public-handle resume: primitive resume is Hubu-only, governed resume can continue stored Gongbu intent, and completed operations replay from the local registry. Agents discover selectable execution targets and pricing; provider-contract diagnostics and guarded-FLUX attestation remain authenticated operator HTTP endpoints. Governance, provider execution, backend storage, credentials, artifacts, and failures remain with their owners.",
+      "The agent harness launches one default stdio server. The router offers bounded governed submission plus public-handle resume: primitive resume stays within Hubu, governed resume can continue stored Gongbu intent, and completed operations replay from the local registry. Agents discover selectable execution targets and pricing; provider-contract diagnostics and guarded-FLUX attestation remain authenticated operator HTTP endpoints. Governance, provider execution, backend storage, credentials, artifacts, and failures remain with their owners.",
     responsibilities: [
       ["The only agent surface", "Written by `hubu init codex`, it is the only MCP server in releases and speaks JSON-RPC over stdio."],
       ["Separate backends", "Hubu and Gongbu have separate endpoints, credentials, clients, and health probes, with no fallback between them."],

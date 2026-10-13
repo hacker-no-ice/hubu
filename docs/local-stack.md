@@ -89,8 +89,8 @@ PROFILE_ROOT/
 The sandbox profile works without edits. Never put API keys or tokens in these
 files, and do not edit `generated/` or `state/`; Hubu manages them.
 
-Other modes exist: `local-stack` uses real, billable providers you approve, and
-`hubu-only` runs governance without Gongbu or Temporal. Keep each mode in its
+The two supported modes are `sandbox` and `live`; both start Gongbu by default.
+Live uses real, billable providers you approve. Keep each mode in its
 own profile; the [complete examples](https://hubustack.dev/configuration/local-stack/v1/examples)
 show all three.
 

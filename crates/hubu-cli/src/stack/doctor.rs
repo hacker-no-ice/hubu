@@ -81,6 +81,8 @@ struct DoctorCheck {
 #[derive(Clone, Debug, Serialize)]
 pub(super) struct DoctorReport {
     schema_version: u32,
+    pub(super) mode: Option<&'static str>,
+    executor: Option<&'static str>,
     pub(super) classification: ProfileClassification,
     pub(super) provider_readiness: ProviderReadiness,
     pub(super) provider_contracts: Vec<ProviderContractCatalogEntry>,
@@ -160,6 +162,8 @@ fn inspect_profile_with(
 ) -> DoctorReport {
     let mut report = DoctorReport {
         schema_version: REPORT_SCHEMA_VERSION,
+        mode: None,
+        executor: None,
         classification: ProfileClassification::Invalid,
         provider_readiness: ProviderReadiness::Unknown,
         provider_contracts: Vec::new(),
@@ -183,6 +187,29 @@ fn inspect_profile_with(
     else {
         return report;
     };
+    report.mode = Some(stack.mode.id());
+    report.executor = Some("gongbu");
+    if std::str::from_utf8(&stack_bytes)
+        .ok()
+        .and_then(|text| toml::from_str::<toml::Value>(text).ok())
+        .and_then(|value| {
+            value
+                .get("mode")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+        })
+        .as_deref()
+        == Some("local-stack")
+    {
+        report.checks.push(check(
+            CheckLayer::SourceSyntax,
+            CheckStatus::Warning,
+            "legacy_mode_alias",
+            "stack",
+            Some("stack.toml:mode".into()),
+            "local-stack is a deprecated alias for live; change mode to live in stack.toml",
+        ));
+    }
     report.provider_readiness = provider_readiness(&providers);
     report.provider_contracts = provider_contract_catalog_entries(&providers, false);
     for contract in &mut report.provider_contracts {
@@ -747,15 +774,6 @@ fn inspect_profile_with(
             "gongbu",
             None,
             "artifact destination and safety limits passed the selected Gongbu validator",
-        ));
-    } else if stack.mode == StackMode::HubuOnly {
-        report.checks.push(check(
-            CheckLayer::Renderability,
-            CheckStatus::Skipped,
-            "gongbu_intentionally_absent",
-            "gongbu",
-            None,
-            "Hubu-only mode intentionally omits Gongbu, Temporal, provider catalogs, and artifacts",
         ));
     } else {
         report.checks.push(check(
@@ -1682,7 +1700,10 @@ fn inspect_credential_file(path: &Path) -> CredentialFileState {
 }
 
 fn redacted_toml_error(error: &toml::de::Error) -> (&'static str, String) {
-    let message = error.to_string();
+    let message = error.message();
+    if message == DECISIONS_ONLY_UNSUPPORTED {
+        return ("unsupported_stack_mode", DECISIONS_ONLY_UNSUPPORTED.into());
+    }
     for (needle, code, prefix) in [
         (
             "unknown field `",
@@ -1830,6 +1851,13 @@ fn render_human(
         style,
         "Profile",
         style.accent(profile.display()),
+    );
+    write_summary_field(&mut output, style, "Mode", report.mode.unwrap_or("invalid"));
+    write_summary_field(
+        &mut output,
+        style,
+        "Executor",
+        report.executor.unwrap_or("unconfigured"),
     );
     write_summary_field(
         &mut output,
@@ -2001,6 +2029,8 @@ mod tests {
     fn presentation_report() -> DoctorReport {
         DoctorReport {
             schema_version: REPORT_SCHEMA_VERSION,
+            mode: None,
+            executor: None,
             classification: ProfileClassification::Incomplete,
             provider_readiness: ProviderReadiness::FixtureOnly,
             provider_contracts: Vec::new(),

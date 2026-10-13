@@ -84,7 +84,7 @@ export default function Home() {
               <ul><li>Provider credentials</li><li>Temporal workflows</li><li>Artifacts + retries</li></ul>
             </div>
             <p className="boundary-note">
-              Gongbu is the first-party executor, not a requirement. Run governance only with <code>hubu-only</code>, or <a href="/docs/external-executor">bring your own executor →</a>
+              Two supported modes: <code>sandbox</code> and <code>live</code>. Both start Gongbu by default. Decisions-only is a future advanced concept and is not supported. <a href="/docs/external-executor">Advanced: custom executors →</a>
             </p>
           </div>
         </section>
