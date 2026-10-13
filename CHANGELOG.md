@@ -25,6 +25,26 @@ Future release template
 
 ## Unreleased
 
+### Highlights
+
+- Human owners can rename an agent with `hubu agent rename` while keeping its
+  `agt_...` ID, account, budgets, policy assignments, and ledger history.
+  `hubu agent history` shows the append-only revision audit. Clients that
+  still register under a previous name resolve to the same agent and receive a
+  `stale_agent_identity` warning. Rename requires the human approval
+  capability and is not exposed through the unified MCP.
+
+### Breaking or operational changes
+
+- Agent registration is now idempotent over HTTP: registering an agent whose
+  identity and version content already exist returns the existing `agt_...`,
+  `agv_...`, and `aga_...` records with a new session instead of failing with
+  `agent is already registered for this owner`. Responses include
+  `identity_resolution` (`created`, `reused`, or `alias`), and
+  `hubu register agent` prints `Agent already registered; reused existing
+  records` for a repeat. Owner, agent-type, and version-content conflicts are
+  still rejected.
+
 ## v0.2.2 — 2026-10-05
 
 ### Highlights

@@ -1135,11 +1135,37 @@ fn register_agent(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
     let response = post_json(base_url, "/agents/register", prepared.envelope.clone())?;
 
     print_registration_review(&prepared);
-    println!("{}", terminal::stdout().success("Agent registered"));
+    let headline = match response.get("identity_resolution").and_then(Value::as_str) {
+        Some("reused") | Some("alias") => "Agent already registered; reused existing records",
+        _ => "Agent registered",
+    };
+    println!("{}", terminal::stdout().success(headline));
     println!("  agent_id: {}", string_at(&response, "agent_id")?);
+    print_registration_warnings(&response)?;
     println!("  version_id: {}", string_at(&response, "version_id")?);
     println!("  account_id: {}", string_at(&response, "account_id")?);
     println!("  session_id: {}", string_at(&response, "session_id")?);
+    Ok(())
+}
+
+fn print_registration_warnings(response: &Value) -> Result<()> {
+    let Some(warnings) = response.get("warnings").and_then(Value::as_array) else {
+        return Ok(());
+    };
+    for warning in warnings {
+        eprintln!(
+            "{}",
+            terminal::stderr().warning(format!(
+                "Registration warning ({})",
+                string_at(warning, "code")?
+            ))
+        );
+        eprintln!("  {}", string_at(warning, "message")?);
+        eprintln!(
+            "  current name: {}",
+            string_at(warning, "current_display_name")?
+        );
+    }
     Ok(())
 }
 
@@ -1609,8 +1635,151 @@ fn agent(base_url: &CliContext, args: Vec<String>) -> Result<()> {
             Ok(())
         }
         Some((command, rest)) if command == "list" => agent_list(base_url, rest.to_vec()),
-        _ => bail!("usage: hubu agent list [--all]"),
+        Some((command, rest)) if command == "rename" => agent_rename(base_url, rest.to_vec()),
+        Some((command, rest)) if command == "history" => agent_history(base_url, rest.to_vec()),
+        _ => bail!(
+            "usage: hubu agent list [--all] | hubu agent rename --agent-id ID --name NAME --reason TEXT | hubu agent history --agent-id ID"
+        ),
     }
+}
+
+fn validate_public_agent_id(agent_id: &str) -> Result<()> {
+    let valid = agent_id.strip_prefix("agt_").is_some_and(|suffix| {
+        !suffix.is_empty()
+            && suffix
+                .chars()
+                .all(|character| character.is_ascii_lowercase() || character.is_ascii_digit())
+    });
+    if !valid {
+        bail!("--agent-id must be a public agent ID like agt_0123456789ab");
+    }
+    Ok(())
+}
+
+/// Owner-only relabel. Sends the human approval capability so agent sessions
+/// holding only the local bearer token cannot rename themselves.
+fn agent_rename(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
+    if take_help(&mut args) {
+        print_agent_help();
+        return Ok(());
+    }
+    let agent_id = take_required(&mut args, "--agent-id")?;
+    let name = take_required(&mut args, "--name")?;
+    let reason = take_required(&mut args, "--reason")?;
+    ensure_no_args(args)?;
+    validate_public_agent_id(&agent_id)?;
+
+    let response = request_json(
+        base_url,
+        "POST",
+        "/agents/rename",
+        Some(json!({ "agent_id": agent_id, "name": name, "reason": reason })),
+        true,
+        false,
+    )?;
+    if string_at(&response, "agent_id")? != agent_id {
+        bail!("server renamed a different agent than requested");
+    }
+    let revision = response
+        .get("revision")
+        .ok_or_else(|| anyhow!("server response missing `revision`"))?;
+    println!("{}", terminal::stdout().success("Agent renamed"));
+    println!("  agent_id: {agent_id} (unchanged)");
+    println!(
+        "  name: {} -> {}",
+        string_at(&response, "previous_display_name")?,
+        string_at(&response, "display_name")?
+    );
+    println!("  revision: {}", u64_at(revision, "revision")?);
+    println!(
+        "  identity_fingerprint: {} (previous fingerprint still resolves to this agent)",
+        compact_fingerprint(string_at(&response, "identity_fingerprint")?)
+    );
+    Ok(())
+}
+
+fn agent_history(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
+    if take_help(&mut args) {
+        print_agent_help();
+        return Ok(());
+    }
+    let agent_id = take_required(&mut args, "--agent-id")?;
+    ensure_no_args(args)?;
+    validate_public_agent_id(&agent_id)?;
+
+    let response = get_json(base_url, &format!("/agents/history?agent_id={agent_id}"))?;
+    if string_at(&response, "agent_id")? != agent_id {
+        bail!("server returned history for a different agent than requested");
+    }
+    let style = terminal::stdout();
+    println!("{}", style.heading("Agent identity"));
+    println!("  agent_id: {agent_id}");
+    println!("  name: {}", string_at(&response, "display_name")?);
+    println!(
+        "  current_revision: {}",
+        u64_at(&response, "current_revision")?
+    );
+    println!(
+        "  registered_at: {}",
+        local_timestamp(string_at(&response, "registered_at")?)
+    );
+
+    println!("{}", style.heading("Identity revisions"));
+    let revisions = response
+        .get("revisions")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("server response missing `revisions`"))?;
+    if revisions.is_empty() {
+        println!("  {}", style.muted("No renames recorded."));
+    }
+    for revision in revisions {
+        println!(
+            "  revision {} at {} by {}",
+            u64_at(revision, "revision")?,
+            local_timestamp(string_at(revision, "created_at")?),
+            string_at(revision, "actor")?
+        );
+        println!("    reason: {}", string_at(revision, "reason")?);
+        for change in revision
+            .get("changes")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow!("server response missing revision `changes`"))?
+        {
+            let value = |key: &str| {
+                change
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .unwrap_or("-")
+                    .to_string()
+            };
+            println!(
+                "    {}: {} -> {}",
+                string_at(change, "field")?,
+                value("old_value"),
+                value("new_value")
+            );
+        }
+    }
+
+    let aliases = response
+        .get("fingerprint_aliases")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("server response missing `fingerprint_aliases`"))?;
+    if !aliases.is_empty() {
+        println!(
+            "{}",
+            style.heading("Identity fingerprints resolving to this agent")
+        );
+        for alias in aliases {
+            println!(
+                "  {} ({}, revision {})",
+                compact_fingerprint(string_at(alias, "identity_fingerprint")?),
+                string_at(alias, "source")?,
+                u64_at(alias, "revision")?
+            );
+        }
+    }
+    Ok(())
 }
 
 fn agent_list(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
@@ -3697,17 +3866,29 @@ Examples:
 
 fn print_agent_help() {
     println!(
-        "Read registered agents
+        "Read and relabel registered agents
 
 Usage:
   hubu agent list [--all]
+  hubu agent rename --agent-id ID --name NEW_NAME --reason TEXT
+  hubu agent history --agent-id ID
 
 Options:
-  --all  Show agents for all local users instead of only the current user
+  --all       Show agents for all local users instead of only the current user
+  --agent-id  Public agent ID (agt_...); it never changes on rename
+  --name      New owner-facing agent name
+  --reason    Why the agent is being renamed (recorded in the revision audit)
+
+Rename is human-owner only and requires HUBU_APPROVAL_TOKEN or
+HUBU_APPROVAL_TOKEN_FILE. Budgets, policies, accounts, and ledger history stay
+attached to the same agent ID, and clients registered under the previous name
+keep resolving to it with a warning.
 
 Examples:
   hubu agent list
-  hubu agent list --all"
+  hubu agent list --all
+  hubu agent rename --agent-id agt_0123456789ab --name research-agent --reason \"fix typo\"
+  hubu agent history --agent-id agt_0123456789ab"
     );
 }
 
@@ -4149,6 +4330,63 @@ mod tests {
             capture_cli_request(|base_url| spend_authorize(base_url, legacy_spend_args()));
         assert_eq!(path, "/spend/authorize");
         assert!(body.get("task_id").is_none());
+    }
+
+    #[test]
+    fn agent_rename_cli_submits_only_owner_labels() {
+        let (path, body) = capture_cli_request(|base_url| {
+            agent(
+                base_url,
+                [
+                    "rename",
+                    "--agent-id",
+                    "agt_0123456789ab",
+                    "--name",
+                    "research-agent",
+                    "--reason",
+                    "fix typo",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            )
+        });
+        assert_eq!(path, "/agents/rename");
+        assert_eq!(
+            body,
+            json!({"agent_id": "agt_0123456789ab", "name": "research-agent", "reason": "fix typo"})
+        );
+    }
+
+    #[test]
+    fn agent_rename_cli_requires_reason_and_public_agent_id() {
+        let client = CliContext::new(
+            Some("http://127.0.0.1:9".to_string()),
+            std::env::temp_dir().join("hubu-cli-unit-test-home"),
+        );
+        let args = |values: &[&str]| values.iter().map(|value| value.to_string()).collect();
+        let error = agent(
+            &client,
+            args(&["rename", "--agent-id", "agt_0123456789ab", "--name", "n"]),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("--reason"));
+        let error = agent(
+            &client,
+            args(&[
+                "rename",
+                "--agent-id",
+                "aga_0123456789ab",
+                "--name",
+                "n",
+                "--reason",
+                "r",
+            ]),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("public agent ID"));
+        let error = agent(&client, args(&["history", "--agent-id", "agt_../x"])).unwrap_err();
+        assert!(error.to_string().contains("public agent ID"));
     }
 
     #[test]

@@ -22,6 +22,8 @@ const sharedLinks = {
   registration: ["Registration manager", "crates/hubu-core/src/registration/manager.rs"],
   registrationModel: ["Registration model", "crates/hubu-core/src/registration/model.rs"],
   registrationProtocol: ["Agent registration deep dive", "docs/agent-registration.md"],
+  agentIdentity: ["Owner agent rename API", "crates/hubu-api/src/agent_identity.rs"],
+  identityStorage: ["Identity alias and revision schema", "crates/hubu-core/src/storage.rs"],
   policyEngine: ["Policy engine", "crates/hubu-core/src/policy/engine.rs"],
   policyModel: ["Policy model", "crates/hubu-core/src/policy/model.rs"],
   policyCondition: ["Policy conditions", "crates/hubu-core/src/policy/condition.rs"],
@@ -378,8 +380,8 @@ const components = {
   registration: {
     title: "Registration",
     kind: "Component",
-    summary: "Humans set up the owner; agents register against that owner with structured identity and version payloads. The server recomputes fingerprints before creating or reusing an agent record.",
-    viewBox: "0 0 1200 700",
+    summary: "Humans set up the owner; agents register against that owner with structured identity and version payloads. The server recomputes fingerprints before creating or reusing an agent record, and owners can rename an agent without changing its agt_ ID.",
+    viewBox: "0 0 1200 900",
     copy:
       "Registration has two paths: humans create the owner user context that Hubu selects as active, while agents prepare structured identity and version payloads against that owner. The server validates fingerprints before creating or reusing agent records.",
     responsibilities: [
@@ -387,12 +389,15 @@ const components = {
       ["Guidance for agents", "Hubu publishes compact guidance so agents build registration envelopes instead of guessing fields."],
       ["Fingerprint check", "The server recomputes fingerprints and rejects mismatches before creating anything."],
       ["Records", "Creates or reuses agent identity, version, and account records, with a fresh session per registration."],
+      ["Owner rename", "A human owner relabels an agent with the approval capability; the agt_ ID, account, budgets, policies, and ledger stay attached. Not exposed through the unified MCP."],
+      ["Fingerprint aliases", "Previous and current identity fingerprints resolve to the same agent; previous names stay reserved and registrations under them return a warning. Append-only revisions audit each rename."],
       ["No restarts", "Registering after the stack starts changes only Hubu state; Gongbu needs no rerender or restart."],
     ],
-    links: [sharedLinks.user, sharedLinks.registration, sharedLinks.registrationModel, sharedLinks.registrationProtocol, sharedLinks.common],
+    links: [sharedLinks.user, sharedLinks.registration, sharedLinks.registrationModel, sharedLinks.registrationProtocol, sharedLinks.agentIdentity, sharedLinks.identityStorage, sharedLinks.common],
     zones: [
       { label: "Human registration path", x: 44, y: 46, w: 1090, h: 178 },
       { label: "Agent registration path", x: 44, y: 286, w: 1090, h: 350 },
+      { label: "Owner rename path (human only)", x: 44, y: 676, w: 1090, h: 190 },
     ],
     nodes: [
       { id: "humanFields", label: "Human fields", sub: "username + display", x: 84, y: 112, w: 218, h: 88, tone: "human", path: "crates/hubu-cli/src/main.rs" },
@@ -403,6 +408,9 @@ const components = {
       { id: "envelope", label: "Envelope", sub: "identity + version", x: 436, y: 430, w: 230, h: 98, tone: "core", path: "docs/agent-registration.md" },
       { id: "fingerprints", label: "Fingerprint check", sub: "canonical SHA-256", x: 806, y: 352, w: 240, h: 92, tone: "core", path: "crates/hubu-api/src/lib.rs" },
       { id: "records", label: "Agent records", sub: "identity/version/account", x: 806, y: 512, w: 250, h: 96, tone: "data", path: "crates/hubu-core/src/registration/manager.rs" },
+      { id: "ownerRename", label: "Owner rename", sub: "hubu agent rename", x: 84, y: 742, w: 218, h: 88, tone: "human", path: "crates/hubu-cli/src/main.rs" },
+      { id: "renameRoute", label: "Rename route", sub: "approval capability", x: 436, y: 742, w: 230, h: 88, tone: "core", path: "crates/hubu-api/src/agent_identity.rs" },
+      { id: "aliases", label: "Aliases + revisions", sub: "append-only", x: 806, y: 742, w: 250, h: 88, tone: "data", path: "crates/hubu-core/src/storage.rs" },
     ],
     edges: [
       ["humanFields", "userManager", "POST /init"],
@@ -411,7 +419,10 @@ const components = {
       ["review", "envelope", "approves"],
       ["ownerContext", "envelope", "owner pub_id", { labelDx: -78, labelDy: 4, labelT: 0.58 }],
       ["envelope", "fingerprints", "canonicalize"],
-      ["fingerprints", "records", "create/reuse"],
+      ["fingerprints", "records", "resolve alias/create"],
+      ["ownerRename", "renameRoute", "POST /agents/rename"],
+      ["renameRoute", "aliases", "new fingerprint"],
+      ["aliases", "records", "same agt_"],
     ],
   },
   policy: {
@@ -849,6 +860,7 @@ const sidebarHighlights = {
     "Humans establish the active owner context.",
     "Agents submit structured identity and version envelopes.",
     "The server recomputes fingerprints before registration.",
+    "Owner renames keep agt_ IDs and alias old fingerprints.",
   ],
   policy: [
     "Policies use immutable, hash-addressed revisions.",

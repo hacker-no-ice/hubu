@@ -32,6 +32,26 @@ hubu agent list
 Registration guidance, derived fields, fingerprints, and record reuse are
 documented in [Agent registration](agent-registration.md).
 
+## Rename an agent
+
+Fix an agent's owner-facing name without changing its `agt_...` ID. Budgets,
+policy assignments, the account, and ledger history stay attached. Rename is
+human-owner only: it sends the human approval capability
+(`HUBU_APPROVAL_TOKEN` or `HUBU_APPROVAL_TOKEN_FILE`) and is not available
+through the unified MCP.
+
+```sh
+hubu agent rename --agent-id agt_EXACT_AGENT_ID --name research-agent --reason "fix typo"
+hubu agent history --agent-id agt_EXACT_AGENT_ID
+```
+
+`hubu agent history` shows each revision (old -> new values, actor, time,
+reason) and the identity fingerprints that resolve to the agent. Clients still
+registering under a previous name resolve to the same agent and receive a
+warning naming the current name. A rename to a name another agent uses or
+previously used is rejected. See
+[Renaming an agent](agent-registration.md#renaming-an-agent).
+
 ## Draft, validate, and apply a policy
 
 Create or edit a YAML policy, validate it locally, and review its assignment

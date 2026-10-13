@@ -138,6 +138,81 @@ pub(crate) fn init_schema(conn: &Connection) -> Result<(), StorageError> {
         WHERE username IS NOT NULL;
         ",
     )?;
+    init_identity_revision_schema(conn)?;
+    Ok(())
+}
+
+/// Owner rename support (HUB-250).
+///
+/// `agent_identities.identity_payload_json` keeps the verified v1 identity
+/// payload so a rename can derive the relabeled fingerprint. Older rows keep
+/// NULL and are reconstructed and verified by the API before any rename.
+///
+/// Aliases map every fingerprint an agent has been known by to its stable
+/// `agt_...` and keep the normalized name it was derived from reserved for
+/// that agent; revisions audit each relabel. Both tables are append-only so a
+/// rename can never move an old fingerprint to a different agent.
+fn init_identity_revision_schema(conn: &Connection) -> Result<(), StorageError> {
+    add_column_if_missing(conn, "agent_identities", "identity_payload_json", "TEXT")?;
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS agent_identity_aliases (
+            owner_user_id TEXT NOT NULL,
+            fingerprint TEXT NOT NULL,
+            agent_id TEXT NOT NULL,
+            source TEXT NOT NULL CHECK(source IN ('registration', 'rename')),
+            normalized_name TEXT NOT NULL,
+            revision INTEGER NOT NULL CHECK(revision >= 0),
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(owner_user_id, fingerprint),
+            FOREIGN KEY(agent_id) REFERENCES agent_identities(id),
+            FOREIGN KEY(owner_user_id) REFERENCES users(id)
+        );
+
+        CREATE INDEX IF NOT EXISTS agent_identity_aliases_agent
+        ON agent_identity_aliases(agent_id, revision);
+
+        CREATE INDEX IF NOT EXISTS agent_identity_aliases_owner_name
+        ON agent_identity_aliases(owner_user_id, normalized_name);
+
+        CREATE TABLE IF NOT EXISTS agent_identity_revisions (
+            agent_id TEXT NOT NULL,
+            revision INTEGER NOT NULL CHECK(revision >= 1),
+            previous_fingerprint TEXT NOT NULL,
+            fingerprint TEXT NOT NULL,
+            changes_json TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(agent_id, revision),
+            FOREIGN KEY(agent_id) REFERENCES agent_identities(id)
+        );
+
+        CREATE TRIGGER IF NOT EXISTS agent_identity_aliases_no_update
+        BEFORE UPDATE ON agent_identity_aliases
+        BEGIN
+            SELECT RAISE(ABORT, 'agent identity aliases are immutable');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS agent_identity_aliases_no_delete
+        BEFORE DELETE ON agent_identity_aliases
+        BEGIN
+            SELECT RAISE(ABORT, 'agent identity aliases are immutable');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS agent_identity_revisions_no_update
+        BEFORE UPDATE ON agent_identity_revisions
+        BEGIN
+            SELECT RAISE(ABORT, 'agent identity revisions are immutable');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS agent_identity_revisions_no_delete
+        BEFORE DELETE ON agent_identity_revisions
+        BEGIN
+            SELECT RAISE(ABORT, 'agent identity revisions are immutable');
+        END;
+        ",
+    )?;
     Ok(())
 }
 

@@ -118,14 +118,10 @@ AGENT_ID="$(extract_field "${AGENT_OUTPUT}" "agent_id")"
 ACCOUNT_ID="$(extract_field "${AGENT_OUTPUT}" "account_id")"
 [[ -n "${ACCOUNT_ID}" ]] || fail "could not parse account_id"
 
-set +e
-DUPLICATE_AGENT_OUTPUT="$(hubu register agent --name core-flow-agent --version ci 2>&1)"
-DUPLICATE_AGENT_STATUS=$?
-set -e
-[[ "${DUPLICATE_AGENT_STATUS}" -ne 0 ]] || fail "duplicate agent registration unexpectedly succeeded"
-assert_contains "duplicate agent registration" "${DUPLICATE_AGENT_OUTPUT}" "agent is already registered for this owner"
-assert_not_contains "duplicate agent registration" "${DUPLICATE_AGENT_OUTPUT}" "Registration review"
-assert_not_contains "duplicate agent registration" "${DUPLICATE_AGENT_OUTPUT}" "identity_fingerprint"
+REPEAT_AGENT_OUTPUT="$(hubu register agent --name core-flow-agent --version ci)"
+assert_contains "repeat agent registration" "${REPEAT_AGENT_OUTPUT}" "Agent already registered; reused existing records"
+[[ "$(extract_field "${REPEAT_AGENT_OUTPUT}" "agent_id")" == "${AGENT_ID}" ]] || fail "repeat registration returned a different agent_id"
+[[ "$(extract_field "${REPEAT_AGENT_OUTPUT}" "account_id")" == "${ACCOUNT_ID}" ]] || fail "repeat registration returned a different account_id"
 
 rm -f "${POLICY_FILE}"
 hubu policy new-template --path "${POLICY_FILE}" >/dev/null
