@@ -29,6 +29,12 @@ hubu register agent --name image-designer --version local-dev
 hubu agent list
 ```
 
+Agent names are unique per owner, ignoring case and surrounding spaces.
+`hubu register agent` with a new identity under an existing agent's name fails
+and names that agent's `agt_...` ID; choose a different `--name` or rename the
+existing agent. Repeating a registration with the same identity reuses the
+existing records.
+
 Registration guidance, derived fields, fingerprints, and record reuse are
 documented in [Agent registration](agent-registration.md).
 

@@ -44,6 +44,11 @@ Future release template
   `hubu register agent` prints `Agent already registered; reused existing
   records` for a repeat. Owner, agent-type, and version-content conflicts are
   still rejected.
+- Agent names are now unique per owner (trimmed, case-insensitive).
+  Registering a new identity under an existing agent's name fails with HTTP
+  409 `display_name_conflict` naming the existing `agt_...`. Existing local
+  databases that already contain duplicate names are not migrated: the server
+  refuses to start and lists the conflicting agents.
 
 ## v0.2.2 — 2026-10-05
 

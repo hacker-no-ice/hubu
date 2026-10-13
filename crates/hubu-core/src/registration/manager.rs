@@ -679,11 +679,20 @@ impl MemoryRegistrationStore {
             return Ok((agent, resolution.via_alias));
         }
 
-        if self.name_reserved_by_other_agent(
-            &request.owner_user_id,
-            &normalize_agent_name(requested_agent_name(request)),
-            None,
-        ) {
+        let normalized_display_name = normalize_agent_name(&request.display_name);
+        if let Some(existing) = self.agents.values().find(|existing| {
+            existing.owner_user_id == request.owner_user_id
+                && normalize_agent_name(&existing.display_name) == normalized_display_name
+        }) {
+            return Err(RegistrationError::DisplayNameConflict {
+                existing_agent_id: existing.pub_id.clone(),
+                display_name: existing.display_name.clone(),
+            });
+        }
+        if requested_normalized_names(request)
+            .iter()
+            .any(|name| self.name_reserved_by_other_agent(&request.owner_user_id, name, None))
+        {
             return Err(RegistrationError::AgentNameReserved);
         }
 
@@ -1003,7 +1012,8 @@ impl SqliteRegistrationStore {
         )?;
         tx.execute(
             "UPDATE agent_identities
-             SET fingerprint = ?1, display_name = ?2, identity_payload_json = ?3, updated_at = ?4
+             SET fingerprint = ?1, display_name = ?2, identity_payload_json = ?3, updated_at = ?4,
+                 normalized_display_name = ?6
              WHERE id = ?5",
             params![
                 &request.new_fingerprint,
@@ -1011,8 +1021,23 @@ impl SqliteRegistrationStore {
                 serde_json::to_string(&request.new_identity_payload)?,
                 now.to_rfc3339(),
                 agent.id.to_string(),
+                &new_name,
             ],
-        )?;
+        )
+        .map_err(|error| {
+            match name_index_violation(
+                &tx,
+                &request.owner_user_id,
+                &new_name,
+                Some(&agent.id),
+                error,
+            ) {
+                RegistrationError::DisplayNameConflict { .. } => {
+                    RegistrationError::AgentNameConflict
+                }
+                other => other,
+            }
+        })?;
         tx.execute(
             "INSERT INTO agent_identity_revisions
              (agent_id, revision, previous_fingerprint, fingerprint, changes_json, actor, reason, created_at)
@@ -1148,13 +1173,16 @@ fn resolve_or_create_agent_sqlite(
         return Ok((agent, via_alias));
     }
 
-    if name_reserved_by_other_agent_sqlite(
-        tx,
-        &request.owner_user_id,
-        &normalize_agent_name(requested_agent_name(request)),
-        None,
-    )? {
-        return Err(RegistrationError::AgentNameReserved);
+    let normalized_display_name = normalize_agent_name(&request.display_name);
+    if let Some(conflict) =
+        display_name_conflict_sqlite(tx, &request.owner_user_id, &normalized_display_name, None)?
+    {
+        return Err(conflict);
+    }
+    for name in requested_normalized_names(request) {
+        if name_reserved_by_other_agent_sqlite(tx, &request.owner_user_id, &name, None)? {
+            return Err(RegistrationError::AgentNameReserved);
+        }
     }
 
     let now = Utc::now();
@@ -1174,8 +1202,8 @@ fn resolve_or_create_agent_sqlite(
 
     tx.execute(
         "INSERT INTO agent_identities
-         (id, pub_id, fingerprint, display_name, description, owner_user_id, agent_type, agent_status, created_at, updated_at, identity_payload_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+         (id, pub_id, fingerprint, display_name, description, owner_user_id, agent_type, agent_status, created_at, updated_at, identity_payload_json, normalized_display_name)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             agent.id.to_string(),
             &agent.pub_id,
@@ -1192,8 +1220,12 @@ fn resolve_or_create_agent_sqlite(
                 .as_ref()
                 .map(serde_json::to_string)
                 .transpose()?,
+            &normalized_display_name,
         ],
-    )?;
+    )
+    .map_err(|error| {
+        name_index_violation(tx, &request.owner_user_id, &normalized_display_name, None, error)
+    })?;
 
     log_event(
         "info",
@@ -1432,15 +1464,72 @@ fn resolve_identity_fingerprint_sqlite(
     )
 }
 
-/// Name the registration request asks for: the identity payload's
-/// `agent_name` when present, otherwise the reviewed display name.
-fn requested_agent_name(request: &RegisterAgentRequest) -> &str {
-    request
+/// Normalized names a registration request asks for: the reviewed display
+/// name and, when present, the identity payload's `agent_name`.
+fn requested_normalized_names(request: &RegisterAgentRequest) -> Vec<String> {
+    let mut names = vec![normalize_agent_name(&request.display_name)];
+    if let Some(agent_name) = request
         .identity_payload
         .as_ref()
         .and_then(|payload| payload.get("agent_name"))
         .and_then(serde_json::Value::as_str)
-        .unwrap_or(&request.display_name)
+    {
+        let agent_name = normalize_agent_name(agent_name);
+        if !names.contains(&agent_name) {
+            names.push(agent_name);
+        }
+    }
+    names
+}
+
+fn display_name_conflict_sqlite(
+    conn: &Connection,
+    owner_user_id: &UserId,
+    normalized_name: &str,
+    except: Option<&AgentId>,
+) -> Result<Option<RegistrationError>, StorageError> {
+    Ok(conn
+        .query_row(
+            "SELECT pub_id, display_name FROM agent_identities
+             WHERE owner_user_id = ?1 AND normalized_display_name = ?2 AND id != ?3",
+            params![
+                owner_user_id.to_string(),
+                normalized_name,
+                except.map(ToString::to_string).unwrap_or_default(),
+            ],
+            |row| {
+                Ok(RegistrationError::DisplayNameConflict {
+                    existing_agent_id: row.get(0)?,
+                    display_name: row.get(1)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
+/// The unique name index is the backstop for races the application check
+/// cannot see; translate its violation into the structured conflict.
+fn name_index_violation(
+    conn: &Connection,
+    owner_user_id: &UserId,
+    normalized_name: &str,
+    except: Option<&AgentId>,
+    error: rusqlite::Error,
+) -> RegistrationError {
+    let is_name_index = matches!(
+        &error,
+        rusqlite::Error::SqliteFailure(failure, Some(message))
+            if failure.code == rusqlite::ErrorCode::ConstraintViolation
+                && message.contains("normalized_display_name")
+    );
+    if is_name_index {
+        if let Ok(Some(conflict)) =
+            display_name_conflict_sqlite(conn, owner_user_id, normalized_name, except)
+        {
+            return conflict;
+        }
+    }
+    error.into()
 }
 
 fn current_name_used_by_other_agent_sqlite(
@@ -1448,20 +1537,10 @@ fn current_name_used_by_other_agent_sqlite(
     agent: &AgentIdentity,
     normalized_name: &str,
 ) -> Result<bool, StorageError> {
-    // Normalization is Unicode-aware, so compare in Rust instead of SQL lower().
-    let mut stmt = tx.prepare(
-        "SELECT display_name FROM agent_identities WHERE owner_user_id = ?1 AND id != ?2",
-    )?;
-    let names = stmt.query_map(
-        params![agent.owner_user_id.to_string(), agent.id.to_string()],
-        |row| row.get::<_, String>(0),
-    )?;
-    for name in names {
-        if normalize_agent_name(&name?) == normalized_name {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+    Ok(
+        display_name_conflict_sqlite(tx, &agent.owner_user_id, normalized_name, Some(&agent.id))?
+            .is_some(),
+    )
 }
 
 fn name_reserved_by_other_agent_sqlite(
@@ -1972,7 +2051,7 @@ mod tests {
             .register_agent(test_request("sha256:agent-a", "sha256:version-a"))
             .unwrap();
         let second = manager
-            .register_agent(test_request("sha256:agent-b", "sha256:version-a"))
+            .register_agent(named_request("Second Agent", "sha256:agent-b"))
             .unwrap();
 
         assert_public_id(&first.agent.pub_id, "agt");
@@ -2279,10 +2358,10 @@ mod tests {
     fn rename_rejects_fingerprint_owned_by_another_agent() {
         for mut manager in rename_managers() {
             let first = manager
-                .register_agent(test_request("sha256:agent-a", "sha256:version-a"))
+                .register_agent(named_request("Agent A", "sha256:agent-a"))
                 .unwrap();
             let second = manager
-                .register_agent(test_request("sha256:agent-b", "sha256:version-a"))
+                .register_agent(named_request("Agent Beta", "sha256:agent-b"))
                 .unwrap();
 
             let error = manager
@@ -2556,5 +2635,211 @@ mod tests {
             let owner = a.agent.owner_user_id.clone();
             assert_eq!(manager.agents_for_user(&owner).unwrap().len(), 1);
         }
+    }
+
+    #[test]
+    fn new_identity_with_an_existing_normalized_name_is_a_display_name_conflict() {
+        for mut manager in rename_managers() {
+            let alpha = manager
+                .register_agent(named_request("alpha", "sha256:alpha"))
+                .unwrap();
+
+            for variant in ["Alpha", "  ALPHA  ", "alpha"] {
+                let error = manager
+                    .register_agent(named_request(variant, &format!("sha256:{variant}-other")))
+                    .unwrap_err();
+                assert_eq!(
+                    error,
+                    RegistrationError::DisplayNameConflict {
+                        existing_agent_id: alpha.agent.pub_id.clone(),
+                        display_name: "alpha".to_string(),
+                    },
+                    "{variant}"
+                );
+            }
+
+            // Re-registering the existing identity stays idempotent.
+            let again = manager
+                .register_agent(named_request("alpha", "sha256:alpha"))
+                .unwrap();
+            assert_eq!(again.agent.id, alpha.agent.id);
+            assert_eq!(again.version.id, alpha.version.id);
+            assert_eq!(again.account.id, alpha.account.id);
+            let owner = alpha.agent.owner_user_id.clone();
+            assert_eq!(manager.agents_for_user(&owner).unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn different_owners_may_use_the_same_agent_name() {
+        let mut manager = RegistrationManager::in_memory_sqlite().unwrap();
+        seed_sqlite_owner(&manager);
+        let other_owner = user_id("00000000-0000-4000-8000-000000000456");
+        if let RegistrationStore::Sqlite(store) = &manager.store {
+            let now = Utc::now().to_rfc3339();
+            store
+                .raw_connection()
+                .execute(
+                    "INSERT INTO users (id, pub_id, identity_key, display_name, status, created_at, updated_at)
+                     VALUES (?1, 'usr_otherowner', 'test:other', 'Other', 'active', ?2, ?2)",
+                    params![other_owner.to_string(), now],
+                )
+                .unwrap();
+        }
+        let first = manager
+            .register_agent(named_request("shared-name", "sha256:shared-a"))
+            .unwrap();
+        let mut second_request = named_request("Shared-Name", "sha256:shared-b");
+        second_request.owner_user_id = other_owner.clone();
+        let second = manager.register_agent(second_request).unwrap();
+        assert_ne!(first.agent.id, second.agent.id);
+
+        let mut memory = RegistrationManager::new();
+        memory
+            .register_agent(named_request("shared-name", "sha256:shared-a"))
+            .unwrap();
+        let mut memory_second = named_request("shared-name", "sha256:shared-b");
+        memory_second.owner_user_id = other_owner;
+        memory.register_agent(memory_second).unwrap();
+    }
+
+    #[test]
+    fn rename_releases_the_old_current_name_only_as_a_reserved_alias() {
+        for mut manager in rename_managers() {
+            let a = manager
+                .register_agent(named_request("alpha", "sha256:alpha"))
+                .unwrap();
+            manager
+                .rename_agent(rename_request(&a.agent, "Gamma", "sha256:gamma"))
+                .unwrap();
+
+            // The new current name is unique, and the old one stays reserved.
+            let error = manager
+                .register_agent(named_request("gamma", "sha256:gamma-other"))
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                RegistrationError::DisplayNameConflict { ref existing_agent_id, .. }
+                    if existing_agent_id == &a.agent.pub_id
+            ));
+            assert_eq!(
+                manager
+                    .register_agent(named_request("ALPHA", "sha256:alpha-other"))
+                    .unwrap_err(),
+                RegistrationError::AgentNameReserved
+            );
+        }
+    }
+
+    #[test]
+    fn sqlite_unique_name_index_rejects_direct_duplicate_inserts() {
+        let mut manager = RegistrationManager::in_memory_sqlite().unwrap();
+        seed_sqlite_owner(&manager);
+        let alpha = manager
+            .register_agent(named_request("Alpha", "sha256:alpha"))
+            .unwrap();
+        if let RegistrationStore::Sqlite(store) = &manager.store {
+            let conn = store.raw_connection();
+            let stored: String = conn
+                .query_row(
+                    "SELECT normalized_display_name FROM agent_identities WHERE id = ?1",
+                    params![alpha.agent.id.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(stored, "alpha");
+            let now = Utc::now().to_rfc3339();
+            let error = conn
+                .execute(
+                    "INSERT INTO agent_identities
+                     (id, pub_id, fingerprint, display_name, owner_user_id, agent_type, agent_status,
+                      created_at, updated_at, normalized_display_name)
+                     VALUES (?1, 'agt_duplicate001', 'sha256:dup', 'ALPHA', ?2, 'autonomous_agent',
+                             'active', ?3, ?3, 'alpha')",
+                    params![
+                        AgentId::new().to_string(),
+                        alpha.agent.owner_user_id.to_string(),
+                        now
+                    ],
+                )
+                .unwrap_err();
+            assert!(error.to_string().contains("UNIQUE"), "{error}");
+        }
+    }
+
+    #[test]
+    fn startup_with_existing_duplicate_names_fails_naming_the_agents() {
+        let path =
+            std::env::temp_dir().join(format!("hubu-agent-dupnames-{}.sqlite", AgentId::new()));
+        let owner = user_id("00000000-0000-4000-8000-000000000123");
+        {
+            let conn = Connection::open(&path).unwrap();
+            let now = Utc::now().to_rfc3339();
+            conn.execute_batch(
+                "CREATE TABLE users (id TEXT PRIMARY KEY, pub_id TEXT NOT NULL UNIQUE,
+                     identity_key TEXT UNIQUE, display_name TEXT NOT NULL, email TEXT,
+                     status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+                 CREATE TABLE agent_identities (id TEXT PRIMARY KEY, pub_id TEXT NOT NULL UNIQUE,
+                     fingerprint TEXT NOT NULL, display_name TEXT NOT NULL, description TEXT,
+                     owner_user_id TEXT NOT NULL, agent_type TEXT NOT NULL,
+                     agent_status TEXT NOT NULL, created_at TEXT NOT NULL,
+                     updated_at TEXT NOT NULL, UNIQUE(owner_user_id, fingerprint),
+                     FOREIGN KEY(owner_user_id) REFERENCES users(id));",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO users VALUES (?1, 'usr_testowner', 'test:owner', 'Owner', NULL, 'active', ?2, ?2)",
+                params![owner.to_string(), now],
+            )
+            .unwrap();
+            for (pub_id, fingerprint, name) in [
+                ("agt_dupnamefirst", "sha256:first", "Research Agent"),
+                ("agt_dupnamesecnd", "sha256:second", " research agent "),
+                ("agt_uniquename01", "sha256:third", "Other Agent"),
+            ] {
+                conn.execute(
+                    "INSERT INTO agent_identities VALUES (?1, ?2, ?3, ?4, NULL, ?5, 'autonomous_agent', 'active', ?6, ?6)",
+                    params![AgentId::new().to_string(), pub_id, fingerprint, name, owner.to_string(), now],
+                )
+                .unwrap();
+            }
+        }
+
+        let error = RegistrationManager::open(&path)
+            .err()
+            .expect("startup must fail");
+        let message = error.to_string();
+        assert!(
+            message.contains("agent names must be unique per owner"),
+            "{message}"
+        );
+        assert!(message.contains("usr_testowner"), "{message}");
+        assert!(message.contains("agt_dupnamefirst"), "{message}");
+        assert!(message.contains("agt_dupnamesecnd"), "{message}");
+        assert!(!message.contains("agt_uniquename01"), "{message}");
+
+        // The operator fixes the duplicate by editing only display_name; the
+        // retry must recompute normalized names instead of trusting stale ones.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute(
+                "UPDATE agent_identities SET display_name = 'Research Agent 2' WHERE pub_id = 'agt_dupnamesecnd'",
+                [],
+            )
+            .unwrap();
+        }
+        let manager = RegistrationManager::open(&path).expect("retry after fixing names succeeds");
+        if let RegistrationStore::Sqlite(store) = &manager.store {
+            let normalized: String = store
+                .raw_connection()
+                .query_row(
+                    "SELECT normalized_display_name FROM agent_identities WHERE pub_id = 'agt_dupnamesecnd'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(normalized, "research agent 2");
+        }
+        std::fs::remove_file(path).ok();
     }
 }
