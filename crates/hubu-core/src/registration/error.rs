@@ -17,6 +17,37 @@ pub enum RegistrationError {
     #[error("agent account is suspended")]
     SuspendedAccount,
 
+    #[error("invalid rename: {0}")]
+    InvalidRename(&'static str),
+
+    #[error("agent not found")]
+    AgentNotFound,
+
+    #[error(
+        "agent identity changed since the rename was prepared; review the current name and retry"
+    )]
+    RenameConflict,
+
+    #[error("rename does not change the agent identity")]
+    NoIdentityChange,
+
+    #[error("renamed identity fingerprint already belongs to a different agent")]
+    IdentityFingerprintCollision,
+
+    #[error("agent name is already used by another agent of this owner")]
+    AgentNameConflict,
+
+    #[error("agent name is reserved as a previous name of another agent of this owner")]
+    AgentNameReserved,
+
+    /// A new identity would reuse the trimmed, case-insensitive name of an
+    /// existing agent of the same owner (HUB-251).
+    #[error("an agent named `{display_name}` already exists for this owner ({existing_agent_id})")]
+    DisplayNameConflict {
+        existing_agent_id: String,
+        display_name: String,
+    },
+
     #[error(transparent)]
     Storage(#[from] StorageError),
 }

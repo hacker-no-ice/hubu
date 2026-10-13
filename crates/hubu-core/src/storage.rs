@@ -9,6 +9,8 @@ use hubu_common::models::{
 };
 use rusqlite::{Connection, Row};
 
+use crate::registration::normalize_agent_name;
+
 pub(crate) const DEFAULT_USER_IDENTITY_KEY: &str = "system:local-default";
 pub(crate) const SELECTED_DEFAULT_USER_ID_KEY: &str = "selected_default_user_id";
 
@@ -136,6 +138,179 @@ pub(crate) fn init_schema(conn: &Connection) -> Result<(), StorageError> {
         CREATE UNIQUE INDEX IF NOT EXISTS users_username_unique
         ON users(username)
         WHERE username IS NOT NULL;
+        ",
+    )?;
+    init_identity_revision_schema(conn)?;
+    init_agent_name_uniqueness(conn)?;
+    Ok(())
+}
+
+/// Per-owner agent name uniqueness (HUB-251).
+///
+/// `normalized_display_name` holds [`normalize_agent_name`] of
+/// `display_name`, computed in Rust so the unique index and the application
+/// check always agree (SQLite's `lower()` is ASCII-only). Every startup
+/// recomputes it from the current `display_name` and checks for duplicates
+/// in memory *before* writing anything, so a failed start is safe to retry
+/// after the operator fixes names. Existing duplicates are not migrated:
+/// startup fails with the conflicting agents named instead of an opaque
+/// constraint error.
+fn init_agent_name_uniqueness(conn: &Connection) -> Result<(), StorageError> {
+    add_column_if_missing(conn, "agent_identities", "normalized_display_name", "TEXT")?;
+    let rows = load_agent_names(conn)?;
+
+    let duplicates = duplicate_agent_names(&rows);
+    if !duplicates.is_empty() {
+        return Err(StorageError::InvalidData(format!(
+            "agent names must be unique per owner (trimmed, case-insensitive), but the database at this \
+             HUBU_DB_PATH has duplicates: {}. Rename or remove the conflicting agents, or start from a \
+             fresh database",
+            duplicates.join("; ")
+        )));
+    }
+
+    for row in rows
+        .iter()
+        .filter(|row| row.stored.as_deref() != Some(&row.normalized))
+    {
+        conn.execute(
+            "UPDATE agent_identities SET normalized_display_name = ?1 WHERE id = ?2",
+            rusqlite::params![row.normalized, row.id],
+        )?;
+    }
+    conn.execute_batch(
+        "
+        CREATE UNIQUE INDEX IF NOT EXISTS agent_identities_owner_name_unique
+        ON agent_identities(owner_user_id, normalized_display_name);
+        ",
+    )?;
+    Ok(())
+}
+
+struct AgentNameRow {
+    id: String,
+    owner_user_id: String,
+    owner_pub_id: String,
+    pub_id: String,
+    display_name: String,
+    normalized: String,
+    stored: Option<String>,
+}
+
+fn load_agent_names(conn: &Connection) -> Result<Vec<AgentNameRow>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT a.id, a.owner_user_id, COALESCE(u.pub_id, a.owner_user_id), a.pub_id,
+                a.display_name, a.normalized_display_name
+         FROM agent_identities a
+         LEFT JOIN users u ON u.id = a.owner_user_id
+         ORDER BY a.owner_user_id, a.created_at, a.pub_id",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let display_name: String = row.get(4)?;
+        Ok(AgentNameRow {
+            id: row.get(0)?,
+            owner_user_id: row.get(1)?,
+            owner_pub_id: row.get(2)?,
+            pub_id: row.get(3)?,
+            normalized: normalize_agent_name(&display_name),
+            display_name,
+            stored: row.get(5)?,
+        })
+    })?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+fn duplicate_agent_names(rows: &[AgentNameRow]) -> Vec<String> {
+    let mut groups: std::collections::BTreeMap<(&str, &str), (&str, Vec<String>)> =
+        std::collections::BTreeMap::new();
+    for row in rows {
+        groups
+            .entry((row.owner_user_id.as_str(), row.normalized.as_str()))
+            .or_insert_with(|| (row.owner_pub_id.as_str(), Vec::new()))
+            .1
+            .push(format!("{} ({:?})", row.pub_id, row.display_name));
+    }
+    groups
+        .into_iter()
+        .filter(|(_, (_, agents))| agents.len() > 1)
+        .map(|((_, normalized), (owner_pub_id, agents))| {
+            format!(
+                "owner {owner_pub_id} name {normalized:?}: {}",
+                agents.join(", ")
+            )
+        })
+        .collect()
+}
+
+/// Owner rename support (HUB-250).
+///
+/// `agent_identities.identity_payload_json` keeps the verified v1 identity
+/// payload so a rename can derive the relabeled fingerprint. Older rows keep
+/// NULL and are reconstructed and verified by the API before any rename.
+///
+/// Aliases map every fingerprint an agent has been known by to its stable
+/// `agt_...` and keep the normalized name it was derived from reserved for
+/// that agent; revisions audit each relabel. Both tables are append-only so a
+/// rename can never move an old fingerprint to a different agent.
+fn init_identity_revision_schema(conn: &Connection) -> Result<(), StorageError> {
+    add_column_if_missing(conn, "agent_identities", "identity_payload_json", "TEXT")?;
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS agent_identity_aliases (
+            owner_user_id TEXT NOT NULL,
+            fingerprint TEXT NOT NULL,
+            agent_id TEXT NOT NULL,
+            source TEXT NOT NULL CHECK(source IN ('registration', 'rename')),
+            normalized_name TEXT NOT NULL,
+            revision INTEGER NOT NULL CHECK(revision >= 0),
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(owner_user_id, fingerprint),
+            FOREIGN KEY(agent_id) REFERENCES agent_identities(id),
+            FOREIGN KEY(owner_user_id) REFERENCES users(id)
+        );
+
+        CREATE INDEX IF NOT EXISTS agent_identity_aliases_agent
+        ON agent_identity_aliases(agent_id, revision);
+
+        CREATE INDEX IF NOT EXISTS agent_identity_aliases_owner_name
+        ON agent_identity_aliases(owner_user_id, normalized_name);
+
+        CREATE TABLE IF NOT EXISTS agent_identity_revisions (
+            agent_id TEXT NOT NULL,
+            revision INTEGER NOT NULL CHECK(revision >= 1),
+            previous_fingerprint TEXT NOT NULL,
+            fingerprint TEXT NOT NULL,
+            changes_json TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(agent_id, revision),
+            FOREIGN KEY(agent_id) REFERENCES agent_identities(id)
+        );
+
+        CREATE TRIGGER IF NOT EXISTS agent_identity_aliases_no_update
+        BEFORE UPDATE ON agent_identity_aliases
+        BEGIN
+            SELECT RAISE(ABORT, 'agent identity aliases are immutable');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS agent_identity_aliases_no_delete
+        BEFORE DELETE ON agent_identity_aliases
+        BEGIN
+            SELECT RAISE(ABORT, 'agent identity aliases are immutable');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS agent_identity_revisions_no_update
+        BEFORE UPDATE ON agent_identity_revisions
+        BEGIN
+            SELECT RAISE(ABORT, 'agent identity revisions are immutable');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS agent_identity_revisions_no_delete
+        BEFORE DELETE ON agent_identity_revisions
+        BEGIN
+            SELECT RAISE(ABORT, 'agent identity revisions are immutable');
+        END;
         ",
     )?;
     Ok(())

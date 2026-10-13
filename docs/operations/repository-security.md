@@ -34,6 +34,12 @@ Use structured cargo-deny entries with reasons. Verify upstream license text
 before adding a license exception, and never broadly allow an unreviewed Git
 dependency source.
 
+Current advisory exceptions:
+
+| Advisory | Scope and justification | Owner | Review by | Removal condition |
+| --- | --- | --- | --- | --- |
+| RUSTSEC-2024-0449 | `unsafe-libyaml` 0.2.11 is **unmaintained**; there is no known vulnerability. It is reached only through `serde_yaml_ng` 0.10.0. Affected paths: (a) policy YAML submitted to `hubu-api` (`POST /policies`, which parses it via `hubu-core` `policy/loader.rs`); (b) local policy files parsed by `hubu policy validate` and `hubu policy apply` (`Policy::from_yaml_file`) before submission; (c) the operator lease config file named by `HUBU_LEASE_CONFIG`, parsed once by `hubu-api` at startup (`load_lease_config`); and (d) YAML **serialization** of an already validated stored policy by `GET /policies/export` (`serde_yaml_ng::to_string`). Compensating controls: (a) and (d) require the API bearer token. API request bodies are capped at 1 MiB, every parsed policy is validated before it is stored, and (d) only emits data Hubu already validated. The server binds the default loopback address, but an operator-supplied bind address (positional argument or `HUBU_BIND_ADDR`) is not forced to loopback, so authentication, not network exposure, is the control. (b) and (c) are local files chosen by the operator running the CLI or server, with no size cap, and are trusted at the same level as the operator's own environment; each parsed value is validated (`Policy` validation, `LeaseConfig::validate`) before use. The ignore names this single advisory ID; other `unsafe-libyaml` or `serde_yaml_ng` advisories still fail CI. | Yizheng Zhang | 2026-11-12 | [HUB-270](https://linear.app/hubu/issue/HUB-270/replace-serde-yaml-ng-unmaintained-unsafe-libyaml-rustsec-2024-0449) replaces `serde_yaml_ng` and removes the ignore. |
+
 The current exact-version license exceptions are documented with their owners,
 review dates, and removal conditions in `deny.toml`. Release packaging must
 include the corresponding license material.
