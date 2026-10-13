@@ -9,6 +9,8 @@ use hubu_common::models::{
 };
 use rusqlite::{Connection, Row};
 
+use crate::registration::normalize_agent_name;
+
 pub(crate) const DEFAULT_USER_IDENTITY_KEY: &str = "system:local-default";
 pub(crate) const SELECTED_DEFAULT_USER_ID_KEY: &str = "selected_default_user_id";
 
@@ -139,7 +141,97 @@ pub(crate) fn init_schema(conn: &Connection) -> Result<(), StorageError> {
         ",
     )?;
     init_identity_revision_schema(conn)?;
+    init_agent_name_uniqueness(conn)?;
     Ok(())
+}
+
+/// Per-owner agent name uniqueness (HUB-251).
+///
+/// `normalized_display_name` holds [`normalize_agent_name`] of
+/// `display_name`, computed in Rust so the unique index and the application
+/// check always agree (SQLite's `lower()` is ASCII-only). Rows written before
+/// the column existed are backfilled here. Existing duplicates are not
+/// migrated: startup fails with the conflicting agents named instead of an
+/// opaque constraint error.
+fn init_agent_name_uniqueness(conn: &Connection) -> Result<(), StorageError> {
+    add_column_if_missing(conn, "agent_identities", "normalized_display_name", "TEXT")?;
+    let pending = {
+        let mut stmt = conn.prepare(
+            "SELECT id, display_name FROM agent_identities WHERE normalized_display_name IS NULL",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    for (id, display_name) in pending {
+        conn.execute(
+            "UPDATE agent_identities SET normalized_display_name = ?1 WHERE id = ?2",
+            rusqlite::params![normalize_agent_name(&display_name), id],
+        )?;
+    }
+
+    let duplicates = duplicate_agent_names(conn)?;
+    if !duplicates.is_empty() {
+        return Err(StorageError::InvalidData(format!(
+            "agent names must be unique per owner (trimmed, case-insensitive), but the database at this \
+             HUBU_DB_PATH has duplicates: {}. Rename or remove the conflicting agents, or start from a \
+             fresh database",
+            duplicates.join("; ")
+        )));
+    }
+    conn.execute_batch(
+        "
+        CREATE UNIQUE INDEX IF NOT EXISTS agent_identities_owner_name_unique
+        ON agent_identities(owner_user_id, normalized_display_name);
+        ",
+    )?;
+    Ok(())
+}
+
+fn duplicate_agent_names(conn: &Connection) -> Result<Vec<String>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT a.owner_user_id, COALESCE(u.pub_id, a.owner_user_id), a.normalized_display_name,
+                a.pub_id, a.display_name
+         FROM agent_identities a
+         LEFT JOIN users u ON u.id = a.owner_user_id
+         WHERE EXISTS (
+             SELECT 1 FROM agent_identities other
+             WHERE other.owner_user_id = a.owner_user_id
+               AND other.normalized_display_name = a.normalized_display_name
+               AND other.id != a.id
+         )
+         ORDER BY a.owner_user_id, a.normalized_display_name, a.created_at, a.pub_id",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+        ))
+    })?;
+    let mut groups: Vec<((String, String), String, Vec<String>)> = Vec::new();
+    for row in rows {
+        let (owner_id, owner_pub_id, normalized, pub_id, display_name) = row?;
+        let agent = format!("{pub_id} ({display_name:?})");
+        match groups.last_mut() {
+            Some(((owner, name), _, agents)) if *owner == owner_id && *name == normalized => {
+                agents.push(agent)
+            }
+            _ => groups.push(((owner_id, normalized), owner_pub_id, vec![agent])),
+        }
+    }
+    Ok(groups
+        .into_iter()
+        .map(|((_, normalized), owner_pub_id, agents)| {
+            format!(
+                "owner {owner_pub_id} name {normalized:?}: {}",
+                agents.join(", ")
+            )
+        })
+        .collect())
 }
 
 /// Owner rename support (HUB-250).

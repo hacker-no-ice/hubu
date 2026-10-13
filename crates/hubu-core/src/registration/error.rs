@@ -40,6 +40,14 @@ pub enum RegistrationError {
     #[error("agent name is reserved as a previous name of another agent of this owner")]
     AgentNameReserved,
 
+    /// A new identity would reuse the trimmed, case-insensitive name of an
+    /// existing agent of the same owner (HUB-251).
+    #[error("an agent named `{display_name}` already exists for this owner ({existing_agent_id})")]
+    DisplayNameConflict {
+        existing_agent_id: String,
+        display_name: String,
+    },
+
     #[error(transparent)]
     Storage(#[from] StorageError),
 }

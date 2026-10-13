@@ -391,6 +391,7 @@ const components = {
       ["Records", "Creates or reuses agent identity, version, and account records, with a fresh session per registration."],
       ["Owner rename", "A human owner relabels an agent with the approval capability; the agt_ ID, account, budgets, policies, and ledger stay attached. Not exposed through the unified MCP."],
       ["Fingerprint aliases", "Previous and current identity fingerprints resolve to the same agent; previous names stay reserved and registrations under them return a warning. Append-only revisions audit each rename."],
+      ["Unique names", "Agent names are unique per owner, trimmed and case-insensitive; a unique index on the normalized name backs the display_name_conflict check."],
       ["No restarts", "Registering after the stack starts changes only Hubu state; Gongbu needs no rerender or restart."],
     ],
     links: [sharedLinks.user, sharedLinks.registration, sharedLinks.registrationModel, sharedLinks.registrationProtocol, sharedLinks.agentIdentity, sharedLinks.identityStorage, sharedLinks.common],

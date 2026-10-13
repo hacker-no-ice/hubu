@@ -1866,6 +1866,9 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
             if let Some(response) = budget_version_error_response(&error) {
                 return response;
             }
+            if let Some(response) = registration_error_response(&error) {
+                return response;
+            }
             let message = error.to_string();
             let (status, retry_guidance) = spend_retry_error_response(&error);
             let mut body = json!({ "error": message, "retry_guidance": retry_guidance });
@@ -1874,6 +1877,42 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
             }
             HttpResponse { status, body }
         }
+    }
+}
+
+/// Structured responses for registration name conflicts (HUB-251).
+fn registration_error_response(error: &anyhow::Error) -> Option<HttpResponse> {
+    match error.downcast_ref::<hubu_core::registration::RegistrationError>()? {
+        hubu_core::registration::RegistrationError::DisplayNameConflict {
+            existing_agent_id,
+            display_name,
+        } => Some(HttpResponse {
+            status: 409,
+            body: json!({
+                "error": error.to_string(),
+                "error_code": "display_name_conflict",
+                "details": {
+                    "existing_agent_id": existing_agent_id,
+                    "existing_display_name": display_name,
+                },
+                "retry_guidance": {
+                    "action": "choose_different_name",
+                    "message": "agent names are unique per owner (trimmed, case-insensitive); choose a different name or re-register the existing agent with its identical identity"
+                },
+            }),
+        }),
+        hubu_core::registration::RegistrationError::AgentNameReserved => Some(HttpResponse {
+            status: 409,
+            body: json!({
+                "error": error.to_string(),
+                "error_code": "agent_name_reserved",
+                "retry_guidance": {
+                    "action": "choose_different_name",
+                    "message": "this name is a previous name of another agent of this owner and stays reserved for it"
+                },
+            }),
+        }),
+        _ => None,
     }
 }
 
@@ -2442,6 +2481,7 @@ fn registration_guidance() -> Value {
             },
             "client_action_on_warning": "show the warning to the human and update the configured agent_name to warnings[].current_display_name",
             "name_normalization": "trimmed, case-insensitive",
+            "unique_names": "agent names are unique per owner after normalization; registering a new identity under an existing agent's name fails with HTTP 409 display_name_conflict and details.existing_agent_id",
             "reserved_names": "a previous name stays reserved for its agent; another agent of the same owner cannot register or be renamed into it",
             "protocol_unchanged": "canonicalization, hashing, and server-side fingerprint recompute-and-reject are identical to protocol v1"
         },
@@ -6867,6 +6907,50 @@ lease_profiles:
     }
 
     #[test]
+    fn registering_a_new_identity_under_an_existing_name_returns_display_name_conflict() {
+        let (path, state, user) = rename_test_state("display-name-conflict");
+        let alpha = register_named(&state, &user, "alpha-agent").unwrap();
+
+        for variant in ["Alpha-Agent", "  ALPHA-AGENT "] {
+            let envelope = simple_registration_envelope(variant, "dev", &user.user_id);
+            let response = route(
+                authenticated_json_request(
+                    "/agents/register",
+                    serde_json::to_value(&envelope).unwrap(),
+                ),
+                &state,
+            );
+            assert_eq!(response.status, 409, "{variant}: {}", response.body);
+            assert_eq!(response.body["error_code"], "display_name_conflict");
+            assert_eq!(
+                response.body["details"]["existing_agent_id"],
+                alpha["agent_id"]
+            );
+            assert_eq!(
+                response.body["details"]["existing_display_name"],
+                "alpha-agent"
+            );
+        }
+
+        // The identical identity still re-registers idempotently.
+        let again = register_named(&state, &user, "alpha-agent").unwrap();
+        assert_eq!(again["identity_resolution"], "reused");
+        assert_eq!(again["agent_id"], alpha["agent_id"]);
+
+        // A different owner may use the same name.
+        let bob = init(
+            json!({ "username": "bob-example", "display_name": "Bob", "email": "bob@example.com" })
+                .to_string(),
+            &state,
+        )
+        .expect("init should select bob");
+        let bobs = register_named(&state, &bob, "alpha-agent").unwrap();
+        assert_eq!(bobs["identity_resolution"], "created");
+        assert_ne!(bobs["agent_id"], alpha["agent_id"]);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
     fn registration_guidance_documents_rename_and_alias_resolution() {
         let path =
             std::env::temp_dir().join(format!("hubu-api-guidance-rename-{}.sqlite", UserId::new()));
@@ -6893,6 +6977,10 @@ lease_profiles:
             guidance["identity_resolution"]["name_normalization"],
             "trimmed, case-insensitive"
         );
+        assert!(guidance["identity_resolution"]["unique_names"]
+            .as_str()
+            .unwrap()
+            .contains("display_name_conflict"));
         std::fs::remove_file(path).ok();
     }
 

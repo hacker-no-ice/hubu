@@ -148,7 +148,39 @@ Registration fails when:
 - an existing identity fingerprint resolves to a different owner or agent
   type; or
 - an existing version fingerprint for the same agent resolves to different
-  version content.
+  version content; or
+- a new identity would reuse the normalized name of another agent of the same
+  owner (`display_name_conflict`) or a name reserved by a rename
+  (`agent_name_reserved`).
+
+### Unique agent names per owner
+
+Agent names are unique per owner after normalization: names are trimmed and
+compared case-insensitively (`hubu_core::registration::normalize_agent_name`,
+the same helper used for rename reservations). When a registration would
+create a **new** identity whose `display_name` normalizes to an existing
+agent's current name for the same owner, the server rejects it with HTTP 409:
+
+```json
+{
+  "error": "an agent named `alpha` already exists for this owner (agt_...)",
+  "error_code": "display_name_conflict",
+  "details": { "existing_agent_id": "agt_...", "existing_display_name": "alpha" }
+}
+```
+
+A name that is a previous name of another agent (see
+[Renaming an agent](#renaming-an-agent)) is rejected with
+`agent_name_reserved`. Different owners may use the same name, and
+re-registering an existing identity is unaffected.
+
+Storage enforces the same rule: `agent_identities.normalized_display_name`
+holds the Rust-normalized name and a unique index on
+`(owner_user_id, normalized_display_name)` is the backstop for races. There is
+no data-preserving migration. If an existing database already contains
+duplicate names, the server refuses to start and names the conflicting
+`usr_...` owner and `agt_...` agents; rename or remove them, or start from a
+fresh `HUBU_DB_PATH`.
 
 Matching identity and version content is reused: registering the same agent
 again returns the existing `agt_...`, `agv_...`, and `aga_...` records and a new

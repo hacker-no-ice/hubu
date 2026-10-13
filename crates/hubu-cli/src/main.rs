@@ -1132,7 +1132,8 @@ fn register_agent(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
         return Ok(());
     }
 
-    let response = post_json(base_url, "/agents/register", prepared.envelope.clone())?;
+    let response = post_json(base_url, "/agents/register", prepared.envelope.clone())
+        .map_err(registration_conflict_error)?;
 
     print_registration_review(&prepared);
     let headline = match response.get("identity_resolution").and_then(Value::as_str) {
@@ -1146,6 +1147,35 @@ fn register_agent(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
     println!("  account_id: {}", string_at(&response, "account_id")?);
     println!("  session_id: {}", string_at(&response, "session_id")?);
     Ok(())
+}
+
+/// Turn a per-owner name conflict (HUB-251) into an actionable CLI message.
+fn registration_conflict_error(error: anyhow::Error) -> anyhow::Error {
+    let Some(http) = error.downcast_ref::<HttpApplicationError>() else {
+        return error;
+    };
+    match http.body.get("error_code").and_then(Value::as_str) {
+        Some("display_name_conflict") => {
+            let details = &http.body["details"];
+            let existing_id = details["existing_agent_id"]
+                .as_str()
+                .unwrap_or("an existing agent");
+            let existing_name = details["existing_display_name"]
+                .as_str()
+                .unwrap_or("that name");
+            anyhow!(
+                "an agent named `{existing_name}` already exists for this owner ({existing_id}); \
+                 agent names are unique per owner, ignoring case and surrounding spaces. \
+                 Choose a different --name, or rename the existing agent with \
+                 `hubu agent rename --agent-id {existing_id} --name NEW_NAME --reason TEXT`"
+            )
+        }
+        Some("agent_name_reserved") => anyhow!(
+            "that name is a previous name of another of your agents and stays reserved for it; \
+             choose a different --name"
+        ),
+        _ => error,
+    }
 }
 
 fn print_registration_warnings(response: &Value) -> Result<()> {
@@ -4356,6 +4386,33 @@ mod tests {
             body,
             json!({"agent_id": "agt_0123456789ab", "name": "research-agent", "reason": "fix typo"})
         );
+    }
+
+    #[test]
+    fn display_name_conflict_maps_to_an_actionable_cli_message() {
+        let error = registration_conflict_error(
+            HttpApplicationError {
+                status: 409,
+                body: json!({
+                    "error": "an agent named `alpha` already exists for this owner (agt_0123456789ab)",
+                    "error_code": "display_name_conflict",
+                    "details": {"existing_agent_id": "agt_0123456789ab", "existing_display_name": "alpha"}
+                }),
+            }
+            .into(),
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("an agent named `alpha` already exists"),
+            "{message}"
+        );
+        assert!(
+            message.contains("hubu agent rename --agent-id agt_0123456789ab"),
+            "{message}"
+        );
+
+        let passthrough = registration_conflict_error(anyhow!("connection refused"));
+        assert_eq!(passthrough.to_string(), "connection refused");
     }
 
     #[test]
