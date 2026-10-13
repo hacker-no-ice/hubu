@@ -3,7 +3,13 @@
 # make CI green.
 
 [advisories]
-ignore = []
+ignore = [
+    # unsafe-libyaml 0.2.11 is unmaintained (not a known vulnerability). It is
+    # reached only via serde_yaml_ng 0.10.0 for owner-authored policy YAML.
+    # Owner: Yizheng Zhang. Review by 2026-11-12. Remove when HUB-270 replaces
+    # serde_yaml_ng. See docs/operations/repository-security.md.
+    { id = "RUSTSEC-2024-0449", reason = "unmaintained unsafe-libyaml via serde_yaml_ng policy YAML; replacement tracked in HUB-270" },
+]
 
 [licenses]
 confidence-threshold = 0.8

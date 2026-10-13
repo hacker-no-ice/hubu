@@ -34,6 +34,12 @@ Use structured cargo-deny entries with reasons. Verify upstream license text
 before adding a license exception, and never broadly allow an unreviewed Git
 dependency source.
 
+Current advisory exceptions:
+
+| Advisory | Scope and justification | Owner | Review by | Removal condition |
+| --- | --- | --- | --- | --- |
+| RUSTSEC-2024-0449 | `unsafe-libyaml` 0.2.11 is **unmaintained**; there is no known vulnerability. It is reached only through `serde_yaml_ng` 0.10.0, which `hubu-core` (`policy/loader.rs`, `policy/error.rs`) and `hubu-api` use to parse and emit owner-authored policy YAML. Compensating controls: policy YAML arrives only over the authenticated loopback API, which caps request bodies at 1 MiB, and every parsed policy is validated before it is stored. The ignore names this single advisory ID; other `unsafe-libyaml` or `serde_yaml_ng` advisories still fail CI. | Yizheng Zhang | 2026-11-12 | [HUB-270](https://linear.app/hubu/issue/HUB-270/replace-serde-yaml-ng-unmaintained-unsafe-libyaml-rustsec-2024-0449) replaces `serde_yaml_ng` and removes the ignore. |
+
 The current exact-version license exceptions are documented with their owners,
 review dates, and removal conditions in `deny.toml`. Release packaging must
 include the corresponding license material.
