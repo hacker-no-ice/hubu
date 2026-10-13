@@ -149,29 +149,17 @@ pub(crate) fn init_schema(conn: &Connection) -> Result<(), StorageError> {
 ///
 /// `normalized_display_name` holds [`normalize_agent_name`] of
 /// `display_name`, computed in Rust so the unique index and the application
-/// check always agree (SQLite's `lower()` is ASCII-only). Rows written before
-/// the column existed are backfilled here. Existing duplicates are not
-/// migrated: startup fails with the conflicting agents named instead of an
-/// opaque constraint error.
+/// check always agree (SQLite's `lower()` is ASCII-only). Every startup
+/// recomputes it from the current `display_name` and checks for duplicates
+/// in memory *before* writing anything, so a failed start is safe to retry
+/// after the operator fixes names. Existing duplicates are not migrated:
+/// startup fails with the conflicting agents named instead of an opaque
+/// constraint error.
 fn init_agent_name_uniqueness(conn: &Connection) -> Result<(), StorageError> {
     add_column_if_missing(conn, "agent_identities", "normalized_display_name", "TEXT")?;
-    let pending = {
-        let mut stmt = conn.prepare(
-            "SELECT id, display_name FROM agent_identities WHERE normalized_display_name IS NULL",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?;
-        rows.collect::<Result<Vec<_>, _>>()?
-    };
-    for (id, display_name) in pending {
-        conn.execute(
-            "UPDATE agent_identities SET normalized_display_name = ?1 WHERE id = ?2",
-            rusqlite::params![normalize_agent_name(&display_name), id],
-        )?;
-    }
+    let rows = load_agent_names(conn)?;
 
-    let duplicates = duplicate_agent_names(conn)?;
+    let duplicates = duplicate_agent_names(&rows);
     if !duplicates.is_empty() {
         return Err(StorageError::InvalidData(format!(
             "agent names must be unique per owner (trimmed, case-insensitive), but the database at this \
@@ -179,6 +167,16 @@ fn init_agent_name_uniqueness(conn: &Connection) -> Result<(), StorageError> {
              fresh database",
             duplicates.join("; ")
         )));
+    }
+
+    for row in rows
+        .iter()
+        .filter(|row| row.stored.as_deref() != Some(&row.normalized))
+    {
+        conn.execute(
+            "UPDATE agent_identities SET normalized_display_name = ?1 WHERE id = ?2",
+            rusqlite::params![row.normalized, row.id],
+        )?;
     }
     conn.execute_batch(
         "
@@ -189,49 +187,59 @@ fn init_agent_name_uniqueness(conn: &Connection) -> Result<(), StorageError> {
     Ok(())
 }
 
-fn duplicate_agent_names(conn: &Connection) -> Result<Vec<String>, StorageError> {
+struct AgentNameRow {
+    id: String,
+    owner_user_id: String,
+    owner_pub_id: String,
+    pub_id: String,
+    display_name: String,
+    normalized: String,
+    stored: Option<String>,
+}
+
+fn load_agent_names(conn: &Connection) -> Result<Vec<AgentNameRow>, StorageError> {
     let mut stmt = conn.prepare(
-        "SELECT a.owner_user_id, COALESCE(u.pub_id, a.owner_user_id), a.normalized_display_name,
-                a.pub_id, a.display_name
+        "SELECT a.id, a.owner_user_id, COALESCE(u.pub_id, a.owner_user_id), a.pub_id,
+                a.display_name, a.normalized_display_name
          FROM agent_identities a
          LEFT JOIN users u ON u.id = a.owner_user_id
-         WHERE EXISTS (
-             SELECT 1 FROM agent_identities other
-             WHERE other.owner_user_id = a.owner_user_id
-               AND other.normalized_display_name = a.normalized_display_name
-               AND other.id != a.id
-         )
-         ORDER BY a.owner_user_id, a.normalized_display_name, a.created_at, a.pub_id",
+         ORDER BY a.owner_user_id, a.created_at, a.pub_id",
     )?;
     let rows = stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, String>(3)?,
-            row.get::<_, String>(4)?,
-        ))
+        let display_name: String = row.get(4)?;
+        Ok(AgentNameRow {
+            id: row.get(0)?,
+            owner_user_id: row.get(1)?,
+            owner_pub_id: row.get(2)?,
+            pub_id: row.get(3)?,
+            normalized: normalize_agent_name(&display_name),
+            display_name,
+            stored: row.get(5)?,
+        })
     })?;
-    let mut groups: Vec<((String, String), String, Vec<String>)> = Vec::new();
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+fn duplicate_agent_names(rows: &[AgentNameRow]) -> Vec<String> {
+    let mut groups: std::collections::BTreeMap<(&str, &str), (&str, Vec<String>)> =
+        std::collections::BTreeMap::new();
     for row in rows {
-        let (owner_id, owner_pub_id, normalized, pub_id, display_name) = row?;
-        let agent = format!("{pub_id} ({display_name:?})");
-        match groups.last_mut() {
-            Some(((owner, name), _, agents)) if *owner == owner_id && *name == normalized => {
-                agents.push(agent)
-            }
-            _ => groups.push(((owner_id, normalized), owner_pub_id, vec![agent])),
-        }
+        groups
+            .entry((row.owner_user_id.as_str(), row.normalized.as_str()))
+            .or_insert_with(|| (row.owner_pub_id.as_str(), Vec::new()))
+            .1
+            .push(format!("{} ({:?})", row.pub_id, row.display_name));
     }
-    Ok(groups
+    groups
         .into_iter()
-        .map(|((_, normalized), owner_pub_id, agents)| {
+        .filter(|(_, (_, agents))| agents.len() > 1)
+        .map(|((_, normalized), (owner_pub_id, agents))| {
             format!(
                 "owner {owner_pub_id} name {normalized:?}: {}",
                 agents.join(", ")
             )
         })
-        .collect())
+        .collect()
 }
 
 /// Owner rename support (HUB-250).

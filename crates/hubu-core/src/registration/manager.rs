@@ -2817,6 +2817,29 @@ mod tests {
         assert!(message.contains("agt_dupnamefirst"), "{message}");
         assert!(message.contains("agt_dupnamesecnd"), "{message}");
         assert!(!message.contains("agt_uniquename01"), "{message}");
+
+        // The operator fixes the duplicate by editing only display_name; the
+        // retry must recompute normalized names instead of trusting stale ones.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute(
+                "UPDATE agent_identities SET display_name = 'Research Agent 2' WHERE pub_id = 'agt_dupnamesecnd'",
+                [],
+            )
+            .unwrap();
+        }
+        let manager = RegistrationManager::open(&path).expect("retry after fixing names succeeds");
+        if let RegistrationStore::Sqlite(store) = &manager.store {
+            let normalized: String = store
+                .raw_connection()
+                .query_row(
+                    "SELECT normalized_display_name FROM agent_identities WHERE pub_id = 'agt_dupnamesecnd'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(normalized, "research agent 2");
+        }
         std::fs::remove_file(path).ok();
     }
 }
