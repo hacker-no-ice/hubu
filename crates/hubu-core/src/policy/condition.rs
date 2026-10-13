@@ -207,7 +207,10 @@ fn value_name(value: &PolicyValue) -> String {
     match value {
         PolicyValue::String(value) => format!("`{value}`"),
         PolicyValue::Money(amount) => format!("USD {amount}"),
-        PolicyValue::MoneyCents(cents) => format!("USD {}", saturating_legacy_cents(*cents)),
+        PolicyValue::MoneyCents(cents) => match Amount::from_legacy_cents(*cents) {
+            Ok(amount) => format!("USD {amount}"),
+            Err(_) => format!("{cents} cents"),
+        },
         PolicyValue::Currency(value) => value.to_string(),
         PolicyValue::AgentId(value) => value.to_string(),
     }
@@ -216,9 +219,8 @@ fn value_name(value: &PolicyValue) -> String {
 impl Field {
     pub fn value_from(&self, request: &SpendRequest) -> Option<PolicyValue> {
         match self {
-            Field::Amount => Some(PolicyValue::Money(saturating_legacy_cents(
-                request.amount_cents,
-            ))),
+            // Request amounts are still whole cents; keep them exact.
+            Field::Amount => Some(PolicyValue::MoneyCents(request.amount_cents)),
             Field::Currency => Some(PolicyValue::Currency(request.currency)),
             Field::AgentId => Some(PolicyValue::AgentId(request.agent_id.clone())),
             Field::Merchant => request.merchant.clone().map(PolicyValue::String),
@@ -271,26 +273,37 @@ impl PolicyValue {
         }
     }
 
-    /// The budget-currency amount of a money value, with legacy cents
-    /// converted exactly (saturating at the representable range).
+    /// The budget-currency amount of a money value, or `None` for other
+    /// kinds and for legacy cents beyond the accounting-scale range.
     pub fn money(&self) -> Option<Amount> {
         match self {
             PolicyValue::Money(amount) => Some(*amount),
-            PolicyValue::MoneyCents(cents) => Some(saturating_legacy_cents(*cents)),
+            PolicyValue::MoneyCents(cents) => Amount::from_legacy_cents(*cents).ok(),
+            _ => None,
+        }
+    }
+
+    /// Exact accounting-scale units for comparison. Widening to `i128`
+    /// keeps legacy cent values beyond the `Amount` range distinct and
+    /// ordered.
+    fn money_units(&self) -> Option<i128> {
+        match self {
+            PolicyValue::Money(amount) => Some(i128::from(amount.units())),
+            PolicyValue::MoneyCents(cents) => Some(i128::from(*cents) * 10_000),
             _ => None,
         }
     }
 
     fn eq_value(&self, other: &PolicyValue) -> bool {
         assert_value_kind_matches(self, other);
-        match (self.money(), other.money()) {
+        match (self.money_units(), other.money_units()) {
             (Some(left), Some(right)) => left == right,
             _ => self == other,
         }
     }
 
-    fn money_pair(&self, other: &PolicyValue, operator: &str) -> (Amount, Amount) {
-        match (self.money(), other.money()) {
+    fn money_pair(&self, other: &PolicyValue, operator: &str) -> (i128, i128) {
+        match (self.money_units(), other.money_units()) {
             (Some(left), Some(right)) => (left, right),
             _ => panic!(
                 "policy value mismatch: cannot compare {} {operator} {}",
@@ -412,17 +425,6 @@ impl fmt::Display for ValueKind {
             ValueKind::AgentId => f.write_str("agent_id"),
         }
     }
-}
-
-/// Converts a legacy cent amount for comparison. Values beyond the µ range
-/// saturate, so an oversized amount still trips `gt` caps instead of
-/// silently failing to compare.
-fn saturating_legacy_cents(cents: i64) -> Amount {
-    Amount::from_legacy_cents(cents).unwrap_or(if cents < 0 {
-        Amount::from_units(i64::MIN)
-    } else {
-        Amount::from_units(i64::MAX)
-    })
 }
 
 /// Serde for policy money: exact decimal strings only. Unquoted numbers are
@@ -643,7 +645,7 @@ mod tests {
     }
 
     #[test]
-    fn oversized_legacy_amount_saturates_instead_of_skipping_caps() {
+    fn legacy_amounts_beyond_the_accounting_range_stay_exact_and_ordered() {
         let mut request = spend_request();
         request.amount_cents = i64::MAX;
         assert!(Condition::Gt {
@@ -651,6 +653,26 @@ mod tests {
             value: money("1000000"),
         }
         .eval(&request));
+
+        // Both values exceed i64::MAX / 10^4 cents; they must not collapse.
+        request.amount_cents = 922_337_203_685_478;
+        let cap = PolicyValue::MoneyCents(922_337_203_685_477);
+        assert!(!Condition::Lte {
+            field: Field::Amount,
+            value: cap.clone(),
+        }
+        .eval(&request));
+        assert!(Condition::Gt {
+            field: Field::Amount,
+            value: cap,
+        }
+        .eval(&request));
+        assert!(!Condition::Eq {
+            field: Field::Amount,
+            value: PolicyValue::MoneyCents(922_337_203_685_479),
+        }
+        .eval(&request));
+        assert_eq!(PolicyValue::MoneyCents(i64::MAX).money(), None);
     }
 
     #[test]
