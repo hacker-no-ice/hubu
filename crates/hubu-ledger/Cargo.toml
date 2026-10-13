@@ -1,6 +1,6 @@
 [package]
 name = "hubu-ledger"
-version = "0.2.2"
+version = "0.2.3"
 description = "Exact double-entry accounting domain for Hubu"
 edition.workspace = true
 homepage.workspace = true

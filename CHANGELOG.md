@@ -25,8 +25,25 @@ Future release template
 
 ## Unreleased
 
+## v0.2.3 — 2026-10-13
+
 ### Highlights
 
+- Added `hubu watch`, a read-only terminal view of agent budgets and
+  governance state for live demos. It shows per-agent budget bars with
+  consumed, frozen, and free capacity and a feed of the newest operation
+  decisions, polls the selected profile's authenticated endpoint about once per
+  second, keeps the last snapshot when a poll fails, and fits its layout to the
+  terminal width (70–100 columns, measured by grapheme cluster so emoji and
+  wide characters align). `--compact`, `--events`, `--agent`, `--once`, and
+  `--currency` narrow the view.
+- Added `hubu gallery export` (and `hubu-unified-mcp gallery export`) to save
+  generated images from a completed public operation handle into a local
+  folder with Hubu-aware filenames such as `01-flux-2k-draft-5.8c.png`, a
+  receipt carrying the exact settled operation total, and a hidden gallery
+  manifest. Export fetches artifacts natively through the selected stack
+  profile, validates artifact digests, and refuses to write if the operation's
+  accounting changes during export.
 - Human owners can rename an agent with `hubu agent rename` while keeping its
   `agt_...` ID, account, budgets, policy assignments, and ledger history.
   `hubu agent history` shows the append-only revision audit. Clients that
@@ -36,6 +53,13 @@ Future release template
 
 ### Breaking or operational changes
 
+- Local stacks now support two modes, `sandbox` and `live`, and both start
+  Gongbu by default. `hubu stack init --mode local-stack` and `mode =
+  "local-stack"` still work as a deprecated alias for `live`; doctor warns and
+  new profiles write `live`. Legacy `hubu-only` profiles are rejected with a
+  migration message: create a separate sandbox profile or explicitly configure
+  a live profile with approved providers. No automatic migration enables
+  billable execution.
 - Agent registration is now idempotent over HTTP: registering an agent whose
   identity and version content already exist returns the existing `agt_...`,
   `agv_...`, and `aga_...` records with a new session instead of failing with
