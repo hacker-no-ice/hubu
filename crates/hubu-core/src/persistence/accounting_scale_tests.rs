@@ -403,6 +403,20 @@ fn overflowing_legacy_amount_aborts_without_partial_writes() {
         1,
         "backup precedes the failed migration"
     );
+    // Immutability is restored before the fallible migration, so the aborted
+    // database and its backup both keep it (the fixture dropped one trigger).
+    let backup = Connection::open(&backups(&path)[0]).unwrap();
+    for conn in [&conn, &backup] {
+        let triggers = trigger_names(conn);
+        for trigger in [
+            "spend_executor_settlement_receipts_no_update",
+            "spend_executor_settlement_receipts_no_delete",
+            "budget_versions_no_update",
+            "budget_versions_no_delete",
+        ] {
+            assert!(triggers.iter().any(|name| name == trigger), "{trigger}");
+        }
+    }
 }
 
 #[test]

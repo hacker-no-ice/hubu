@@ -1344,9 +1344,11 @@ impl SqliteGovernanceRepository {
         self.migrate_spend_operation_attempts()?;
         self.migrate_executor_claim_reconciliation()?;
         self.migrate_precise_executor_settlement_receipts()?;
-        self.migrate_accounting_scale()?;
+        // Restore immutability before the fallible accounting-scale migration,
+        // so neither an aborted migration nor its backup is left without it.
         self.enforce_executor_settlement_receipt_immutability()?;
         self.enforce_budget_version_immutability()?;
+        self.migrate_accounting_scale()?;
         self.enforce_one_budget_hold_per_spend_decision()?;
         self.initialize_provider_accounting()?;
         Ok(())
