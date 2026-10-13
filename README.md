@@ -64,9 +64,7 @@ processes with separate storage, credentials, and failure domains.
 | Platform | macOS, built from an exact release tag |
 | Agent clients | Codex via `hubu init codex`; other MCP clients via [manual configuration](docs/unified-mcp.md#setup) |
 | Live providers | Gemini Developer API and FLUX.2 Pro ([live provider operations](docs/operations/live-providers.md)) |
-| Sandbox | Complete stack with a deterministic, non-billable provider fixture |
-| Governance only | `hubu-only` mode, without Gongbu |
-| Your own executor | Any service implementing `hubu-spend-executor-v4.4` ([external executor](docs/external-executor.md)) |
+| Stack modes | `sandbox` (non-billable fixture) and `live` (approved real providers); both start Gongbu by default |
 | Direct payments | Mock only |
 
 ## Requirements
@@ -127,10 +125,14 @@ hubu stack start
 hubu stack status
 ```
 
-Use `--mode local-stack` for approved live provider targets, or `--mode
-hubu-only` for governance alone. The
+Use `--mode live` in a separate profile for approved, billable provider targets.
+Sandbox and live are the two supported modes; both start Gongbu by default. The
 [complete local stack examples](docs/configuration/local-stack/v1/examples.md)
-show each mode.
+show both modes.
+
+Decisions-only is a future advanced concept and is not supported. The existing
+reserve-and-settle accounting lifecycle remains in both modes. Custom executors
+on the versioned contract are an [advanced integration](docs/external-executor.md).
 
 ### 3. Connect Codex
 
