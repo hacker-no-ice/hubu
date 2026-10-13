@@ -300,7 +300,12 @@ impl SqliteGovernanceRepository {
                 .remaining_amount_cents
                 .checked_sub(amount)
                 .ok_or_else(|| invalid("adjustment balance overflow"))?;
-            tx.execute("UPDATE budget_balances SET consumed_amount_cents=?2, remaining_amount_cents=?3, updated_at=?4 WHERE budget_id=?1",params![context.budget_id.to_string(),consumed,remaining,Utc::now().to_rfc3339()])?;
+            let updated = BudgetBalance {
+                consumed_amount_cents: consumed,
+                remaining_amount_cents: remaining,
+                ..balance.clone()
+            };
+            super::compare_and_set_balance(&tx, &balance, &updated, &Utc::now().to_rfc3339())?;
             (
                 Some(amount),
                 Some((i128::from(amount) * CENT_AT_SCALE_18 - delta).to_string()),
@@ -432,7 +437,7 @@ fn backfill_wallet_context(tx: &rusqlite::Transaction<'_>) -> Result<(), Storage
             JOIN budget_versions v ON v.id=h.budget_version_id AND v.budget_id=b.id
             WHERE p.ledger_transaction_id=?1 AND p.owner_user_id=?2 AND p.status='succeeded'
             AND p.payment_id=?3 AND t.used_by_payment_id=p.payment_id AND t.owner_user_id=p.owner_user_id
-            AND d.owner_user_id=p.owner_user_id AND d.agent_id=p.agent_id AND h.amount_cents=p.amount_cents AND h.currency=p.currency AND h.status='settled' AND h.executor_claim_id IS NULL")?;
+            AND d.owner_user_id=p.owner_user_id AND d.agent_id=p.agent_id AND h.amount=p.amount_cents*10000 AND h.currency=p.currency AND h.status='settled' AND h.executor_claim_id IS NULL")?;
             let rows = stmt
                 .query_map(
                     params![id, record.owner_user_id.to_string(), record.external_ref],

@@ -38,6 +38,19 @@ Future release template
   units. Until budgets move to sub-cent accounting, spend requests are still
   whole cents.
 
+### Breaking or operational changes
+
+- **One-way storage migration.** On first start, Hubu adds micro-unit
+  (`10⁻⁶` USD) amount columns to budget versions, balances, holds, spending
+  targets, and executor settlement receipts, and backfills them exactly from
+  the existing cent columns. Before migrating a database that holds budget
+  data, Hubu writes a copy to `<database>.pre-accounting-scale.bak` and logs
+  the path. The migration refuses to run if any stored amount exceeds
+  USD 9,223,372,036,854.77, and it rolls back if any backfilled value or
+  budget invariant does not match. The cent columns are still written as
+  conservative projections, but restore the backup rather than downgrading
+  in place.
+
 ## v0.2.3 — 2026-10-13
 
 ### Highlights
