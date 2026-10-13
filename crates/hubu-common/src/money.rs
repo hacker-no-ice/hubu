@@ -323,16 +323,21 @@ pub enum ParseAmountErrorReason {
 }
 
 /// An exact external amount (provider receipt, executor quote, payment
-/// requirement) at its own scale, before it enters the budget plane.
+/// requirement) at its own scale, before it enters the budget plane. Costs are
+/// never negative, and the fields are private so that invariant and the scale
+/// bound hold for every value.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct ExactMoney {
-    pub amount: i128,
-    pub scale: u32,
-    pub asset: Asset,
+    amount: i128,
+    scale: u32,
+    asset: Asset,
 }
 
 impl ExactMoney {
     pub fn new(amount: i128, scale: u32, asset: Asset) -> Result<Self, MoneyError> {
+        if amount < 0 {
+            return Err(MoneyError::Negative);
+        }
         if scale > MAX_EXACT_SCALE {
             return Err(MoneyError::ScaleTooLarge { scale });
         }
@@ -343,13 +348,22 @@ impl ExactMoney {
         })
     }
 
+    pub fn amount(&self) -> i128 {
+        self.amount
+    }
+
+    pub fn scale(&self) -> u32 {
+        self.scale
+    }
+
+    pub fn asset(&self) -> Asset {
+        self.asset
+    }
+
     /// Converts into the budget currency through `rate` and rounds up to the
     /// accounting scale. This is the single rounding step of a crossing into
     /// the budget plane.
     pub fn to_amount_ceil(&self, rate: &ConversionRate) -> Result<Amount, MoneyError> {
-        if self.scale > MAX_EXACT_SCALE {
-            return Err(MoneyError::ScaleTooLarge { scale: self.scale });
-        }
         // units = amount × num × 10^6 / (den × 10^scale), rounded toward +∞.
         let numerator = i128::try_from(rate.numerator)
             .ok()
@@ -360,8 +374,9 @@ impl ExactMoney {
             .ok()
             .and_then(|rate_denominator| rate_denominator.checked_mul(10_i128.pow(self.scale)))
             .ok_or(MoneyError::Overflow)?;
-        let quotient = numerator.div_euclid(denominator);
-        let units = if numerator.rem_euclid(denominator) == 0 {
+        // Both operands are non-negative, so truncating division is floor.
+        let quotient = numerator / denominator;
+        let units = if numerator % denominator == 0 {
             quotient
         } else {
             quotient + 1
@@ -431,6 +446,8 @@ impl ConversionRate {
 pub enum MoneyError {
     #[error("amount overflows the supported range")]
     Overflow,
+    #[error("exact amounts must not be negative")]
+    Negative,
     #[error("scale {scale} exceeds the maximum exact scale of {MAX_EXACT_SCALE}")]
     ScaleTooLarge { scale: u32 },
     #[error("conversion rate denominator must be non-zero")]
@@ -668,14 +685,18 @@ mod tests {
             ExactMoney::new(1, 19, Asset::Usd),
             Err(MoneyError::ScaleTooLarge { scale: 19 })
         );
-        let unchecked = ExactMoney {
-            amount: 1,
-            scale: 19,
-            asset: Asset::Usd,
-        };
         assert_eq!(
-            unchecked.to_amount_ceil(&identity()),
-            Err(MoneyError::ScaleTooLarge { scale: 19 })
+            ExactMoney::new(-1, 6, Asset::Usdc),
+            Err(MoneyError::Negative)
+        );
+        assert_eq!(
+            ExactMoney::new(i128::MIN, 0, Asset::Usd),
+            Err(MoneyError::Negative)
+        );
+        let fact = exact(31, 4, Asset::Usd);
+        assert_eq!(
+            (fact.amount(), fact.scale(), fact.asset()),
+            (31, 4, Asset::Usd)
         );
         assert_eq!(
             exact(i128::MAX, 0, Asset::Usd).to_amount_ceil(&identity()),
