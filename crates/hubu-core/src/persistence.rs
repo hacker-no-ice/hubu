@@ -177,7 +177,7 @@ pub trait BudgetRepository {
 pub(crate) struct AppendBudgetVersionRequest {
     pub budget_id: BudgetId,
     pub expected_revision: u64,
-    pub amount_limit_cents: i64,
+    pub amount_limit: Amount,
     pub actor: String,
     pub source: String,
     pub reason: Option<String>,
@@ -760,10 +760,10 @@ impl SqliteGovernanceRepository {
                     && matches!(hold.status, BudgetHoldStatus::Settled)
                     && hold.executor_claim_id.as_ref() == Some(&claim.id)
                     && &stored_receipt.settlement_id == settlement_id
-                    && stored_receipt.authorized_max_cents == hold.amount_cents
-                    && stored_receipt.budget_charge_cents == stored_amounts.budget_charge_cents
-                    && stored_receipt.released_amount_cents == stored_amounts.released_amount_cents
-                    && stored_receipt.overrun_amount_cents == stored_amounts.overrun_amount_cents
+                    && stored_receipt.authorized_max == hold.amount
+                    && stored_receipt.budget_charge == stored_amounts.budget_charge
+                    && stored_receipt.released_amount == stored_amounts.released_amount
+                    && stored_receipt.overrun_amount == stored_amounts.overrun_amount
                     && stored_receipt.currency == hold.currency
             }
             (ExecutorFinalizationAction::Release, SpendExecutorClaimStatus::Released) => {
@@ -868,7 +868,7 @@ impl SqliteGovernanceRepository {
                 "executor claim budget hold is not exclusively claimed".to_string(),
             ));
         }
-        if balance.frozen_amount_cents < hold.amount_cents {
+        if balance.frozen_amount < hold.amount {
             return Err(StorageError::InvalidData(
                 "executor claim budget balance is inconsistent".to_string(),
             ));
@@ -996,10 +996,10 @@ impl SqliteGovernanceRepository {
                 let receipt_record = PersistedSpendExecutorSettlementReceipt {
                     claim_id: claim.id.clone(),
                     settlement_id: settlement_id.clone(),
-                    authorized_max_cents: hold.amount_cents,
-                    budget_charge_cents: settlement_amounts.budget_charge_cents,
-                    released_amount_cents: settlement_amounts.released_amount_cents,
-                    overrun_amount_cents: settlement_amounts.overrun_amount_cents,
+                    authorized_max: hold.amount,
+                    budget_charge: settlement_amounts.budget_charge,
+                    released_amount: settlement_amounts.released_amount,
+                    overrun_amount: settlement_amounts.overrun_amount,
                     currency: hold.currency,
                     receipt,
                     created_at: finalization_started_at,
@@ -1901,7 +1901,7 @@ impl SqliteGovernanceRepository {
                 id,
                 scope_type,
                 scope_id,
-                amount_limit_cents,
+                amount_limit,
                 currency,
                 starting_at,
                 ending_before,
@@ -1924,9 +1924,12 @@ impl SqliteGovernanceRepository {
                 .map_err(|_| {
                     StorageError::InvalidData(format!("budget {id} has an invalid period"))
                 })?;
+                let legacy_limit = Amount::from_legacy_cents(*amount_limit).map_err(|_| {
+                    StorageError::InvalidData(format!("budget {id} limit is out of range"))
+                })?;
                 let request_fingerprint = initial_budget_request_fingerprint(
                     &agent_id,
-                    *amount_limit_cents,
+                    legacy_limit,
                     parsed_currency,
                     &period,
                 );
@@ -1966,7 +1969,7 @@ impl SqliteGovernanceRepository {
                     params![
                         version_id,
                         id,
-                        amount_limit_cents,
+                        amount_limit,
                         created_at,
                         "Backfilled from the pre-versioned budget row",
                         request_fingerprint,
@@ -3922,21 +3925,28 @@ impl BudgetRepository for SqliteGovernanceRepository {
                  WHERE id = ?1 AND status = 'frozen'",
                 params![hold_id, now.to_rfc3339()],
             )?;
-            // Legacy projections stay exact while every hold is whole cents.
-            sqlite_tx.execute(
-                "UPDATE budget_balances
-                 SET frozen_amount = frozen_amount - ?2,
-                     remaining_amount = remaining_amount + ?2,
-                     frozen_amount_cents = frozen_amount_cents - ?3,
-                     remaining_amount_cents = remaining_amount_cents + ?3,
-                     updated_at = ?4
-                 WHERE budget_id = ?1",
-                params![
-                    budget_id,
-                    amount.units(),
-                    amount.legacy_cents_ceil(),
-                    now.to_rfc3339()
-                ],
+            let budget_id: BudgetId = budget_id
+                .parse()
+                .map_err(|_| StorageError::InvalidData("invalid hold budget id".to_string()))?;
+            let current = load_budget_balance_by_id(&sqlite_tx, &budget_id)?.ok_or_else(|| {
+                StorageError::InvalidData("expired hold has no budget balance".to_string())
+            })?;
+            let (Some(frozen_amount), Some(remaining_amount)) = (
+                current.frozen_amount.checked_sub(amount),
+                current.remaining_amount.checked_add(amount),
+            ) else {
+                return Err(StorageError::InvalidData(
+                    "expired hold exceeds the representable budget balance".to_string(),
+                ));
+            };
+            let updated = BudgetBalance {
+                frozen_amount,
+                remaining_amount,
+                ..current.clone()
+            };
+            require_one_updated_row(
+                compare_and_set_balance(&sqlite_tx, &current, &updated, &now.to_rfc3339())?,
+                "budget balance changed while expiring a hold",
             )?;
         }
 
@@ -4009,7 +4019,7 @@ impl BudgetVersionRepository for SqliteGovernanceRepository {
         &mut self,
         request: &AppendBudgetVersionRequest,
     ) -> Result<AppendBudgetVersionResult, BudgetUpdateError> {
-        if request.amount_limit_cents <= 0 {
+        if request.amount_limit <= Amount::ZERO {
             return Err(BudgetUpdateError::AmountLimitMustBePositive);
         }
         if request.expected_revision == 0 {
@@ -4031,7 +4041,7 @@ impl BudgetVersionRepository for SqliteGovernanceRepository {
         let request_fingerprint = budget_update_request_fingerprint(
             &request.budget_id,
             request.expected_revision,
-            request.amount_limit_cents,
+            request.amount_limit,
             actor,
             source,
             reason,
@@ -4076,7 +4086,7 @@ impl BudgetVersionRepository for SqliteGovernanceRepository {
             load_budget_version_successor(&transaction, &request.budget_id, &expected.id)?
         {
             let exact_replay = successor.revision == request.expected_revision + 1
-                && successor.amount_limit_cents == request.amount_limit_cents
+                && successor.amount_limit == request.amount_limit
                 && successor.actor == actor
                 && successor.source == source
                 && successor.reason.as_deref() == reason
@@ -4127,27 +4137,27 @@ impl BudgetVersionRepository for SqliteGovernanceRepository {
             ))
             .into());
         }
-        validate_balance_for_limit(&current.balance, current.version.amount_limit_cents)?;
-        let frozen_hold_amount_cents = active_hold_total_cents(&transaction, &request.budget_id)?;
-        if frozen_hold_amount_cents != current.balance.frozen_amount_cents {
+        validate_balance_for_limit(&current.balance, current.version.amount_limit)?;
+        let frozen_hold_amount = active_hold_total(&transaction, &request.budget_id)?;
+        if frozen_hold_amount != current.balance.frozen_amount {
             return Err(StorageError::InvalidData(
                 "frozen budget balance must equal its active holds".to_string(),
             )
             .into());
         }
-        let committed_amount_cents = current
+        let committed_amount = current
             .balance
-            .consumed_amount_cents
-            .checked_add(current.balance.frozen_amount_cents)
+            .consumed_amount
+            .checked_add(current.balance.frozen_amount)
             .ok_or_else(|| {
                 StorageError::InvalidData(
                     "budget committed usage exceeds the representable range".to_string(),
                 )
             })?;
-        if request.amount_limit_cents < committed_amount_cents {
+        if request.amount_limit < committed_amount {
             return Err(BudgetUpdateError::LimitBelowCommitted {
-                requested_amount_cents: request.amount_limit_cents,
-                committed_amount_cents,
+                requested_amount: request.amount_limit,
+                committed_amount,
             });
         }
         let revision = request.expected_revision.checked_add(1).ok_or_else(|| {
@@ -4161,7 +4171,7 @@ impl BudgetVersionRepository for SqliteGovernanceRepository {
             budget_id: request.budget_id.clone(),
             revision,
             predecessor_version_id: Some(expected.id.clone()),
-            amount_limit_cents: request.amount_limit_cents,
+            amount_limit: request.amount_limit,
             effective_at: request.effective_at,
             actor: actor.to_string(),
             source: source.to_string(),
@@ -4169,7 +4179,7 @@ impl BudgetVersionRepository for SqliteGovernanceRepository {
             request_fingerprint,
             created_at: request.effective_at,
         };
-        let amount_limit = units_from_cents(version.amount_limit_cents)?;
+        let amount_limit = version.amount_limit;
         transaction.execute(
             "INSERT INTO budget_versions
              (id, budget_id, revision, predecessor_version_id, amount_limit_cents,
@@ -4181,7 +4191,7 @@ impl BudgetVersionRepository for SqliteGovernanceRepository {
                 version.budget_id.to_string(),
                 sqlite_revision,
                 expected.id.to_string(),
-                amount_limit.legacy_cents_floor(),
+                legacy_limit_cents(amount_limit),
                 version.effective_at.to_rfc3339(),
                 version.actor,
                 version.source,
@@ -4206,12 +4216,19 @@ impl BudgetVersionRepository for SqliteGovernanceRepository {
             "budget current-version compare-and-set failed after serialization",
         )?;
 
-        let remaining_amount_cents = request.amount_limit_cents - committed_amount_cents;
+        let remaining_amount = request
+            .amount_limit
+            .checked_sub(committed_amount)
+            .ok_or_else(|| {
+                StorageError::InvalidData(
+                    "budget remaining balance exceeds the representable range".to_string(),
+                )
+            })?;
         let balance = BudgetBalance {
             budget_id: request.budget_id.clone(),
-            consumed_amount_cents: current.balance.consumed_amount_cents,
-            frozen_amount_cents: current.balance.frozen_amount_cents,
-            remaining_amount_cents,
+            consumed_amount: current.balance.consumed_amount,
+            frozen_amount: current.balance.frozen_amount,
+            remaining_amount,
         };
         let balance_rows = compare_and_set_balance(
             &transaction,
@@ -4281,7 +4298,7 @@ impl SpendingTargetRepository for SqliteGovernanceRepository {
             params![
                 target.id.to_string(),
                 target.owner_user_id.to_string(),
-                target.target_amount_cents,
+                target.target_amount.legacy_cents_floor(),
                 target.currency.to_string(),
                 target.period.starting_at.to_rfc3339(),
                 target
@@ -4291,7 +4308,7 @@ impl SpendingTargetRepository for SqliteGovernanceRepository {
                 spending_target_status(target.status),
                 target.created_at.to_rfc3339(),
                 target.updated_at.to_rfc3339(),
-                units_from_cents(target.target_amount_cents)?.units(),
+                target.target_amount.units(),
             ],
         )?;
         Ok(())
@@ -4316,7 +4333,7 @@ impl SpendingTargetRepository for SqliteGovernanceRepository {
             Ok(SpendingTarget {
                 id: parse_id(&id)?,
                 owner_user_id: parse_id(&owner_user_id)?,
-                target_amount_cents: cents_from_units(row, 2)?,
+                target_amount: accounting_units_from_row(row, 2)?,
                 currency: parse_currency(&currency)?,
                 period: TimePeriod::new(
                     parse_timestamp(&starting_at)?,
@@ -4396,8 +4413,11 @@ fn save_executor_settlement_receipt(
     // Retained v4.3 columns continue to describe the authorization-bounded
     // budget charge. Precise columns are authoritative, including for a human
     // reconciliation whose already-incurred charge exceeds that authorization.
-    let legacy_actual_vendor_cost_cents =
-        record.budget_charge_cents.min(record.authorized_max_cents);
+    // Legacy cent columns are conservative projections that still satisfy the
+    // table's v4.3 CHECKs (released = authorized - actual, actual <= authorized).
+    let authorized_max_cents = record.authorized_max.legacy_cents_ceil();
+    let budget_charge_cents = record.budget_charge.legacy_cents_ceil();
+    let legacy_actual_vendor_cost_cents = budget_charge_cents.min(authorized_max_cents);
     conn.execute(
         "INSERT INTO spend_executor_settlement_receipts
          (claim_id, settlement_id, authorized_max_cents, actual_vendor_cost_cents,
@@ -4411,23 +4431,23 @@ fn save_executor_settlement_receipt(
         params![
             record.claim_id.to_string(),
             record.settlement_id.to_string(),
-            record.authorized_max_cents,
+            authorized_max_cents,
             legacy_actual_vendor_cost_cents,
             record.receipt.actual_vendor_cost.amount,
             i64::from(record.receipt.actual_vendor_cost.scale),
             record.receipt.actual_vendor_cost.currency.to_string(),
-            record.budget_charge_cents,
-            record.released_amount_cents,
-            record.overrun_amount_cents,
+            budget_charge_cents,
+            authorized_max_cents - legacy_actual_vendor_cost_cents,
+            record.overrun_amount.legacy_cents_ceil(),
             record.currency.to_string(),
             record.receipt.provider_request_id,
             price_model_snapshot_json,
             record.receipt.artifact_reference,
             record.created_at.to_rfc3339(),
-            units_from_cents(record.authorized_max_cents)?.units(),
-            units_from_cents(record.budget_charge_cents)?.units(),
-            units_from_cents(record.released_amount_cents)?.units(),
-            units_from_cents(record.overrun_amount_cents)?.units(),
+            record.authorized_max.units(),
+            record.budget_charge.units(),
+            record.released_amount.units(),
+            record.overrun_amount.units(),
         ],
     )?;
     Ok(())
@@ -4435,9 +4455,9 @@ fn save_executor_settlement_receipt(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ExecutorSettlementAmounts {
-    budget_charge_cents: i64,
-    released_amount_cents: i64,
-    overrun_amount_cents: i64,
+    budget_charge: Amount,
+    released_amount: Amount,
+    overrun_amount: Amount,
 }
 
 fn checked_executor_finalization_balance(
@@ -4445,20 +4465,18 @@ fn checked_executor_finalization_balance(
     hold: &BudgetHold,
     settlement_amounts: Option<&ExecutorSettlementAmounts>,
 ) -> Result<BudgetBalance, StorageError> {
-    let frozen_amount_cents = balance
-        .frozen_amount_cents
-        .checked_sub(hold.amount_cents)
+    let frozen_amount = balance
+        .frozen_amount
+        .checked_sub(hold.amount)
         .ok_or_else(|| {
             StorageError::InvalidData(
                 "executor claim finalization exceeds the representable budget balance".to_string(),
             )
         })?;
-    let (consumed_amount_cents, remaining_amount_cents) = if let Some(settlement_amounts) =
-        settlement_amounts
-    {
-        let consumed_amount_cents = balance
-            .consumed_amount_cents
-            .checked_add(settlement_amounts.budget_charge_cents)
+    let (consumed_amount, remaining_amount) = if let Some(settlement_amounts) = settlement_amounts {
+        let consumed_amount = balance
+            .consumed_amount
+            .checked_add(settlement_amounts.budget_charge)
             .ok_or_else(|| {
                 StorageError::InvalidData(
                     "executor claim settlement exceeds the representable budget balance"
@@ -4466,16 +4484,16 @@ fn checked_executor_finalization_balance(
                 )
             })?;
         let remaining_delta = hold
-            .amount_cents
-            .checked_sub(settlement_amounts.budget_charge_cents)
+            .amount
+            .checked_sub(settlement_amounts.budget_charge)
             .ok_or_else(|| {
                 StorageError::InvalidData(
                     "executor claim settlement exceeds the representable budget balance"
                         .to_string(),
                 )
             })?;
-        let remaining_amount_cents = balance
-            .remaining_amount_cents
+        let remaining_amount = balance
+            .remaining_amount
             .checked_add(remaining_delta)
             .ok_or_else(|| {
                 StorageError::InvalidData(
@@ -4483,24 +4501,24 @@ fn checked_executor_finalization_balance(
                         .to_string(),
                 )
             })?;
-        (consumed_amount_cents, remaining_amount_cents)
+        (consumed_amount, remaining_amount)
     } else {
-        let remaining_amount_cents = balance
-            .remaining_amount_cents
-            .checked_add(hold.amount_cents)
+        let remaining_amount = balance
+            .remaining_amount
+            .checked_add(hold.amount)
             .ok_or_else(|| {
                 StorageError::InvalidData(
                     "executor claim release exceeds the representable budget balance".to_string(),
                 )
             })?;
-        (balance.consumed_amount_cents, remaining_amount_cents)
+        (balance.consumed_amount, remaining_amount)
     };
 
     Ok(BudgetBalance {
         budget_id: balance.budget_id.clone(),
-        consumed_amount_cents,
-        frozen_amount_cents,
-        remaining_amount_cents,
+        consumed_amount,
+        frozen_amount,
+        remaining_amount,
     })
 }
 
@@ -4514,11 +4532,11 @@ fn validate_executor_settlement_receipt(
             "actual vendor cost currency does not match the authorization".to_string(),
         ));
     }
-    let budget_charge_cents = receipt
+    let budget_charge = receipt
         .actual_vendor_cost
-        .conservative_budget_charge_cents()
+        .budget_charge()
         .map_err(|message| StorageError::InvalidData(message.to_string()))?;
-    if !allow_authorization_overrun && budget_charge_cents > hold.amount_cents {
+    if !allow_authorization_overrun && budget_charge > hold.amount {
         return Err(StorageError::InvalidData(
             "actual vendor cost exceeds the authorized maximum".to_string(),
         ));
@@ -4568,16 +4586,16 @@ fn validate_executor_settlement_receipt(
     }
 
     Ok(ExecutorSettlementAmounts {
-        budget_charge_cents,
-        released_amount_cents: hold
-            .amount_cents
-            .checked_sub(budget_charge_cents)
-            .unwrap_or(0)
-            .max(0),
-        overrun_amount_cents: budget_charge_cents
-            .checked_sub(hold.amount_cents)
-            .unwrap_or(0)
-            .max(0),
+        budget_charge,
+        released_amount: hold
+            .amount
+            .checked_sub(budget_charge)
+            .unwrap_or(Amount::ZERO)
+            .max(Amount::ZERO),
+        overrun_amount: budget_charge
+            .checked_sub(hold.amount)
+            .unwrap_or(Amount::ZERO)
+            .max(Amount::ZERO),
     })
 }
 
@@ -4681,10 +4699,10 @@ fn executor_settlement_receipt_from_row(
     Ok(PersistedSpendExecutorSettlementReceipt {
         claim_id: parse_id(&claim_id)?,
         settlement_id: parse_id(&settlement_id)?,
-        authorized_max_cents: cents_from_units(row, 2)?,
-        budget_charge_cents: cents_from_units(row, 6)?,
-        released_amount_cents: cents_from_units(row, 7)?,
-        overrun_amount_cents: cents_from_units(row, 8)?,
+        authorized_max: accounting_units_from_row(row, 2)?,
+        budget_charge: accounting_units_from_row(row, 6)?,
+        released_amount: accounting_units_from_row(row, 7)?,
+        overrun_amount: accounting_units_from_row(row, 8)?,
         currency: parse_currency(&currency)?,
         receipt: SpendExecutorSettlementReceipt {
             actual_vendor_cost: crate::spend::SpendExecutorVendorCost {
@@ -4738,7 +4756,7 @@ fn budget_hold_from_row(row: &rusqlite::Row<'_>) -> Result<BudgetHold, rusqlite:
         budget_id: parse_id(&budget_id)?,
         budget_version_id: parse_id(&budget_version_id)?,
         spend_decision_id: parse_id(&spend_decision_id)?,
-        amount_cents: cents_from_units(row, 4)?,
+        amount: accounting_units_from_row(row, 4)?,
         currency: parse_currency(&currency)?,
         status: parse_budget_hold_status(&status)?,
         executor_claim_id: parse_optional_id(executor_claim_id)?,
@@ -4812,7 +4830,7 @@ fn load_current_budget_snapshot(
                 budget_id: parse_id(&version_budget_id)?,
                 revision,
                 predecessor_version_id: parse_optional_id(predecessor_version_id)?,
-                amount_limit_cents: cents_from_units(row, 13)?,
+                amount_limit: accounting_units_from_row(row, 13)?,
                 effective_at: parse_timestamp(&effective_at)?,
                 actor: row.get(15)?,
                 source: row.get(16)?,
@@ -4822,9 +4840,9 @@ fn load_current_budget_snapshot(
             };
             let balance = BudgetBalance {
                 budget_id: parse_id(&balance_budget_id)?,
-                consumed_amount_cents: cents_from_units(row, 21)?,
-                frozen_amount_cents: cents_from_units(row, 22)?,
-                remaining_amount_cents: cents_from_units(row, 23)?,
+                consumed_amount: accounting_units_from_row(row, 21)?,
+                frozen_amount: accounting_units_from_row(row, 22)?,
+                remaining_amount: accounting_units_from_row(row, 23)?,
             };
             Ok(BudgetWithBalance {
                 budget,
@@ -4893,7 +4911,7 @@ fn budget_version_from_row(row: &rusqlite::Row<'_>) -> Result<BudgetVersion, rus
         budget_id: parse_id(&budget_id)?,
         revision,
         predecessor_version_id: parse_optional_id(predecessor_version_id)?,
-        amount_limit_cents: cents_from_units(row, 4)?,
+        amount_limit: accounting_units_from_row(row, 4)?,
         effective_at: parse_timestamp(&effective_at)?,
         actor: row.get(6)?,
         source: row.get(7)?,
@@ -4907,9 +4925,9 @@ fn budget_balance_from_row(row: &rusqlite::Row<'_>) -> Result<BudgetBalance, rus
     let budget_id: String = row.get(0)?;
     Ok(BudgetBalance {
         budget_id: parse_id(&budget_id)?,
-        consumed_amount_cents: cents_from_units(row, 1)?,
-        frozen_amount_cents: cents_from_units(row, 2)?,
-        remaining_amount_cents: cents_from_units(row, 3)?,
+        consumed_amount: accounting_units_from_row(row, 1)?,
+        frozen_amount: accounting_units_from_row(row, 2)?,
+        remaining_amount: accounting_units_from_row(row, 3)?,
     })
 }
 
@@ -4984,7 +5002,7 @@ fn validate_budget_version_relationship(
         ));
     }
     if version.revision == 0
-        || version.amount_limit_cents <= 0
+        || version.amount_limit <= Amount::ZERO
         || version.actor.trim().is_empty()
         || version.source.trim().is_empty()
         || version.request_fingerprint.trim().is_empty()
@@ -4993,25 +5011,25 @@ fn validate_budget_version_relationship(
             "budget version immutable metadata is invalid".to_string(),
         ));
     }
-    validate_balance_for_limit(balance, version.amount_limit_cents)
+    validate_balance_for_limit(balance, version.amount_limit)
 }
 
 fn validate_balance_for_limit(
     balance: &BudgetBalance,
-    amount_limit_cents: i64,
+    amount_limit: Amount,
 ) -> Result<(), StorageError> {
-    if balance.consumed_amount_cents < 0 || balance.frozen_amount_cents < 0 {
+    if balance.consumed_amount.is_negative() || balance.frozen_amount.is_negative() {
         return Err(StorageError::InvalidData(
             "budget consumed and frozen balances cannot be negative".to_string(),
         ));
     }
-    let remaining_amount_cents = amount_limit_cents
-        .checked_sub(balance.consumed_amount_cents)
-        .and_then(|value| value.checked_sub(balance.frozen_amount_cents))
+    let remaining_amount = amount_limit
+        .checked_sub(balance.consumed_amount)
+        .and_then(|value| value.checked_sub(balance.frozen_amount))
         .ok_or_else(|| {
             StorageError::InvalidData("budget balance exceeds the representable range".to_string())
         })?;
-    if remaining_amount_cents != balance.remaining_amount_cents {
+    if remaining_amount != balance.remaining_amount {
         return Err(StorageError::InvalidData(
             "remaining budget balance must derive from the current version limit".to_string(),
         ));
@@ -5020,7 +5038,7 @@ fn validate_balance_for_limit(
 }
 
 fn upsert_balance(conn: &Connection, balance: &BudgetBalance) -> Result<(), StorageError> {
-    let amount_limit_cents = conn
+    let amount_limit = conn
         .query_row(
             "SELECT version.amount_limit
              FROM budget_current_versions AS current
@@ -5029,7 +5047,7 @@ fn upsert_balance(conn: &Connection, balance: &BudgetBalance) -> Result<(), Stor
               AND version.id = current.version_id
              WHERE current.budget_id = ?1",
             params![balance.budget_id.to_string()],
-            |row| cents_from_units(row, 0),
+            |row| accounting_units_from_row(row, 0),
         )
         .optional()?
         .ok_or_else(|| {
@@ -5037,9 +5055,9 @@ fn upsert_balance(conn: &Connection, balance: &BudgetBalance) -> Result<(), Stor
                 "cannot save a balance without a current budget version".to_string(),
             )
         })?;
-    validate_balance_for_limit(balance, amount_limit_cents)?;
-    let frozen_hold_amount_cents = active_hold_total_cents(conn, &balance.budget_id)?;
-    if frozen_hold_amount_cents != balance.frozen_amount_cents {
+    validate_balance_for_limit(balance, amount_limit)?;
+    let frozen_hold_amount = active_hold_total(conn, &balance.budget_id)?;
+    if frozen_hold_amount != balance.frozen_amount {
         return Err(StorageError::InvalidData(
             "frozen budget balance must equal its active holds".to_string(),
         ));
@@ -5085,9 +5103,9 @@ struct BalanceUnits {
 impl BalanceUnits {
     fn from_balance(balance: &BudgetBalance) -> Result<Self, StorageError> {
         Ok(Self {
-            consumed: units_from_cents(balance.consumed_amount_cents)?,
-            frozen: units_from_cents(balance.frozen_amount_cents)?,
-            remaining: units_from_cents(balance.remaining_amount_cents)?,
+            consumed: balance.consumed_amount,
+            frozen: balance.frozen_amount,
+            remaining: balance.remaining_amount,
         })
     }
 }
@@ -5131,14 +5149,20 @@ fn compare_and_set_balance(
     )?)
 }
 
+/// Legacy limit projection: rounded down, but never below the 1-cent minimum
+/// that the legacy `amount_limit_cents > 0` CHECK requires.
+fn legacy_limit_cents(amount_limit: Amount) -> i64 {
+    amount_limit.legacy_cents_floor().max(1)
+}
+
 fn insert_budget_hold(conn: &Connection, hold: &BudgetHold) -> Result<(), StorageError> {
-    let amount = units_from_cents(hold.amount_cents)?;
+    let amount = hold.amount;
     conn.execute(
         "INSERT INTO budget_holds
          (id, budget_id, budget_version_id, spend_decision_id, amount_cents,
           currency, status, executor_claim_id, created_at, updated_at, expires_at,
           amount, amount_scale, spend_asset, spend_exact_amount, spend_exact_scale)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 6, ?6, ?13, 2)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 6, ?6, ?13, 6)",
         params![
             hold.id.to_string(),
             hold.budget_id.to_string(),
@@ -5152,28 +5176,22 @@ fn insert_budget_hold(conn: &Connection, hold: &BudgetHold) -> Result<(), Storag
             hold.updated_at.to_rfc3339(),
             hold.expires_at.to_rfc3339(),
             amount.units(),
-            hold.amount_cents.to_string(),
+            // Until spend in other assets exists, a hold is requested in its
+            // budget currency at accounting scale.
+            amount.units().to_string(),
         ],
     )?;
     Ok(())
 }
 
-fn active_hold_total_cents(conn: &Connection, budget_id: &BudgetId) -> Result<i64, StorageError> {
+fn active_hold_total(conn: &Connection, budget_id: &BudgetId) -> Result<Amount, StorageError> {
     Ok(conn.query_row(
         "SELECT COALESCE(SUM(amount), 0)
          FROM budget_holds
          WHERE budget_id = ?1 AND status IN ('frozen', 'claimed')",
         params![budget_id.to_string()],
-        |row| cents_from_units(row, 0),
+        |row| accounting_units_from_row(row, 0),
     )?)
-}
-
-fn units_from_cents(cents: i64) -> Result<Amount, StorageError> {
-    Amount::from_legacy_cents(cents).map_err(|_| {
-        StorageError::InvalidData(format!(
-            "amount of {cents} cents exceeds the accounting-scale range"
-        ))
-    })
 }
 
 /// Reads an authoritative accounting-scale amount. NULL means the
@@ -5192,23 +5210,6 @@ fn accounting_units_from_row(
             )),
         )
     })
-}
-
-/// Reads an authoritative accounting-scale amount for the cent-denominated
-/// domain. Amounts that are not whole cents cannot be represented yet.
-fn cents_from_units(row: &rusqlite::Row<'_>, index: usize) -> Result<i64, rusqlite::Error> {
-    let amount = accounting_units_from_row(row, index)?;
-    if amount.legacy_cents_floor() != amount.legacy_cents_ceil() {
-        return Err(rusqlite::Error::FromSqlConversionFailure(
-            index,
-            rusqlite::types::Type::Integer,
-            Box::new(StorageError::InvalidData(format!(
-                "accounting-scale amount {} is not a whole cent",
-                amount.units()
-            ))),
-        ));
-    }
-    Ok(amount.legacy_cents_floor())
 }
 
 fn budget_administrative_state(state: BudgetAdministrativeState) -> &'static str {
@@ -5394,7 +5395,7 @@ fn persist_budget_records(
         budget_rows,
         "logical budget properties differ from the persisted allocation",
     )?;
-    let amount_limit = units_from_cents(version.amount_limit_cents)?;
+    let amount_limit = version.amount_limit;
     sqlite_tx.execute(
         "INSERT INTO budget_versions
              (id, budget_id, revision, predecessor_version_id, amount_limit_cents,
@@ -5410,7 +5411,7 @@ fn persist_budget_records(
                 .predecessor_version_id
                 .as_ref()
                 .map(ToString::to_string),
-            amount_limit.legacy_cents_floor(),
+            legacy_limit_cents(amount_limit),
             version.effective_at.to_rfc3339(),
             version.actor,
             version.source,
@@ -5643,6 +5644,7 @@ pub(crate) fn strip_accounting_scale_columns(conn: &Connection) {
 
 #[cfg(test)]
 mod tests {
+    use crate::test_money::cents;
 
     use std::sync::{Arc, Barrier};
 
@@ -5673,7 +5675,7 @@ mod tests {
     fn facade_create_request() -> CreateSingleBudgetRequest {
         CreateSingleBudgetRequest {
             agent_id: agent_id(),
-            amount_limit_cents: 10_000,
+            amount_limit: cents(10_000),
             currency: Currency::Usd,
             period: TimePeriod::new(Utc::now() - Duration::hours(1), None).unwrap(),
         }
@@ -5836,8 +5838,8 @@ mod tests {
                     BudgetAdministrativeState::Active
                 );
                 assert_eq!(
-                    repo.load_budget_balances().unwrap()[0].remaining_amount_cents,
-                    10_000
+                    repo.load_budget_balances().unwrap()[0].remaining_amount,
+                    cents(10_000)
                 );
                 repo.conn.execute_batch("DROP TRIGGER fail_write").unwrap();
             }
@@ -5886,7 +5888,7 @@ mod tests {
             .reserve_budget(ReserveBudgetRequest {
                 budget_id: created.budget.id.clone(),
                 spend_decision_id: decision.id.clone(),
-                amount_cents: 2_500,
+                amount: cents(2_500),
                 currency: Currency::Usd,
                 expires_at: Utc::now() + Duration::hours(1),
             })
@@ -5928,8 +5930,8 @@ mod tests {
             .unwrap();
         let revoked = stale.revoke_budget(&created.budget.id).unwrap();
         assert_eq!(revoked.version.revision, 4);
-        assert_eq!(revoked.balance.frozen_amount_cents, 2_500);
-        assert_eq!(revoked.balance.remaining_amount_cents, 22_500);
+        assert_eq!(revoked.balance.frozen_amount, cents(2_500));
+        assert_eq!(revoked.balance.remaining_amount, cents(22_500));
         assert_eq!(
             stale
                 .get_budget_versions_by_budget_id(&created.budget.id)
@@ -5948,8 +5950,8 @@ mod tests {
             .unwrap()
             .update_budget_hold(&released.hold, &released.balance)
             .unwrap();
-        assert_eq!(released.balance.remaining_amount_cents, 25_000);
-        assert_eq!(released.balance.frozen_amount_cents, 0);
+        assert_eq!(released.balance.remaining_amount, cents(25_000));
+        assert_eq!(released.balance.frozen_amount, cents(0));
     }
 
     #[test]
@@ -6016,7 +6018,7 @@ mod tests {
         let first_request = budget_update_request(
             created.budget.id.clone(),
             1,
-            winner.applied_version.amount_limit_cents,
+            winner.applied_version.amount_limit.legacy_cents_floor(),
         );
         assert!(
             restarted
@@ -6063,10 +6065,10 @@ mod tests {
         "00000000-0000-4000-8000-000000000456".parse().unwrap()
     }
 
-    fn initial_budget_version(budget: &Budget, amount_limit_cents: i64) -> BudgetVersion {
+    fn initial_budget_version(budget: &Budget, amount_limit: i64) -> BudgetVersion {
         BudgetVersion::initial(
             budget,
-            amount_limit_cents,
+            cents(amount_limit),
             "test:budget-owner",
             "hubu-core:persistence-test",
             None,
@@ -6077,13 +6079,13 @@ mod tests {
     fn create_persisted_budget(
         repo: &mut SqliteGovernanceRepository,
         manager: &mut BudgetManager,
-        amount_limit_cents: i64,
+        amount_limit: i64,
     ) -> CreateSingleBudgetResponse {
         let created = manager
             .create_single_budget_in_memory(
                 CreateSingleBudgetRequest {
                     agent_id: agent_id(),
-                    amount_limit_cents,
+                    amount_limit: cents(amount_limit),
                     currency: Currency::Usd,
                     period: TimePeriod::new(
                         Utc::now() - Duration::hours(1),
@@ -6102,12 +6104,12 @@ mod tests {
     fn budget_update_request(
         budget_id: BudgetId,
         expected_revision: u64,
-        amount_limit_cents: i64,
+        amount_limit: i64,
     ) -> UpdateBudgetLimitRequest {
         UpdateBudgetLimitRequest {
             budget_id,
             expected_revision,
-            amount_limit_cents,
+            amount_limit: cents(amount_limit),
             actor: user_id().to_string(),
             source: Some("test:budget-update".to_string()),
             reason: Some("adjust total allocation".to_string()),
@@ -6284,7 +6286,7 @@ mod tests {
 
     fn spend_request() -> SpendRequest {
         SpendRequest {
-            amount_cents: 2_500,
+            amount: cents(2_500),
             currency: Currency::Usd,
             owner_user_id: user_id(),
             agent_id: agent_id(),
@@ -6324,7 +6326,7 @@ mod tests {
         }
     }
 
-    fn spend_decision() -> SpendDecisionRecord {
+    pub(super) fn spend_decision() -> SpendDecisionRecord {
         SpendDecisionRecord {
             id: SpendDecisionId::new(),
             owner_user_id: user_id(),
@@ -6398,24 +6400,24 @@ mod tests {
         let budget_version = initial_budget_version(&budget, 10_000);
         let initial_balance = BudgetBalance {
             budget_id: budget.id.clone(),
-            consumed_amount_cents: 0,
-            frozen_amount_cents: 0,
-            remaining_amount_cents: 10_000,
+            consumed_amount: cents(0),
+            frozen_amount: cents(0),
+            remaining_amount: cents(10_000),
         };
         repo.save_budget_with_balance(&budget, &budget_version, &initial_balance)
             .unwrap();
         let approved_balance = BudgetBalance {
             budget_id: budget.id.clone(),
-            consumed_amount_cents: 0,
-            frozen_amount_cents: decision.request.amount_cents,
-            remaining_amount_cents: 10_000 - decision.request.amount_cents,
+            consumed_amount: cents(0),
+            frozen_amount: decision.request.amount,
+            remaining_amount: cents(10_000).checked_sub(decision.request.amount).unwrap(),
         };
         let hold = BudgetHold {
             id: BudgetHoldId::new(),
             budget_id: budget.id.clone(),
             budget_version_id: budget_version.id,
             spend_decision_id: decision.id.clone(),
-            amount_cents: decision.request.amount_cents,
+            amount: decision.request.amount,
             currency: Currency::Usd,
             status: BudgetHoldStatus::Frozen,
             executor_claim_id: None,
@@ -6458,17 +6460,11 @@ mod tests {
         let balances = repo.load_budget_balances().unwrap();
         assert_eq!(balances.len(), 1);
         assert_eq!(balances[0].budget_id, initial_balance.budget_id);
+        assert_eq!(balances[0].consumed_amount, initial_balance.consumed_amount);
+        assert_eq!(balances[0].frozen_amount, initial_balance.frozen_amount);
         assert_eq!(
-            balances[0].consumed_amount_cents,
-            initial_balance.consumed_amount_cents
-        );
-        assert_eq!(
-            balances[0].frozen_amount_cents,
-            initial_balance.frozen_amount_cents
-        );
-        assert_eq!(
-            balances[0].remaining_amount_cents,
-            initial_balance.remaining_amount_cents
+            balances[0].remaining_amount,
+            initial_balance.remaining_amount
         );
         let history = repo
             .load_spend_attempt_history(&decision.request.agent_id, &decision.operation_key)
@@ -6505,7 +6501,26 @@ mod tests {
         operation_key: &str,
         agent: AgentId,
     ) -> (SpendExecutorClaimRecord, SpendAuthTokenRecord, BudgetHold) {
+        persist_claimed_executor_spend_with_amounts(
+            repo,
+            claim_expires_at,
+            operation_key,
+            agent,
+            cents(10_000),
+            cents(2_500),
+        )
+    }
+
+    pub(super) fn persist_claimed_executor_spend_with_amounts(
+        repo: &mut SqliteGovernanceRepository,
+        claim_expires_at: DateTime<Utc>,
+        operation_key: &str,
+        agent: AgentId,
+        amount_limit: Amount,
+        hold_amount: Amount,
+    ) -> (SpendExecutorClaimRecord, SpendAuthTokenRecord, BudgetHold) {
         let mut decision = spend_decision();
+        decision.request.amount = hold_amount;
         decision.operation_key = operation_key.to_string();
         decision.request.agent_id = agent.clone();
         let token = SpendAuthTokenRecord {
@@ -6545,25 +6560,32 @@ mod tests {
             )
             .unwrap(),
         );
-        let budget_version = initial_budget_version(&budget, 10_000);
+        let budget_version = BudgetVersion::initial(
+            &budget,
+            amount_limit,
+            "test:budget-owner",
+            "hubu-core:persistence-test",
+            None,
+        )
+        .unwrap();
         let balance = BudgetBalance {
             budget_id: budget.id.clone(),
-            consumed_amount_cents: 0,
-            frozen_amount_cents: 2_500,
-            remaining_amount_cents: 7_500,
+            consumed_amount: Amount::ZERO,
+            frozen_amount: hold_amount,
+            remaining_amount: amount_limit.checked_sub(hold_amount).unwrap(),
         };
         let initial_balance = BudgetBalance {
             budget_id: budget.id.clone(),
-            consumed_amount_cents: 0,
-            frozen_amount_cents: 0,
-            remaining_amount_cents: 10_000,
+            consumed_amount: Amount::ZERO,
+            frozen_amount: Amount::ZERO,
+            remaining_amount: amount_limit,
         };
         let hold = BudgetHold {
             id: BudgetHoldId::new(),
             budget_id: budget.id.clone(),
             budget_version_id: budget_version.id.clone(),
             spend_decision_id: decision.id.clone(),
-            amount_cents: 2_500,
+            amount: hold_amount,
             currency: Currency::Usd,
             status: BudgetHoldStatus::Claimed,
             executor_claim_id: Some(claim.id.clone()),
@@ -6733,9 +6755,9 @@ mod tests {
             .unwrap();
         assert_eq!(receipt.receipt.actual_vendor_cost.amount, 17);
         assert_eq!(receipt.receipt.actual_vendor_cost.scale, 2);
-        assert_eq!(receipt.budget_charge_cents, 17);
-        assert_eq!(receipt.released_amount_cents, 8);
-        assert_eq!(receipt.overrun_amount_cents, 0);
+        assert_eq!(receipt.budget_charge, cents(17));
+        assert_eq!(receipt.released_amount, cents(8));
+        assert_eq!(receipt.overrun_amount, cents(0));
         let update_error = reopened
             .conn
             .execute(
@@ -7035,16 +7057,16 @@ mod tests {
             SpendExecutorClaimStatus::Settled
         ));
         assert!(matches!(first.hold.status, BudgetHoldStatus::Settled));
-        assert_eq!(first.balance.consumed_amount_cents, 2_000);
-        assert_eq!(first.balance.frozen_amount_cents, 0);
-        assert_eq!(first.balance.remaining_amount_cents, 8_000);
+        assert_eq!(first.balance.consumed_amount, cents(2_000));
+        assert_eq!(first.balance.frozen_amount, cents(0));
+        assert_eq!(first.balance.remaining_amount, cents(8_000));
         let receipt = first.receipt.as_ref().expect("receipt should be returned");
-        assert_eq!(receipt.authorized_max_cents, 2_500);
+        assert_eq!(receipt.authorized_max, cents(2_500));
         assert_eq!(receipt.receipt.actual_vendor_cost.amount, 2_000);
         assert_eq!(receipt.receipt.actual_vendor_cost.scale, 2);
-        assert_eq!(receipt.budget_charge_cents, 2_000);
-        assert_eq!(receipt.released_amount_cents, 500);
-        assert_eq!(receipt.overrun_amount_cents, 0);
+        assert_eq!(receipt.budget_charge, cents(2_000));
+        assert_eq!(receipt.released_amount, cents(500));
+        assert_eq!(receipt.overrun_amount, cents(0));
         assert_eq!(
             persisted_budget_administrative_row(&repo, &hold.budget_id),
             administrative_before
@@ -7068,8 +7090,8 @@ mod tests {
             .unwrap();
         assert!(replay.idempotent_replay);
         assert_eq!(replay.claim.settlement_id, Some(first_settlement_id));
-        assert_eq!(replay.balance.consumed_amount_cents, 2_000);
-        assert_eq!(replay.balance.frozen_amount_cents, 0);
+        assert_eq!(replay.balance.consumed_amount, cents(2_000));
+        assert_eq!(replay.balance.frozen_amount, cents(0));
         assert_eq!(
             persisted_budget_administrative_row(&repo, &hold.budget_id),
             administrative_before
@@ -7174,12 +7196,12 @@ mod tests {
         let balance = load_budget_balance_by_id(&repo.conn, &hold.budget_id)
             .unwrap()
             .expect("balance should remain");
-        assert_eq!(balance.consumed_amount_cents, 0);
-        assert_eq!(balance.frozen_amount_cents, 2_500);
+        assert_eq!(balance.consumed_amount, cents(0));
+        assert_eq!(balance.frozen_amount, cents(2_500));
     }
 
     #[test]
-    fn executor_settlement_rounds_fractional_cent_to_exact_authorized_maximum() {
+    fn executor_settlement_charges_the_exact_fractional_cent_cost() {
         let mut repo = SqliteGovernanceRepository::in_memory().unwrap();
         let now = Utc::now();
         let (claim, _, _) = persist_claimed_executor_spend(&mut repo, now + Duration::minutes(15));
@@ -7197,9 +7219,18 @@ mod tests {
         let receipt = settled.receipt.unwrap();
         assert_eq!(receipt.receipt.actual_vendor_cost.amount, 24_991);
         assert_eq!(receipt.receipt.actual_vendor_cost.scale, 3);
-        assert_eq!(receipt.budget_charge_cents, 2_500);
-        assert_eq!(receipt.released_amount_cents, 0);
-        assert_eq!(receipt.overrun_amount_cents, 0);
+        // USD 24.991 is charged exactly; the unused 0.009 of the hold returns.
+        assert_eq!(receipt.budget_charge, Amount::from_units(24_991_000));
+        assert_eq!(receipt.released_amount, Amount::from_units(9_000));
+        assert_eq!(receipt.overrun_amount, cents(0));
+        assert_eq!(
+            settled.balance.consumed_amount,
+            Amount::from_units(24_991_000)
+        );
+        assert_eq!(
+            settled.balance.remaining_amount,
+            Amount::from_units(75_009_000)
+        );
     }
 
     #[test]
@@ -7242,10 +7273,16 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(first.receipt.unwrap().budget_charge_cents, 1);
-        assert_eq!(second.receipt.unwrap().budget_charge_cents, 2);
-        assert_eq!(first.balance.consumed_amount_cents, 1);
-        assert_eq!(second.balance.consumed_amount_cents, 2);
+        assert_eq!(
+            first.receipt.unwrap().budget_charge,
+            Amount::from_units(1_000)
+        );
+        assert_eq!(
+            second.receipt.unwrap().budget_charge,
+            Amount::from_units(11_000)
+        );
+        assert_eq!(first.balance.consumed_amount, Amount::from_units(1_000));
+        assert_eq!(second.balance.consumed_amount, Amount::from_units(11_000));
     }
 
     #[test]
@@ -7298,8 +7335,8 @@ mod tests {
         assert_eq!(reloaded_token.used_at, None);
         assert_eq!(reloaded_token.used_by_payment_id, None);
         assert!(matches!(reloaded_hold.status, BudgetHoldStatus::Claimed));
-        assert_eq!(reloaded_balance.consumed_amount_cents, 0);
-        assert_eq!(reloaded_balance.frozen_amount_cents, 2_500);
+        assert_eq!(reloaded_balance.consumed_amount, cents(0));
+        assert_eq!(reloaded_balance.frozen_amount, cents(2_500));
         assert!(
             load_executor_settlement_receipt_by_claim_id(&repo.conn, &claim.id)
                 .unwrap()
@@ -7376,9 +7413,9 @@ mod tests {
             reconciled.claim.reconciled_by_user_id,
             Some(claim.owner_user_id.clone())
         );
-        assert_eq!(reconciled.balance.consumed_amount_cents, 2_000);
-        assert_eq!(reconciled.balance.remaining_amount_cents, 8_000);
-        assert_eq!(reconciled.balance.frozen_amount_cents, 0);
+        assert_eq!(reconciled.balance.consumed_amount, cents(2_000));
+        assert_eq!(reconciled.balance.remaining_amount, cents(8_000));
+        assert_eq!(reconciled.balance.frozen_amount, cents(0));
         let reloaded = load_executor_claim_by_id(&repo.conn, &claim.id)
             .unwrap()
             .expect("reconciled claim should persist");
@@ -7445,12 +7482,18 @@ mod tests {
             )
             .unwrap();
         let receipt = reconciled.receipt.unwrap();
-        assert_eq!(receipt.budget_charge_cents, 10_001);
-        assert_eq!(receipt.released_amount_cents, 0);
-        assert_eq!(receipt.overrun_amount_cents, 7_501);
-        assert_eq!(reconciled.balance.consumed_amount_cents, 10_001);
-        assert_eq!(reconciled.balance.remaining_amount_cents, -1);
-        assert_eq!(reconciled.balance.frozen_amount_cents, 0);
+        assert_eq!(receipt.budget_charge, Amount::from_units(100_001_000));
+        assert_eq!(receipt.released_amount, cents(0));
+        assert_eq!(receipt.overrun_amount, Amount::from_units(75_001_000));
+        assert_eq!(
+            reconciled.balance.consumed_amount,
+            Amount::from_units(100_001_000)
+        );
+        assert_eq!(
+            reconciled.balance.remaining_amount,
+            Amount::from_units(-1_000)
+        );
+        assert_eq!(reconciled.balance.frozen_amount, cents(0));
         assert_eq!(
             persisted_budget_administrative_row(&repo, &hold.budget_id),
             administrative_before
@@ -7506,7 +7549,9 @@ mod tests {
                 "vendor-charge-overflow",
                 "Invoice confirms the exact provider charge.",
                 settlement_id.clone(),
-                precise_settlement_receipt(i64::MAX, 2),
+                // The largest charge representable at accounting scale, which
+                // overflows once added to the existing consumption.
+                precise_settlement_receipt(i64::MAX / 10_000, 2),
                 now,
             )
             .unwrap_err();
@@ -7535,9 +7580,9 @@ mod tests {
         assert_eq!(stored_token.used_at, None);
         assert_eq!(stored_token.used_by_payment_id, None);
         assert!(matches!(stored_hold.status, BudgetHoldStatus::Claimed));
-        assert_eq!(stored_balance.consumed_amount_cents, 1);
-        assert_eq!(stored_balance.frozen_amount_cents, 2_500);
-        assert_eq!(stored_balance.remaining_amount_cents, 7_499);
+        assert_eq!(stored_balance.consumed_amount, cents(1));
+        assert_eq!(stored_balance.frozen_amount, cents(2_500));
+        assert_eq!(stored_balance.remaining_amount, cents(7_499));
         assert!(
             load_executor_settlement_receipt_by_claim_id(&repo.conn, &claim.id)
                 .unwrap()
@@ -7558,9 +7603,9 @@ mod tests {
             .unwrap();
         assert!(!retried.idempotent_replay);
         assert_eq!(retried.claim.settlement_id, Some(settlement_id.clone()));
-        assert_eq!(retried.balance.consumed_amount_cents, 2_501);
-        assert_eq!(retried.balance.frozen_amount_cents, 0);
-        assert_eq!(retried.balance.remaining_amount_cents, 7_499);
+        assert_eq!(retried.balance.consumed_amount, cents(2_501));
+        assert_eq!(retried.balance.frozen_amount, cents(0));
+        assert_eq!(retried.balance.remaining_amount, cents(7_499));
 
         let replayed = repo
             .reconcile_executor_claim_as_billed_transactionally(
@@ -7575,9 +7620,9 @@ mod tests {
             .unwrap();
         assert!(replayed.idempotent_replay);
         assert_eq!(replayed.claim.settlement_id, Some(settlement_id));
-        assert_eq!(replayed.balance.consumed_amount_cents, 2_501);
-        assert_eq!(replayed.balance.frozen_amount_cents, 0);
-        assert_eq!(replayed.balance.remaining_amount_cents, 7_499);
+        assert_eq!(replayed.balance.consumed_amount, cents(2_501));
+        assert_eq!(replayed.balance.frozen_amount, cents(0));
+        assert_eq!(replayed.balance.remaining_amount, cents(7_499));
     }
 
     #[test]
@@ -7601,8 +7646,8 @@ mod tests {
             SpendExecutorClaimStatus::Released
         ));
         assert!(reconciled.token.revoked_at.is_some());
-        assert_eq!(reconciled.balance.frozen_amount_cents, 0);
-        assert_eq!(reconciled.balance.remaining_amount_cents, 10_000);
+        assert_eq!(reconciled.balance.frozen_amount, cents(0));
+        assert_eq!(reconciled.balance.remaining_amount, cents(10_000));
     }
 
     #[test]
@@ -7654,8 +7699,8 @@ mod tests {
         ));
         assert!(released.token.revoked_at.is_some());
         assert!(matches!(released.hold.status, BudgetHoldStatus::Released));
-        assert_eq!(released.balance.frozen_amount_cents, 0);
-        assert_eq!(released.balance.remaining_amount_cents, 10_000);
+        assert_eq!(released.balance.frozen_amount, cents(0));
+        assert_eq!(released.balance.remaining_amount, cents(10_000));
         assert_eq!(
             persisted_budget_administrative_row(&repo, &hold.budget_id),
             administrative_before
@@ -7670,7 +7715,7 @@ mod tests {
             )
             .unwrap();
         assert!(replay.idempotent_replay);
-        assert_eq!(replay.balance.remaining_amount_cents, 10_000);
+        assert_eq!(replay.balance.remaining_amount, cents(10_000));
         assert_eq!(
             persisted_budget_administrative_row(&repo, &hold.budget_id),
             administrative_before
@@ -7799,7 +7844,10 @@ mod tests {
             .map(|(index, mut repo)| {
                 let barrier = Arc::clone(&barrier);
                 let mut corrected = initial_request.clone();
-                corrected.amount_cents += index as i64 + 1;
+                corrected.amount = corrected
+                    .amount
+                    .checked_add(cents(index as i64 + 1))
+                    .unwrap();
                 std::thread::spawn(move || {
                     barrier.wait();
                     repo.admit_spend_attempt(
@@ -7855,7 +7903,7 @@ mod tests {
         let mut repo = SqliteGovernanceRepository::open(&path).unwrap();
         let mut request = spend_request();
         for revision in 1..=2 {
-            request.amount_cents += 1;
+            request.amount = request.amount.checked_add(cents(1)).unwrap();
             assert_eq!(
                 repo.admit_spend_attempt(
                     &user_id(),
@@ -7944,7 +7992,7 @@ mod tests {
             SpendAttemptAdmission::ExactReplay { revision: 1 }
         );
         let mut changed = legacy.request.clone();
-        changed.amount_cents += 1;
+        changed.amount = changed.amount.checked_add(cents(1)).unwrap();
         assert_eq!(
             repo.admit_spend_attempt(
                 &legacy.owner_user_id,
@@ -8233,7 +8281,7 @@ mod tests {
             budget_update_request_fingerprint(
                 &created.budget.id,
                 1,
-                15_000,
+                cents(15_000),
                 &user_id().to_string(),
                 "test:budget-update",
                 Some("adjust total allocation"),
@@ -8341,7 +8389,7 @@ mod tests {
             .append_budget_version(&AppendBudgetVersionRequest {
                 budget_id: request.budget_id.clone(),
                 expected_revision: request.expected_revision,
-                amount_limit_cents: request.amount_limit_cents,
+                amount_limit: request.amount_limit,
                 actor: request.actor.clone(),
                 source: request.source.clone().unwrap(),
                 reason: request.reason.clone(),
@@ -8384,8 +8432,8 @@ mod tests {
                 .get_budget_by_id(&created.budget.id)
                 .unwrap()
                 .balance
-                .remaining_amount_cents,
-            15_000
+                .remaining_amount,
+            cents(15_000)
         );
 
         let repeated = BudgetCoordinator::update_limit(
@@ -8487,14 +8535,16 @@ mod tests {
             .reserve_budget(ReserveBudgetRequest {
                 budget_id: created.budget.id.clone(),
                 spend_decision_id: decisions[0].id.clone(),
-                amount_cents: 4_000,
+                amount: cents(4_000),
                 currency: Currency::Usd,
                 expires_at: Utc::now() + Duration::hours(1),
             })
             .unwrap();
         repo.save_budget_hold(&consumed_hold.hold, &consumed_hold.balance)
             .unwrap();
-        let consumed = manager.settle_budget(&consumed_hold.hold.id).unwrap();
+        let consumed = manager
+            .settle_budget(&consumed_hold.hold.id, consumed_hold.hold.amount)
+            .unwrap();
         repo.update_budget_hold(&consumed.hold, &consumed.balance)
             .unwrap();
 
@@ -8502,7 +8552,7 @@ mod tests {
             .reserve_budget(ReserveBudgetRequest {
                 budget_id: created.budget.id.clone(),
                 spend_decision_id: decisions[1].id.clone(),
-                amount_cents: 1_500,
+                amount: cents(1_500),
                 currency: Currency::Usd,
                 expires_at: Utc::now() + Duration::hours(1),
             })
@@ -8513,7 +8563,7 @@ mod tests {
             .reserve_budget(ReserveBudgetRequest {
                 budget_id: created.budget.id.clone(),
                 spend_decision_id: decisions[2].id.clone(),
-                amount_cents: 1_500,
+                amount: cents(1_500),
                 currency: Currency::Usd,
                 expires_at: Utc::now() + Duration::hours(1),
             })
@@ -8531,9 +8581,9 @@ mod tests {
         assert!(matches!(
             below_floor,
             crate::budget::BudgetLimitUpdateError::Append(BudgetUpdateError::LimitBelowCommitted {
-                requested_amount_cents: 6_999,
-                committed_amount_cents: 7_000
-            })
+                requested_amount,
+                committed_amount,
+            }) if requested_amount == cents(6_999) && committed_amount == cents(7_000)
         ));
         let at_floor = BudgetCoordinator::update_limit(
             budget_update_request(created.budget.id.clone(), 1, 7_000),
@@ -8542,7 +8592,7 @@ mod tests {
             &mut repo,
         )
         .unwrap();
-        assert_eq!(at_floor.current.balance.remaining_amount_cents, 0);
+        assert_eq!(at_floor.current.balance.remaining_amount, cents(0));
         assert_eq!(
             at_floor.current.availability_at(Utc::now()).unwrap(),
             BudgetAvailability::Exhausted
@@ -8555,13 +8605,15 @@ mod tests {
             &mut repo,
         )
         .unwrap();
-        assert_eq!(increased.current.balance.remaining_amount_cents, 1_000);
+        assert_eq!(increased.current.balance.remaining_amount, cents(1_000));
         assert_eq!(
             increased.current.availability_at(Utc::now()).unwrap(),
             BudgetAvailability::Active
         );
 
-        let settled = manager.settle_budget(&first_frozen.hold.id).unwrap();
+        let settled = manager
+            .settle_budget(&first_frozen.hold.id, first_frozen.hold.amount)
+            .unwrap();
         repo.update_budget_hold(&settled.hold, &settled.balance)
             .unwrap();
         let released = manager.release_budget(&second_frozen.hold.id).unwrap();
@@ -8571,9 +8623,9 @@ mod tests {
         assert_eq!(released.hold.budget_version_id, created.version.id);
         let final_state = manager.get_budget_by_id(&created.budget.id).unwrap();
         assert_eq!(final_state.version.id, increased.applied_version.id);
-        assert_eq!(final_state.balance.consumed_amount_cents, 5_500);
-        assert_eq!(final_state.balance.frozen_amount_cents, 0);
-        assert_eq!(final_state.balance.remaining_amount_cents, 2_500);
+        assert_eq!(final_state.balance.consumed_amount, cents(5_500));
+        assert_eq!(final_state.balance.frozen_amount, cents(0));
+        assert_eq!(final_state.balance.remaining_amount, cents(2_500));
 
         let mut new_decision = spend_decision();
         new_decision.operation_key = "budget-update-current-version-hold".to_string();
@@ -8584,7 +8636,7 @@ mod tests {
             budget_id: created.budget.id.clone(),
             budget_version_id: created.version.id.clone(),
             spend_decision_id: new_decision.id.clone(),
-            amount_cents: 500,
+            amount: cents(500),
             currency: Currency::Usd,
             status: BudgetHoldStatus::Frozen,
             executor_claim_id: None,
@@ -8594,9 +8646,9 @@ mod tests {
         };
         let historical_new_balance = BudgetBalance {
             budget_id: created.budget.id.clone(),
-            consumed_amount_cents: 5_500,
-            frozen_amount_cents: 500,
-            remaining_amount_cents: 2_000,
+            consumed_amount: cents(5_500),
+            frozen_amount: cents(500),
+            remaining_amount: cents(2_000),
         };
         let historical_error = repo
             .save_budget_hold(&historical_new_hold, &historical_new_balance)
@@ -8609,7 +8661,7 @@ mod tests {
             .reserve_budget(ReserveBudgetRequest {
                 budget_id: created.budget.id.clone(),
                 spend_decision_id: new_decision.id,
-                amount_cents: 500,
+                amount: cents(500),
                 currency: Currency::Usd,
                 expires_at: now + Duration::hours(1),
             })
@@ -8668,7 +8720,7 @@ mod tests {
             .create_single_budget_in_memory(
                 CreateSingleBudgetRequest {
                     agent_id: agent_id(),
-                    amount_limit_cents: 10_000,
+                    amount_limit: cents(10_000),
                     currency: Currency::Usd,
                     period: TimePeriod::new(
                         now + Duration::hours(1),
@@ -8709,7 +8761,7 @@ mod tests {
             .create_single_budget_in_memory(
                 CreateSingleBudgetRequest {
                     agent_id: agent_id(),
-                    amount_limit_cents: 10_000,
+                    amount_limit: cents(10_000),
                     currency: Currency::Usd,
                     period: TimePeriod::new(now, Some(now + Duration::minutes(1))).unwrap(),
                 },
@@ -8798,7 +8850,7 @@ mod tests {
         let same_request = AppendBudgetVersionRequest {
             budget_id: same_budget_id.clone(),
             expected_revision: 1,
-            amount_limit_cents: 15_000,
+            amount_limit: cents(15_000),
             actor: user_id().to_string(),
             source: "test:concurrent".to_string(),
             reason: Some("same edge".to_string()),
@@ -8852,13 +8904,13 @@ mod tests {
         let barrier = Arc::new(Barrier::new(3));
         let handles = [15_000, 16_000]
             .into_iter()
-            .map(|amount_limit_cents| {
+            .map(|amount_limit| {
                 let mut repo = SqliteGovernanceRepository::open(&changed_path).unwrap();
                 let barrier = Arc::clone(&barrier);
                 let request = AppendBudgetVersionRequest {
                     budget_id: changed_budget_id.clone(),
                     expected_revision: 1,
-                    amount_limit_cents,
+                    amount_limit: cents(amount_limit),
                     actor: user_id().to_string(),
                     source: "test:concurrent".to_string(),
                     reason: Some("changed edge".to_string()),
@@ -8953,14 +9005,14 @@ mod tests {
             assert!(error.to_string().contains(message));
             let manager_snapshot = manager.get_budget_by_id(&created.budget.id).unwrap();
             assert_eq!(manager_snapshot.version.id, created.version.id);
-            assert_eq!(manager_snapshot.version.amount_limit_cents, 10_000);
+            assert_eq!(manager_snapshot.version.amount_limit, cents(10_000));
             assert_eq!(
                 manager_snapshot.budget.administrative_state,
                 BudgetAdministrativeState::Active
             );
-            assert_eq!(manager_snapshot.balance.consumed_amount_cents, 0);
-            assert_eq!(manager_snapshot.balance.frozen_amount_cents, 0);
-            assert_eq!(manager_snapshot.balance.remaining_amount_cents, 10_000);
+            assert_eq!(manager_snapshot.balance.consumed_amount, cents(0));
+            assert_eq!(manager_snapshot.balance.frozen_amount, cents(0));
+            assert_eq!(manager_snapshot.balance.remaining_amount, cents(10_000));
             assert_eq!(repo.load_budget_versions().unwrap().len(), 1);
             let persisted_budget = &repo.load_budgets().unwrap()[0];
             assert_eq!(persisted_budget.current_version_id, created.version.id);
@@ -8970,9 +9022,9 @@ mod tests {
             );
             assert_eq!(persisted_budget.updated_at, created.budget.updated_at);
             let persisted_balance = &repo.load_budget_balances().unwrap()[0];
-            assert_eq!(persisted_balance.consumed_amount_cents, 0);
-            assert_eq!(persisted_balance.frozen_amount_cents, 0);
-            assert_eq!(persisted_balance.remaining_amount_cents, 10_000);
+            assert_eq!(persisted_balance.consumed_amount, cents(0));
+            assert_eq!(persisted_balance.frozen_amount, cents(0));
+            assert_eq!(persisted_balance.remaining_amount, cents(10_000));
             repo.conn
                 .execute_batch(&format!("DROP TRIGGER {trigger_name};"))
                 .unwrap();
@@ -9004,22 +9056,22 @@ mod tests {
         let budget_version = initial_budget_version(&budget, 10_000);
         let reserved_balance = BudgetBalance {
             budget_id: budget.id.clone(),
-            consumed_amount_cents: 0,
-            frozen_amount_cents: 2_500,
-            remaining_amount_cents: 7_500,
+            consumed_amount: cents(0),
+            frozen_amount: cents(2_500),
+            remaining_amount: cents(7_500),
         };
         let initial_balance = BudgetBalance {
             budget_id: budget.id.clone(),
-            consumed_amount_cents: 0,
-            frozen_amount_cents: 0,
-            remaining_amount_cents: 10_000,
+            consumed_amount: cents(0),
+            frozen_amount: cents(0),
+            remaining_amount: cents(10_000),
         };
         let hold = BudgetHold {
             id: BudgetHoldId::new(),
             budget_id: budget.id.clone(),
             budget_version_id: budget_version.id.clone(),
             spend_decision_id: decision.id,
-            amount_cents: 2_500,
+            amount: cents(2_500),
             currency: Currency::Usd,
             status: BudgetHoldStatus::Frozen,
             executor_claim_id: None,
@@ -9041,8 +9093,8 @@ mod tests {
         let reloaded_hold = repo.load_budget_holds().unwrap().pop().unwrap();
         let reloaded_balance = repo.load_budget_balances().unwrap().pop().unwrap();
         assert!(matches!(reloaded_hold.status, BudgetHoldStatus::Expired));
-        assert_eq!(reloaded_balance.frozen_amount_cents, 0);
-        assert_eq!(reloaded_balance.remaining_amount_cents, 10_000);
+        assert_eq!(reloaded_balance.frozen_amount, cents(0));
+        assert_eq!(reloaded_balance.remaining_amount, cents(10_000));
         assert_eq!(
             persisted_budget_administrative_row(&repo, &budget.id),
             administrative_before
@@ -9115,7 +9167,7 @@ mod tests {
                 ReserveBudgetRequest {
                     budget_id: first.id.clone(),
                     spend_decision_id: decision.id,
-                    amount_cents: 2_500,
+                    amount: cents(2_500),
                     currency: Currency::Usd,
                     expires_at: second.period.starting_at,
                 },
@@ -9150,9 +9202,11 @@ mod tests {
                 .unwrap(),
             Some(second.id.clone())
         );
-        let settled = restarted.settle_budget(&reserved.hold.id).unwrap();
+        let settled = restarted
+            .settle_budget(&reserved.hold.id, reserved.hold.amount)
+            .unwrap();
         assert_eq!(settled.hold.budget_version_id, first.current_version_id);
-        assert_eq!(settled.balance.consumed_amount_cents, 2_500);
+        assert_eq!(settled.balance.consumed_amount, cents(2_500));
         repo.update_budget_hold(&settled.hold, &settled.balance)
             .unwrap();
         let revoked = restarted
@@ -9161,7 +9215,7 @@ mod tests {
         repo.save_budget_with_balance(&revoked.budget, &revoked.version, &revoked.balance)
             .unwrap();
         let untouched = restarted.get_budget_by_id(&second.id).unwrap();
-        assert_eq!(untouched.balance.remaining_amount_cents, 10_000);
+        assert_eq!(untouched.balance.remaining_amount, cents(10_000));
         assert_eq!(
             untouched.budget.administrative_state,
             BudgetAdministrativeState::Active
@@ -9206,7 +9260,7 @@ mod tests {
             .create_single_budget_in_memory(
                 CreateSingleBudgetRequest {
                     agent_id: decision.request.agent_id.clone(),
-                    amount_limit_cents: 10_000,
+                    amount_limit: cents(10_000),
                     currency: Currency::Usd,
                     period: TimePeriod::new(
                         Utc::now() - Duration::hours(1),
@@ -9223,7 +9277,7 @@ mod tests {
             .reserve_budget(ReserveBudgetRequest {
                 budget_id: created.budget.id.clone(),
                 spend_decision_id: decision.id,
-                amount_cents: 2_500,
+                amount: cents(2_500),
                 currency: Currency::Usd,
                 expires_at: Utc::now() + Duration::minutes(5),
             })
@@ -9248,14 +9302,16 @@ mod tests {
         assert_eq!(loaded_hold.budget_id, created.budget.id);
         assert_eq!(loaded_hold.budget_version_id, created.version.id);
 
-        let settled = restarted.settle_budget(&reserved.hold.id).unwrap();
+        let settled = restarted
+            .settle_budget(&reserved.hold.id, reserved.hold.amount)
+            .unwrap();
         repo.update_budget_hold(&settled.hold, &settled.balance)
             .unwrap();
         let reloaded_balance = repo.load_budget_balances().unwrap().pop().unwrap();
         let reloaded_hold = repo.load_budget_holds().unwrap().pop().unwrap();
-        assert_eq!(reloaded_balance.consumed_amount_cents, 2_500);
-        assert_eq!(reloaded_balance.frozen_amount_cents, 0);
-        assert_eq!(reloaded_balance.remaining_amount_cents, 7_500);
+        assert_eq!(reloaded_balance.consumed_amount, cents(2_500));
+        assert_eq!(reloaded_balance.frozen_amount, cents(0));
+        assert_eq!(reloaded_balance.remaining_amount, cents(7_500));
         assert_eq!(reloaded_hold.budget_version_id, created.version.id);
         assert!(matches!(reloaded_hold.status, BudgetHoldStatus::Settled));
     }
@@ -9275,7 +9331,7 @@ mod tests {
             .create_single_budget_in_memory(
                 CreateSingleBudgetRequest {
                     agent_id: agent_id(),
-                    amount_limit_cents: 1_000,
+                    amount_limit: cents(1_000),
                     currency: Currency::Usd,
                     period: TimePeriod::new(
                         now - Duration::hours(1),
@@ -9293,7 +9349,7 @@ mod tests {
                 ReserveBudgetRequest {
                     budget_id: created.budget.id.clone(),
                     spend_decision_id: decision.id,
-                    amount_cents: 1_000,
+                    amount: cents(1_000),
                     currency: Currency::Usd,
                     expires_at: now + Duration::minutes(30),
                 },
@@ -9361,7 +9417,7 @@ mod tests {
             .create_single_budget_in_memory(
                 CreateSingleBudgetRequest {
                     agent_id: agent_id(),
-                    amount_limit_cents: 1_000,
+                    amount_limit: cents(1_000),
                     currency: Currency::Usd,
                     period: TimePeriod::new(
                         now - Duration::hours(1),
@@ -9382,7 +9438,7 @@ mod tests {
                 ReserveBudgetRequest {
                     budget_id: created.budget.id.clone(),
                     spend_decision_id: decision.id,
-                    amount_cents: 400,
+                    amount: cents(400),
                     currency: Currency::Usd,
                     expires_at: now + Duration::hours(1),
                 },
@@ -9398,6 +9454,7 @@ mod tests {
             .unwrap();
         let administrative_before = persisted_budget_administrative_row(&repo, &created.budget.id);
         let hold_id = reserved.hold.id;
+        let hold_amount = reserved.hold.amount;
         drop(repo);
 
         let mut reopened = SqliteGovernanceRepository::open(&path).unwrap();
@@ -9417,13 +9474,13 @@ mod tests {
             BudgetAvailability::Revoked
         );
         let settled = restarted
-            .settle_budget(&hold_id)
+            .settle_budget(&hold_id, hold_amount)
             .expect("a pre-revocation hold must settle after restart");
         reopened
             .update_budget_hold(&settled.hold, &settled.balance)
             .unwrap();
-        assert_eq!(settled.balance.consumed_amount_cents, 400);
-        assert_eq!(settled.balance.frozen_amount_cents, 0);
+        assert_eq!(settled.balance.consumed_amount, cents(400));
+        assert_eq!(settled.balance.frozen_amount, cents(0));
         assert_eq!(
             persisted_budget_administrative_row(&reopened, &created.budget.id),
             administrative_before
@@ -9441,7 +9498,7 @@ mod tests {
         let first = manager
             .create_single_budget(CreateSingleBudgetRequest {
                 agent_id: AgentId::new(),
-                amount_limit_cents: 10_000,
+                amount_limit: cents(10_000),
                 currency: Currency::Usd,
                 period: TimePeriod::new(
                     Utc::now() - Duration::hours(1),
@@ -9453,7 +9510,7 @@ mod tests {
         let second = manager
             .create_single_budget(CreateSingleBudgetRequest {
                 agent_id: AgentId::new(),
-                amount_limit_cents: 20_000,
+                amount_limit: cents(20_000),
                 currency: Currency::Usd,
                 period: TimePeriod::new(
                     Utc::now() - Duration::hours(1),
@@ -9555,7 +9612,7 @@ mod tests {
         let target = SpendingTarget {
             id: SpendingTargetId::new(),
             owner_user_id: user_id(),
-            target_amount_cents: 25_000,
+            target_amount: cents(25_000),
             currency: Currency::Usd,
             period: TimePeriod::new(now, Some(now + Duration::days(30))).unwrap(),
             status: SpendingTargetStatus::Active,
@@ -9568,7 +9625,7 @@ mod tests {
         let targets = repo.load_spending_targets().unwrap();
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].id, target.id);
-        assert_eq!(targets[0].target_amount_cents, 25_000);
+        assert_eq!(targets[0].target_amount, cents(25_000));
         assert!(repo.load_budgets().unwrap().is_empty());
     }
 
@@ -9905,7 +9962,7 @@ mod tests {
         let targets = repo.load_spending_targets().unwrap();
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].id.to_string(), legacy_cap_id.to_string());
-        assert_eq!(targets[0].target_amount_cents, 10_000);
+        assert_eq!(targets[0].target_amount, cents(10_000));
         assert_eq!(targets[0].status, SpendingTargetStatus::Active);
         let budgets = repo.load_budgets().unwrap();
         assert_eq!(budgets.len(), 1);
@@ -9956,3 +10013,7 @@ mod accounting_tests;
 #[cfg(test)]
 #[path = "persistence/accounting_scale_tests.rs"]
 mod accounting_scale_tests;
+
+#[cfg(test)]
+#[path = "persistence/sub_cent_tests.rs"]
+mod sub_cent_tests;

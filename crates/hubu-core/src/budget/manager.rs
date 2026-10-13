@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use hubu_common::ids::{AgentId, BudgetHoldId, BudgetId, SpendDecisionId, SpendExecutorClaimId};
-use hubu_common::money::Currency;
+use hubu_common::money::{Amount, Currency};
 
 use super::state::BudgetState;
 use crate::budget::dto::{
@@ -193,12 +193,14 @@ impl BudgetManager {
         self.state.claim_budget(hold_id, claim_id, expires_at)
     }
 
-    /// Settle a frozen budget hold after payment succeeds.
+    /// Settle a frozen budget hold after payment succeeds, consuming what
+    /// the rail actually charged and releasing the remainder.
     pub fn settle_budget(
         &mut self,
         hold_id: &BudgetHoldId,
+        charged: Amount,
     ) -> Result<SettleBudgetResponse, BudgetManagerError> {
-        self.state.settle_budget(hold_id)
+        self.state.settle_budget(hold_id, charged)
     }
 
     /// Release a frozen budget hold back into remaining budget.
@@ -297,6 +299,7 @@ impl Default for BudgetManager {
 
 #[cfg(test)]
 mod tests {
+    use crate::test_money::cents;
     use chrono::Duration;
     use chrono::TimeZone;
 
@@ -340,7 +343,7 @@ mod tests {
     // through the supported facade without exposing private construction helpers.
     fn create_isolated_budget(
         agent_id: AgentId,
-        amount_limit_cents: i64,
+        amount_limit: i64,
         currency: Currency,
         period: TimePeriod,
         provenance: &BudgetVersionProvenance,
@@ -348,7 +351,7 @@ mod tests {
         let created = BudgetManager::new().create_single_budget_in_memory(
             CreateSingleBudgetRequest {
                 agent_id,
-                amount_limit_cents,
+                amount_limit: cents(amount_limit),
                 currency,
                 period,
             },
@@ -361,11 +364,11 @@ mod tests {
         })
     }
 
-    fn create_agent_budget(manager: &mut BudgetManager, amount_cents: i64) -> BudgetWithBalance {
+    fn create_agent_budget(manager: &mut BudgetManager, amount: i64) -> BudgetWithBalance {
         let response = manager
             .create_single_budget(CreateSingleBudgetRequest {
                 agent_id: AgentId::new(),
-                amount_limit_cents: amount_cents,
+                amount_limit: cents(amount),
                 currency: Currency::Usd,
                 period: active_period(),
             })
@@ -388,14 +391,14 @@ mod tests {
         assert_eq!(created.version.budget_id, created.budget.id);
         assert_eq!(created.version.revision, 1);
         assert!(created.version.predecessor_version_id.is_none());
-        assert_eq!(created.version.amount_limit_cents, 10_000);
+        assert_eq!(created.version.amount_limit, cents(10_000));
         assert!(!created.version.actor.is_empty());
         assert!(!created.version.source.is_empty());
         assert!(created.version.request_fingerprint.starts_with("sha256:"));
         assert_eq!(created.balance.budget_id, created.budget.id);
-        assert_eq!(created.balance.consumed_amount_cents, 0);
-        assert_eq!(created.balance.frozen_amount_cents, 0);
-        assert_eq!(created.balance.remaining_amount_cents, 10_000);
+        assert_eq!(created.balance.consumed_amount, cents(0));
+        assert_eq!(created.balance.frozen_amount, cents(0));
+        assert_eq!(created.balance.remaining_amount, cents(10_000));
         assert!(manager.get_budget_by_id(&created.budget.id).is_some());
     }
 
@@ -408,7 +411,7 @@ mod tests {
             budget_id: created.budget.id.clone(),
             revision: 2,
             predecessor_version_id: Some(created.version.id.clone()),
-            amount_limit_cents: 20_000,
+            amount_limit: cents(20_000),
             effective_at: Utc::now(),
             actor: "test:budget-owner".to_string(),
             source: "manager-hydration-test".to_string(),
@@ -420,9 +423,9 @@ mod tests {
         logical_budget.current_version_id = second_version.id.clone();
         let balance = BudgetBalance {
             budget_id: logical_budget.id.clone(),
-            consumed_amount_cents: 0,
-            frozen_amount_cents: 0,
-            remaining_amount_cents: 20_000,
+            consumed_amount: cents(0),
+            frozen_amount: cents(0),
+            remaining_amount: cents(20_000),
         };
 
         let mut hydrated = BudgetManager::from_records(
@@ -441,7 +444,7 @@ mod tests {
             .reserve_budget(ReserveBudgetRequest {
                 budget_id: logical_budget.id,
                 spend_decision_id: SpendDecisionId::new(),
-                amount_cents: 15_000,
+                amount: cents(15_000),
                 currency: Currency::Usd,
                 expires_at: Utc::now() + Duration::minutes(5),
             })
@@ -459,7 +462,7 @@ mod tests {
             budget_id: created.budget.id.clone(),
             revision: 2,
             predecessor_version_id: Some(created.version.id.clone()),
-            amount_limit_cents: 20_000,
+            amount_limit: cents(20_000),
             effective_at: Utc::now(),
             actor: "test:budget-owner".to_string(),
             source: "manager-history-test".to_string(),
@@ -482,9 +485,9 @@ mod tests {
                 unrelated.balance,
                 BudgetBalance {
                     budget_id: logical_budget_id.clone(),
-                    consumed_amount_cents: 0,
-                    frozen_amount_cents: 0,
-                    remaining_amount_cents: 20_000,
+                    consumed_amount: cents(0),
+                    frozen_amount: cents(0),
+                    remaining_amount: cents(20_000),
                 },
             ],
             vec![],
@@ -511,9 +514,9 @@ mod tests {
         let created = create_agent_budget(&mut manager, 10_000);
         let invalid_balance = BudgetBalance {
             budget_id: created.budget.id.clone(),
-            consumed_amount_cents: 1_000,
-            frozen_amount_cents: 0,
-            remaining_amount_cents: 10_000,
+            consumed_amount: cents(1_000),
+            frozen_amount: cents(0),
+            remaining_amount: cents(10_000),
         };
 
         let error = BudgetManager::from_records(
@@ -667,7 +670,7 @@ mod tests {
             .reserve_budget(ReserveBudgetRequest {
                 budget_id: created.budget.id.clone(),
                 spend_decision_id: SpendDecisionId::new(),
-                amount_cents: 1_000,
+                amount: cents(1_000),
                 currency: Currency::Usd,
                 expires_at: Utc::now() + Duration::minutes(5),
             })
@@ -682,9 +685,9 @@ mod tests {
         );
 
         let settled = manager
-            .settle_budget(&reservation.hold.id)
+            .settle_budget(&reservation.hold.id, reservation.hold.amount)
             .expect("the outstanding hold should still settle");
-        assert_eq!(settled.balance.consumed_amount_cents, 1_000);
+        assert_eq!(settled.balance.consumed_amount, cents(1_000));
         assert_eq!(
             manager
                 .get_evaluated_budget_by_id(&created.budget.id, Utc::now())
@@ -702,7 +705,7 @@ mod tests {
         let created = manager
             .create_single_budget(CreateSingleBudgetRequest {
                 agent_id: agent_id.clone(),
-                amount_limit_cents: 10_000,
+                amount_limit: cents(10_000),
                 currency: Currency::Usd,
                 period: period(2026, 6, 1, 2026, 7, 1),
             })
@@ -714,7 +717,7 @@ mod tests {
         manager
             .create_single_budget(CreateSingleBudgetRequest {
                 agent_id,
-                amount_limit_cents: 20_000,
+                amount_limit: cents(20_000),
                 currency: Currency::Usd,
                 period: period(2026, 6, 15, 2026, 7, 1),
             })
@@ -730,7 +733,7 @@ mod tests {
         let scheduled = scheduled_manager
             .create_single_budget(CreateSingleBudgetRequest {
                 agent_id: AgentId::new(),
-                amount_limit_cents: 1_000,
+                amount_limit: cents(1_000),
                 currency: Currency::Usd,
                 period: TimePeriod::new(start, Some(end)).unwrap(),
             })
@@ -738,7 +741,7 @@ mod tests {
         let request = |budget_id| ReserveBudgetRequest {
             budget_id,
             spend_decision_id: SpendDecisionId::new(),
-            amount_cents: 100,
+            amount: cents(100),
             currency: Currency::Usd,
             expires_at: end + Duration::hours(1),
         };
@@ -766,11 +769,11 @@ mod tests {
         let remaining = scheduled_manager
             .get_budget_balance(&scheduled.budget.id)
             .unwrap()
-            .remaining_amount_cents;
+            .remaining_amount;
         scheduled_manager
             .reserve_budget_at(
                 ReserveBudgetRequest {
-                    amount_cents: remaining,
+                    amount: remaining,
                     ..request(scheduled.budget.id.clone())
                 },
                 start + Duration::minutes(1),
@@ -807,7 +810,7 @@ mod tests {
                 manager
                     .create_single_budget(CreateSingleBudgetRequest {
                         agent_id: agent_id.clone(),
-                        amount_limit_cents: 1_000,
+                        amount_limit: cents(1_000),
                         currency: Currency::Usd,
                         period: TimePeriod::new(
                             timestamp() + Duration::days(day),
@@ -846,7 +849,7 @@ mod tests {
         let created = manager
             .create_single_budget(CreateSingleBudgetRequest {
                 agent_id: AgentId::new(),
-                amount_limit_cents: 1_000,
+                amount_limit: cents(1_000),
                 currency: Currency::Usd,
                 period: TimePeriod::new(start, Some(end)).unwrap(),
             })
@@ -857,7 +860,7 @@ mod tests {
                 ReserveBudgetRequest {
                     budget_id: created.budget.id.clone(),
                     spend_decision_id: SpendDecisionId::new(),
-                    amount_cents: 400,
+                    amount: cents(400),
                     currency: Currency::Usd,
                     expires_at: end + Duration::minutes(1),
                 },
@@ -879,7 +882,7 @@ mod tests {
                 ReserveBudgetRequest {
                     budget_id: created.budget.id.clone(),
                     spend_decision_id: SpendDecisionId::new(),
-                    amount_cents: 400,
+                    amount: cents(400),
                     currency: Currency::Usd,
                     expires_at: end,
                 },
@@ -904,7 +907,7 @@ mod tests {
         manager
             .create_single_budget(CreateSingleBudgetRequest {
                 agent_id: agent_id.clone(),
-                amount_limit_cents: 10_000,
+                amount_limit: cents(10_000),
                 currency: Currency::Usd,
                 period: period(2026, 6, 1, 2026, 7, 1),
             })
@@ -913,7 +916,7 @@ mod tests {
         let error = manager
             .create_single_budget(CreateSingleBudgetRequest {
                 agent_id,
-                amount_limit_cents: 10_000,
+                amount_limit: cents(10_000),
                 currency: Currency::Usd,
                 period: period(2026, 6, 15, 2026, 7, 15),
             })
@@ -930,7 +933,7 @@ mod tests {
         manager
             .create_single_budget(CreateSingleBudgetRequest {
                 agent_id: agent_id.clone(),
-                amount_limit_cents: 10_000,
+                amount_limit: cents(10_000),
                 currency: Currency::Usd,
                 period: period(2026, 6, 1, 2026, 7, 1),
             })
@@ -939,7 +942,7 @@ mod tests {
         manager
             .create_single_budget(CreateSingleBudgetRequest {
                 agent_id,
-                amount_limit_cents: 10_000,
+                amount_limit: cents(10_000),
                 currency: Currency::Usd,
                 period: period(2026, 7, 1, 2026, 8, 1),
             })
@@ -956,7 +959,7 @@ mod tests {
         manager
             .create_single_budget(CreateSingleBudgetRequest {
                 agent_id: agent_id.clone(),
-                amount_limit_cents: 10_000,
+                amount_limit: cents(10_000),
                 currency: Currency::Usd,
                 period: open_ended_period,
             })
@@ -965,7 +968,7 @@ mod tests {
         let error = manager
             .create_single_budget(CreateSingleBudgetRequest {
                 agent_id,
-                amount_limit_cents: 10_000,
+                amount_limit: cents(10_000),
                 currency: Currency::Usd,
                 period: period(2026, 7, 1, 2026, 8, 1),
             })
@@ -983,7 +986,7 @@ mod tests {
             .reserve_budget(ReserveBudgetRequest {
                 budget_id: created.budget.id,
                 spend_decision_id: SpendDecisionId::new(),
-                amount_cents: 3_000,
+                amount: cents(3_000),
                 currency: Currency::Usd,
                 expires_at: Utc::now() + Duration::minutes(5),
             })
@@ -991,9 +994,9 @@ mod tests {
 
         assert!(matches!(response.hold.status, BudgetHoldStatus::Frozen));
         assert_eq!(response.hold.budget_version_id, created.version.id);
-        assert_eq!(response.balance.frozen_amount_cents, 3_000);
-        assert_eq!(response.balance.remaining_amount_cents, 7_000);
-        assert_eq!(response.balance.consumed_amount_cents, 0);
+        assert_eq!(response.balance.frozen_amount, cents(3_000));
+        assert_eq!(response.balance.remaining_amount, cents(7_000));
+        assert_eq!(response.balance.consumed_amount, cents(0));
     }
 
     #[test]
@@ -1005,7 +1008,7 @@ mod tests {
             .reserve_budget(ReserveBudgetRequest {
                 budget_id: created.budget.id,
                 spend_decision_id: SpendDecisionId::new(),
-                amount_cents: 3_000,
+                amount: cents(3_000),
                 currency: Currency::Usd,
                 expires_at: authorization_expires_at,
             })
@@ -1045,7 +1048,7 @@ mod tests {
             .reserve_budget(ReserveBudgetRequest {
                 budget_id: created.budget.id.clone(),
                 spend_decision_id: spend_decision_id.clone(),
-                amount_cents: 3_000,
+                amount: cents(3_000),
                 currency: Currency::Usd,
                 expires_at: Utc::now() + Duration::minutes(5),
             })
@@ -1055,7 +1058,7 @@ mod tests {
             .reserve_budget(ReserveBudgetRequest {
                 budget_id: created.budget.id,
                 spend_decision_id,
-                amount_cents: 3_000,
+                amount: cents(3_000),
                 currency: Currency::Usd,
                 expires_at: Utc::now() + Duration::minutes(5),
             })
@@ -1076,7 +1079,7 @@ mod tests {
             .reserve_budget(ReserveBudgetRequest {
                 budget_id: created.budget.id,
                 spend_decision_id: SpendDecisionId::new(),
-                amount_cents: 10_001,
+                amount: cents(10_001),
                 currency: Currency::Usd,
                 expires_at: Utc::now() + Duration::minutes(5),
             })
@@ -1096,20 +1099,20 @@ mod tests {
             .reserve_budget(ReserveBudgetRequest {
                 budget_id: created.budget.id,
                 spend_decision_id: SpendDecisionId::new(),
-                amount_cents: 3_000,
+                amount: cents(3_000),
                 currency: Currency::Usd,
                 expires_at: Utc::now() + Duration::minutes(5),
             })
             .expect("budget should be reserved");
 
         let response = manager
-            .settle_budget(&reservation.hold.id)
+            .settle_budget(&reservation.hold.id, reservation.hold.amount)
             .expect("hold should settle");
 
         assert!(matches!(response.hold.status, BudgetHoldStatus::Settled));
-        assert_eq!(response.balance.frozen_amount_cents, 0);
-        assert_eq!(response.balance.consumed_amount_cents, 3_000);
-        assert_eq!(response.balance.remaining_amount_cents, 7_000);
+        assert_eq!(response.balance.frozen_amount, cents(0));
+        assert_eq!(response.balance.consumed_amount, cents(3_000));
+        assert_eq!(response.balance.remaining_amount, cents(7_000));
     }
 
     #[test]
@@ -1121,7 +1124,7 @@ mod tests {
             .reserve_budget(ReserveBudgetRequest {
                 budget_id: budget_id.clone(),
                 spend_decision_id: SpendDecisionId::new(),
-                amount_cents: 1_000,
+                amount: cents(1_000),
                 currency: Currency::Usd,
                 expires_at: Utc::now() + Duration::minutes(5),
             })
@@ -1134,11 +1137,11 @@ mod tests {
             reserved.availability_at(Utc::now()).unwrap(),
             BudgetAvailability::Exhausted
         );
-        assert_eq!(reserved.balance.remaining_amount_cents, 0);
-        assert_eq!(reserved.balance.frozen_amount_cents, 1_000);
+        assert_eq!(reserved.balance.remaining_amount, cents(0));
+        assert_eq!(reserved.balance.frozen_amount, cents(1_000));
 
         manager
-            .settle_budget(&reservation.hold.id)
+            .settle_budget(&reservation.hold.id, reservation.hold.amount)
             .expect("hold should settle");
         let settled = manager
             .get_budget_by_id(&budget_id)
@@ -1147,8 +1150,8 @@ mod tests {
             settled.availability_at(Utc::now()).unwrap(),
             BudgetAvailability::Exhausted
         );
-        assert_eq!(settled.balance.remaining_amount_cents, 0);
-        assert_eq!(settled.balance.frozen_amount_cents, 0);
+        assert_eq!(settled.balance.remaining_amount, cents(0));
+        assert_eq!(settled.balance.frozen_amount, cents(0));
     }
 
     #[test]
@@ -1160,7 +1163,7 @@ mod tests {
             .reserve_budget(ReserveBudgetRequest {
                 budget_id: budget_id.clone(),
                 spend_decision_id: SpendDecisionId::new(),
-                amount_cents: 1_000,
+                amount: cents(1_000),
                 currency: Currency::Usd,
                 expires_at: Utc::now() + Duration::minutes(5),
             })
@@ -1176,8 +1179,8 @@ mod tests {
             released.availability_at(Utc::now()).unwrap(),
             BudgetAvailability::Active
         );
-        assert_eq!(released.balance.remaining_amount_cents, 1_000);
-        assert_eq!(released.balance.frozen_amount_cents, 0);
+        assert_eq!(released.balance.remaining_amount, cents(1_000));
+        assert_eq!(released.balance.frozen_amount, cents(0));
     }
 
     #[test]
@@ -1187,7 +1190,7 @@ mod tests {
         let created = manager
             .create_single_budget(CreateSingleBudgetRequest {
                 agent_id: agent_id.clone(),
-                amount_limit_cents: 1_000,
+                amount_limit: cents(1_000),
                 currency: Currency::Usd,
                 period: active_period(),
             })
@@ -1196,19 +1199,19 @@ mod tests {
             .reserve_budget(ReserveBudgetRequest {
                 budget_id: created.budget.id.clone(),
                 spend_decision_id: SpendDecisionId::new(),
-                amount_cents: 1_000,
+                amount: cents(1_000),
                 currency: Currency::Usd,
                 expires_at: Utc::now() + Duration::minutes(5),
             })
             .expect("budget should be reserved");
         manager
-            .settle_budget(&reservation.hold.id)
+            .settle_budget(&reservation.hold.id, reservation.hold.amount)
             .expect("hold should settle");
 
         let error = manager
             .create_single_budget(CreateSingleBudgetRequest {
                 agent_id,
-                amount_limit_cents: 2_000,
+                amount_limit: cents(2_000),
                 currency: Currency::Usd,
                 period: active_period(),
             })
@@ -1225,14 +1228,14 @@ mod tests {
             .reserve_budget(ReserveBudgetRequest {
                 budget_id: created.budget.id.clone(),
                 spend_decision_id: SpendDecisionId::new(),
-                amount_cents: 3_000,
+                amount: cents(3_000),
                 currency: Currency::Usd,
                 expires_at: Utc::now() - Duration::minutes(1),
             })
             .expect("budget should be reserved");
 
         let error = manager
-            .settle_budget(&reservation.hold.id)
+            .settle_budget(&reservation.hold.id, reservation.hold.amount)
             .expect_err("expired hold should not settle");
         let balance = manager
             .get_budget_balance(&created.budget.id)
@@ -1243,9 +1246,9 @@ mod tests {
 
         assert!(matches!(error, BudgetManagerError::ExpiredBudgetHold));
         assert!(matches!(hold.status, BudgetHoldStatus::Frozen));
-        assert_eq!(balance.frozen_amount_cents, 3_000);
-        assert_eq!(balance.consumed_amount_cents, 0);
-        assert_eq!(balance.remaining_amount_cents, 7_000);
+        assert_eq!(balance.frozen_amount, cents(3_000));
+        assert_eq!(balance.consumed_amount, cents(0));
+        assert_eq!(balance.remaining_amount, cents(7_000));
     }
 
     #[test]
@@ -1256,7 +1259,7 @@ mod tests {
             .reserve_budget(ReserveBudgetRequest {
                 budget_id: created.budget.id,
                 spend_decision_id: SpendDecisionId::new(),
-                amount_cents: 3_000,
+                amount: cents(3_000),
                 currency: Currency::Usd,
                 expires_at: Utc::now() + Duration::minutes(5),
             })
@@ -1267,9 +1270,9 @@ mod tests {
             .expect("hold should release");
 
         assert!(matches!(response.hold.status, BudgetHoldStatus::Released));
-        assert_eq!(response.balance.frozen_amount_cents, 0);
-        assert_eq!(response.balance.consumed_amount_cents, 0);
-        assert_eq!(response.balance.remaining_amount_cents, 10_000);
+        assert_eq!(response.balance.frozen_amount, cents(0));
+        assert_eq!(response.balance.consumed_amount, cents(0));
+        assert_eq!(response.balance.remaining_amount, cents(10_000));
     }
 
     #[test]
@@ -1280,7 +1283,7 @@ mod tests {
             .reserve_budget(ReserveBudgetRequest {
                 budget_id: created.budget.id.clone(),
                 spend_decision_id: SpendDecisionId::new(),
-                amount_cents: 3_000,
+                amount: cents(3_000),
                 currency: Currency::Usd,
                 expires_at: Utc::now() + Duration::minutes(5),
             })
@@ -1295,10 +1298,10 @@ mod tests {
 
         assert_eq!(expired.len(), 1);
         assert!(matches!(expired[0].hold.status, BudgetHoldStatus::Expired));
-        assert_eq!(expired[0].balance.frozen_amount_cents, 0);
-        assert_eq!(expired[0].balance.remaining_amount_cents, 10_000);
-        assert_eq!(balance.frozen_amount_cents, 0);
-        assert_eq!(balance.consumed_amount_cents, 0);
-        assert_eq!(balance.remaining_amount_cents, 10_000);
+        assert_eq!(expired[0].balance.frozen_amount, cents(0));
+        assert_eq!(expired[0].balance.remaining_amount, cents(10_000));
+        assert_eq!(balance.frozen_amount, cents(0));
+        assert_eq!(balance.consumed_amount, cents(0));
+        assert_eq!(balance.remaining_amount, cents(10_000));
     }
 }

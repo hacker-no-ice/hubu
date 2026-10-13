@@ -243,6 +243,13 @@ impl fmt::Display for Amount {
     }
 }
 
+/// Serializes as the exact decimal string (`"0.005"`), never a float.
+impl Serialize for Amount {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
 impl FromStr for Amount {
     type Err = ParseAmountError;
 
@@ -588,6 +595,14 @@ mod tests {
         ] {
             assert_eq!(Amount::from_units(units).display(), expected, "{units}");
         }
+    }
+
+    #[test]
+    fn amount_serializes_as_an_exact_decimal_string() {
+        assert_eq!(
+            serde_json::to_value(Amount::from_units(5_000)).unwrap(),
+            serde_json::json!("0.005")
+        );
     }
 
     #[test]

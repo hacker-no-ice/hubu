@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use hubu_common::{
     ids::{SpendingTargetId, UserId},
-    money::Currency,
+    money::{Amount, Currency},
     time::TimePeriod,
 };
 
@@ -11,7 +11,7 @@ use hubu_common::{
 pub struct SpendingTarget {
     pub id: SpendingTargetId,
     pub owner_user_id: UserId,
-    pub target_amount_cents: i64,
+    pub target_amount: Amount,
     pub currency: Currency,
     pub period: TimePeriod,
     pub status: SpendingTargetStatus,
@@ -28,7 +28,7 @@ pub enum SpendingTargetStatus {
 #[derive(Debug, Clone)]
 pub struct CreateSpendingTargetRequest {
     pub owner_user_id: UserId,
-    pub target_amount_cents: i64,
+    pub target_amount: Amount,
     pub currency: Currency,
     pub period: TimePeriod,
 }
@@ -74,7 +74,7 @@ impl SpendingTargetManager {
         &mut self,
         request: CreateSpendingTargetRequest,
     ) -> Result<SpendingTarget, SpendingTargetError> {
-        if request.target_amount_cents <= 0 {
+        if request.target_amount <= Amount::ZERO {
             return Err(SpendingTargetError::AmountMustBePositive);
         }
         if self.targets.values().any(|target| {
@@ -90,7 +90,7 @@ impl SpendingTargetManager {
         let target = SpendingTarget {
             id: SpendingTargetId::new(),
             owner_user_id: request.owner_user_id,
-            target_amount_cents: request.target_amount_cents,
+            target_amount: request.target_amount,
             currency: request.currency,
             period: request.period,
             status: SpendingTargetStatus::Active,
@@ -161,7 +161,7 @@ mod tests {
     fn request(user_id: UserId, starting_at: DateTime<Utc>) -> CreateSpendingTargetRequest {
         CreateSpendingTargetRequest {
             owner_user_id: user_id,
-            target_amount_cents: 10_000,
+            target_amount: Amount::from_legacy_cents(10_000).unwrap(),
             currency: Currency::Usd,
             period: TimePeriod::new(starting_at, Some(starting_at + Duration::days(30)))
                 .expect("period should be valid"),
@@ -179,7 +179,10 @@ mod tests {
         let targets = manager.get_targets_by_user_id(&user_id);
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].id, created.id);
-        assert_eq!(targets[0].target_amount_cents, 10_000);
+        assert_eq!(
+            targets[0].target_amount,
+            Amount::from_legacy_cents(10_000).unwrap()
+        );
     }
 
     #[test]

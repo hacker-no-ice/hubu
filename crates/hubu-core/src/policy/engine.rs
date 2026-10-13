@@ -100,15 +100,16 @@ fn merge_effects(current: Effect, effect: Effect) -> Effect {
 
 #[cfg(test)]
 mod tests {
+    use crate::test_money::cents;
     use hubu_common::ids::{AgentAccountId, AgentId, UserId};
 
     use super::*;
     use crate::policy::condition::{Condition, Field, PolicyValue, ValueKind};
     use hubu_common::money::Currency;
 
-    fn spend_request(amount_cents: i64, category: Option<&str>) -> SpendRequest {
+    fn spend_request(amount: i64, category: Option<&str>) -> SpendRequest {
         SpendRequest {
-            amount_cents,
+            amount: cents(amount),
             currency: Currency::Usd,
             owner_user_id: test_user_id(),
             agent_id: AgentId::new(),

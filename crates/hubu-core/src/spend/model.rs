@@ -6,7 +6,7 @@ use hubu_common::ids::{
     AgentAccountId, AgentId, PaymentId, SpendAuthTokenId, SpendDecisionId, SpendExecutorClaimId,
     UserId,
 };
-use hubu_common::money::Currency;
+use hubu_common::money::{Amount, Asset, ConversionRate, Currency, ExactMoney};
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -14,8 +14,10 @@ use sha2::{Digest, Sha256};
 use crate::policy::model::Evaluation;
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(try_from = "SpendRequestRepr", into = "SpendRequestRepr")]
 pub struct SpendRequest {
-    pub amount_cents: i64, // in minor unit
+    /// Requested amount in the budget currency at accounting scale.
+    pub amount: Amount,
     pub currency: Currency,
     pub owner_user_id: UserId,
     pub agent_id: AgentId,
@@ -29,6 +31,85 @@ pub struct SpendRequest {
     pub reason: String,
     #[serde(default = "default_lease_profile")]
     pub lease_profile: String,
+}
+
+/// Stored form of [`SpendRequest`]. Whole-cent amounts keep the original
+/// `amount_cents` field, so requests persisted or fingerprinted before
+/// accounting-scale amounts stay byte-identical and replay; only sub-cent
+/// amounts use an exact decimal `amount`.
+#[derive(Deserialize, Serialize)]
+struct SpendRequestRepr {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    amount_cents: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    amount: Option<String>,
+    currency: Currency,
+    owner_user_id: UserId,
+    agent_id: AgentId,
+    agent_account_id: AgentAccountId,
+    merchant: Option<String>,
+    #[serde(default)]
+    execution_scope: Option<ExecutionScope>,
+    category: Option<String>,
+    task_id: Option<String>,
+    #[serde(default)]
+    reason: String,
+    #[serde(default = "default_lease_profile")]
+    lease_profile: String,
+}
+
+impl TryFrom<SpendRequestRepr> for SpendRequest {
+    type Error = String;
+
+    fn try_from(repr: SpendRequestRepr) -> Result<Self, Self::Error> {
+        let amount = match (repr.amount_cents, repr.amount) {
+            (Some(cents), None) => {
+                Amount::from_legacy_cents(cents).map_err(|error| error.to_string())?
+            }
+            (None, Some(amount)) => amount
+                .parse::<Amount>()
+                .map_err(|error| error.to_string())?,
+            (Some(_), Some(_)) => {
+                return Err("spend request has both `amount_cents` and `amount`".to_string())
+            }
+            (None, None) => return Err("spend request is missing `amount`".to_string()),
+        };
+        Ok(Self {
+            amount,
+            currency: repr.currency,
+            owner_user_id: repr.owner_user_id,
+            agent_id: repr.agent_id,
+            agent_account_id: repr.agent_account_id,
+            merchant: repr.merchant,
+            execution_scope: repr.execution_scope,
+            category: repr.category,
+            task_id: repr.task_id,
+            reason: repr.reason,
+            lease_profile: repr.lease_profile,
+        })
+    }
+}
+
+impl From<SpendRequest> for SpendRequestRepr {
+    fn from(request: SpendRequest) -> Self {
+        let whole_cents = (request.amount.legacy_cents_floor()
+            == request.amount.legacy_cents_ceil())
+        .then(|| request.amount.legacy_cents_floor());
+        Self {
+            amount_cents: whole_cents,
+            amount: whole_cents.is_none().then(|| request.amount.display()),
+            currency: request.currency,
+            owner_user_id: request.owner_user_id,
+            agent_id: request.agent_id,
+            agent_account_id: request.agent_account_id,
+            merchant: request.merchant,
+            execution_scope: request.execution_scope,
+            category: request.category,
+            task_id: request.task_id,
+            reason: request.reason,
+            lease_profile: request.lease_profile,
+        }
+    }
 }
 
 impl SpendRequest {
@@ -237,7 +318,7 @@ pub struct SpendPaymentValidationRequest {
     pub owner_user_id: UserId,
     pub agent_id: AgentId,
     pub agent_account_id: AgentAccountId,
-    pub amount_cents: i64,
+    pub amount: Amount,
     pub currency: Currency,
     pub merchant: Option<String>,
     pub execution_scope: Option<ExecutionScope>,
@@ -284,7 +365,7 @@ mod identity_tests {
 
     fn request(task_id: Option<&str>, reason: &str) -> SpendRequest {
         SpendRequest {
-            amount_cents: 500,
+            amount: Amount::from_legacy_cents(500).unwrap(),
             currency: Currency::Usd,
             owner_user_id: "00000000-0000-4000-8000-000000000123".parse().unwrap(),
             agent_id: AgentId::new(),
@@ -332,8 +413,9 @@ pub const MAX_VENDOR_COST_DECIMAL_SCALE: u32 = 18;
 
 /// Exact provider cost expressed as `amount * 10^-scale` major currency units.
 ///
-/// Budget accounting is in cents. Conversion therefore rounds toward positive
-/// infinity so Hubu never understates externally billed consumption.
+/// Budget accounting is at accounting scale (10⁻⁶). [`Self::budget_charge`]
+/// rounds toward positive infinity exactly once, so Hubu never understates
+/// externally billed consumption.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SpendExecutorVendorCost {
@@ -358,6 +440,27 @@ where
 }
 
 impl SpendExecutorVendorCost {
+    /// The budget charge for this exact cost: the single round-up from the
+    /// provider's scale to accounting scale.
+    pub fn budget_charge(&self) -> Result<Amount, &'static str> {
+        if self.amount < 0 {
+            return Err("actual vendor cost cannot be negative");
+        }
+        if self.scale > MAX_VENDOR_COST_DECIMAL_SCALE {
+            return Err("actual vendor cost scale cannot exceed 18");
+        }
+        let asset = Asset::from(self.currency);
+        ExactMoney::new(i128::from(self.amount), self.scale, asset)
+            .and_then(|exact| {
+                exact.to_amount_ceil(&ConversionRate::identity(
+                    "budget-currency",
+                    DateTime::<Utc>::UNIX_EPOCH,
+                ))
+            })
+            .map_err(|_| "actual vendor cost cannot be represented in budget units")
+    }
+
+    /// Whole-cent projection of the charge, for legacy cent fields.
     pub fn conservative_budget_charge_cents(&self) -> Result<i64, &'static str> {
         if self.amount < 0 {
             return Err("actual vendor cost cannot be negative");
@@ -453,10 +556,10 @@ impl<'de> Deserialize<'de> for SpendExecutorSettlementReceipt {
 pub struct PersistedSpendExecutorSettlementReceipt {
     pub claim_id: SpendExecutorClaimId,
     pub settlement_id: PaymentId,
-    pub authorized_max_cents: i64,
-    pub budget_charge_cents: i64,
-    pub released_amount_cents: i64,
-    pub overrun_amount_cents: i64,
+    pub authorized_max: Amount,
+    pub budget_charge: Amount,
+    pub released_amount: Amount,
+    pub overrun_amount: Amount,
     pub currency: Currency,
     pub receipt: SpendExecutorSettlementReceipt,
     pub created_at: DateTime<Utc>,

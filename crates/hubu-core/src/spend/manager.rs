@@ -296,7 +296,7 @@ impl SpendManager {
                     "request_owner_user_id": request.owner_user_id.to_string(),
                     "policy_owner_user_id": policy.owner_user_id.to_string(),
                     "agent_id": request.agent_id.to_string(),
-                    "amount_cents": request.amount_cents,
+                    "amount": request.amount,
                 }),
             );
             return Err(SpendError::UserScopeMismatch);
@@ -412,7 +412,7 @@ impl SpendManager {
                 "decision": effect_name(evaluation.decision),
                 "owner_user_id": user.user_id.to_string(),
                 "agent_id": request.agent_id.to_string(),
-                "amount_cents": request.amount_cents,
+                "amount": request.amount,
                 "currency": request.currency.to_string(),
                 "merchant": request.merchant,
                 "execution_scope": request.execution_scope,
@@ -518,7 +518,7 @@ impl SpendManager {
                 "spend_decision_id": token.spend_decision_id.to_string(),
                 "owner_user_id": token.owner_user_id.to_string(),
                 "agent_id": request.agent_id.to_string(),
-                "amount_cents": request.amount_cents,
+                "amount": request.amount,
                 "currency": request.currency.to_string(),
             }),
         );
@@ -780,7 +780,7 @@ fn payment_matches_authorized_spend(
             && payment.merchant == spend.merchant);
     payment.agent_id == spend.agent_id
         && payment.agent_account_id == spend.agent_account_id
-        && payment.amount_cents == spend.amount_cents
+        && payment.amount == spend.amount
         && payment.currency == spend.currency
         && payment.merchant == spend.merchant
         && execution_scope_matches
@@ -796,7 +796,7 @@ fn log_auth_validation_rejected(request: &SpendPaymentValidationRequest, reason:
             "spend_auth_token_id": request.spend_auth_token_id.to_string(),
             "owner_user_id": request.owner_user_id.to_string(),
             "agent_id": request.agent_id.to_string(),
-            "amount_cents": request.amount_cents,
+            "amount": request.amount,
             "currency": request.currency.to_string(),
             "merchant": request.merchant,
             "execution_scope": request.execution_scope,
@@ -821,6 +821,7 @@ impl Default for SpendManager {
 
 #[cfg(test)]
 mod tests {
+    use crate::test_money::cents;
     use chrono::Utc;
     use hubu_common::ids::{AgentAccountId, AgentId, PaymentId, UserId};
 
@@ -830,9 +831,9 @@ mod tests {
 
     use crate::policy::model::Rule;
 
-    fn spend_request(amount_cents: i64) -> SpendRequest {
+    fn spend_request(amount: i64) -> SpendRequest {
         SpendRequest {
-            amount_cents,
+            amount: cents(amount),
             currency: Currency::Usd,
             owner_user_id: test_user_id(),
             agent_id: AgentId::new(),
@@ -946,7 +947,7 @@ mod tests {
         assert_eq!(manager.tokens.len(), 1);
 
         let mut changed = request.clone();
-        changed.amount_cents += 1;
+        changed.amount = changed.amount.checked_add(cents(1)).unwrap();
         let corrected = manager
             .evaluate_spend(&user_context(), "stable-job-1", changed, &policy)
             .expect("SQLite admission, not the process-local manager, governs corrected scope");
@@ -1010,7 +1011,7 @@ mod tests {
                 owner_user_id: request.owner_user_id,
                 agent_id: request.agent_id,
                 agent_account_id: request.agent_account_id,
-                amount_cents: request.amount_cents,
+                amount: request.amount,
                 currency: request.currency,
                 merchant: request.merchant,
                 execution_scope: request.execution_scope,
@@ -1044,7 +1045,7 @@ mod tests {
                 owner_user_id: request.owner_user_id,
                 agent_id: request.agent_id,
                 agent_account_id: request.agent_account_id,
-                amount_cents: request.amount_cents + 1,
+                amount: request.amount.checked_add(cents(1)).unwrap(),
                 currency: request.currency,
                 merchant: request.merchant,
                 execution_scope: request.execution_scope,
@@ -1076,7 +1077,7 @@ mod tests {
                 owner_user_id: request.owner_user_id,
                 agent_id: request.agent_id,
                 agent_account_id: AgentAccountId::new(),
-                amount_cents: request.amount_cents,
+                amount: request.amount,
                 currency: request.currency,
                 merchant: request.merchant,
                 execution_scope: request.execution_scope,
@@ -1112,7 +1113,7 @@ mod tests {
                 owner_user_id: request.owner_user_id,
                 agent_id: request.agent_id,
                 agent_account_id: request.agent_account_id,
-                amount_cents: request.amount_cents,
+                amount: request.amount,
                 currency: request.currency,
                 merchant: request.merchant,
                 execution_scope: request.execution_scope,
@@ -1214,7 +1215,7 @@ mod tests {
             owner_user_id: spend.owner_user_id.clone(),
             agent_id: spend.agent_id.clone(),
             agent_account_id: spend.agent_account_id.clone(),
-            amount_cents: spend.amount_cents,
+            amount: spend.amount,
             currency: spend.currency,
             merchant: spend.merchant.clone(),
             execution_scope: spend.execution_scope.clone(),
@@ -1263,7 +1264,7 @@ mod tests {
             owner_user_id: spend.owner_user_id,
             agent_id: spend.agent_id,
             agent_account_id: spend.agent_account_id,
-            amount_cents: spend.amount_cents,
+            amount: spend.amount,
             currency: spend.currency,
             merchant: spend.merchant,
             execution_scope: spend.execution_scope,

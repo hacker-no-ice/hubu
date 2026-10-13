@@ -3,7 +3,7 @@ use hubu_common::{
     execution_scope::ExecutionScope,
     ids::{AgentAccountId, AgentId, BudgetId, SpendAuthTokenId, SpendDecisionId},
     models::UserContext,
-    money::Currency,
+    money::{Amount, Currency},
 };
 use hubu_wallet::{
     PaymentAttemptRepository, PaymentAttemptStorageError, PaymentDestination, PaymentError,
@@ -35,7 +35,7 @@ pub struct AuthorizeSpendRequest {
     pub user: UserContext,
     pub agent_id: AgentId,
     pub agent_account_id: AgentAccountId,
-    pub amount_cents: i64,
+    pub amount: Amount,
     pub currency: Currency,
     pub merchant: Option<String>,
     pub execution_scope: Option<ExecutionScope>,
@@ -62,7 +62,7 @@ pub struct ApprovedSpendAuthorization {
     pub user: UserContext,
     pub agent_id: AgentId,
     pub agent_account_id: AgentAccountId,
-    pub amount_cents: i64,
+    pub amount: Amount,
     pub currency: Currency,
     pub merchant: Option<String>,
     pub execution_scope: Option<ExecutionScope>,
@@ -86,7 +86,7 @@ pub struct RejectedSpendAuthorization {
     pub user: UserContext,
     pub agent_id: AgentId,
     pub agent_account_id: AgentAccountId,
-    pub amount_cents: i64,
+    pub amount: Amount,
     pub currency: Currency,
     pub merchant: Option<String>,
     pub execution_scope: Option<ExecutionScope>,
@@ -151,6 +151,9 @@ impl BudgetHoldUpdate {
 pub enum SpendApprovalError {
     #[error("spend amount must be positive")]
     NonPositiveAmount,
+
+    #[error("payment rail charges whole cents and cannot pay a sub-cent authorization of {0}")]
+    SubCentPaymentRail(Amount),
 
     #[error("spend decision was not recorded")]
     MissingSpendDecision,
@@ -232,12 +235,12 @@ impl SpendApprovalService {
     where
         G: SpendRepository + BudgetRepository,
     {
-        if request.amount_cents <= 0 {
+        if request.amount <= Amount::ZERO {
             return Err(SpendApprovalError::NonPositiveAmount);
         }
 
         let spend_request = SpendRequest {
-            amount_cents: request.amount_cents,
+            amount: request.amount,
             currency: request.currency,
             owner_user_id: request.user.user_id.clone(),
             agent_id: request.agent_id.clone(),
@@ -329,7 +332,7 @@ impl SpendApprovalService {
                                 user: request.user,
                                 agent_id: request.agent_id,
                                 agent_account_id: request.agent_account_id,
-                                amount_cents: request.amount_cents,
+                                amount: request.amount,
                                 currency: request.currency,
                                 merchant: request.merchant,
                                 execution_scope: request.execution_scope,
@@ -352,7 +355,7 @@ impl SpendApprovalService {
                                 user: request.user,
                                 agent_id: request.agent_id,
                                 agent_account_id: request.agent_account_id,
-                                amount_cents: request.amount_cents,
+                                amount: request.amount,
                                 currency: request.currency,
                                 merchant: request.merchant,
                                 execution_scope: request.execution_scope,
@@ -378,7 +381,7 @@ impl SpendApprovalService {
                                 user: request.user,
                                 agent_id: request.agent_id,
                                 agent_account_id: request.agent_account_id,
-                                amount_cents: request.amount_cents,
+                                amount: request.amount,
                                 currency: request.currency,
                                 merchant: request.merchant,
                                 execution_scope: request.execution_scope,
@@ -409,7 +412,7 @@ impl SpendApprovalService {
                         user: request.user,
                         agent_id: request.agent_id,
                         agent_account_id: request.agent_account_id,
-                        amount_cents: request.amount_cents,
+                        amount: request.amount,
                         currency: request.currency,
                         merchant: request.merchant,
                         execution_scope: request.execution_scope,
@@ -443,7 +446,7 @@ impl SpendApprovalService {
                         user: request.user,
                         agent_id: request.agent_id,
                         agent_account_id: request.agent_account_id,
-                        amount_cents: request.amount_cents,
+                        amount: request.amount,
                         currency: request.currency,
                         merchant: request.merchant,
                         execution_scope: request.execution_scope,
@@ -506,7 +509,7 @@ impl SpendApprovalService {
                     user: request.user,
                     agent_id: request.agent_id,
                     agent_account_id: request.agent_account_id,
-                    amount_cents: request.amount_cents,
+                    amount: request.amount,
                     currency: request.currency,
                     merchant: request.merchant,
                     execution_scope: request.execution_scope,
@@ -556,7 +559,7 @@ impl SpendApprovalService {
             ReserveBudgetRequest {
                 budget_id: budget_id.clone(),
                 spend_decision_id: evaluation.decision_id.clone(),
-                amount_cents: request.amount_cents,
+                amount: request.amount,
                 currency: request.currency,
                 expires_at: token.expires_at,
             },
@@ -588,7 +591,7 @@ impl SpendApprovalService {
                         "user_id": request.user.user_id.to_string(),
                         "decision_id": evaluation.decision_id.to_string(),
                         "budget_id": budget_id.to_string(),
-                        "amount_cents": request.amount_cents,
+                        "amount": request.amount,
                         "reason": "insufficient_remaining_budget",
                     }),
                 );
@@ -610,7 +613,7 @@ impl SpendApprovalService {
                     json!({
                         "decision_id": evaluation.decision_id.to_string(),
                         "hold_id": budget_release.hold.id.to_string(),
-                        "remaining_amount_cents": budget_release.balance.remaining_amount_cents,
+                        "remaining_amount": budget_release.balance.remaining_amount,
                         "error": error.to_string(),
                     }),
                 );
@@ -641,9 +644,9 @@ impl SpendApprovalService {
                 "budget_id": budget_reservation.hold.budget_id.to_string(),
                 "hold_id": budget_reservation.hold.id.to_string(),
                 "decision_id": evaluation.decision_id.to_string(),
-                "amount_cents": budget_reservation.hold.amount_cents,
-                "remaining_amount_cents": budget_reservation.balance.remaining_amount_cents,
-                "frozen_amount_cents": budget_reservation.balance.frozen_amount_cents,
+                "amount": budget_reservation.hold.amount,
+                "remaining_amount": budget_reservation.balance.remaining_amount,
+                "frozen_amount": budget_reservation.balance.frozen_amount,
             }),
         );
 
@@ -653,7 +656,7 @@ impl SpendApprovalService {
                 user: request.user,
                 agent_id: request.agent_id,
                 agent_account_id: request.agent_account_id,
-                amount_cents: request.amount_cents,
+                amount: request.amount,
                 currency: request.currency,
                 merchant: request.merchant,
                 execution_scope: request.execution_scope,
@@ -799,7 +802,7 @@ impl SpendApprovalService {
                     ReserveBudgetRequest {
                         budget_id,
                         spend_decision_id: approval_request_id.clone(),
-                        amount_cents: decision_record.request.amount_cents,
+                        amount: decision_record.request.amount,
                         currency: decision_record.request.currency,
                         expires_at: token.expires_at,
                     },
@@ -846,7 +849,7 @@ impl SpendApprovalService {
                         user: request.user,
                         agent_id: request.agent_id,
                         agent_account_id: request.agent_account_id,
-                        amount_cents: request.amount_cents,
+                        amount: request.amount,
                         currency: request.currency,
                         merchant: request.merchant,
                         execution_scope: request.execution_scope,
@@ -883,13 +886,19 @@ impl SpendApprovalService {
         LoadUsedToken:
             FnOnce(&SpendAuthTokenId) -> Result<SpendAuthTokenRecord, SpendApprovalError>,
     {
+        // Wallet rails move whole cents; a sub-cent authorization can never be
+        // charged exactly, so refuse it before any money moves.
+        let amount_cents = authorization.amount.legacy_cents_ceil();
+        if authorization.amount.legacy_cents_floor() != amount_cents {
+            return Err(SpendApprovalError::SubCentPaymentRail(authorization.amount));
+        }
         let payment_request = PaymentRequest {
             idempotency_key: payment_spec.idempotency_key,
             spend_auth_token_id: authorization.token.id.clone(),
             owner_user_id: authorization.user.user_id.clone(),
             agent_id: authorization.agent_id.clone(),
             agent_account_id: authorization.agent_account_id.clone(),
-            amount_cents: authorization.amount_cents,
+            amount_cents,
             currency: authorization.currency,
             merchant: authorization.merchant.clone(),
             execution_scope: authorization.execution_scope.clone(),
@@ -961,8 +970,11 @@ impl SpendApprovalService {
                     balance: authorization.budget_reservation.balance.clone(),
                 })
             } else {
-                let budget_settlement =
-                    budget_manager.settle_budget(&authorization.budget_reservation.hold.id)?;
+                // Consume what the rail actually charged and release the rest.
+                let charged = Amount::from_legacy_cents(payment.amount_cents)
+                    .map_err(|_| BudgetManagerError::BalanceOverflow)?;
+                let budget_settlement = budget_manager
+                    .settle_budget(&authorization.budget_reservation.hold.id, charged)?;
                 BudgetHoldUpdate::Settled(budget_settlement)
             }
         } else if payment_spec.failed_payment_hold_policy == FailedPaymentHoldPolicy::Release {
@@ -1015,7 +1027,7 @@ fn authorize_request_from_decision(
         user,
         agent_id: decision.request.agent_id.clone(),
         agent_account_id: decision.request.agent_account_id.clone(),
-        amount_cents: decision.request.amount_cents,
+        amount: decision.request.amount,
         currency: decision.request.currency,
         merchant: decision.request.merchant.clone(),
         execution_scope: decision.request.execution_scope.clone(),
@@ -1059,7 +1071,7 @@ fn rejected_from_request(
         user: request.user,
         agent_id: request.agent_id,
         agent_account_id: request.agent_account_id,
-        amount_cents: request.amount_cents,
+        amount: request.amount,
         currency: request.currency,
         merchant: request.merchant,
         execution_scope: request.execution_scope,
@@ -1082,7 +1094,7 @@ fn budget_rejection(
         user: request.user,
         agent_id: request.agent_id,
         agent_account_id: request.agent_account_id,
-        amount_cents: request.amount_cents,
+        amount: request.amount,
         currency: request.currency,
         merchant: request.merchant,
         execution_scope: request.execution_scope,
@@ -1155,6 +1167,7 @@ fn payment_status_name(status: PaymentStatus) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use crate::test_money::cents;
     use std::sync::{Arc, Mutex};
 
     use chrono::Duration;
@@ -1237,7 +1250,7 @@ mod tests {
                     owner_user_id: request.owner_user_id.clone(),
                     agent_id: request.agent_id.clone(),
                     agent_account_id: request.agent_account_id.clone(),
-                    amount_cents: request.amount_cents,
+                    amount: Amount::from_legacy_cents(request.amount_cents).unwrap(),
                     currency: request.currency,
                     merchant: request.merchant.clone(),
                     execution_scope: request.execution_scope.clone(),
@@ -1301,7 +1314,7 @@ mod tests {
             let budget = budget_manager
                 .create_single_budget(CreateSingleBudgetRequest {
                     agent_id: agent_id.clone(),
-                    amount_limit_cents: budget_cents,
+                    amount_limit: cents(budget_cents),
                     currency: Currency::Usd,
                     period,
                 })
@@ -1335,7 +1348,7 @@ mod tests {
             }
         }
 
-        fn authorize(&mut self, amount_cents: i64, merchant: &str) -> SpendAuthorizationOutcome {
+        fn authorize(&mut self, amount: i64, merchant: &str) -> SpendAuthorizationOutcome {
             let mut spend_manager = self
                 .spend_manager
                 .lock()
@@ -1347,7 +1360,7 @@ mod tests {
                         user: self.user.clone(),
                         agent_id: self.agent_id.clone(),
                         agent_account_id: self.account_id.clone(),
-                        amount_cents,
+                        amount: cents(amount),
                         currency: Currency::Usd,
                         merchant: Some(merchant.to_string()),
                         execution_scope: None,
@@ -1437,10 +1450,10 @@ mod tests {
             }
         };
 
-        assert_eq!(authorization.amount_cents, 500);
+        assert_eq!(authorization.amount, cents(500));
         assert_eq!(
-            authorization.budget_reservation.balance.frozen_amount_cents,
-            500
+            authorization.budget_reservation.balance.frozen_amount,
+            cents(500)
         );
         assert_eq!(
             harness
