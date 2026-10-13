@@ -32,7 +32,7 @@ impl Policy {
     /// Serialize a policy as canonical export YAML.
     ///
     /// Enum values use the same nested-map form policy authors write
-    /// (`value: {money_cents: 500}`), not YAML tags, and the output parses
+    /// (`value: {money: "5.00"}`), not YAML tags, and the output parses
     /// back with [`Policy::from_yaml_str`].
     pub fn to_yaml_string(&self) -> Result<String, PolicyLoadError> {
         Ok(serde_saphyr::to_string(self)?)
@@ -62,7 +62,7 @@ rules:
       op: gt
       field: amount
       value:
-        money_cents: 50000
+        money: "500"
 
   - id: allow_small_meals
     effect: allow
@@ -273,7 +273,8 @@ rules:
             .unwrap()
             .to_yaml_string()
             .unwrap();
-        assert!(exported.contains("money_cents: 50000"), "{exported}");
+        assert!(exported.contains("money: \"500.00\""), "{exported}");
+        assert!(exported.contains("money_cents: 5000"), "{exported}");
         assert!(exported.contains("string: meals"), "{exported}");
     }
 
@@ -282,13 +283,94 @@ rules:
         // Exports produced by the previous YAML library used tags for enum
         // values; files saved from them must keep loading.
         let legacy = valid_policy_yaml().replace(
-            "      value:\n        money_cents: 50000",
-            "      value: !money_cents 50000",
+            "          value:\n            money_cents: 5000",
+            "          value: !money_cents 5000",
         );
-        assert!(legacy.contains("!money_cents 50000"));
+        assert!(legacy.contains("!money_cents 5000"));
         let current = Policy::from_yaml_str(valid_policy_yaml()).unwrap();
         let parsed = Policy::from_yaml_str(&legacy).unwrap();
         assert_eq!(policy_json(&parsed), policy_json(&current));
+    }
+
+    fn yaml_with_amount_value(value: &str) -> String {
+        valid_policy_yaml().replace("money: \"500\"", value)
+    }
+
+    fn parse_error_detail(error: PolicyLoadError) -> String {
+        match error {
+            PolicyLoadError::ParseYaml { source } => source.to_string(),
+            other => panic!("expected a yaml parse error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mixed_money_and_legacy_cents_policy_evaluates() {
+        let policy = Policy::from_yaml_str(valid_policy_yaml()).unwrap();
+        let rules = &policy.rules;
+        let crate::policy::condition::Condition::Gt { value, .. } = &rules[0].when else {
+            panic!("expected a gt rule");
+        };
+        assert_eq!(value.money(), Some("500".parse().unwrap()));
+        assert_eq!(
+            rules[0].when.describe(),
+            "amount is greater than USD 500.00"
+        );
+        assert!(rules[1]
+            .when
+            .describe()
+            .contains("amount is at most USD 50.00"));
+    }
+
+    #[test]
+    fn sub_cent_money_caps_load_exactly() {
+        let policy = Policy::from_yaml_str(&yaml_with_amount_value("money: \"0.005\"")).unwrap();
+        let crate::policy::condition::Condition::Gt { value, .. } = &policy.rules[0].when else {
+            panic!("expected a gt rule");
+        };
+        assert_eq!(value.money().unwrap().units(), 5_000);
+        let policy = Policy::from_yaml_str(&yaml_with_amount_value("money: '0.000001'")).unwrap();
+        let crate::policy::condition::Condition::Gt { value, .. } = &policy.rules[0].when else {
+            panic!("expected a gt rule");
+        };
+        assert_eq!(value.money().unwrap().units(), 1);
+    }
+
+    #[test]
+    fn unquoted_money_numbers_are_rejected_with_a_quoting_hint() {
+        for value in ["money: 0.005", "money: 500", "money: 1e-3"] {
+            let error = Policy::from_yaml_str(&yaml_with_amount_value(value)).unwrap_err();
+            let detail = parse_error_detail(error);
+            assert!(
+                detail.contains("quote decimal amounts"),
+                "{value}: {detail}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_money_strings_are_rejected() {
+        for (value, expected) in [
+            ("money: \"0.0050000\"", "at most 6 decimal places"),
+            ("money: \"-1\"", "must not carry a sign"),
+            ("money: \"1e-3\"", "exponents are not accepted"),
+            ("money: \"9223372036855\"", "too large"),
+            ("money: \"\"", "enter a decimal"),
+        ] {
+            let error = Policy::from_yaml_str(&yaml_with_amount_value(value)).unwrap_err();
+            let detail = parse_error_detail(error);
+            assert!(detail.contains(expected), "{value}: {detail}");
+        }
+    }
+
+    #[test]
+    fn legacy_cents_revision_json_reserializes_byte_for_byte() {
+        // Stored policy revisions are hashed over their JSON; loading one and
+        // serializing it again must not change a byte.
+        let stored = r#"{"id":"legacy","version":"v1","owner_user_id":"00000000-0000-4000-8000-000000000123","rules":[{"id":"cap","effect":"allow","when":{"op":"lte","field":"amount","value":{"money_cents":10}},"reason":"cap"}],"default_effect":"needs_approval"}"#;
+        let policy: Policy = serde_json::from_str(stored).unwrap();
+        assert_eq!(serde_json::to_string(&policy).unwrap(), stored);
+        let exported = policy.to_yaml_string().unwrap();
+        assert!(exported.contains("money_cents: 10"), "{exported}");
     }
 
     #[test]

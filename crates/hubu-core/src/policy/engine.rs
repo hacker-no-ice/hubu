@@ -328,7 +328,7 @@ mod tests {
             } => {
                 assert_eq!(rule_id, "invalid_amount_type");
                 assert_eq!(field, Field::Amount);
-                assert_eq!(expected, ValueKind::MoneyCents);
+                assert_eq!(expected, ValueKind::Money);
                 assert_eq!(actual, ValueKind::String);
             }
             other => panic!("unexpected validation error: {other:?}"),
