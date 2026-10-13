@@ -96,6 +96,13 @@ button, input { font: inherit; }
 .worked-example-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px 20px; margin-bottom: 22px; }
 .worked-example-head h2 { margin: 0; font-size: 21px; font-weight: 540; letter-spacing: -.025em; }
 .worked-example-head > p:last-child { margin: 0; color: var(--dim); font-size: 13px; }
+.worked-example-content { display: grid; grid-template-columns: minmax(0, 1fr) 270px; gap: 32px; align-items: center; }
+.worked-example-content .example-flow { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.example-mascot { margin: 0; text-align: center; }
+.example-mascot img { display: block; width: 100%; height: auto; }
+.example-mascot figcaption { margin: 12px 0 8px; color: var(--muted); font-size: 12px; }
+.example-mascot a { display: block; margin-top: 8px; color: #b4b5ff; font-size: 12px; line-height: 1.6; }
+.example-mascot a:hover { color: white; }
 .example-flow { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-top: 1px solid var(--line); border-left: 1px solid var(--line); }
 .example-flow li { padding: 22px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .example-flow li > span { color: #5f626a; font: 12px var(--font-geist-mono), monospace; }
@@ -107,6 +114,15 @@ button, input { font: inherit; }
 .intro-video-player { aspect-ratio: 16 / 9; overflow: hidden; border: 1px solid #34363e; border-radius: 16px; background: #090a10; }
 .intro-video-player iframe { display: block; width: 100%; height: 100%; border: 0; }
 .markdown-body .intro-video-player { margin: 24px 0; }
+.demo-gallery { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; margin: 24px 0 36px; }
+.demo-gallery figure { min-width: 0; margin: 0; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: var(--surface); }
+.demo-gallery a { display: block; }
+.demo-gallery a:focus-visible { outline: 2px solid var(--cyan); outline-offset: -2px; }
+.demo-gallery img { display: block; width: 100%; height: auto; aspect-ratio: 4 / 3; object-fit: contain; background: #eee9d9; }
+.demo-gallery .original-mascot img { padding: 12px; background: radial-gradient(circle at 50% 40%, #29242a, #0d0e10 75%); }
+.demo-gallery figcaption { padding: 14px; font-size: 12px; line-height: 1.55; }
+.demo-gallery figcaption strong { display: block; color: var(--text); font-weight: 560; }
+.demo-gallery figcaption span { display: block; margin-top: 4px; color: var(--muted); }
 .intro-video-link { margin: 16px 0 0; text-align: right; font-size: 14px; color: #b7b8bd; }
 .section-intro { display: grid; grid-template-columns: 1fr 1.15fr; gap: 70px; margin-bottom: 55px; }
 .section-intro .eyebrow { align-self: start; margin-top: 13px; }
@@ -239,6 +255,7 @@ footer span { color: #d7d8da; font-weight: 620; } footer p { flex: 1; } footer a
   .hero { grid-template-columns: 1fr 420px; gap: 50px; }
   .topic-grid { grid-template-columns: 1fr 1fr; }
   .example-flow { grid-template-columns: 1fr 1fr; }
+  .demo-gallery { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .docs-shell { grid-template-columns: 230px minmax(0, 1fr); }
   .toc { display: none; }
   .doc-main { padding-inline: 55px; }
@@ -248,6 +265,8 @@ footer span { color: #d7d8da; font-weight: 620; } footer p { flex: 1; } footer a
   .site-menu { display: block; }
   .hero { min-height: auto; grid-template-columns: 1fr; padding-top: 80px; }
   .boundary-card { max-width: 560px; }
+  .worked-example-content { grid-template-columns: 1fr; }
+  .example-mascot { width: min(270px, 100%); justify-self: center; }
   .section-intro { display: block; }
   .section-intro h2 { margin-top: 24px; }
   .section-intro > p:last-child { margin-top: 20px; }
@@ -283,6 +302,8 @@ footer span { color: #d7d8da; font-weight: 620; } footer p { flex: 1; } footer a
   .worked-example.section-wrap { padding-top: 0; padding-bottom: 56px; }
   .example-flow { grid-template-columns: 1fr; }
   .example-flow li { padding: 18px; }
+  .worked-example-content .example-flow { grid-template-columns: 1fr; }
+  .demo-gallery { grid-template-columns: 1fr; }
   .section-wrap { padding: 82px 20px; }
   .topic-grid { grid-template-columns: 1fr; }
   .topic-grid > a { min-height: 220px; }

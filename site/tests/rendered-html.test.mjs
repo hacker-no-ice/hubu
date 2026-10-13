@@ -47,12 +47,13 @@ test("embeds the introduction below the hero without autoplay", async () => {
   assert.match(html, /Meet Hubu in 3 min/);
   const iframe = html.match(/<iframe\b[^>]*><\/iframe>/)?.[0];
   assert.ok(iframe);
-  assert.match(iframe, /src="https:\/\/www.youtube-nocookie.com\/embed\/ufEgYjmxKWM"/);
+  assert.match(iframe, /src="https:\/\/www.youtube-nocookie.com\/embed\/SlJbC_hcl9U"/);
   assert.match(iframe, /title="Introducing Hubu: bounded spending power for AI agents"/);
   assert.match(iframe, /loading="lazy"/);
   assert.match(iframe, /referrerPolicy="strict-origin-when-cross-origin"/i);
   assert.doesNotMatch(iframe, /autoplay/);
-  assert.match(html, /href="https:\/\/youtu.be\/ufEgYjmxKWM"/);
+  assert.match(html, /href="https:\/\/youtu.be\/SlJbC_hcl9U"/);
+  assert.doesNotMatch(html, /ufEgYjmxKWM/);
   assert.ok(html.indexOf('class="hero"') < html.indexOf('id="intro-video-title"'));
   assert.ok(html.indexOf('id="intro-video-title"') < html.indexOf('class="warning-band"'));
 });
@@ -68,6 +69,12 @@ test("home page walks through an illustrative governed image request", async () 
   assert.match(html, /Illustrative amounts\./);
   assert.ok(html.indexOf('class="hero"') < html.indexOf('id="worked-example-title"'));
   assert.ok(html.indexOf('id="worked-example-title"') < html.indexOf('id="intro-video-title"'));
+  const mascot = html.match(/<figure class="example-mascot">[\s\S]*?<\/figure>/)?.[0];
+  assert.ok(mascot);
+  assert.match(mascot, /src="\/brand\/hubu-mascot.png"/);
+  assert.match(mascot, /loading="lazy"/);
+  assert.match(mascot, /alt="Hubu&#x27;s cream-and-jade seal mascot on a cinnabar base"/);
+  assert.match(mascot, /href="\/demos\/local-stack"/);
 });
 
 test("links demos from home and publishes the sandbox video before its concise script", async () => {
@@ -80,7 +87,10 @@ test("links demos from home and publishes the sandbox video before its concise s
   assert.match(home, /See Hubu in use: watch the sandbox demo and follow the walkthrough/);
   const index = await render("/demos");
   assert.equal(index.status, 200);
-  assert.match(await index.text(), /href="\/demos\/sandbox"/);
+  const indexHtml = await index.text();
+  assert.match(indexHtml, /href="\/demos\/sandbox"/);
+  assert.match(indexHtml, /10:42 · CLI \+ Codex MCP · No real charges/);
+  assert.doesNotMatch(indexHtml, /14:40/);
   const response = await render("/demos/sandbox");
   assert.equal(response.status, 200);
   const html = await response.text();
@@ -95,11 +105,16 @@ test("links demos from home and publishes the sandbox video before its concise s
   assert.match(startHere, /href="\/docs\/faq">FAQ<\/a>$/);
   const iframe = html.match(/<iframe\b[^>]*><\/iframe>/)?.[0];
   assert.ok(iframe);
-  assert.match(iframe, /youtube-nocookie.com\/embed\/01A1RemvK1A/);
+  assert.match(iframe, /youtube-nocookie.com\/embed\/3PpPcytk-v0/);
   assert.match(iframe, /title="Hubu Sandbox Demo: From Agent Registration to Spend Settlement"/);
   assert.match(iframe, /loading="lazy"/);
   assert.doesNotMatch(iframe, /autoplay/);
   assert.ok(html.indexOf(iframe) < html.indexOf('id="the-short-version"'));
+  assert.match(html, /href="https:\/\/youtu.be\/3PpPcytk-v0"/);
+  assert.doesNotMatch(html, /01A1RemvK1A|14:40/);
+  assert.match(html, /v0\.2\.2 · 10:42 · Happy path/);
+  assert.match(html, /Command typing is silent and shown at 4× speed; long waits are shortened\./);
+  assert.match(html, /Explanations and result review remain at normal speed\./);
   assert.match(html, /1×1 PNG fixture/);
   assert.match(html, /USD 0\.99 remaining/);
   assert.match(html, /denies unmatched requests/);
@@ -122,6 +137,45 @@ test("home page states that Gongbu is optional and links what works today", asyn
   assert.match(html, /<strong>Sandbox<\/strong> with no provider credentials/);
   assert.match(html, /href="\/docs\/overview#what-works-today"/);
   assert.ok(html.indexOf('class="warning-band"') < html.indexOf('class="works-today"'));
+});
+
+test("publishes the live-provider demo with a video-first companion and clear cost boundary", async () => {
+  const index = await (await render("/demos")).text();
+  assert.match(index, /href="\/demos\/sandbox"/);
+  assert.match(index, /href="\/demos\/local-stack"/);
+  assert.match(index, /No real charges/);
+  assert.match(index, /Real provider charges/);
+  const response = await render("/demos/local-stack");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /href="https:\/\/hubustack.dev\/demos\/local-stack"/);
+  assert.match(html, /<a(?=[^>]*href="\/demos\/local-stack")(?=[^>]*aria-current="page")[^>]*>/);
+  const iframe = html.match(/<iframe\b[^>]*><\/iframe>/)?.[0];
+  assert.ok(iframe);
+  assert.match(iframe, /youtube-nocookie.com\/embed\/2lLNKL6ykjY/);
+  assert.match(iframe, /title="Hubu Local Stack Demo: Real Providers, Governed Spend"/);
+  assert.match(iframe, /loading="lazy"/);
+  assert.match(iframe, /referrerpolicy="strict-origin-when-cross-origin"/i);
+  assert.doesNotMatch(iframe, /autoplay/);
+  assert.ok(html.indexOf(iframe) < html.indexOf('id="the-short-version"'));
+  assert.match(html, /10:53/);
+  assert.match(html, /Real provider calls and charges/);
+  assert.match(html, /needs_approval/);
+  assert.match(html, /precise provider cost of 6\.7¢; USD budget accounting rounds up to 7¢/);
+  assert.match(html, /href="\/demos\/sandbox"/);
+  assert.match(html, /href="\/docs\/operations\/live-providers"/);
+  assert.match(html, /id="mascot-gallery"/);
+  const galleries = [...html.matchAll(/<div class="demo-gallery">[\s\S]*?<\/div>/g)].map(([gallery]) => gallery).join("");
+  assert.equal(galleries.match(/<figure\b/g)?.length, 6);
+  assert.equal(galleries.match(/loading="lazy"/g)?.length, 6);
+  assert.match(html, /not additional executions shown in the video/);
+  for (const image of ["brand/hubu-mascot.png", "demos/local-stack/mascot-flux-ledger.jpg", "demos/local-stack/mascot-gemini-blocked.jpg", "demos/local-stack/concepts-builtin.png", "demos/local-stack/concepts-flux.jpg", "demos/local-stack/concepts-gemini.jpg"]) {
+    assert.ok(galleries.includes(`src="/${image}"`), image);
+    await access(new URL(`../dist/client/${image}`, import.meta.url));
+  }
+  const legacy = await render("/docs/demos/local-stack");
+  assert.equal(legacy.status, 307);
+  assert.equal(legacy.headers.get("location"), "/demos/local-stack");
 });
 
 test("roadmap shows three linked priorities without promising release dates", async () => {
@@ -208,7 +262,7 @@ test("publishes a sitemap of every documentation route", async () => {
     readFile(new URL("../dist/client/robots.txt", import.meta.url), "utf8"),
   ]);
   assert.match(robots, /^Sitemap: https:\/\/hubustack.dev\/sitemap.xml$/m);
-  for (const pathname of ["/", "/demos", "/demos/sandbox", "/architecture/", "/docs/overview", "/docs/local-stack", "/configuration/local-stack/v1", "/configuration/local-stack/v1/stack-toml"]) {
+  for (const pathname of ["/", "/demos", "/demos/sandbox", "/demos/local-stack", "/architecture/", "/docs/overview", "/docs/local-stack", "/configuration/local-stack/v1", "/configuration/local-stack/v1/stack-toml"]) {
     assert.ok(sitemap.includes(`<loc>https://hubustack.dev${pathname}</loc>`), pathname);
   }
 });

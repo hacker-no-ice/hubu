@@ -2,13 +2,15 @@
 
 Set spending boundaries in the CLI, run one governed request in Codex, and inspect the result.
 
-**v0.2.2 · 14:40 · Happy path · No real provider calls or charges**
+**v0.2.2 · 10:42 · Happy path · No real provider calls or charges**
 
 <div class="intro-video-player">
-<iframe src="https://www.youtube-nocookie.com/embed/01A1RemvK1A" title="Hubu Sandbox Demo: From Agent Registration to Spend Settlement" width="960" height="540" loading="lazy" referrerpolicy="strict-origin-when-cross-origin" allow="encrypted-media; picture-in-picture; fullscreen" allowfullscreen></iframe>
+<iframe src="https://www.youtube-nocookie.com/embed/3PpPcytk-v0" title="Hubu Sandbox Demo: From Agent Registration to Spend Settlement" width="960" height="540" loading="lazy" referrerpolicy="strict-origin-when-cross-origin" allow="encrypted-media; picture-in-picture; fullscreen" allowfullscreen></iframe>
 </div>
 
-[Watch on YouTube ↗](https://youtu.be/01A1RemvK1A)
+[Watch on YouTube ↗](https://youtu.be/3PpPcytk-v0)
+
+Command typing is silent and shown at 4× speed; long waits are shortened. Explanations and result review remain at normal speed.
 
 ## The short version
 
@@ -59,6 +61,6 @@ The recorded cost is one simulated cent: USD 0.01 consumed, nothing frozen, and 
 
 People set the boundaries. Agents work within them. Results stay inspectable.
 
-Follow the [local stack quick start](../local-stack.md) to prepare your own sandbox. This video begins with a running stack and focuses on the happy path. Real providers, approval flows, and failure handling will get separate demos.
+Follow the [local stack quick start](../local-stack.md) to prepare your own sandbox. This video begins with a running stack and focuses on the happy path. For real providers and approval decisions, continue with the [local-stack demo](local-stack.md). Failure handling will get a separate demo.
 
 [Explore the source on GitHub ↗](https://github.com/hacker-no-ice/hubu)
