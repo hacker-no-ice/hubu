@@ -13,7 +13,7 @@ use std::{
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, Local};
 use hubu_common::build::build_info;
-use hubu_common::money::{Currency, DecimalMajorAmount};
+use hubu_common::money::Currency;
 use hubu_core::policy::{Effect, Policy};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -3580,7 +3580,10 @@ fn money_at(value: &Value, key: &str) -> Result<String> {
     Ok(format_cents(cents, "$"))
 }
 
+// Replaced by `Amount` parsing when the CLI moves to accounting units.
+#[allow(deprecated)]
 fn amount_to_cents(value: &str) -> Result<i64> {
+    use hubu_common::money::DecimalMajorAmount;
     Ok(value.parse::<DecimalMajorAmount>()?.minor_units())
 }
 

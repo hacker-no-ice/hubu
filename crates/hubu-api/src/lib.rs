@@ -33,7 +33,7 @@ use hubu_common::{
         AgentType, CodeReference, ModelIdentity, RuntimeEnvironment, RuntimeIdentity,
     },
     models::{User, UserContext},
-    money::Currency,
+    money::{Amount, Currency},
     time::TimePeriod,
 };
 use hubu_core::{
@@ -975,6 +975,9 @@ struct UserHttpResponse {
 #[derive(Debug, Deserialize)]
 struct AddPolicyHttpRequest {
     agent_id: Option<String>,
+    /// Single-spend limit of the starter policy as a decimal string ("5.00").
+    daily_limit: Option<String>,
+    /// Deprecated whole-cent form of `daily_limit`.
     daily_limit_cents: Option<i64>,
     policy_yaml: Option<String>,
     display_name: Option<String>,
@@ -3023,12 +3026,37 @@ fn add_policy(body: String, state: &ServerState) -> Result<AddPolicyHttpResponse
         validate_policy(&policy)?;
         policy
     } else {
-        let daily_limit_cents = request
-            .daily_limit_cents
-            .ok_or_else(|| anyhow!("policy add requires `policy_yaml` or `daily_limit_cents`"))?;
-        if daily_limit_cents <= 0 {
-            return Err(anyhow!("daily limit must be positive"));
-        }
+        let (limit_value, limit_description) =
+            match (request.daily_limit.as_deref(), request.daily_limit_cents) {
+                (Some(_), Some(_)) => {
+                    return Err(anyhow!(
+                        "send either `daily_limit` or the deprecated `daily_limit_cents`, not both"
+                    ))
+                }
+                (Some(daily_limit), None) => {
+                    let amount = daily_limit.parse::<Amount>()?;
+                    if amount <= Amount::ZERO {
+                        return Err(anyhow!("daily limit must be positive"));
+                    }
+                    (PolicyValue::Money(amount), format!("USD {amount}"))
+                }
+                (None, Some(daily_limit_cents)) => {
+                    if daily_limit_cents <= 0 {
+                        return Err(anyhow!("daily limit must be positive"));
+                    }
+                    // Legacy starter policies keep their exact payload so
+                    // re-applying them stays idempotent.
+                    (
+                        PolicyValue::MoneyCents(daily_limit_cents),
+                        format!("{daily_limit_cents} cents"),
+                    )
+                }
+                (None, None) => {
+                    return Err(anyhow!(
+                        "policy add requires `policy_yaml` or `daily_limit`"
+                    ))
+                }
+            };
 
         Policy {
             id: match agent_pub_id.as_deref() {
@@ -3053,11 +3081,10 @@ fn add_policy(body: String, state: &ServerState) -> Result<AddPolicyHttpResponse
                     effect: Effect::Allow,
                     when: Condition::Lte {
                         field: Field::Amount,
-                        value: PolicyValue::MoneyCents(daily_limit_cents),
+                        value: limit_value,
                     },
                     reason: format!(
-                        "amount is within the configured single-spend limit of {} cents",
-                        daily_limit_cents
+                        "amount is within the configured single-spend limit of {limit_description}"
                     ),
                 },
             ],
@@ -10369,6 +10396,88 @@ rules: []
 
         assert!(error.to_string().contains("failed to parse policy yaml"));
         assert!(error.to_string().contains("daily_limit_cents"));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn starter_policy_accepts_decimal_daily_limit_and_keeps_legacy_cents_stable() {
+        let path = std::env::temp_dir().join(format!(
+            "hubu-api-policy-decimal-limit-{}.sqlite",
+            UserId::new()
+        ));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+
+        let decimal = add_policy(json!({"daily_limit": "0.005"}).to_string(), &state).unwrap();
+        let show = route(
+            authenticated_get_request(&format!("/policies/show?policy_id={}", decimal.policy_id)),
+            &state,
+        );
+        assert_eq!(show.status, 200);
+        let rule = &show.body["policy"]["rules"][1];
+        assert_eq!(rule["when"]["value"], json!({"money": "0.005"}));
+        assert_eq!(
+            rule["reason"],
+            "amount is within the configured single-spend limit of USD 0.005"
+        );
+
+        // A legacy client re-applying the same cents limit produces the same
+        // payload, so the write stays an idempotent no-op.
+        let legacy = add_policy(
+            json!({"daily_limit_cents": 500, "declarative_key": "legacy"}).to_string(),
+            &state,
+        )
+        .unwrap();
+        let replay = add_policy(
+            json!({
+                "daily_limit_cents": 500,
+                "declarative_key": "legacy",
+                "expected_hash": legacy.payload_hash,
+            })
+            .to_string(),
+            &state,
+        )
+        .unwrap();
+        assert!(!replay.changed);
+        let show = route(
+            authenticated_get_request(&format!("/policies/show?policy_id={}", legacy.policy_id)),
+            &state,
+        );
+        let rule = &show.body["policy"]["rules"][1];
+        assert_eq!(rule["when"]["value"], json!({"money_cents": 500}));
+        assert_eq!(
+            rule["reason"],
+            "amount is within the configured single-spend limit of 500 cents"
+        );
+
+        for (body, expected) in [
+            (
+                json!({"daily_limit": "5.00", "daily_limit_cents": 500}),
+                "not both",
+            ),
+            (json!({"daily_limit": "0"}), "must be positive"),
+            (
+                json!({"daily_limit": "0.0000001"}),
+                "at most 6 decimal places",
+            ),
+            (json!({}), "`policy_yaml` or `daily_limit`"),
+        ] {
+            let error = add_policy(body.to_string(), &state).unwrap_err();
+            assert!(error.to_string().contains(expected), "{body}: {error}");
+        }
+
+        let error = add_policy(
+            json!({
+                "policy_yaml": "id: p\nversion: v1\ndefault_effect: deny\nrules:\n  - id: cap\n    effect: allow\n    reason: cap\n    when:\n      op: lte\n      field: amount\n      value:\n        money: 0.005\n",
+            })
+            .to_string(),
+            &state,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("quote decimal amounts"),
+            "{error}"
+        );
+
         std::fs::remove_file(path).ok();
     }
 

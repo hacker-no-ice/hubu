@@ -25,6 +25,19 @@ Future release template
 
 ## Unreleased
 
+### Highlights
+
+- Policies can state exact amounts with `value: {money: "0.005"}`: a quoted
+  decimal in the budget currency with up to 6 decimal places. Unquoted
+  numbers, signs, exponents, and more than 6 decimal places are rejected when
+  the policy is written. The legacy `money_cents` form still loads and
+  compares with `money` values in the same policy, and stored policy
+  revisions are never rewritten. `POST /policies` accepts
+  `daily_limit: "5.00"` for the starter policy (`daily_limit_cents` is
+  deprecated), and policy explanations show `USD 0.005` instead of minor
+  units. Until budgets move to sub-cent accounting, spend requests are still
+  whole cents.
+
 ## v0.2.3 — 2026-10-13
 
 ### Highlights

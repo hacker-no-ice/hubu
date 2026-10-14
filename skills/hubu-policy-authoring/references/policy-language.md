@@ -17,7 +17,7 @@ rules:
       op: gt
       field: amount
       value:
-        money_cents: 500
+        money: "5.00"
 
   - id: deny_unapproved_provider
     effect: deny
@@ -72,7 +72,7 @@ rules:
       op: lte
       field: amount
       value:
-        money_cents: 500
+        money: "5.00"
 ```
 
 This pattern makes the amount, provider, executor, capability, and billing
@@ -89,7 +89,7 @@ to guess an id. Resolve the canonical tuple for the target environment.
 
 | Field | Value encoding | Notes |
 | --- | --- | --- |
-| `amount` | `{money_cents: INTEGER}` | The only field supporting `gt`, `gte`, `lt`, and `lte` |
+| `amount` | `{money: "DECIMAL"}` | Quoted decimal in the budget currency, at most 6 decimal places (`"5.00"`, `"0.005"`). The only field supporting `gt`, `gte`, `lt`, and `lte`. Legacy `{money_cents: INTEGER}` still loads |
 | `currency` | `{currency: usd}` | Hubu currently supports USD |
 | `agent_id` | `{agent_id: agt_...}` | Use a registered public agent id |
 | `provider` | `{string: provider:...}` | Stable provider id from the trusted scope catalog |

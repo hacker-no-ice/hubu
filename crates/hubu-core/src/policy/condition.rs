@@ -1,6 +1,6 @@
 use hubu_common::ids::AgentId;
-use hubu_common::money::Currency;
-use serde::{Deserialize, Serialize};
+use hubu_common::money::{Amount, Currency};
+use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 
 use crate::policy::error::PolicyValidationError;
@@ -68,7 +68,7 @@ pub enum Field {
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum ValueKind {
     String,
-    MoneyCents,
+    Money,
     Currency,
     AgentId,
 }
@@ -77,6 +77,12 @@ pub enum ValueKind {
 #[serde(rename_all = "snake_case")]
 pub enum PolicyValue {
     String(String),
+    /// An exact budget-currency amount, authored as a quoted decimal string
+    /// (`money: "0.005"`).
+    Money(#[serde(with = "money_string")] Amount),
+    /// Legacy whole-cent amount (`money_cents: 10` ≡ `money: "0.10"`). Kept
+    /// as its own variant so stored, hashed policy revisions re-serialize
+    /// unchanged; it compares as [`ValueKind::Money`].
     MoneyCents(i64),
     Currency(Currency),
     AgentId(AgentId),
@@ -200,7 +206,11 @@ fn field_name(field: Field) -> &'static str {
 fn value_name(value: &PolicyValue) -> String {
     match value {
         PolicyValue::String(value) => format!("`{value}`"),
-        PolicyValue::MoneyCents(value) => format!("{value} minor units"),
+        PolicyValue::Money(amount) => format!("USD {amount}"),
+        PolicyValue::MoneyCents(cents) => match Amount::from_legacy_cents(*cents) {
+            Ok(amount) => format!("USD {amount}"),
+            Err(_) => format!("{cents} cents"),
+        },
         PolicyValue::Currency(value) => value.to_string(),
         PolicyValue::AgentId(value) => value.to_string(),
     }
@@ -209,6 +219,7 @@ fn value_name(value: &PolicyValue) -> String {
 impl Field {
     pub fn value_from(&self, request: &SpendRequest) -> Option<PolicyValue> {
         match self {
+            // Request amounts are still whole cents; keep them exact.
             Field::Amount => Some(PolicyValue::MoneyCents(request.amount_cents)),
             Field::Currency => Some(PolicyValue::Currency(request.currency)),
             Field::AgentId => Some(PolicyValue::AgentId(request.agent_id.clone())),
@@ -235,7 +246,7 @@ impl Field {
 
     pub fn value_kind(&self) -> ValueKind {
         match self {
-            Field::Amount => ValueKind::MoneyCents,
+            Field::Amount => ValueKind::Money,
             Field::Currency => ValueKind::Currency,
             Field::AgentId => ValueKind::AgentId,
             Field::Merchant
@@ -256,59 +267,70 @@ impl PolicyValue {
     pub fn kind(&self) -> ValueKind {
         match self {
             PolicyValue::String(_) => ValueKind::String,
-            PolicyValue::MoneyCents(_) => ValueKind::MoneyCents,
+            PolicyValue::Money(_) | PolicyValue::MoneyCents(_) => ValueKind::Money,
             PolicyValue::Currency(_) => ValueKind::Currency,
             PolicyValue::AgentId(_) => ValueKind::AgentId,
         }
     }
 
+    /// The budget-currency amount of a money value, or `None` for other
+    /// kinds and for legacy cents beyond the accounting-scale range.
+    pub fn money(&self) -> Option<Amount> {
+        match self {
+            PolicyValue::Money(amount) => Some(*amount),
+            PolicyValue::MoneyCents(cents) => Amount::from_legacy_cents(*cents).ok(),
+            _ => None,
+        }
+    }
+
+    /// Exact accounting-scale units for comparison. Widening to `i128`
+    /// keeps legacy cent values beyond the `Amount` range distinct and
+    /// ordered.
+    fn money_units(&self) -> Option<i128> {
+        match self {
+            PolicyValue::Money(amount) => Some(i128::from(amount.units())),
+            PolicyValue::MoneyCents(cents) => Some(i128::from(*cents) * 10_000),
+            _ => None,
+        }
+    }
+
     fn eq_value(&self, other: &PolicyValue) -> bool {
         assert_value_kind_matches(self, other);
-        self == other
+        match (self.money_units(), other.money_units()) {
+            (Some(left), Some(right)) => left == right,
+            _ => self == other,
+        }
+    }
+
+    fn money_pair(&self, other: &PolicyValue, operator: &str) -> (i128, i128) {
+        match (self.money_units(), other.money_units()) {
+            (Some(left), Some(right)) => (left, right),
+            _ => panic!(
+                "policy value mismatch: cannot compare {} {operator} {}",
+                self.kind(),
+                other.kind()
+            ),
+        }
     }
 
     fn gt_value(&self, other: &PolicyValue) -> bool {
-        match (self, other) {
-            (PolicyValue::MoneyCents(left), PolicyValue::MoneyCents(right)) => left > right,
-            _ => panic!(
-                "policy value mismatch: cannot compare {} > {}",
-                self.kind(),
-                other.kind()
-            ),
-        }
+        let (left, right) = self.money_pair(other, ">");
+        left > right
     }
 
     fn gte_value(&self, other: &PolicyValue) -> bool {
-        match (self, other) {
-            (PolicyValue::MoneyCents(left), PolicyValue::MoneyCents(right)) => left >= right,
-            _ => panic!(
-                "policy value mismatch: cannot compare {} >= {}",
-                self.kind(),
-                other.kind()
-            ),
-        }
+        let (left, right) = self.money_pair(other, ">=");
+        left >= right
     }
 
     fn lt_value(&self, other: &PolicyValue) -> bool {
-        match (self, other) {
-            (PolicyValue::MoneyCents(left), PolicyValue::MoneyCents(right)) => left < right,
-            _ => panic!(
-                "policy value mismatch: cannot compare {} < {}",
-                self.kind(),
-                other.kind()
-            ),
-        }
+        let (left, right) = self.money_pair(other, "<");
+        left < right
     }
 
     fn lte_value(&self, other: &PolicyValue) -> bool {
-        match (self, other) {
-            (PolicyValue::MoneyCents(left), PolicyValue::MoneyCents(right)) => left <= right,
-            _ => panic!(
-                "policy value mismatch: cannot compare {} <= {}",
-                self.kind(),
-                other.kind()
-            ),
-        }
+        let (left, right) = self.money_pair(other, "<=");
+        left <= right
     }
 }
 
@@ -398,9 +420,58 @@ impl fmt::Display for ValueKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ValueKind::String => f.write_str("string"),
-            ValueKind::MoneyCents => f.write_str("money_cents"),
+            ValueKind::Money => f.write_str("money"),
             ValueKind::Currency => f.write_str("currency"),
             ValueKind::AgentId => f.write_str("agent_id"),
+        }
+    }
+}
+
+/// Serde for policy money: exact decimal strings only. Unquoted numbers are
+/// rejected because YAML/JSON parsers may read them as binary floats.
+mod money_string {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(amount: &Amount, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(amount)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Amount, D::Error> {
+        deserializer.deserialize_any(MoneyVisitor)
+    }
+
+    struct MoneyVisitor;
+
+    const QUOTE_HINT: &str =
+        "quote decimal amounts so they stay exact, for example `money: \"0.005\"`";
+
+    impl de::Visitor<'_> for MoneyVisitor {
+        type Value = Amount;
+
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("a quoted decimal amount such as \"0.005\"")
+        }
+
+        fn visit_str<E: de::Error>(self, value: &str) -> Result<Amount, E> {
+            value.parse().map_err(E::custom)
+        }
+
+        fn visit_f64<E: de::Error>(self, value: f64) -> Result<Amount, E> {
+            Err(E::custom(format_args!(
+                "unquoted number {value} for `money`; {QUOTE_HINT}"
+            )))
+        }
+
+        fn visit_i64<E: de::Error>(self, value: i64) -> Result<Amount, E> {
+            Err(E::custom(format_args!(
+                "unquoted number {value} for `money`; {QUOTE_HINT}"
+            )))
+        }
+
+        fn visit_u64<E: de::Error>(self, value: u64) -> Result<Amount, E> {
+            Err(E::custom(format_args!(
+                "unquoted number {value} for `money`; {QUOTE_HINT}"
+            )))
         }
     }
 }
@@ -515,6 +586,155 @@ mod tests {
             field: Field::Merchant,
         }
         .eval(&request));
+    }
+
+    fn money(value: &str) -> PolicyValue {
+        PolicyValue::Money(value.parse().unwrap())
+    }
+
+    #[test]
+    fn money_and_legacy_cents_compare_as_one_kind() {
+        let request = spend_request(); // 4_500 cents = USD 45.00
+        for (value, lte, gt, eq) in [
+            (money("45"), true, false, true),
+            (PolicyValue::MoneyCents(4_500), true, false, true),
+            (money("44.999999"), false, true, false),
+            (money("45.000001"), true, false, false),
+        ] {
+            let lte_holds = Condition::Lte {
+                field: Field::Amount,
+                value: value.clone(),
+            }
+            .eval(&request);
+            let gt_holds = Condition::Gt {
+                field: Field::Amount,
+                value: value.clone(),
+            }
+            .eval(&request);
+            let eq_holds = Condition::Eq {
+                field: Field::Amount,
+                value: value.clone(),
+            }
+            .eval(&request);
+            assert_eq!((lte_holds, gt_holds, eq_holds), (lte, gt, eq), "{value:?}");
+        }
+        assert!(Condition::In {
+            field: Field::Amount,
+            values: vec![money("1"), PolicyValue::MoneyCents(4_500)],
+        }
+        .eval(&request));
+        assert_eq!(money("0.10").kind(), PolicyValue::MoneyCents(10).kind());
+        assert_eq!(money("0.10").money(), PolicyValue::MoneyCents(10).money());
+    }
+
+    #[test]
+    fn mixed_money_and_legacy_conditions_validate() {
+        let condition = Condition::All {
+            conditions: vec![
+                Condition::Lte {
+                    field: Field::Amount,
+                    value: money("0.005"),
+                },
+                Condition::Gt {
+                    field: Field::Amount,
+                    value: PolicyValue::MoneyCents(0),
+                },
+            ],
+        };
+        condition.validate("mixed").unwrap();
+    }
+
+    #[test]
+    fn legacy_amounts_beyond_the_accounting_range_stay_exact_and_ordered() {
+        let mut request = spend_request();
+        request.amount_cents = i64::MAX;
+        assert!(Condition::Gt {
+            field: Field::Amount,
+            value: money("1000000"),
+        }
+        .eval(&request));
+
+        // Both values exceed i64::MAX / 10^4 cents; they must not collapse.
+        request.amount_cents = 922_337_203_685_478;
+        let cap = PolicyValue::MoneyCents(922_337_203_685_477);
+        assert!(!Condition::Lte {
+            field: Field::Amount,
+            value: cap.clone(),
+        }
+        .eval(&request));
+        assert!(Condition::Gt {
+            field: Field::Amount,
+            value: cap,
+        }
+        .eval(&request));
+        assert!(!Condition::Eq {
+            field: Field::Amount,
+            value: PolicyValue::MoneyCents(922_337_203_685_479),
+        }
+        .eval(&request));
+        assert_eq!(PolicyValue::MoneyCents(i64::MAX).money(), None);
+    }
+
+    #[test]
+    fn describes_money_in_budget_currency() {
+        assert_eq!(
+            Condition::Lte {
+                field: Field::Amount,
+                value: money("0.005"),
+            }
+            .describe(),
+            "amount is at most USD 0.005"
+        );
+        assert_eq!(
+            Condition::Gt {
+                field: Field::Amount,
+                value: PolicyValue::MoneyCents(10),
+            }
+            .describe(),
+            "amount is greater than USD 0.10"
+        );
+    }
+
+    #[test]
+    fn money_serializes_as_an_exact_string_and_legacy_cents_unchanged() {
+        assert_eq!(
+            serde_json::to_value(money("0.005")).unwrap(),
+            serde_json::json!({"money": "0.005"})
+        );
+        assert_eq!(
+            serde_json::to_value(PolicyValue::MoneyCents(10)).unwrap(),
+            serde_json::json!({"money_cents": 10})
+        );
+        let parsed: PolicyValue =
+            serde_json::from_value(serde_json::json!({"money": "0.0050"})).unwrap();
+        assert_eq!(parsed, money("0.005"));
+    }
+
+    #[test]
+    fn money_rejects_unquoted_numbers_and_invalid_decimals() {
+        for (value, expected) in [
+            (serde_json::json!({"money": 0.005}), "quote decimal amounts"),
+            (serde_json::json!({"money": 5}), "quote decimal amounts"),
+            (
+                serde_json::json!({"money": "0.0050000"}),
+                "at most 6 decimal places",
+            ),
+            (
+                serde_json::json!({"money": "-0.01"}),
+                "must not carry a sign",
+            ),
+            (
+                serde_json::json!({"money": "1e-3"}),
+                "exponents are not accepted",
+            ),
+            (
+                serde_json::json!({"money": "9223372036854.775808"}),
+                "too large",
+            ),
+        ] {
+            let error = serde_json::from_value::<PolicyValue>(value.clone()).unwrap_err();
+            assert!(error.to_string().contains(expected), "{value}: {error}");
+        }
     }
 
     #[test]

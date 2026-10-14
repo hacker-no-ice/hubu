@@ -13,9 +13,9 @@ rules:
 
   - id: allow_small_spend
     effect: allow
-    reason: amount is within the starter single-spend limit of 10000 cents
+    reason: amount is within the starter single-spend limit of USD 100.00
     when:
       op: lte
       field: amount
       value:
-        money_cents: 10000
+        money: "100.00"
