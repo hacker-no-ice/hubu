@@ -83,6 +83,53 @@ remainder of the authorized maximum.
 `POST /spend/executor/validate` remains available for scope inspection, but
 validation alone does not authorize irreversible work.
 
+## Admission rejection before claim
+
+When Gongbu definitively rejects the initial execution admission with a permanent
+`invalid_request`, no claim exists. The trusted unified MCP router cancels the
+unclaimed reservation through a separate backend operation:
+
+```http
+POST /spend/void
+Authorization: Bearer <Hubu backend bearer>
+Content-Type: application/json
+
+{
+  "spend_auth_token_id": "<bound authorization token>",
+  "account_id": "<bound agent account>",
+  "operation_key": "<router's private operation key>"
+}
+```
+
+This route requires the authenticated owner, account, token and private
+operation key to match the same authorization. The router retains the random
+private key; it is never accepted as a model-supplied argument or exposed in a
+public operation result. There is no agent-facing void MCP tool. Gongbu keeps
+using the token-only executor routes and does not receive the private key.
+
+Hubu atomically revokes an unused, unrevoked, unclaimed token and returns the
+entire frozen hold to its budget in one SQLite write transaction. Claim creation
+checks persisted token and hold state under the same write lock. If void wins,
+claim refuses the revoked token. If claim wins, void returns HTTP 409 with
+`error_code: authorization_not_voidable` and leaves the claimed hold unchanged.
+The same conflict also applies to already used or finalized authorizations.
+Repeating a completed void returns HTTP 200 with `idempotent_replay: true` and
+does not credit the budget twice. No provider charge, receipt or ledger posting
+is created.
+
+Authorization history and `hubu watch` show status `released` and
+`release_reason: executor_rejected_before_claim`. The router durably records
+the original admission failure and pending cleanup together; it retries a lost
+void response after restart without redispatching Gongbu or re-authorizing the
+operation. Replaying the original call retains the same failed result. A
+corrected request needs a new call identity.
+
+Timeouts, malformed replies, retry exhaustion, observation errors and other
+ambiguous outcomes keep the existing expiry and observation paths. A definitive
+rejection after an earlier ambiguous dispatch also keeps its hold. The router
+never infers that no claim exists from a missing execution ID alone. Ordinary
+executor `release` remains identified exclusively by `claim_id`.
+
 ## V4.4 Executor Request Identity
 
 An executor identifies its operation only by values Hubu gave it: it claims

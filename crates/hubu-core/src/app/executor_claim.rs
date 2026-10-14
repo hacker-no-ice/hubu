@@ -154,6 +154,27 @@ pub enum ExecutorClaimServiceError {
 }
 
 impl ExecutorClaimService {
+    #[allow(clippy::too_many_arguments)]
+    pub fn void_unclaimed(
+        &self,
+        owner: &UserId,
+        account: &hubu_common::ids::AgentAccountId,
+        token: &hubu_common::ids::SpendAuthTokenId,
+        operation_key: &str,
+        spend: &mut SpendManager,
+        budgets: &mut BudgetManager,
+        repository: &mut crate::persistence::SqliteGovernanceRepository,
+    ) -> Result<
+        crate::persistence::AuthorizationVoidResult,
+        crate::persistence::AuthorizationVoidError,
+    > {
+        let result =
+            repository.void_unclaimed_authorization(owner, account, token, operation_key)?;
+        spend.apply_persisted_authorization_void(result.token.clone());
+        budgets.apply_persisted_finalization(result.hold.clone(), result.balance.clone());
+        Ok(result)
+    }
+
     pub fn claim<R>(
         &self,
         request: ClaimExecutorSpendRequest,
@@ -190,30 +211,35 @@ impl ExecutorClaimService {
         }
 
         let idempotent_replay = existing_claim.is_some();
-        let (claim, authorization) = spend_manager.claim_auth_token(SpendExecutorClaimRequest {
-            authorization: request.authorization,
-            operation_key: operation_key.to_string(),
-        })?;
+        let (claim, authorization) =
+            spend_manager.prepare_auth_token_claim(SpendExecutorClaimRequest {
+                authorization: request.authorization,
+                operation_key: operation_key.to_string(),
+            })?;
         if authorization.spend_decision_id != prevalidated.spend_decision_id {
             return Err(ExecutorClaimServiceError::ClaimDecisionMismatch);
         }
 
-        let claimed_hold = if idempotent_replay {
-            let balance = budget_manager
-                .get_budget_balance(&budget_hold.budget_id)
-                .ok_or(ExecutorClaimServiceError::MissingBudgetBalance)?;
-            ReserveBudgetResponse {
-                hold: budget_hold,
-                balance,
-            }
-        } else {
-            budget_manager.claim_budget(&budget_hold.id, claim.id.clone(), claim.expires_at)?
-        };
+        let balance = budget_manager
+            .get_budget_balance(&budget_hold.budget_id)
+            .ok_or(ExecutorClaimServiceError::MissingBudgetBalance)?;
+        let mut hold = budget_hold;
+        if !idempotent_replay {
+            hold.claim(claim.id.clone(), claim.expires_at)
+                .map_err(BudgetManagerError::from)?;
+        }
+        let claimed_hold = ReserveBudgetResponse { hold, balance };
+        let token = spend_manager
+            .auth_token_record(&claim.spend_auth_token_id)
+            .ok_or(ExecutorClaimServiceError::MissingClaimToken)?;
         repository.save_executor_claim_with_budget_hold(
             &claim,
             &claimed_hold.hold,
             &claimed_hold.balance,
         )?;
+        spend_manager.apply_persisted_executor_finalization(claim.clone(), token);
+        budget_manager
+            .apply_persisted_finalization(claimed_hold.hold.clone(), claimed_hold.balance.clone());
 
         let state = claim_state_from_records(
             claim,

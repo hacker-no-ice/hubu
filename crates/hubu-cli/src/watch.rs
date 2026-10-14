@@ -357,7 +357,9 @@ fn event_line(event: &Value, single: bool, name_width: usize, width: usize) -> S
     // Fixed columns: time, glyph, agent, provider and status; the rule takes the rest.
     let fixed = if single { 43 } else { 35 + name_width };
     let rule_width = (width - 9).saturating_sub(fixed).max(14);
-    let rule = if event["denial_kind"] == "budget" {
+    let rule = if event["release_reason"].as_str() == Some("executor_rejected_before_claim") {
+        "executor_rejected_before_claim".into()
+    } else if event["denial_kind"] == "budget" {
         "budget".into()
     } else {
         event["rule_ids"]
@@ -640,6 +642,14 @@ fn render(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn admission_void_reason_is_visible_in_the_watch_event() {
+        let event = serde_json::json!({"created_at":"2026-10-13T12:00:00Z", "status":"released", "reserved_cents":500,
+            "release_reason":"executor_rejected_before_claim", "rule_ids":["allow"]});
+        let line = super::event_line(&event, true, 12, 100);
+        assert!(line.contains("released"));
+        assert!(line.contains("executor_rejected_before_claim"));
+    }
     use super::*;
     fn snapshot() -> Value {
         json!({"schema_version":"hubu-watch-v1","currency":"usd","observed_at":"2026-10-08T03:12:07Z","rows":[{"agent_id":"a","name":"image-agent","budget_id":"b","limit_cents":200,"consumed_cents":6,"frozen_cents":8,"available_cents":186}],"recent_events":[{"id":"d","agent_id":"a","agent_name":"image-agent","created_at":"2026-10-08T03:12:05Z","provider":{"id":"provider:black-forest-labs:flux","display_name":"untrusted"},"status":"settled","requested_cents":8,"reserved_cents":8,"settled_cost":{"amount":"58","scale":3},"budget_charge_cents":6,"rule_ids":["draft_images"]}]})

@@ -22,7 +22,7 @@ const MAX_TASK_ID_BYTES: usize = 512;
 const MAX_TOOL_NAME_BYTES: usize = 128;
 const LEGACY_SCHEMA_VERSION: i64 = 4;
 const PREVIOUS_SCHEMA_VERSION: i64 = 5;
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 const APPLICATION_ID: i64 = 0x4855_424f;
 const MAX_RESULT_BYTES: usize = 1024 * 1024;
 const MAX_GOVERNED_RESULT_BYTES: usize = 16 * 1024 * 1024;
@@ -304,6 +304,9 @@ pub(crate) struct ClaimedDurableOperation {
     pub(crate) observation_failures: u32,
     pub(crate) reconciliation_attempts: u32,
     pub(crate) deadline_expired: bool,
+    pub(crate) void_pending: bool,
+    pub(crate) operation_key: String,
+    pub(crate) account_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -342,7 +345,9 @@ pub(crate) fn gallery_context(path: &Path, handle: &str) -> Result<(String, Stri
     let application_id: i64 =
         connection.pragma_query_value(None, "application_id", |row| row.get(0))?;
     let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if application_id != APPLICATION_ID || version != SCHEMA_VERSION {
+    // The gallery projection is read-only and unchanged by the v7 cleanup
+    // column. It must keep working on an existing v6 registry without migrating it.
+    if application_id != APPLICATION_ID || !matches!(version, 6 | SCHEMA_VERSION) {
         bail!("gallery requires the current unified operation registry schema; it never migrates state");
     }
     let context = connection
@@ -439,8 +444,12 @@ impl OperationRegistry {
         } else if application_id == APPLICATION_ID && version == LEGACY_SCHEMA_VERSION {
             migrate_v4_to_v5(&mut connection)?;
             migrate_v5_to_v6(&mut connection)?;
+            migrate_v6_to_v7(&mut connection)?;
         } else if application_id == APPLICATION_ID && version == PREVIOUS_SCHEMA_VERSION {
             migrate_v5_to_v6(&mut connection)?;
+            migrate_v6_to_v7(&mut connection)?;
+        } else if application_id == APPLICATION_ID && version == 6 {
+            migrate_v6_to_v7(&mut connection)?;
         } else if application_id != APPLICATION_ID || version != SCHEMA_VERSION {
             bail!("unified MCP operation registry identity or schema version is unsupported; refusing to modify the configured database");
         }
@@ -1723,9 +1732,9 @@ impl OperationRegistry {
                 "SELECT operation_handle, auth_token_id, gongbu_request_json,
                         gongbu_execution_id, operation_state, dispatch_attempts,
                         observation_failures, reconciliation_attempts,
-                        operation_deadline_at
+                        operation_deadline_at, authorization_void_pending, operation_key, json_extract(result_json,'$.account_id')
                  FROM harness_operations
-                 WHERE operation_state IN ('queued','dispatching','reconciling')
+                 WHERE (operation_state IN ('queued','dispatching','reconciling') OR authorization_void_pending=1)
                    AND (next_operation_attempt_at IS NULL OR next_operation_attempt_at <= ?1)
                    AND (worker_lease_expires_at IS NULL OR worker_lease_expires_at <= ?1)
                  ORDER BY COALESCE(next_operation_attempt_at, created_at), created_at
@@ -1742,6 +1751,9 @@ impl OperationRegistry {
                         row.get::<_, u32>(6)?,
                         row.get::<_, u32>(7)?,
                         row.get::<_, Option<String>>(8)?,
+                        row.get::<_, bool>(9)?,
+                        row.get::<_, String>(10)?,
+                        row.get::<_, Option<String>>(11)?,
                     ))
                 },
             )
@@ -1758,11 +1770,13 @@ impl OperationRegistry {
             .as_deref()
             .map(serde_json::from_str)
             .transpose()?;
-        if candidate.3.is_none() && request.is_none() {
+        if !candidate.9 && candidate.3.is_none() && request.is_none() {
             bail!("durable operation is missing its replay request");
         }
         let lease_id = Uuid::new_v4().simple().to_string();
-        let claimed_state = if candidate.3.is_some() {
+        let claimed_state = if candidate.9 {
+            "failed"
+        } else if candidate.3.is_some() {
             "reconciling"
         } else {
             "dispatching"
@@ -1789,6 +1803,9 @@ impl OperationRegistry {
             dispatch_attempts: candidate.5,
             observation_failures: candidate.6,
             reconciliation_attempts: candidate.7,
+            void_pending: candidate.9,
+            operation_key: candidate.10,
+            account_id: candidate.11,
             deadline_expired: candidate
                 .8
                 .as_deref()
@@ -1879,6 +1896,33 @@ impl OperationRegistry {
                 operation.auth_token_id,
             ],
         )?;
+        ensure_lease_update(changed)
+    }
+
+    /// Persist terminal admission failure and its cleanup obligation together.
+    pub(crate) fn reject_durable_admission(
+        &mut self,
+        operation: &ClaimedDurableOperation,
+        code: &str,
+    ) -> Result<()> {
+        validate_result_code(code)?;
+        let changed = self.connection.execute(
+            "UPDATE harness_operations SET operation_state='failed', operation_result_code=?3,
+             authorization_void_pending=1, gongbu_request_json=NULL, next_operation_attempt_at=NULL,
+             worker_lease_id=NULL, worker_lease_expires_at=NULL, operation_updated_at=CURRENT_TIMESTAMP
+             WHERE operation_handle=?1 AND worker_lease_id=?2 AND gongbu_execution_id IS NULL AND operation_state='dispatching'",
+            params![operation.operation_handle, operation.lease_id, code])?;
+        ensure_lease_update(changed)
+    }
+
+    pub(crate) fn finish_authorization_void(
+        &mut self,
+        operation: &ClaimedDurableOperation,
+    ) -> Result<()> {
+        let changed = self.connection.execute(
+            "UPDATE harness_operations SET authorization_void_pending=0, worker_lease_id=NULL, worker_lease_expires_at=NULL,
+             next_operation_attempt_at=NULL WHERE operation_handle=?1 AND worker_lease_id=?2 AND authorization_void_pending=1",
+            params![operation.operation_handle, operation.lease_id])?;
         ensure_lease_update(changed)
     }
 
@@ -2444,6 +2488,14 @@ fn migrate_v5_to_v6(connection: &mut Connection) -> Result<()> {
                  WHERE operation_key_record_id IS NOT NULL;",
         )
         .context("migrate unified MCP preallocated operation key binding schema")?;
+    transaction.pragma_update(None, "user_version", 6)?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn migrate_v6_to_v7(connection: &mut Connection) -> Result<()> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    transaction.execute_batch("ALTER TABLE harness_operations ADD COLUMN authorization_void_pending INTEGER NOT NULL DEFAULT 0 CHECK(authorization_void_pending IN (0,1));")?;
     transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     transaction.commit()?;
     Ok(())
@@ -2492,6 +2544,7 @@ fn create_schema(connection: &Connection) -> Result<()> {
              gongbu_result_recorded_at TEXT,
              operation_state TEXT CHECK(operation_state IS NULL OR operation_state IN ('accepted','queued','dispatching','reconciling','succeeded','failed')),
              operation_result_code TEXT CHECK(operation_result_code IS NULL OR length(operation_result_code) BETWEEN 1 AND 128),
+             authorization_void_pending INTEGER NOT NULL DEFAULT 0 CHECK(authorization_void_pending IN (0,1)),
              dispatch_attempts INTEGER NOT NULL DEFAULT 0 CHECK(dispatch_attempts >= 0),
              observation_failures INTEGER NOT NULL DEFAULT 0 CHECK(observation_failures >= 0),
              reconciliation_attempts INTEGER NOT NULL DEFAULT 0 CHECK(reconciliation_attempts >= 0),
@@ -2762,7 +2815,7 @@ fn validate_schema(connection: &Connection) -> Result<()> {
                     gongbu_request_hash, gongbu_request_json, gongbu_execution_id, gongbu_status,
                     gongbu_outcome, gongbu_create_started_at,
                     gongbu_result_recorded_at, operation_state, operation_result_code,
-                    dispatch_attempts, observation_failures, reconciliation_attempts,
+                    dispatch_attempts, observation_failures, reconciliation_attempts, authorization_void_pending,
                     operation_deadline_at, next_operation_attempt_at,
                     worker_lease_id, worker_lease_expires_at,
                     operation_updated_at, created_at
@@ -4906,6 +4959,68 @@ mod tests {
     }
 
     #[test]
+    fn rejected_admission_cleanup_survives_restart_and_preserves_terminal_replay() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("void-recovery.sqlite3");
+        let mut registry = OperationRegistry::open(&path).unwrap();
+        let operation = authorize_for_execution(&mut registry, "void-recovery", "void-token");
+        registry
+            .resolve_gongbu_continuation("void-token", &execution_arguments("void-token"))
+            .unwrap();
+        registry.promote_accepted_operations().unwrap();
+        let claimed = registry.claim_due_operation().unwrap().unwrap();
+        registry
+            .reject_durable_admission(&claimed, "execution_request_invalid")
+            .unwrap();
+        let terminal = registry
+            .durable_operation_status(&operation.operation_handle)
+            .unwrap();
+        assert_eq!(terminal.state, "failed");
+        assert_eq!(
+            terminal.result_code.as_deref(),
+            Some("execution_request_invalid")
+        );
+        drop(registry);
+        let mut restarted = OperationRegistry::open(&path).unwrap();
+        let cleanup = restarted.claim_due_operation().unwrap().unwrap();
+        assert!(cleanup.void_pending);
+        assert_eq!(cleanup.auth_token_id, "void-token");
+        assert_eq!(
+            cleanup.operation_key,
+            operation.operation_key.clone().unwrap()
+        );
+        assert!(cleanup.request.is_none());
+        // Simulate a lost void response / router crash before recording success.
+        make_due(&restarted, &operation.operation_handle);
+        drop(restarted);
+        let mut restarted = OperationRegistry::open(&path).unwrap();
+        let replay = restarted.claim_due_operation().unwrap().unwrap();
+        assert!(replay.void_pending);
+        restarted.finish_authorization_void(&replay).unwrap();
+        assert!(restarted.claim_due_operation().unwrap().is_none());
+        let terminal = restarted
+            .durable_operation_status(&operation.operation_handle)
+            .unwrap();
+        assert_eq!(terminal.state, "failed");
+        assert_eq!(
+            terminal.result_code.as_deref(),
+            Some("execution_request_invalid")
+        );
+        let continuation = restarted
+            .resolve_gongbu_continuation("void-token", &execution_arguments("void-token"))
+            .unwrap();
+        assert_eq!(continuation.operation_handle, operation.operation_handle);
+        assert!(restarted.claim_due_operation().unwrap().is_none());
+        assert_eq!(
+            restarted
+                .durable_operation_status(&operation.operation_handle)
+                .unwrap()
+                .state,
+            "failed"
+        );
+    }
+
+    #[test]
     fn durable_lifecycle_persists_accept_queue_dispatch_observe_and_success() {
         let mut registry = OperationRegistry::open_in_memory().unwrap();
         let operation = authorize_for_execution(&mut registry, "durable-success", "token-success");
@@ -5666,6 +5781,7 @@ mod tests {
             .execute_batch(
                 "DROP INDEX harness_operation_key_record;
                  DROP INDEX harness_operation_approval_request;
+                 ALTER TABLE harness_operations DROP COLUMN authorization_void_pending;
                  ALTER TABLE harness_operations DROP COLUMN operation_key_record_id;
                  ALTER TABLE harness_operations DROP COLUMN governed_result_json;
                  ALTER TABLE harness_operations DROP COLUMN normalized_request_json;
