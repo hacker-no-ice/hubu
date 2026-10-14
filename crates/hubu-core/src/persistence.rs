@@ -1054,6 +1054,11 @@ impl SqliteGovernanceRepository {
         // its immediate transaction instead of joining an init phase.
         self.migrate_versioned_budgets()?;
         self.in_init_transaction(Self::init_spend_migrations)?;
+        // The accounting-scale migration backs the database up with
+        // `VACUUM INTO`, which cannot run inside a transaction, so it runs
+        // after the spend phase has committed (with immutability restored)
+        // and owns its immediate transaction.
+        self.migrate_accounting_scale()?;
         self.initialize_provider_accounting()?;
         Ok(())
     }
@@ -1375,11 +1380,11 @@ impl SqliteGovernanceRepository {
         self.migrate_spend_operation_attempts()?;
         self.migrate_executor_claim_reconciliation()?;
         self.migrate_precise_executor_settlement_receipts()?;
-        // Restore immutability before the fallible accounting-scale migration,
-        // so neither an aborted migration nor its backup is left without it.
+        // Restore immutability in this phase, before the fallible
+        // accounting-scale migration runs, so neither an aborted migration
+        // nor its backup is left without it.
         self.enforce_executor_settlement_receipt_immutability()?;
         self.enforce_budget_version_immutability()?;
-        self.migrate_accounting_scale()?;
         self.enforce_one_budget_hold_per_spend_decision()?;
         Ok(())
     }
@@ -1392,11 +1397,7 @@ impl SqliteGovernanceRepository {
     /// the product into a REAL), and verifies every backfilled value and the
     /// budget invariants before committing. Re-running it is a no-op.
     fn migrate_accounting_scale(&mut self) -> Result<(), StorageError> {
-        let pending = ACCOUNTING_SCALE_COLUMNS
-            .iter()
-            .map(|column| table_has_column(&self.conn, column.table, column.name))
-            .collect::<Result<Vec<_>, _>>()?;
-        if pending.iter().all(|present| *present) {
+        if accounting_scale_migrated(&self.conn)? {
             return Ok(());
         }
         backup_before_accounting_scale(&self.conn)?;
@@ -1404,6 +1405,11 @@ impl SqliteGovernanceRepository {
         let transaction = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // A concurrent open may have finished the migration while this
+        // connection waited for the write lock.
+        if accounting_scale_migrated(&transaction)? {
+            return Ok(());
+        }
         for column in ACCOUNTING_SCALE_COLUMNS {
             if let Some(legacy) = column.legacy {
                 let overflowing: i64 = transaction.query_row(
@@ -3308,6 +3314,15 @@ const ACCOUNTING_SCALE_COLUMNS: &[AccountingScaleColumn] = &[
     ),
     scale_column("spend_executor_settlement_receipts"),
 ];
+
+fn accounting_scale_migrated(conn: &Connection) -> Result<bool, StorageError> {
+    for column in ACCOUNTING_SCALE_COLUMNS {
+        if !table_has_column(conn, column.table, column.name)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
 
 /// Copies the database aside before the one-way accounting-scale migration.
 /// In-memory and empty databases have nothing to protect.

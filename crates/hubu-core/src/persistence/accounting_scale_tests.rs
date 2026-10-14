@@ -566,3 +566,46 @@ fn accounting_scale_drill() {
         backups(&path)
     );
 }
+
+#[test]
+fn concurrent_first_opens_migrate_a_legacy_database_once() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("hubu.sqlite3");
+    legacy_database(&path);
+    let legacy_triggers = trigger_names(&Connection::open(&path).unwrap());
+
+    let openers = 6;
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(openers));
+    let handles: Vec<_> = (0..openers)
+        .map(|_| {
+            let barrier = std::sync::Arc::clone(&barrier);
+            let path = path.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                SqliteGovernanceRepository::open(&path).map(drop)
+            })
+        })
+        .collect();
+    for handle in handles {
+        handle.join().unwrap().unwrap();
+    }
+
+    let repo = SqliteGovernanceRepository::open(&path).unwrap();
+    for (table, column, legacy_column) in AMOUNT_PAIRS {
+        let mismatched: i64 = repo
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM {table}
+                     WHERE {column} IS NOT {legacy_column} * 10000 OR amount_scale IS NOT 6"
+                ),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(mismatched, 0, "{table}.{column}");
+    }
+    assert_eq!(trigger_names(&repo.conn), legacy_triggers);
+    // Openers that raced before the write lock may each have taken a backup.
+    assert!(!backups(&path).is_empty());
+}
