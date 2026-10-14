@@ -269,10 +269,7 @@ fn transaction(
     if let Some(metadata) = meta {
         metadata.effective_cost.scaled()?;
     }
-    let charge_units = meta
-        .map(|m| m.budget_charge_units())
-        .transpose()?
-        .flatten();
+    let charge_units = meta.map(|m| m.budget_charge_units()).transpose()?.flatten();
     let rounding = meta
         .and_then(|m| m.rounding_delta_amount.as_deref())
         .map(|v| v.parse::<i128>())

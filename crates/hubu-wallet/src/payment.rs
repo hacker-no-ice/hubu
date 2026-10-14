@@ -243,9 +243,10 @@ where
                 &mut self.ledger_accounts_by_user,
                 &request.owner_user_id,
             )?;
-            let budget_charge_units = request.amount_cents.checked_mul(10_000).ok_or_else(|| {
-                LedgerError::InvalidData("payment amount exceeds the budget unit range".into())
-            })?;
+            let budget_charge_units =
+                request.amount_cents.checked_mul(10_000).ok_or_else(|| {
+                    LedgerError::InvalidData("payment amount exceeds the budget unit range".into())
+                })?;
             let ledger_transaction = self.ledger.record_transaction_with_metadata(
                 request.owner_user_id.clone(),
                 Some(payment_id.to_string()),
