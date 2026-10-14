@@ -48,7 +48,7 @@ impl SqliteGovernanceRepository {
             return Err(invalid("unknown owned authorization operation").into());
         }
         let mut hold = tx.query_row(
-            "SELECT id,budget_id,budget_version_id,spend_decision_id,amount_cents,currency,status,executor_claim_id,created_at,updated_at,expires_at
+            "SELECT id,budget_id,budget_version_id,spend_decision_id,amount,currency,status,executor_claim_id,created_at,updated_at,expires_at
              FROM budget_holds WHERE spend_decision_id=?1",
             [token.spend_decision_id.to_string()], budget_hold_from_row)?;
         let mut balance = load_budget_balance_by_id(&tx, &hold.budget_id)?
