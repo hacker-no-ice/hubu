@@ -119,12 +119,20 @@ fn invalid(message: &str) -> LedgerError {
 
 /// Installs or upgrades the deployed wallet tables in one transaction. Historical
 /// IDs and cents remain intact; exact provider entries have NULL legacy cents.
-/// Inside a caller's transaction the upgrade joins it and a failure aborts the
-/// caller's transaction; otherwise it takes the write lock up front so
-/// concurrent opens serialize instead of failing a read-to-write lock upgrade.
+/// Inside a caller's transaction the upgrade runs in a savepoint that is rolled
+/// back on failure, so the caller can never commit a partial upgrade; otherwise
+/// it takes the write lock up front so concurrent opens serialize instead of
+/// failing a read-to-write lock upgrade.
 pub fn initialize(conn: &Connection) -> Result<(), LedgerError> {
     if !conn.is_autocommit() {
-        return install(conn);
+        conn.execute_batch("SAVEPOINT ledger_initialize")?;
+        return match install(conn) {
+            Ok(()) => Ok(conn.execute_batch("RELEASE ledger_initialize")?),
+            Err(error) => {
+                conn.execute_batch("ROLLBACK TO ledger_initialize; RELEASE ledger_initialize;")?;
+                Err(error)
+            }
+        };
     }
     conn.pragma_update(None, "foreign_keys", "ON")?;
     let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
