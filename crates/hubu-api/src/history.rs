@@ -269,7 +269,10 @@ fn transaction(
     if let Some(metadata) = meta {
         metadata.effective_cost.scaled()?;
     }
-    let charge_units = meta.map(|m| m.budget_charge_units()).transpose()?.flatten();
+    let charge_delta_cents = meta
+        .map(legacy_budget_charge_delta_cents)
+        .transpose()?
+        .flatten();
     let rounding = meta
         .and_then(|m| m.rounding_delta_amount.as_deref())
         .map(|v| v.parse::<i128>())
@@ -317,7 +320,7 @@ fn transaction(
         "effective_cost":meta.map(|m|&m.effective_cost),
         "cost_semantics":meta.map(|m|if m.kind==hubu_core::ledger::TransactionKind::Adjustment {"corrected_total"} else {"original_total"}),
         "purpose_reference":reference(meta.and_then(|m|m.purpose.as_deref())),
-        "budget_charge_delta_cents":charge_units.map(|units|Amount::from_units(units).legacy_cents_ceil()),
+        "budget_charge_delta_cents":charge_delta_cents,
         "rounding_delta_amount":rounding,
         "original_transaction_id":meta.and_then(|m|m.original_transaction_id.as_ref()).filter(owned_transaction),
         "previous_transaction_id":meta.and_then(|m|m.previous_transaction_id.as_ref()).filter(owned_transaction),
@@ -543,6 +546,35 @@ fn authorization_record(
         "purpose_reference":reference(Some(&decision.request.reason)),
         "task_reference":reference(decision.request.task_id.as_deref()),
         "raw_evidence_redacted":true}))
+}
+
+/// Cent projection of one posting's budget charge, kept consistent with the
+/// cent projection of the running total. Legacy postings report their stored
+/// cents. For a µ correction, the delta is the difference of the corrected and
+/// previous totals' cent projections, so reversing a sub-cent charge still
+/// reverses the cent it projected to.
+fn legacy_budget_charge_delta_cents(
+    meta: &hubu_core::ledger::TransactionMetadata,
+) -> Result<Option<i64>> {
+    if meta.budget_charge_scale.is_none() {
+        return Ok(meta.budget_charge_delta_cents);
+    }
+    let Some(delta) = meta.budget_charge_delta else {
+        return Ok(None);
+    };
+    if meta.kind != hubu_core::ledger::TransactionKind::Adjustment {
+        return Ok(Some(Amount::from_units(delta).legacy_cents_ceil()));
+    }
+    let corrected = meta
+        .effective_cost
+        .budget_units(hubu_common::money::ACCOUNTING_SCALE)?;
+    let previous = corrected
+        .checked_sub(delta)
+        .ok_or_else(|| anyhow!("budget charge delta overflow"))?;
+    Ok(Some(
+        Amount::from_units(corrected).legacy_cents_ceil()
+            - Amount::from_units(previous).legacy_cents_ceil(),
+    ))
 }
 
 pub(super) fn authorization_records(

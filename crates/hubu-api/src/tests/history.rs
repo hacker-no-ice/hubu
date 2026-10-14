@@ -100,6 +100,58 @@ fn provider_history_is_canonical_precise_private_and_budget_scoped() {
 }
 
 #[test]
+fn reversing_a_sub_cent_charge_reverses_its_cent_projection() {
+    let (path, state, agent, auth) = setup_executor_authorization("history-sub-cent-reversal");
+    settle(&state, &agent, &auth, 1); // USD 0.001
+    let original: hubu_common::ids::LedgerTransactionId = read(&state, "/ledger/transactions")
+        ["transactions"][0]["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let owner = authenticated_user_context(&state).unwrap().user_id;
+    hubu_core::ledger::LedgerService::adjust(
+        &mut state.budgets.lock().unwrap(),
+        hubu_core::ledger::AccountingAdjustment {
+            owner_user_id: owner,
+            original_transaction_id: original.clone(),
+            expected_previous_transaction_id: original.clone(),
+            operation_key: "sub-cent-reversal".into(),
+            corrected_cost: hubu_core::ledger::ExactMoney {
+                amount: "0".into(),
+                scale: 3,
+                currency: Currency::Usd,
+            },
+            reason: "provider refunded the call".into(),
+            evidence: "invoice://refund".into(),
+        },
+    )
+    .unwrap();
+    let history = read(
+        &state,
+        &format!(
+            "/ledger/transactions?agent_id={}&budget_id={}",
+            agent.agent_id,
+            auth.budget_hold.as_ref().unwrap().budget_id
+        ),
+    );
+    let rows = history["transactions"].as_array().unwrap();
+    let delta = |kind: &str| {
+        rows.iter()
+            .find(|row| row["kind"] == kind)
+            .map(|row| row["budget_charge_delta_cents"].as_i64().unwrap())
+            .unwrap()
+    };
+    // The 0.001 charge projects to 1 cent, so its reversal reports -1 cent and
+    // the rows reconcile with the zero coverage total.
+    assert_eq!(delta("external_provider"), 1);
+    assert_eq!(delta("adjustment"), -1);
+    assert_eq!(history["coverage"]["consumed_amount_cents"], 0);
+    assert_eq!(history["coverage"]["recorded_budget_charges_cents"], 0);
+    std::fs::remove_file(path).ok();
+}
+
+#[test]
 fn budget_coverage_is_full_history_with_linked_signed_corrections() {
     let (path, state, agent, auth) = setup_executor_authorization("history-correction");
     settle(&state, &agent, &auth, 11);
