@@ -43,16 +43,23 @@ condition objects reject unknown fields; required fields and semantic
 validation remain enforced after parsing.
 
 - Write enum values as nested maps, for example `value:` then
-  `money_cents: 500` on the next indented line. `hubu policy export` emits
+  `money: "5.00"` on the next indented line. `hubu policy export` emits
   this form. Older exports that used YAML tags (`value: !money_cents 500`)
   still load.
+- Write amounts as quoted decimal strings in the budget currency, with at
+  most 6 decimal places: `money: "5.00"` or `money: "0.005"`. Unquoted
+  numbers such as `money: 0.005` are rejected so a YAML float can never round
+  a limit. Signs and exponents are rejected too.
+- The legacy `money_cents: 500` form still loads and means the same as
+  `money: "5.00"`. Stored policy revisions that use it are never rewritten.
 - A document must be a single YAML document. Duplicate keys, tab
   indentation, and unknown fields are rejected.
 - String fields such as `id` and `version` must not be `null`, `Null`, or
   `~`; quote them if you need that literal text. Words such as `no`, `yes`,
   or `on` stay strings.
 - Integer values accept `_` digit separators, so `money_cents: 10_000` means
-  10000. Floating-point and quoted numbers are rejected for integer fields.
+  10000. Floating-point and quoted numbers are rejected for integer fields
+  such as `money_cents`.
 - Anchors and aliases are allowed, but expansion is bounded.
 
 Callers may rely on Hubu's top-level errors (`failed to parse policy yaml` and

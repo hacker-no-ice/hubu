@@ -9,7 +9,7 @@ rules:
       op: gt
       field: amount
       value:
-        money_cents: 100
+        money: "1.00"
 
   - id: allow_approved_merchants
     effect: allow
