@@ -236,7 +236,7 @@ const components = {
     responsibilities: [
       ["Humans set the boundaries", "Owners register, attach policies, create agent budgets, approve or deny pending spend, and reconcile uncertain outcomes."],
       ["One agent surface", "Agents use only the unified MCP server; one governed call can authorize, execute, and return the result."],
-      ["Hubu governs money", "Hubu resolves the trusted scope, evaluates policy, reserves budget, then settles or releases it. It holds no provider credentials."],
+      ["Hubu governs money", "Hubu resolves the trusted scope, evaluates policy, reserves budget, then settles or releases it. A definitive admission rejection lets the router void its unclaimed authorization and return the full hold; ambiguous dispatch retains the hold. It holds no provider credentials."],
       ["Gongbu does the work", "Gongbu runs provider calls, retries, artifacts, and recovery in its own process, database, and credential store."],
       ["Separate failure domains", "Hubu and Gongbu share source and releases, but never a process, database, credential, or backend client."],
       ["Exact, replay-safe accounting", "Gongbu reports the exact cost and Hubu charges within the authorized maximum. Retries return stored state; overruns go to a human."],

@@ -242,6 +242,10 @@ impl SpendManager {
         self.executor_claims.insert(claim.id.clone(), claim);
     }
 
+    pub(crate) fn apply_persisted_authorization_void(&mut self, token: SpendAuthTokenRecord) {
+        self.tokens.insert(token.id.clone(), token);
+    }
+
     pub fn evaluate_spend(
         &mut self,
         user: &UserContext,
@@ -530,6 +534,22 @@ impl SpendManager {
         &mut self,
         request: SpendExecutorClaimRequest,
     ) -> Result<(SpendExecutorClaimRecord, ValidatedSpendAuthorization), SpendError> {
+        let (claim, validation) = self.prepare_auth_token_claim(request)?;
+        self.claim_id_by_token
+            .insert(claim.spend_auth_token_id.clone(), claim.id.clone());
+        self.claim_id_by_operation.insert(
+            (claim.agent_id.clone(), claim.operation_key.clone()),
+            claim.id.clone(),
+        );
+        self.executor_claims.insert(claim.id.clone(), claim.clone());
+
+        Ok((claim, validation))
+    }
+
+    pub(crate) fn prepare_auth_token_claim(
+        &self,
+        request: SpendExecutorClaimRequest,
+    ) -> Result<(SpendExecutorClaimRecord, ValidatedSpendAuthorization), SpendError> {
         let (validation, existing_claim) = self.validate_auth_token_for_executor_claim(
             &request.authorization,
             &request.operation_key,
@@ -566,14 +586,6 @@ impl SpendManager {
             reconciled_at: None,
             reconciled_by_user_id: None,
         };
-        self.claim_id_by_token
-            .insert(claim.spend_auth_token_id.clone(), claim.id.clone());
-        self.claim_id_by_operation.insert(
-            (claim.agent_id.clone(), claim.operation_key.clone()),
-            claim.id.clone(),
-        );
-        self.executor_claims.insert(claim.id.clone(), claim.clone());
-
         Ok((claim, validation))
     }
 

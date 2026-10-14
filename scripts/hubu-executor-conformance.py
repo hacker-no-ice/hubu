@@ -669,7 +669,7 @@ class Runner:
         headers = {}
         if actor == "human":
             headers[RECONCILIATION_HEADER] = self.reconciliation
-        elif actor not in ("agent", "observer"):
+        elif actor not in ("agent", "observer", "router"):
             raise ConformanceFailure(f"unknown actor {actor!r}")
         return http_request(
             base_url,
