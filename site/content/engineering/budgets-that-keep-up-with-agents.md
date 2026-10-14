@@ -15,7 +15,7 @@ When an exact cost has to become cents, there are only two options. Rounding dow
 Rounding up has its own cost. A $0.001 call consumes a full cent of budget, so on a $1 budget the agent stops after 100 calls instead of 1,000, ten times too early. At $0.005 a call it's twice too early. The budget runs out while the real spend is a fraction of it. Neither rounding direction works on its own; the unit itself was the problem.
 
 <figure>
-  <img src="/engineering/budgets-that-keep-up-with-agents/02-same-budget-more-work.png" alt="With a $1 budget and a provider price of $0.001 per call, cent-based control permits 100 calls costing $0.10, while micro-dollar control permits 1,000 calls costing $1.00. The provider price stays the same." width="1536" height="1024" loading="lazy" decoding="async">
+  <img src="/blogs/budgets-that-keep-up-with-agents/02-same-budget-more-work.png" alt="With a $1 budget and a provider price of $0.001 per call, cent-based control permits 100 calls costing $0.10, while micro-dollar control permits 1,000 calls costing $1.00. The provider price stays the same." width="1536" height="1024" loading="lazy" decoding="async">
   <figcaption>At $0.001 per call, micro-dollar control lets a $1 budget fund 1,000 calls. Cent-based control stops after 100.</figcaption>
 </figure>
 
@@ -31,7 +31,7 @@ The new control layer will still round, but only at the boundary: once when an e
 I set this up as a principle early, keeping receipts exact even while budgets were in cents, so this change is a migration of the control layer, not a rewrite of the accounting.
 
 <figure>
-  <img src="/engineering/budgets-that-keep-up-with-agents/03-two-precision-layers.png" alt="Provider cost branches into exact facts for receipts and the ledger, kept at up to 18 decimal places, and conservative control for policies, budgets, and reservations at 6 decimal places. The example $0.001234567890123456 becomes $0.001235 in control precision." width="1536" height="1024" loading="lazy" decoding="async">
+  <img src="/blogs/budgets-that-keep-up-with-agents/03-two-precision-layers.png" alt="Provider cost branches into exact facts for receipts and the ledger, kept at up to 18 decimal places, and conservative control for policies, budgets, and reservations at 6 decimal places. The example $0.001234567890123456 becomes $0.001235 in control precision." width="1536" height="1024" loading="lazy" decoding="async">
   <figcaption>Receipts and the ledger retain exact provider charges. Budget control uses six decimal places and rounds conservatively at the boundary.</figcaption>
 </figure>
 
@@ -40,7 +40,7 @@ I set this up as a principle early, keeping receipts exact even while budgets we
 It's tempting to use the highest precision everywhere. But a signed 64-bit integer at 18 decimals tops out around $9.22. Larger budgets would need a different representation, making storage and arithmetic more complex. At 6 decimals, the same integer supports about $9.22 trillion. Budgets don't need 18 decimals; receipts do.
 
 <figure>
-  <img src="/engineering/budgets-that-keep-up-with-agents/04-integer-range.png" alt="A hypothetical signed 64-bit integer representation holds approximately $9.22 at 18 decimal places or $9.22 trillion at 6 decimal places." width="1536" height="1024" loading="lazy" decoding="async">
+  <img src="/blogs/budgets-that-keep-up-with-agents/04-integer-range.png" alt="A hypothetical signed 64-bit integer representation holds approximately $9.22 at 18 decimal places or $9.22 trillion at 6 decimal places." width="1536" height="1024" loading="lazy" decoding="async">
   <figcaption>With a signed 64-bit integer, six decimal places allow budgets of about $9.22 trillion. At 18 decimal places, the same integer tops out around $9.22.</figcaption>
 </figure>
 
@@ -53,7 +53,7 @@ If one component still sends cents and another reads micro-dollars, every amount
 The same care applies to people. A limit typed with too many decimals will be rejected rather than rounded, because silently rounding a cap can block valid calls or loosen the limit. And the CLI will show exact amounts, so real spend never appears as "$0.00".
 
 <figure>
-  <img src="/engineering/budgets-that-keep-up-with-agents/05-units-must-agree.png" alt="The integer 100 means $1.00 in cents but $0.000100 in micro-dollars, a 10,000-fold difference. A versioned contract between Hubu and its executor carries the amount and scale and rejects scale mismatches." width="1536" height="1024" loading="lazy" decoding="async">
+  <img src="/blogs/budgets-that-keep-up-with-agents/05-units-must-agree.png" alt="The integer 100 means $1.00 in cents but $0.000100 in micro-dollars, a 10,000-fold difference. A versioned contract between Hubu and its executor carries the amount and scale and rejects scale mismatches." width="1536" height="1024" loading="lazy" decoding="async">
   <figcaption>The same integer can differ by 10,000× when its unit changes. Explicit scale and a versioned contract prevent silent mismatches.</figcaption>
 </figure>
 

@@ -23,7 +23,7 @@ export default async function EngineeringPostPage({ params }: Props) {
       <main className="engineering-article" id="main-content">
         <article className="engineering-article-inner">
           <header className="engineering-article-heading">
-            <a className="engineering-back" href="/engineering">← Engineering</a>
+            <a className="engineering-back" href="/blogs">← Engineering Blogs</a>
             <h1>{post.title}</h1>
             <p className="engineering-deck">{post.description}</p>
             <div className="engineering-article-meta">
@@ -35,7 +35,7 @@ export default async function EngineeringPostPage({ params }: Props) {
             <img src={post.cover.src} alt={post.cover.alt} width={post.cover.width} height={post.cover.height} fetchPriority="high" decoding="async" />
           </figure>
           <div className="engineering-prose" dangerouslySetInnerHTML={{ __html: post.html }} />
-          <footer className="engineering-article-footer"><a href="/engineering">← All engineering posts</a></footer>
+          <footer className="engineering-article-footer"><a href="/blogs">← Engineering Blogs</a></footer>
         </article>
       </main>
     </div>

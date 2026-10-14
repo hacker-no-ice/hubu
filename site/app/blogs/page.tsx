@@ -12,7 +12,7 @@ export default function EngineeringPage() {
       <main className="engineering-index" id="main-content">
         <header className="engineering-index-heading">
           <p className="eyebrow"><span /> How we build Hubu</p>
-          <h1>Engineering</h1>
+          <h1>Engineering Blogs</h1>
           <p>Design decisions, tradeoffs, and lessons from building governed spend for AI agents.</p>
         </header>
         <div className="engineering-posts">

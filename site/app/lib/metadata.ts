@@ -38,25 +38,25 @@ export function documentMetadata(document: { title: string; description: string;
   };
 }
 
-const engineeringTitle = "Engineering · Hubu";
+const engineeringTitle = "Engineering Blogs · Hubu";
 const engineeringDescription = "Design decisions, tradeoffs, and lessons from building governed spend for AI agents.";
 
 export const engineeringIndexMetadata: Metadata = {
   title: { absolute: engineeringTitle },
-  alternates: { canonical: "/engineering" },
-  ...shareMetadata(engineeringTitle, engineeringDescription, "/engineering"),
+  alternates: { canonical: "/blogs" },
+  ...shareMetadata(engineeringTitle, engineeringDescription, "/blogs"),
 };
 
 export function engineeringPostMetadata(post: EngineeringPost | undefined): Metadata {
   if (!post) return {};
-  const title = `${post.title} · Hubu Engineering`;
+  const title = `${post.title} · Hubu Engineering Blogs`;
   const image = { url: `${siteOrigin}${post.cover.src}`, width: post.cover.width, height: post.cover.height, alt: post.cover.alt };
   return {
     title: { absolute: title },
     description: post.description,
     alternates: { canonical: post.href },
     openGraph: {
-      title, description: post.description, url: post.href, siteName: "Hubu Engineering",
+      title, description: post.description, url: post.href, siteName: "Hubu Engineering Blogs",
       type: "article", publishedTime: post.publishedOn, images: [image],
     },
     twitter: { card: "summary_large_image", title, description: post.description, images: [image.url] },

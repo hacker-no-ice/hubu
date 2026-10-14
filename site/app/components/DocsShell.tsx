@@ -14,7 +14,7 @@ function Navigation({ current, compact = false }: { current: string; compact?: b
         </section>
       ))}
       <section><h2>Visual guide</h2><a href="/architecture/">Interactive architecture <span>↗</span></a></section>
-      <section><h2>Engineering</h2><a href="/engineering">Engineering blog</a></section>
+      <section><h2>Engineering Blogs</h2><a href="/blogs">Engineering Blogs</a></section>
       {compact ? <section><h2>Project</h2><a href="https://github.com/hacker-no-ice/hubu">GitHub repository <span>↗</span></a></section> : null}
     </nav>
   );

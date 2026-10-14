@@ -31,10 +31,10 @@ Internal page changes intentionally use native document navigation. The current
 vinext client router fails on deployed dynamic documentation routes; the smoke
 tests guard this fallback until the upstream Link runtime is safe to restore.
 
-## Engineering posts
+## Engineering Blogs
 
-The Engineering index lives at `/engineering`, with articles at
-`/engineering/<slug>`. Add each post's metadata to
+The Engineering Blogs index lives at `/blogs`, with articles at
+`/blogs/<slug>`. Add each post's metadata to
 `content/engineering/posts.json` and its body to
 `content/engineering/<slug>.md`. The metadata file contains an array of objects:
 
@@ -46,7 +46,7 @@ The Engineering index lives at `/engineering`, with articles at
   "publishedOn": "2026-10-14",
   "releaseStatus": "Hubu v0.2.4 · In development",
   "cover": {
-    "src": "/engineering/budgets-that-keep-up-with-agents/01-cover.png",
+    "src": "/blogs/budgets-that-keep-up-with-agents/01-cover.png",
     "width": 1672,
     "height": 941,
     "alt": "A budget moves from coarse cent divisions to precise micro-dollar divisions."
@@ -65,7 +65,7 @@ not a scheduled publication mechanism.
 
 The page supplies its title as the only H1, so begin the Markdown body with prose
 and use H2 headings for sections. Put artwork in
-`public/engineering/<slug>/`, use root-relative `/engineering/<slug>/...` image
+`public/blogs/<slug>/`, use root-relative `/blogs/<slug>/...` image
 URLs, and provide descriptive alt text, dimensions, and captions. Inline figures
 can use HTML `<figure>`, `<img>`, and `<figcaption>` elements. Keep release status
 explicit when describing work that has not shipped.
