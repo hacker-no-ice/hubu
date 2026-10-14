@@ -39,5 +39,6 @@ yarn-error.log*
 /outputs/
 /work/
 /app/generated-docs.ts
+/app/generated-engineering.ts
 /public/architecture/
 /public/sitemap.xml
