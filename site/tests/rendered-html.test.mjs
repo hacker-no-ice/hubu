@@ -269,6 +269,64 @@ test("publishes a sitemap of every documentation route", async () => {
   }
 });
 
+test("publishes Engineering Blogs with an explicit publication date and links from the site", async () => {
+  const response = await render("/blogs");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /<h1[^>]*>Engineering Blogs<\/h1>/);
+  assert.match(html, /href="\/blogs\/budgets-that-keep-up-with-agents"/);
+  assert.match(html, /Budgets that keep up with agents/);
+  assert.match(html, /<time dateTime="2026-10-14">October 14, 2026<\/time>/i);
+  assert.match(html, /<link rel="canonical" href="https:\/\/hubustack.dev\/blogs"/);
+
+  const [home, docs] = await Promise.all([
+    (await render()).text(),
+    (await render("/docs/overview")).text(),
+  ]);
+  assert.match(home, /href="\/blogs">Engineering Blogs<\/a>/);
+  assert.match(docs, /href="\/blogs">Engineering Blogs<\/a>/);
+});
+
+test("publishes the illustrated precision article with its date and in-development status", async () => {
+  const response = await render("/blogs/budgets-that-keep-up-with-agents");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /<h1[^>]*>Budgets that keep up with agents<\/h1>/);
+  assert.equal(html.match(/<h1\b/g)?.length, 1);
+  assert.match(html, /<time dateTime="2026-10-14">October 14, 2026<\/time>/i);
+  assert.match(html, /v0\.2\.4/);
+  assert.match(html, /is being built|in development/i);
+  assert.match(html, /hasn(?:’|'|&#x27;|&#39;)t shipped|not yet shipped|has not shipped/i);
+  assert.match(html, /<link rel="canonical" href="https:\/\/hubustack.dev\/blogs\/budgets-that-keep-up-with-agents"/);
+  assert.match(html, /<meta property="og:type" content="article"/);
+  assert.match(html, /<meta property="article:published_time" content="2026-10-14(?:T[^"]*)?"/);
+  assert.match(html, /<meta property="og:image" content="https:\/\/hubustack.dev\/blogs\/budgets-that-keep-up-with-agents\/01-cover.png"/);
+  assert.match(html, /<a href="\/docs\/spend-executor-contract">executor contract<\/a>/);
+
+  const images = [...html.matchAll(/<img\b[^>]*src="(\/blogs\/budgets-that-keep-up-with-agents\/[^"]+\.png)"[^>]*>/g)];
+  assert.equal(images.length, 5, "article includes its cover and four supporting visuals");
+  assert.equal(new Set(images.map(([, src]) => src)).size, 5);
+  for (const [image, src] of images) {
+    assert.match(image, /alt="[^"]+"/, `${src} has descriptive alt text`);
+    await access(new URL(`../dist/client${src}`, import.meta.url));
+  }
+  const figures = [...html.matchAll(/<figure\b[^>]*>[\s\S]*?<\/figure>/g)]
+    .map(([figure]) => figure)
+    .filter((figure) => !figure.includes("/01-cover.png"));
+  assert.equal(figures.length, 4, "supporting visuals render in figures");
+  for (const figure of figures) assert.match(figure, /<figcaption[^>]*>[\s\S]*?\S[\s\S]*?<\/figcaption>/);
+
+  const missing = await render("/blogs/not-a-post");
+  assert.equal(missing.status, 404);
+});
+
+test("includes Engineering Blogs and its published article in the sitemap", async () => {
+  const sitemap = await readFile(new URL("../dist/client/sitemap.xml", import.meta.url), "utf8");
+  for (const pathname of ["/blogs", "/blogs/budgets-that-keep-up-with-agents"]) {
+    assert.ok(sitemap.includes(`<loc>https://hubustack.dev${pathname}</loc>`), pathname);
+  }
+});
+
 test("publishes the scalable Hubu wordmark", async () => {
   const svg = await readFile(new URL("../public/brand/hubu-wordmark.svg", import.meta.url), "utf8");
   assert.match(svg, /viewBox="269 286 1168 376"/);
