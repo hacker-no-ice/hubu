@@ -7,6 +7,7 @@ use hubu_common::ids::{
     UserId,
 };
 use hubu_common::money::{Amount, Asset, ConversionRate, Currency, ExactMoney};
+
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -16,9 +17,13 @@ use crate::policy::model::Evaluation;
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(try_from = "SpendRequestRepr", into = "SpendRequestRepr")]
 pub struct SpendRequest {
-    /// Requested amount in the budget currency at accounting scale.
+    /// Requested amount in the budget currency at accounting scale. For spend
+    /// in another asset this is `ceil(spend × frozen rate)`.
     pub amount: Amount,
     pub currency: Currency,
+    /// The exact amount and asset the spend was requested in, with the rate
+    /// frozen at admission. `None` means the budget currency itself.
+    pub spend: Option<SpendSource>,
     pub owner_user_id: UserId,
     pub agent_id: AgentId,
     pub agent_account_id: AgentAccountId,
@@ -37,12 +42,48 @@ pub struct SpendRequest {
 /// `amount_cents` field, so requests persisted or fingerprinted before
 /// accounting-scale amounts stay byte-identical and replay; only sub-cent
 /// amounts use an exact decimal `amount`.
+/// An exact amount in a non-budget asset and the conversion frozen when the
+/// spend was admitted. Holds and settlements reuse this rate; a later
+/// configuration change never alters in-flight accounting.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SpendSource {
+    pub asset: Asset,
+    /// Integer coefficient of `amount × 10^-scale`, as a string.
+    pub amount: String,
+    pub scale: u32,
+    pub rate: ConversionRate,
+}
+
+impl SpendSource {
+    pub fn exact(&self) -> Result<ExactMoney, String> {
+        let amount = self
+            .amount
+            .parse::<i128>()
+            .map_err(|_| format!("invalid spend amount `{}`", self.amount))?;
+        ExactMoney::new(amount, self.scale, self.asset).map_err(|error| error.to_string())
+    }
+
+    /// The budget-currency amount this spend reserves: rounded up once.
+    pub fn budget_amount(&self) -> Result<Amount, String> {
+        self.exact()?
+            .to_amount_ceil(&self.rate)
+            .map_err(|error| error.to_string())
+    }
+
+    fn same_requested_spend(&self, other: &Self) -> bool {
+        self.asset == other.asset && self.amount == other.amount && self.scale == other.scale
+    }
+}
+
 #[derive(Deserialize, Serialize)]
 struct SpendRequestRepr {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     amount_cents: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     amount: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    spend: Option<SpendSource>,
     currency: Currency,
     owner_user_id: UserId,
     agent_id: AgentId,
@@ -74,8 +115,16 @@ impl TryFrom<SpendRequestRepr> for SpendRequest {
             }
             (None, None) => return Err("spend request is missing `amount`".to_string()),
         };
+        if let Some(spend) = &repr.spend {
+            if spend.budget_amount()? != amount {
+                return Err(
+                    "spend request amount does not match its frozen conversion".to_string()
+                );
+            }
+        }
         Ok(Self {
             amount,
+            spend: repr.spend,
             currency: repr.currency,
             owner_user_id: repr.owner_user_id,
             agent_id: repr.agent_id,
@@ -98,6 +147,7 @@ impl From<SpendRequest> for SpendRequestRepr {
         Self {
             amount_cents: whole_cents,
             amount: whole_cents.is_none().then(|| request.amount.display()),
+            spend: request.spend,
             currency: request.currency,
             owner_user_id: request.owner_user_id,
             agent_id: request.agent_id,
@@ -115,7 +165,16 @@ impl From<SpendRequest> for SpendRequestRepr {
 impl SpendRequest {
     pub(crate) fn replay_equivalent(&self, other: &Self) -> bool {
         let self_normalized = self.with_legacy_reason();
-        let other_normalized = other.with_legacy_reason();
+        let mut other_normalized = other.with_legacy_reason();
+        // A retry of the same asset spend replays even if the configured rate
+        // changed since admission: the frozen conversion of the first attempt
+        // stays authoritative.
+        if let (Some(original), Some(retry)) = (&self_normalized.spend, &other_normalized.spend) {
+            if original.same_requested_spend(retry) {
+                other_normalized.spend = self_normalized.spend.clone();
+                other_normalized.amount = self_normalized.amount;
+            }
+        }
         if self_normalized == other_normalized {
             return true;
         }

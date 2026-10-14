@@ -395,8 +395,10 @@ impl ExactMoney {
 }
 
 /// A rate converting an asset into the budget currency, recorded with its
-/// provenance so it can be frozen on a hold.
-#[derive(Debug, Clone, Eq, PartialEq)]
+/// provenance so it can be frozen on a hold. Serialized with string integers
+/// so large ratios survive JSON.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "ConversionRateRepr", into = "ConversionRateRepr")]
 pub struct ConversionRate {
     numerator: u128,
     denominator: u128,
@@ -420,6 +422,55 @@ impl ConversionRate {
             source: source.into(),
             observed_at,
         })
+    }
+
+    /// Parses a configured decimal rate such as `"1"` or `"0.998"`: positive,
+    /// with at most [`ACCOUNTING_SCALE`] fractional digits.
+    pub fn from_decimal(
+        rate: &str,
+        source: impl Into<String>,
+        observed_at: DateTime<Utc>,
+    ) -> Result<Self, MoneyError> {
+        let units = rate
+            .parse::<Amount>()
+            .map_err(|error| MoneyError::InvalidRate(error.to_string()))?;
+        if units <= Amount::ZERO {
+            return Err(MoneyError::InvalidRate(format!(
+                "rate `{rate}` must be positive"
+            )));
+        }
+        Self::new(
+            u128::try_from(units.units()).map_err(|_| MoneyError::Overflow)?,
+            10_u128.pow(ACCOUNTING_SCALE),
+            source,
+            observed_at,
+        )
+    }
+
+    /// Converts an exact amount into the budget currency without rounding,
+    /// for exact ledger evidence. Requires a decimal rate (power-of-ten
+    /// denominator) and a combined scale of at most [`MAX_EXACT_SCALE`].
+    pub fn convert_exact(&self, exact: &ExactMoney, into: Asset) -> Result<ExactMoney, MoneyError> {
+        let mut denominator = self.denominator;
+        let mut rate_scale = 0_u32;
+        while denominator > 1 && denominator % 10 == 0 {
+            denominator /= 10;
+            rate_scale += 1;
+        }
+        if denominator != 1 {
+            return Err(MoneyError::InvalidRate(
+                "exact conversion needs a decimal rate".to_string(),
+            ));
+        }
+        let scale = exact.scale() + rate_scale;
+        if scale > MAX_EXACT_SCALE {
+            return Err(MoneyError::ScaleTooLarge { scale });
+        }
+        let amount = i128::try_from(self.numerator)
+            .ok()
+            .and_then(|numerator| exact.amount().checked_mul(numerator))
+            .ok_or(MoneyError::Overflow)?;
+        ExactMoney::new(amount, scale, into)
     }
 
     /// The 1:1 rate for an amount already in the budget currency.
@@ -449,6 +500,43 @@ impl ConversionRate {
     }
 }
 
+#[derive(Serialize, Deserialize)]
+struct ConversionRateRepr {
+    numerator: String,
+    denominator: String,
+    source: String,
+    observed_at: DateTime<Utc>,
+}
+
+impl TryFrom<ConversionRateRepr> for ConversionRate {
+    type Error = MoneyError;
+
+    fn try_from(repr: ConversionRateRepr) -> Result<Self, Self::Error> {
+        let parse = |value: &str| {
+            value
+                .parse::<u128>()
+                .map_err(|_| MoneyError::InvalidRate(format!("invalid rate integer `{value}`")))
+        };
+        Self::new(
+            parse(&repr.numerator)?,
+            parse(&repr.denominator)?,
+            repr.source,
+            repr.observed_at,
+        )
+    }
+}
+
+impl From<ConversionRate> for ConversionRateRepr {
+    fn from(rate: ConversionRate) -> Self {
+        Self {
+            numerator: rate.numerator.to_string(),
+            denominator: rate.denominator.to_string(),
+            source: rate.source,
+            observed_at: rate.observed_at,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Eq, PartialEq, thiserror::Error)]
 pub enum MoneyError {
     #[error("amount overflows the supported range")]
@@ -457,6 +545,8 @@ pub enum MoneyError {
     Negative,
     #[error("scale {scale} exceeds the maximum exact scale of {MAX_EXACT_SCALE}")]
     ScaleTooLarge { scale: u32 },
+    #[error("invalid conversion rate: {0}")]
+    InvalidRate(String),
     #[error("conversion rate denominator must be non-zero")]
     ZeroDenominator,
 }
@@ -732,6 +822,40 @@ mod tests {
             exact(1, 0, Asset::Usd).to_amount_ceil(&huge_rate),
             Err(MoneyError::Overflow)
         );
+    }
+
+    #[test]
+    fn conversion_rates_parse_freeze_and_convert_exactly() {
+        let at = DateTime::<Utc>::UNIX_EPOCH;
+        let rate = ConversionRate::from_decimal("0.998", "static-config", at).unwrap();
+        assert_eq!((rate.numerator(), rate.denominator()), (998_000, 1_000_000));
+        let json = serde_json::to_value(&rate).unwrap();
+        assert_eq!(json["numerator"], "998000");
+        assert_eq!(
+            serde_json::from_value::<ConversionRate>(json).unwrap(),
+            rate
+        );
+        for bad in ["0", "-1", "0.0000001", "abc"] {
+            assert!(ConversionRate::from_decimal(bad, "x", at).is_err(), "{bad}");
+        }
+        assert!(serde_json::from_value::<ConversionRate>(serde_json::json!({
+            "numerator": "1", "denominator": "0", "source": "x", "observed_at": at
+        }))
+        .is_err());
+        // 0.005 USDC at 0.998 is exactly 0.00499 USD.
+        let usdc = exact(5_000, 6, Asset::Usdc);
+        let usd = rate.convert_exact(&usdc, Asset::Usd).unwrap();
+        assert_eq!(
+            (usd.amount(), usd.scale(), usd.asset()),
+            (4_990_000_000, 12, Asset::Usd)
+        );
+        assert_eq!(
+            usdc.to_amount_ceil(&rate).unwrap(),
+            Amount::from_units(4_990)
+        );
+        assert!(rate
+            .convert_exact(&exact(1, 18, Asset::Usdc), Asset::Usd)
+            .is_err());
     }
 
     proptest! {
