@@ -1048,7 +1048,7 @@ fn watch_overrun_limit_is_version_limit_not_balance_sum() {
     // Fault injection: an existing accounting overrun must not rewrite the
     // configured limit merely because remaining capacity is saturated at zero.
     let conn = rusqlite::Connection::open(&path).unwrap();
-    conn.execute("UPDATE budget_balances SET consumed_amount_cents=1000 WHERE budget_id IN (SELECT budget_id FROM budget_holds WHERE spend_decision_id=?1)",[auth.decision_id.clone()]).unwrap();
+    conn.execute("UPDATE budget_balances SET consumed_amount_cents=1000,consumed_amount=10000000 WHERE budget_id IN (SELECT budget_id FROM budget_holds WHERE spend_decision_id=?1)",[auth.decision_id.clone()]).unwrap();
     let projection = read(&state, "/watch");
     let row = &projection["rows"][0];
     assert_eq!(row["limit_cents"], 500);

@@ -8636,7 +8636,7 @@ lease_profiles:
                 snapshot.budget.updated_at = now;
             }
             let conn = rusqlite::Connection::open(&path).unwrap();
-            conn.execute("UPDATE budget_balances SET consumed_amount_cents = ?2, remaining_amount_cents = ?3 WHERE budget_id = ?1", rusqlite::params![snapshot.budget.id.to_string(), snapshot.balance.consumed_amount_cents, snapshot.balance.remaining_amount_cents]).unwrap();
+            conn.execute("UPDATE budget_balances SET consumed_amount_cents = ?2, remaining_amount_cents = ?3, consumed_amount = ?2 * 10000, remaining_amount = ?3 * 10000 WHERE budget_id = ?1", rusqlite::params![snapshot.budget.id.to_string(), snapshot.balance.consumed_amount_cents, snapshot.balance.remaining_amount_cents]).unwrap();
             if revoked {
                 conn.execute("UPDATE budgets SET administrative_state = 'revoked', updated_at = ?2 WHERE id = ?1", rusqlite::params![snapshot.budget.id.to_string(), now.to_rfc3339()]).unwrap();
             }

@@ -503,7 +503,8 @@ fn ledger_extreme_exact_vendor_reconciliation_posts_once() {
             "invoice",
             "confirmed",
             PaymentId::new(),
-            precise_settlement_receipt(i64::MAX, 2),
+            // The largest charge representable at accounting scale.
+            precise_settlement_receipt(i64::MAX / 10_000, 2),
             now,
         )
         .unwrap();
@@ -511,7 +512,7 @@ fn ledger_extreme_exact_vendor_reconciliation_posts_once() {
     assert_eq!(records(&repo).len(), 1);
     assert_eq!(
         records(&repo)[0].entries[0].amount.amount,
-        (i128::from(i64::MAX) * 10_i128.pow(16)).to_string()
+        (i128::from(i64::MAX / 10_000) * 10_i128.pow(16)).to_string()
     );
 }
 
@@ -617,7 +618,7 @@ fn agent_budget_query_includes_wallet_provider_adjustments_and_truthful_unlinked
         )
         .unwrap();
     // Model the wallet lifecycle's successful consumption, still separate until HUB-210.
-    repo.conn.execute("UPDATE budget_balances SET consumed_amount_cents=consumed_amount_cents+1000,remaining_amount_cents=remaining_amount_cents-1000 WHERE budget_id=?1",[settled.hold.budget_id.to_string()]).unwrap();
+    repo.conn.execute("UPDATE budget_balances SET consumed_amount_cents=consumed_amount_cents+1000,remaining_amount_cents=remaining_amount_cents-1000,consumed_amount=consumed_amount+10000000,remaining_amount=remaining_amount-10000000 WHERE budget_id=?1",[settled.hold.budget_id.to_string()]).unwrap();
     wallet
         .record_transaction(
             user_id(),

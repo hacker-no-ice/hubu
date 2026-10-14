@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 use hubu_common::ids::{
     AgentId, BudgetId, BudgetVersionId, PaymentId, PolicyId, SpendExecutorClaimId, UserId,
 };
-use hubu_common::money::Currency;
+use hubu_common::money::{Amount, Currency};
 use hubu_common::time::TimePeriod;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
@@ -532,25 +532,7 @@ impl SqliteGovernanceRepository {
                 token.revoked_at.map(|timestamp| timestamp.to_rfc3339()),
             ],
         )?;
-        sqlite_tx.execute(
-            "INSERT INTO budget_holds
-             (id, budget_id, budget_version_id, spend_decision_id, amount_cents,
-              currency, status, executor_claim_id, created_at, updated_at, expires_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![
-                hold.id.to_string(),
-                hold.budget_id.to_string(),
-                hold.budget_version_id.to_string(),
-                hold.spend_decision_id.to_string(),
-                hold.amount_cents,
-                hold.currency.to_string(),
-                budget_hold_status(&hold.status),
-                hold.executor_claim_id.as_ref().map(ToString::to_string),
-                hold.created_at.to_rfc3339(),
-                hold.updated_at.to_rfc3339(),
-                hold.expires_at.to_rfc3339(),
-            ],
-        )?;
+        insert_budget_hold(&sqlite_tx, hold)?;
         upsert_balance(&sqlite_tx, balance)?;
         sqlite_tx.execute(
             "INSERT INTO spend_authorization_outcomes
@@ -984,27 +966,8 @@ impl SqliteGovernanceRepository {
             )?,
             &format!("executor claim budget hold changed during {transition_name}"),
         )?;
-        let balance_rows = sqlite_tx.execute(
-            "UPDATE budget_balances
-             SET consumed_amount_cents = ?2,
-                 frozen_amount_cents = ?3,
-                 remaining_amount_cents = ?4,
-                 updated_at = ?5
-             WHERE budget_id = ?1
-               AND consumed_amount_cents = ?6
-               AND frozen_amount_cents = ?7
-               AND remaining_amount_cents = ?8",
-            params![
-                hold.budget_id.to_string(),
-                updated_balance.consumed_amount_cents,
-                updated_balance.frozen_amount_cents,
-                updated_balance.remaining_amount_cents,
-                finalized_at,
-                balance.consumed_amount_cents,
-                balance.frozen_amount_cents,
-                balance.remaining_amount_cents,
-            ],
-        )?;
+        let balance_rows =
+            compare_and_set_balance(&sqlite_tx, &balance, &updated_balance, &finalized_at)?;
         require_one_updated_row(
             balance_rows,
             &format!("executor claim budget balance changed during {transition_name}"),
@@ -1091,6 +1054,11 @@ impl SqliteGovernanceRepository {
         // its immediate transaction instead of joining an init phase.
         self.migrate_versioned_budgets()?;
         self.in_init_transaction(Self::init_spend_migrations)?;
+        // The accounting-scale migration backs the database up with
+        // `VACUUM INTO`, which cannot run inside a transaction, so it runs
+        // after the spend phase has committed (with immutability restored)
+        // and owns its immediate transaction.
+        self.migrate_accounting_scale()?;
         self.initialize_provider_accounting()?;
         Ok(())
     }
@@ -1412,9 +1380,101 @@ impl SqliteGovernanceRepository {
         self.migrate_spend_operation_attempts()?;
         self.migrate_executor_claim_reconciliation()?;
         self.migrate_precise_executor_settlement_receipts()?;
+        // Restore immutability in this phase, before the fallible
+        // accounting-scale migration runs, so neither an aborted migration
+        // nor its backup is left without it.
         self.enforce_executor_settlement_receipt_immutability()?;
         self.enforce_budget_version_immutability()?;
         self.enforce_one_budget_hold_per_spend_decision()?;
+        Ok(())
+    }
+
+    /// Adds authoritative accounting-scale (µ-unit) amount columns next to the
+    /// legacy `*_cents` columns and backfills them exactly (`cents × 10⁴`).
+    ///
+    /// The migration is one-way. It backs the database up first, refuses rows
+    /// whose conversion would overflow (SQLite would otherwise silently turn
+    /// the product into a REAL), and verifies every backfilled value and the
+    /// budget invariants before committing. Re-running it is a no-op.
+    fn migrate_accounting_scale(&mut self) -> Result<(), StorageError> {
+        if accounting_scale_migrated(&self.conn)? {
+            return Ok(());
+        }
+        backup_before_accounting_scale(&self.conn)?;
+
+        let transaction = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // A concurrent open may have finished the migration while this
+        // connection waited for the write lock.
+        if accounting_scale_migrated(&transaction)? {
+            return Ok(());
+        }
+        for column in ACCOUNTING_SCALE_COLUMNS {
+            if let Some(legacy) = column.legacy {
+                let overflowing: i64 = transaction.query_row(
+                    &format!(
+                        "SELECT COUNT(*) FROM {table}
+                         WHERE abs({legacy}) > {MAX_LEGACY_CENTS}
+                            OR typeof({legacy}) NOT IN ('integer', 'null')",
+                        table = column.table,
+                    ),
+                    [],
+                    |row| row.get(0),
+                )?;
+                if overflowing > 0 {
+                    return Err(StorageError::InvalidData(format!(
+                        "cannot migrate {table}.{legacy} to accounting scale: {overflowing} \
+                         row(s) exceed {MAX_LEGACY_CENTS} cents or are not integers",
+                        table = column.table,
+                    )));
+                }
+            }
+        }
+
+        // Immutability triggers would reject the backfill. Capture their exact
+        // definitions, drop them, and recreate them before committing.
+        let update_triggers = {
+            let mut stmt = transaction.prepare(
+                "SELECT name, sql FROM sqlite_master
+                 WHERE type = 'trigger'
+                   AND tbl_name IN ('spend_executor_settlement_receipts', 'budget_versions')
+                   AND sql LIKE '%BEFORE UPDATE%'",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        for (name, _) in &update_triggers {
+            transaction.execute_batch(&format!("DROP TRIGGER \"{name}\";"))?;
+        }
+
+        for column in ACCOUNTING_SCALE_COLUMNS {
+            if !table_has_column(&transaction, column.table, column.name)? {
+                transaction.execute_batch(&format!(
+                    "ALTER TABLE {} ADD COLUMN {} {};",
+                    column.table, column.name, column.sql_type
+                ))?;
+            }
+        }
+        for column in ACCOUNTING_SCALE_COLUMNS {
+            transaction.execute(
+                &format!(
+                    "UPDATE {table} SET {name} = {backfill} WHERE {name} IS NULL",
+                    table = column.table,
+                    name = column.name,
+                    backfill = column.backfill,
+                ),
+                [],
+            )?;
+        }
+        verify_accounting_scale_backfill(&transaction)?;
+
+        for (_, sql) in &update_triggers {
+            transaction.execute_batch(&format!("{sql};"))?;
+        }
+        transaction.commit()?;
         Ok(())
     }
 
@@ -3116,6 +3176,240 @@ fn policy_revision_from_row(
     })
 }
 
+/// Largest legacy cent value whose ×10⁴ conversion still fits an `i64`.
+const MAX_LEGACY_CENTS: i64 = i64::MAX / 10_000;
+
+struct AccountingScaleColumn {
+    table: &'static str,
+    name: &'static str,
+    sql_type: &'static str,
+    /// The legacy cent column this amount is backfilled from, if any.
+    legacy: Option<&'static str>,
+    backfill: &'static str,
+}
+
+const fn amount_column(
+    table: &'static str,
+    name: &'static str,
+    legacy: &'static str,
+    backfill: &'static str,
+) -> AccountingScaleColumn {
+    AccountingScaleColumn {
+        table,
+        name,
+        sql_type: "INTEGER",
+        legacy: Some(legacy),
+        backfill,
+    }
+}
+
+const fn scale_column(table: &'static str) -> AccountingScaleColumn {
+    AccountingScaleColumn {
+        table,
+        name: "amount_scale",
+        sql_type: "INTEGER",
+        legacy: None,
+        backfill: "6",
+    }
+}
+
+/// Authoritative accounting-scale columns. SQLite cannot add `NOT NULL` to an
+/// existing table, so reads treat NULL as invalid data until a later table
+/// rebuild drops the legacy columns and adds the constraints.
+const ACCOUNTING_SCALE_COLUMNS: &[AccountingScaleColumn] = &[
+    amount_column(
+        "budget_versions",
+        "amount_limit",
+        "amount_limit_cents",
+        "amount_limit_cents * 10000",
+    ),
+    scale_column("budget_versions"),
+    amount_column(
+        "budget_balances",
+        "consumed_amount",
+        "consumed_amount_cents",
+        "consumed_amount_cents * 10000",
+    ),
+    amount_column(
+        "budget_balances",
+        "frozen_amount",
+        "frozen_amount_cents",
+        "frozen_amount_cents * 10000",
+    ),
+    amount_column(
+        "budget_balances",
+        "remaining_amount",
+        "remaining_amount_cents",
+        "remaining_amount_cents * 10000",
+    ),
+    scale_column("budget_balances"),
+    amount_column(
+        "budget_holds",
+        "amount",
+        "amount_cents",
+        "amount_cents * 10000",
+    ),
+    scale_column("budget_holds"),
+    // The asset and exact amount the hold was requested in. Every hold so far
+    // was requested in whole cents of its budget currency.
+    AccountingScaleColumn {
+        table: "budget_holds",
+        name: "spend_asset",
+        sql_type: "TEXT",
+        legacy: None,
+        backfill: "currency",
+    },
+    AccountingScaleColumn {
+        table: "budget_holds",
+        name: "spend_exact_amount",
+        sql_type: "TEXT",
+        legacy: None,
+        backfill: "CAST(amount_cents AS TEXT)",
+    },
+    AccountingScaleColumn {
+        table: "budget_holds",
+        name: "spend_exact_scale",
+        sql_type: "INTEGER",
+        legacy: None,
+        backfill: "2",
+    },
+    // Frozen conversion into the budget currency; NULL means none was needed.
+    AccountingScaleColumn {
+        table: "budget_holds",
+        name: "conversion_json",
+        sql_type: "TEXT",
+        legacy: None,
+        backfill: "NULL",
+    },
+    amount_column(
+        "spending_targets",
+        "target_amount",
+        "target_amount_cents",
+        "target_amount_cents * 10000",
+    ),
+    scale_column("spending_targets"),
+    amount_column(
+        "spend_executor_settlement_receipts",
+        "authorized_max",
+        "authorized_max_cents",
+        "authorized_max_cents * 10000",
+    ),
+    amount_column(
+        "spend_executor_settlement_receipts",
+        "budget_charge",
+        "budget_charge_cents",
+        "budget_charge_cents * 10000",
+    ),
+    amount_column(
+        "spend_executor_settlement_receipts",
+        "released_amount",
+        "released_amount_cents",
+        "released_amount_cents * 10000",
+    ),
+    amount_column(
+        "spend_executor_settlement_receipts",
+        "overrun_amount",
+        "overrun_amount_cents",
+        "overrun_amount_cents * 10000",
+    ),
+    scale_column("spend_executor_settlement_receipts"),
+];
+
+fn accounting_scale_migrated(conn: &Connection) -> Result<bool, StorageError> {
+    for column in ACCOUNTING_SCALE_COLUMNS {
+        if !table_has_column(conn, column.table, column.name)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Copies the database aside before the one-way accounting-scale migration.
+/// In-memory and empty databases have nothing to protect.
+fn backup_before_accounting_scale(conn: &Connection) -> Result<(), StorageError> {
+    let Some(path) = conn.path().filter(|path| !path.is_empty()) else {
+        return Ok(());
+    };
+    let has_budget_data: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM budget_versions)
+             OR EXISTS(SELECT 1 FROM spending_targets)
+             OR EXISTS(SELECT 1 FROM spend_executor_settlement_receipts)",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_budget_data {
+        return Ok(());
+    }
+    let mut backup = format!("{path}.pre-accounting-scale.bak");
+    if std::path::Path::new(&backup).exists() {
+        backup = format!(
+            "{path}.pre-accounting-scale.{}.bak",
+            Utc::now().format("%Y%m%dT%H%M%S%.fZ")
+        );
+    }
+    conn.execute("VACUUM INTO ?1", params![backup])?;
+    eprintln!("hubu: backed up the database to {backup} before the accounting-scale migration");
+    Ok(())
+}
+
+fn verify_accounting_scale_backfill(conn: &Connection) -> Result<(), StorageError> {
+    for column in ACCOUNTING_SCALE_COLUMNS {
+        let Some(legacy) = column.legacy else {
+            continue;
+        };
+        let mismatched: i64 = conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM {table}
+                 WHERE typeof({name}) != 'integer'
+                    OR {name} != {legacy} * 10000
+                    OR amount_scale IS NOT 6",
+                table = column.table,
+                name = column.name,
+            ),
+            [],
+            |row| row.get(0),
+        )?;
+        if mismatched > 0 {
+            return Err(StorageError::InvalidData(format!(
+                "accounting-scale backfill of {}.{} left {mismatched} mismatched row(s)",
+                column.table, column.name
+            )));
+        }
+    }
+    let unbalanced: i64 = conn.query_row(
+        "SELECT COUNT(*)
+         FROM budget_balances AS balance
+         JOIN budget_current_versions AS current ON current.budget_id = balance.budget_id
+         JOIN budget_versions AS version
+           ON version.budget_id = current.budget_id AND version.id = current.version_id
+         WHERE balance.remaining_amount
+               != version.amount_limit - balance.consumed_amount - balance.frozen_amount",
+        [],
+        |row| row.get(0),
+    )?;
+    let unfrozen: i64 = conn.query_row(
+        "SELECT COUNT(*)
+         FROM budget_balances AS balance
+         LEFT JOIN (
+             SELECT budget_id, SUM(amount) AS held
+             FROM budget_holds
+             WHERE status IN ('frozen', 'claimed')
+             GROUP BY budget_id
+         ) AS holds ON holds.budget_id = balance.budget_id
+         WHERE balance.frozen_amount != COALESCE(holds.held, 0)",
+        [],
+        |row| row.get(0),
+    )?;
+    if unbalanced > 0 || unfrozen > 0 {
+        return Err(StorageError::InvalidData(format!(
+            "accounting-scale migration found {unbalanced} budget(s) whose remaining amount \
+             differs from limit - consumed - frozen and {unfrozen} whose frozen amount differs \
+             from their active holds"
+        )));
+    }
+    Ok(())
+}
+
 fn table_has_column(
     conn: &Connection,
     table_name: &str,
@@ -3606,7 +3900,7 @@ impl BudgetRepository for SqliteGovernanceRepository {
         let sqlite_tx = self.conn.transaction()?;
         let expired_holds = {
             let mut stmt = sqlite_tx.prepare(
-                "SELECT id, budget_id, amount_cents
+                "SELECT id, budget_id, amount
                  FROM budget_holds
                  WHERE status = 'frozen' AND expires_at <= ?1
                  ORDER BY created_at ASC",
@@ -3615,26 +3909,34 @@ impl BudgetRepository for SqliteGovernanceRepository {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
+                    accounting_units_from_row(row, 2)?,
                 ))
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
         };
 
-        for (hold_id, budget_id, amount_cents) in expired_holds {
+        for (hold_id, budget_id, amount) in expired_holds {
             sqlite_tx.execute(
                 "UPDATE budget_holds
                  SET status = 'expired', updated_at = ?2
                  WHERE id = ?1 AND status = 'frozen'",
                 params![hold_id, now.to_rfc3339()],
             )?;
+            // Legacy projections stay exact while every hold is whole cents.
             sqlite_tx.execute(
                 "UPDATE budget_balances
-                 SET frozen_amount_cents = frozen_amount_cents - ?2,
-                     remaining_amount_cents = remaining_amount_cents + ?2,
-                     updated_at = ?3
+                 SET frozen_amount = frozen_amount - ?2,
+                     remaining_amount = remaining_amount + ?2,
+                     frozen_amount_cents = frozen_amount_cents - ?3,
+                     remaining_amount_cents = remaining_amount_cents + ?3,
+                     updated_at = ?4
                  WHERE budget_id = ?1",
-                params![budget_id, amount_cents, now.to_rfc3339()],
+                params![
+                    budget_id,
+                    amount.units(),
+                    amount.legacy_cents_ceil(),
+                    now.to_rfc3339()
+                ],
             )?;
         }
 
@@ -3649,25 +3951,7 @@ impl BudgetRepository for SqliteGovernanceRepository {
     ) -> Result<(), StorageError> {
         let sqlite_tx = self.conn.transaction()?;
         validate_hold_and_balance_relationship(&sqlite_tx, hold, balance, true)?;
-        sqlite_tx.execute(
-            "INSERT INTO budget_holds
-             (id, budget_id, budget_version_id, spend_decision_id, amount_cents,
-              currency, status, executor_claim_id, created_at, updated_at, expires_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![
-                hold.id.to_string(),
-                hold.budget_id.to_string(),
-                hold.budget_version_id.to_string(),
-                hold.spend_decision_id.to_string(),
-                hold.amount_cents,
-                hold.currency.to_string(),
-                budget_hold_status(&hold.status),
-                hold.executor_claim_id.as_ref().map(ToString::to_string),
-                hold.created_at.to_rfc3339(),
-                hold.updated_at.to_rfc3339(),
-                hold.expires_at.to_rfc3339(),
-            ],
-        )?;
+        insert_budget_hold(&sqlite_tx, hold)?;
         upsert_balance(&sqlite_tx, balance)?;
         sqlite_tx.commit()?;
         Ok(())
@@ -3844,13 +4128,7 @@ impl BudgetVersionRepository for SqliteGovernanceRepository {
             .into());
         }
         validate_balance_for_limit(&current.balance, current.version.amount_limit_cents)?;
-        let frozen_hold_amount_cents: i64 = transaction.query_row(
-            "SELECT COALESCE(SUM(amount_cents), 0)
-             FROM budget_holds
-             WHERE budget_id = ?1 AND status IN ('frozen', 'claimed')",
-            params![request.budget_id.to_string()],
-            |row| row.get(0),
-        )?;
+        let frozen_hold_amount_cents = active_hold_total_cents(&transaction, &request.budget_id)?;
         if frozen_hold_amount_cents != current.balance.frozen_amount_cents {
             return Err(StorageError::InvalidData(
                 "frozen budget balance must equal its active holds".to_string(),
@@ -3891,23 +4169,26 @@ impl BudgetVersionRepository for SqliteGovernanceRepository {
             request_fingerprint,
             created_at: request.effective_at,
         };
+        let amount_limit = units_from_cents(version.amount_limit_cents)?;
         transaction.execute(
             "INSERT INTO budget_versions
              (id, budget_id, revision, predecessor_version_id, amount_limit_cents,
-              effective_at, actor, source, reason, request_fingerprint, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+              effective_at, actor, source, reason, request_fingerprint, created_at,
+              amount_limit, amount_scale)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 6)",
             params![
                 version.id.to_string(),
                 version.budget_id.to_string(),
                 sqlite_revision,
                 expected.id.to_string(),
-                version.amount_limit_cents,
+                amount_limit.legacy_cents_floor(),
                 version.effective_at.to_rfc3339(),
                 version.actor,
                 version.source,
                 version.reason,
                 version.request_fingerprint,
                 version.created_at.to_rfc3339(),
+                amount_limit.units(),
             ],
         )?;
         let pointer_rows = transaction.execute(
@@ -3932,21 +4213,11 @@ impl BudgetVersionRepository for SqliteGovernanceRepository {
             frozen_amount_cents: current.balance.frozen_amount_cents,
             remaining_amount_cents,
         };
-        let balance_rows = transaction.execute(
-            "UPDATE budget_balances
-             SET remaining_amount_cents = ?1, updated_at = ?2
-             WHERE budget_id = ?3
-               AND consumed_amount_cents = ?4
-               AND frozen_amount_cents = ?5
-               AND remaining_amount_cents = ?6",
-            params![
-                balance.remaining_amount_cents,
-                request.effective_at.to_rfc3339(),
-                request.budget_id.to_string(),
-                current.balance.consumed_amount_cents,
-                current.balance.frozen_amount_cents,
-                current.balance.remaining_amount_cents,
-            ],
+        let balance_rows = compare_and_set_balance(
+            &transaction,
+            &current.balance,
+            &balance,
+            &request.effective_at.to_rfc3339(),
         )?;
         require_one_updated_row(
             balance_rows,
@@ -3995,11 +4266,13 @@ impl SpendingTargetRepository for SqliteGovernanceRepository {
         self.conn.execute(
             "INSERT INTO spending_targets
              (id, owner_user_id, target_amount_cents, currency, starting_at,
-              ending_before, status, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+              ending_before, status, created_at, updated_at, target_amount, amount_scale)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 6)
              ON CONFLICT(id) DO UPDATE SET
                 owner_user_id = excluded.owner_user_id,
                 target_amount_cents = excluded.target_amount_cents,
+                target_amount = excluded.target_amount,
+                amount_scale = excluded.amount_scale,
                 currency = excluded.currency,
                 starting_at = excluded.starting_at,
                 ending_before = excluded.ending_before,
@@ -4018,6 +4291,7 @@ impl SpendingTargetRepository for SqliteGovernanceRepository {
                 spending_target_status(target.status),
                 target.created_at.to_rfc3339(),
                 target.updated_at.to_rfc3339(),
+                units_from_cents(target.target_amount_cents)?.units(),
             ],
         )?;
         Ok(())
@@ -4025,7 +4299,7 @@ impl SpendingTargetRepository for SqliteGovernanceRepository {
 
     fn load_spending_targets(&self) -> Result<Vec<SpendingTarget>, StorageError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, owner_user_id, target_amount_cents, currency, starting_at,
+            "SELECT id, owner_user_id, target_amount, currency, starting_at,
                     ending_before, status, created_at, updated_at
              FROM spending_targets
              ORDER BY created_at ASC",
@@ -4042,7 +4316,7 @@ impl SpendingTargetRepository for SqliteGovernanceRepository {
             Ok(SpendingTarget {
                 id: parse_id(&id)?,
                 owner_user_id: parse_id(&owner_user_id)?,
-                target_amount_cents: row.get(2)?,
+                target_amount_cents: cents_from_units(row, 2)?,
                 currency: parse_currency(&currency)?,
                 period: TimePeriod::new(
                     parse_timestamp(&starting_at)?,
@@ -4100,10 +4374,10 @@ fn load_executor_settlement_receipt_by_claim_id(
     claim_id: &SpendExecutorClaimId,
 ) -> Result<Option<PersistedSpendExecutorSettlementReceipt>, StorageError> {
     conn.query_row(
-        "SELECT claim_id, settlement_id, authorized_max_cents,
+        "SELECT claim_id, settlement_id, authorized_max,
                 actual_vendor_cost_amount, actual_vendor_cost_scale,
-                actual_vendor_cost_currency, budget_charge_cents,
-                released_amount_cents, overrun_amount_cents, currency,
+                actual_vendor_cost_currency, budget_charge,
+                released_amount, overrun_amount, currency,
                 provider_request_id, price_model_snapshot_json, artifact_reference, created_at
          FROM spend_executor_settlement_receipts
          WHERE claim_id = ?1",
@@ -4130,8 +4404,10 @@ fn save_executor_settlement_receipt(
           actual_vendor_cost_amount, actual_vendor_cost_scale, actual_vendor_cost_currency,
           budget_charge_cents, released_amount_cents, overrun_amount_cents, currency,
           provider_request_id, price_model_snapshot_json,
-          artifact_reference, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+          artifact_reference, created_at, authorized_max, budget_charge,
+          released_amount, overrun_amount, amount_scale)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+                 ?16, ?17, ?18, ?19, 6)",
         params![
             record.claim_id.to_string(),
             record.settlement_id.to_string(),
@@ -4148,6 +4424,10 @@ fn save_executor_settlement_receipt(
             price_model_snapshot_json,
             record.receipt.artifact_reference,
             record.created_at.to_rfc3339(),
+            units_from_cents(record.authorized_max_cents)?.units(),
+            units_from_cents(record.budget_charge_cents)?.units(),
+            units_from_cents(record.released_amount_cents)?.units(),
+            units_from_cents(record.overrun_amount_cents)?.units(),
         ],
     )?;
     Ok(())
@@ -4322,7 +4602,7 @@ fn load_budget_hold_by_claim_id(
     claim_id: &SpendExecutorClaimId,
 ) -> Result<Option<BudgetHold>, StorageError> {
     conn.query_row(
-        "SELECT id, budget_id, budget_version_id, spend_decision_id, amount_cents,
+        "SELECT id, budget_id, budget_version_id, spend_decision_id, amount,
                 currency, status, executor_claim_id, created_at, updated_at, expires_at
          FROM budget_holds
          WHERE executor_claim_id = ?1",
@@ -4338,7 +4618,7 @@ fn load_budget_balance_by_id(
     budget_id: &hubu_common::ids::BudgetId,
 ) -> Result<Option<BudgetBalance>, StorageError> {
     conn.query_row(
-        "SELECT budget_id, consumed_amount_cents, frozen_amount_cents, remaining_amount_cents
+        "SELECT budget_id, consumed_amount, frozen_amount, remaining_amount
          FROM budget_balances
          WHERE budget_id = ?1",
         params![budget_id.to_string()],
@@ -4401,10 +4681,10 @@ fn executor_settlement_receipt_from_row(
     Ok(PersistedSpendExecutorSettlementReceipt {
         claim_id: parse_id(&claim_id)?,
         settlement_id: parse_id(&settlement_id)?,
-        authorized_max_cents: row.get(2)?,
-        budget_charge_cents: row.get(6)?,
-        released_amount_cents: row.get(7)?,
-        overrun_amount_cents: row.get(8)?,
+        authorized_max_cents: cents_from_units(row, 2)?,
+        budget_charge_cents: cents_from_units(row, 6)?,
+        released_amount_cents: cents_from_units(row, 7)?,
+        overrun_amount_cents: cents_from_units(row, 8)?,
         currency: parse_currency(&currency)?,
         receipt: SpendExecutorSettlementReceipt {
             actual_vendor_cost: crate::spend::SpendExecutorVendorCost {
@@ -4458,7 +4738,7 @@ fn budget_hold_from_row(row: &rusqlite::Row<'_>) -> Result<BudgetHold, rusqlite:
         budget_id: parse_id(&budget_id)?,
         budget_version_id: parse_id(&budget_version_id)?,
         spend_decision_id: parse_id(&spend_decision_id)?,
-        amount_cents: row.get(4)?,
+        amount_cents: cents_from_units(row, 4)?,
         currency: parse_currency(&currency)?,
         status: parse_budget_hold_status(&status)?,
         executor_claim_id: parse_optional_id(executor_claim_id)?,
@@ -4477,11 +4757,11 @@ fn load_current_budget_snapshot(
                 budget.starting_at, budget.ending_before, budget.administrative_state,
                 budget.created_at, budget.updated_at,
                 version.id, version.budget_id, version.revision,
-                version.predecessor_version_id, version.amount_limit_cents,
+                version.predecessor_version_id, version.amount_limit,
                 version.effective_at, version.actor, version.source, version.reason,
                 version.request_fingerprint, version.created_at,
-                balance.budget_id, balance.consumed_amount_cents,
-                balance.frozen_amount_cents, balance.remaining_amount_cents
+                balance.budget_id, balance.consumed_amount,
+                balance.frozen_amount, balance.remaining_amount
          FROM budgets AS budget
          JOIN budget_current_versions AS current ON current.budget_id = budget.id
          JOIN budget_versions AS version
@@ -4532,7 +4812,7 @@ fn load_current_budget_snapshot(
                 budget_id: parse_id(&version_budget_id)?,
                 revision,
                 predecessor_version_id: parse_optional_id(predecessor_version_id)?,
-                amount_limit_cents: row.get(13)?,
+                amount_limit_cents: cents_from_units(row, 13)?,
                 effective_at: parse_timestamp(&effective_at)?,
                 actor: row.get(15)?,
                 source: row.get(16)?,
@@ -4542,9 +4822,9 @@ fn load_current_budget_snapshot(
             };
             let balance = BudgetBalance {
                 budget_id: parse_id(&balance_budget_id)?,
-                consumed_amount_cents: row.get(21)?,
-                frozen_amount_cents: row.get(22)?,
-                remaining_amount_cents: row.get(23)?,
+                consumed_amount_cents: cents_from_units(row, 21)?,
+                frozen_amount_cents: cents_from_units(row, 22)?,
+                remaining_amount_cents: cents_from_units(row, 23)?,
             };
             Ok(BudgetWithBalance {
                 budget,
@@ -4566,7 +4846,7 @@ fn load_budget_version_by_revision(
         StorageError::InvalidData("budget version revision exceeds SQLite range".to_string())
     })?;
     conn.query_row(
-        "SELECT id, budget_id, revision, predecessor_version_id, amount_limit_cents,
+        "SELECT id, budget_id, revision, predecessor_version_id, amount_limit,
                 effective_at, actor, source, reason, request_fingerprint, created_at
          FROM budget_versions
          WHERE budget_id = ?1 AND revision = ?2",
@@ -4583,7 +4863,7 @@ fn load_budget_version_successor(
     predecessor_version_id: &BudgetVersionId,
 ) -> Result<Option<BudgetVersion>, StorageError> {
     conn.query_row(
-        "SELECT id, budget_id, revision, predecessor_version_id, amount_limit_cents,
+        "SELECT id, budget_id, revision, predecessor_version_id, amount_limit,
                 effective_at, actor, source, reason, request_fingerprint, created_at
          FROM budget_versions
          WHERE budget_id = ?1 AND predecessor_version_id = ?2",
@@ -4613,7 +4893,7 @@ fn budget_version_from_row(row: &rusqlite::Row<'_>) -> Result<BudgetVersion, rus
         budget_id: parse_id(&budget_id)?,
         revision,
         predecessor_version_id: parse_optional_id(predecessor_version_id)?,
-        amount_limit_cents: row.get(4)?,
+        amount_limit_cents: cents_from_units(row, 4)?,
         effective_at: parse_timestamp(&effective_at)?,
         actor: row.get(6)?,
         source: row.get(7)?,
@@ -4627,9 +4907,9 @@ fn budget_balance_from_row(row: &rusqlite::Row<'_>) -> Result<BudgetBalance, rus
     let budget_id: String = row.get(0)?;
     Ok(BudgetBalance {
         budget_id: parse_id(&budget_id)?,
-        consumed_amount_cents: row.get(1)?,
-        frozen_amount_cents: row.get(2)?,
-        remaining_amount_cents: row.get(3)?,
+        consumed_amount_cents: cents_from_units(row, 1)?,
+        frozen_amount_cents: cents_from_units(row, 2)?,
+        remaining_amount_cents: cents_from_units(row, 3)?,
     })
 }
 
@@ -4742,14 +5022,14 @@ fn validate_balance_for_limit(
 fn upsert_balance(conn: &Connection, balance: &BudgetBalance) -> Result<(), StorageError> {
     let amount_limit_cents = conn
         .query_row(
-            "SELECT version.amount_limit_cents
+            "SELECT version.amount_limit
              FROM budget_current_versions AS current
              JOIN budget_versions AS version
                ON version.budget_id = current.budget_id
               AND version.id = current.version_id
              WHERE current.budget_id = ?1",
             params![balance.budget_id.to_string()],
-            |row| row.get::<_, i64>(0),
+            |row| cents_from_units(row, 0),
         )
         .optional()?
         .ok_or_else(|| {
@@ -4758,36 +5038,177 @@ fn upsert_balance(conn: &Connection, balance: &BudgetBalance) -> Result<(), Stor
             )
         })?;
     validate_balance_for_limit(balance, amount_limit_cents)?;
-    let frozen_hold_amount_cents: i64 = conn.query_row(
-        "SELECT COALESCE(SUM(amount_cents), 0)
-         FROM budget_holds
-         WHERE budget_id = ?1 AND status IN ('frozen', 'claimed')",
-        params![balance.budget_id.to_string()],
-        |row| row.get(0),
-    )?;
+    let frozen_hold_amount_cents = active_hold_total_cents(conn, &balance.budget_id)?;
     if frozen_hold_amount_cents != balance.frozen_amount_cents {
         return Err(StorageError::InvalidData(
             "frozen budget balance must equal its active holds".to_string(),
         ));
     }
+    let units = BalanceUnits::from_balance(balance)?;
     conn.execute(
         "INSERT INTO budget_balances
-         (budget_id, consumed_amount_cents, frozen_amount_cents, remaining_amount_cents, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)
+         (budget_id, consumed_amount_cents, frozen_amount_cents, remaining_amount_cents, updated_at,
+          consumed_amount, frozen_amount, remaining_amount, amount_scale)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 6)
          ON CONFLICT(budget_id) DO UPDATE SET
             consumed_amount_cents = excluded.consumed_amount_cents,
             frozen_amount_cents = excluded.frozen_amount_cents,
             remaining_amount_cents = excluded.remaining_amount_cents,
+            consumed_amount = excluded.consumed_amount,
+            frozen_amount = excluded.frozen_amount,
+            remaining_amount = excluded.remaining_amount,
+            amount_scale = excluded.amount_scale,
             updated_at = excluded.updated_at",
         params![
             balance.budget_id.to_string(),
-            balance.consumed_amount_cents,
-            balance.frozen_amount_cents,
-            balance.remaining_amount_cents,
+            units.consumed.legacy_cents_ceil(),
+            units.frozen.legacy_cents_ceil(),
+            units.remaining.legacy_cents_floor(),
             Utc::now().to_rfc3339(),
+            units.consumed.units(),
+            units.frozen.units(),
+            units.remaining.units(),
         ],
     )?;
     Ok(())
+}
+
+/// A balance at accounting scale. The authoritative columns hold these units;
+/// the legacy `*_cents` columns hold conservative projections (consumed and
+/// frozen rounded up, remaining rounded down).
+struct BalanceUnits {
+    consumed: Amount,
+    frozen: Amount,
+    remaining: Amount,
+}
+
+impl BalanceUnits {
+    fn from_balance(balance: &BudgetBalance) -> Result<Self, StorageError> {
+        Ok(Self {
+            consumed: units_from_cents(balance.consumed_amount_cents)?,
+            frozen: units_from_cents(balance.frozen_amount_cents)?,
+            remaining: units_from_cents(balance.remaining_amount_cents)?,
+        })
+    }
+}
+
+/// Moves a balance from `current` to `updated` only if the stored
+/// authoritative amounts still equal `current`. Returns the updated row count.
+fn compare_and_set_balance(
+    conn: &Connection,
+    current: &BudgetBalance,
+    updated: &BudgetBalance,
+    updated_at: &str,
+) -> Result<usize, StorageError> {
+    let current_units = BalanceUnits::from_balance(current)?;
+    let updated_units = BalanceUnits::from_balance(updated)?;
+    Ok(conn.execute(
+        "UPDATE budget_balances
+         SET consumed_amount = ?2,
+             frozen_amount = ?3,
+             remaining_amount = ?4,
+             consumed_amount_cents = ?5,
+             frozen_amount_cents = ?6,
+             remaining_amount_cents = ?7,
+             updated_at = ?8
+         WHERE budget_id = ?1
+           AND consumed_amount = ?9
+           AND frozen_amount = ?10
+           AND remaining_amount = ?11",
+        params![
+            updated.budget_id.to_string(),
+            updated_units.consumed.units(),
+            updated_units.frozen.units(),
+            updated_units.remaining.units(),
+            updated_units.consumed.legacy_cents_ceil(),
+            updated_units.frozen.legacy_cents_ceil(),
+            updated_units.remaining.legacy_cents_floor(),
+            updated_at,
+            current_units.consumed.units(),
+            current_units.frozen.units(),
+            current_units.remaining.units(),
+        ],
+    )?)
+}
+
+fn insert_budget_hold(conn: &Connection, hold: &BudgetHold) -> Result<(), StorageError> {
+    let amount = units_from_cents(hold.amount_cents)?;
+    conn.execute(
+        "INSERT INTO budget_holds
+         (id, budget_id, budget_version_id, spend_decision_id, amount_cents,
+          currency, status, executor_claim_id, created_at, updated_at, expires_at,
+          amount, amount_scale, spend_asset, spend_exact_amount, spend_exact_scale)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 6, ?6, ?13, 2)",
+        params![
+            hold.id.to_string(),
+            hold.budget_id.to_string(),
+            hold.budget_version_id.to_string(),
+            hold.spend_decision_id.to_string(),
+            amount.legacy_cents_ceil(),
+            hold.currency.to_string(),
+            budget_hold_status(&hold.status),
+            hold.executor_claim_id.as_ref().map(ToString::to_string),
+            hold.created_at.to_rfc3339(),
+            hold.updated_at.to_rfc3339(),
+            hold.expires_at.to_rfc3339(),
+            amount.units(),
+            hold.amount_cents.to_string(),
+        ],
+    )?;
+    Ok(())
+}
+
+fn active_hold_total_cents(conn: &Connection, budget_id: &BudgetId) -> Result<i64, StorageError> {
+    Ok(conn.query_row(
+        "SELECT COALESCE(SUM(amount), 0)
+         FROM budget_holds
+         WHERE budget_id = ?1 AND status IN ('frozen', 'claimed')",
+        params![budget_id.to_string()],
+        |row| cents_from_units(row, 0),
+    )?)
+}
+
+fn units_from_cents(cents: i64) -> Result<Amount, StorageError> {
+    Amount::from_legacy_cents(cents).map_err(|_| {
+        StorageError::InvalidData(format!(
+            "amount of {cents} cents exceeds the accounting-scale range"
+        ))
+    })
+}
+
+/// Reads an authoritative accounting-scale amount. NULL means the
+/// accounting-scale migration did not cover the row, which is invalid data.
+fn accounting_units_from_row(
+    row: &rusqlite::Row<'_>,
+    index: usize,
+) -> Result<Amount, rusqlite::Error> {
+    let units: Option<i64> = row.get(index)?;
+    units.map(Amount::from_units).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            index,
+            rusqlite::types::Type::Null,
+            Box::new(StorageError::InvalidData(
+                "accounting-scale amount is missing".to_string(),
+            )),
+        )
+    })
+}
+
+/// Reads an authoritative accounting-scale amount for the cent-denominated
+/// domain. Amounts that are not whole cents cannot be represented yet.
+fn cents_from_units(row: &rusqlite::Row<'_>, index: usize) -> Result<i64, rusqlite::Error> {
+    let amount = accounting_units_from_row(row, index)?;
+    if amount.legacy_cents_floor() != amount.legacy_cents_ceil() {
+        return Err(rusqlite::Error::FromSqlConversionFailure(
+            index,
+            rusqlite::types::Type::Integer,
+            Box::new(StorageError::InvalidData(format!(
+                "accounting-scale amount {} is not a whole cent",
+                amount.units()
+            ))),
+        ));
+    }
+    Ok(amount.legacy_cents_floor())
 }
 
 fn budget_administrative_state(state: BudgetAdministrativeState) -> &'static str {
@@ -4973,11 +5394,13 @@ fn persist_budget_records(
         budget_rows,
         "logical budget properties differ from the persisted allocation",
     )?;
+    let amount_limit = units_from_cents(version.amount_limit_cents)?;
     sqlite_tx.execute(
         "INSERT INTO budget_versions
              (id, budget_id, revision, predecessor_version_id, amount_limit_cents,
-              effective_at, actor, source, reason, request_fingerprint, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+              effective_at, actor, source, reason, request_fingerprint, created_at,
+              amount_limit, amount_scale)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 6)
              ON CONFLICT(id) DO NOTHING",
         params![
             version.id.to_string(),
@@ -4987,20 +5410,21 @@ fn persist_budget_records(
                 .predecessor_version_id
                 .as_ref()
                 .map(ToString::to_string),
-            version.amount_limit_cents,
+            amount_limit.legacy_cents_floor(),
             version.effective_at.to_rfc3339(),
             version.actor,
             version.source,
             version.reason,
             version.request_fingerprint,
             version.created_at.to_rfc3339(),
+            amount_limit.units(),
         ],
     )?;
     let matching_version_count: i64 = sqlite_tx.query_row(
         "SELECT COUNT(*)
              FROM budget_versions
              WHERE id = ?1 AND budget_id = ?2 AND revision = ?3
-               AND predecessor_version_id IS ?4 AND amount_limit_cents = ?5
+               AND predecessor_version_id IS ?4 AND amount_limit = ?5
                AND effective_at = ?6 AND actor = ?7 AND source = ?8
                AND reason IS ?9 AND request_fingerprint = ?10 AND created_at = ?11",
         params![
@@ -5011,7 +5435,7 @@ fn persist_budget_records(
                 .predecessor_version_id
                 .as_ref()
                 .map(ToString::to_string),
-            version.amount_limit_cents,
+            amount_limit.units(),
             version.effective_at.to_rfc3339(),
             version.actor,
             version.source,
@@ -5096,7 +5520,7 @@ fn load_budgets_from(conn: &Connection) -> Result<Vec<Budget>, StorageError> {
 }
 fn load_budget_versions_from(conn: &Connection) -> Result<Vec<BudgetVersion>, StorageError> {
     let mut stmt = conn.prepare(
-        "SELECT id, budget_id, revision, predecessor_version_id, amount_limit_cents,
+        "SELECT id, budget_id, revision, predecessor_version_id, amount_limit,
                     effective_at, actor, source, reason, request_fingerprint, created_at
              FROM budget_versions
              ORDER BY budget_id ASC, revision ASC",
@@ -5106,7 +5530,7 @@ fn load_budget_versions_from(conn: &Connection) -> Result<Vec<BudgetVersion>, St
 }
 fn load_budget_balances_from(conn: &Connection) -> Result<Vec<BudgetBalance>, StorageError> {
     let mut stmt = conn.prepare(
-        "SELECT budget_id, consumed_amount_cents, frozen_amount_cents, remaining_amount_cents
+        "SELECT budget_id, consumed_amount, frozen_amount, remaining_amount
              FROM budget_balances
              ORDER BY budget_id ASC",
     )?;
@@ -5115,7 +5539,7 @@ fn load_budget_balances_from(conn: &Connection) -> Result<Vec<BudgetBalance>, St
 }
 fn load_budget_holds_from(conn: &Connection) -> Result<Vec<BudgetHold>, StorageError> {
     let mut stmt = conn.prepare(
-        "SELECT id, budget_id, budget_version_id, spend_decision_id, amount_cents,
+        "SELECT id, budget_id, budget_version_id, spend_decision_id, amount,
                     currency, status, executor_claim_id, created_at, updated_at, expires_at
              FROM budget_holds
              ORDER BY created_at ASC",
@@ -5204,6 +5628,17 @@ fn load_budget_state_from(
         load_budget_holds_from(conn)?,
     )
     .map_err(|error| StorageError::InvalidData(error.to_string()))
+}
+
+#[cfg(test)]
+pub(crate) fn strip_accounting_scale_columns(conn: &Connection) {
+    for column in ACCOUNTING_SCALE_COLUMNS.iter().rev() {
+        conn.execute_batch(&format!(
+            "ALTER TABLE {} DROP COLUMN {};",
+            column.table, column.name
+        ))
+        .unwrap();
+    }
 }
 
 #[cfg(test)]
@@ -6061,8 +6496,18 @@ mod tests {
         claim_expires_at: DateTime<Utc>,
         operation_key: &str,
     ) -> (SpendExecutorClaimRecord, SpendAuthTokenRecord, BudgetHold) {
+        persist_claimed_executor_spend_for_agent(repo, claim_expires_at, operation_key, agent_id())
+    }
+
+    pub(super) fn persist_claimed_executor_spend_for_agent(
+        repo: &mut SqliteGovernanceRepository,
+        claim_expires_at: DateTime<Utc>,
+        operation_key: &str,
+        agent: AgentId,
+    ) -> (SpendExecutorClaimRecord, SpendAuthTokenRecord, BudgetHold) {
         let mut decision = spend_decision();
         decision.operation_key = operation_key.to_string();
+        decision.request.agent_id = agent.clone();
         let token = SpendAuthTokenRecord {
             id: SpendAuthTokenId::new(),
             owner_user_id: user_id(),
@@ -6092,7 +6537,7 @@ mod tests {
         };
         let budget = Budget::new(
             BudgetId::new(),
-            agent_id(),
+            agent,
             Currency::Usd,
             TimePeriod::new(
                 Utc::now() - Duration::hours(1),
@@ -7046,7 +7491,8 @@ mod tests {
         repo.conn
             .execute(
                 "UPDATE budget_balances
-                 SET consumed_amount_cents = 1, remaining_amount_cents = 7499
+                 SET consumed_amount_cents = 1, remaining_amount_cents = 7499,
+                     consumed_amount = 10000, remaining_amount = 74990000
                  WHERE budget_id = ?1",
                 params![hold.budget_id.to_string()],
             )
@@ -8609,10 +9055,15 @@ mod tests {
             "hubu-historical-periods-{}.sqlite",
             BudgetId::new()
         ));
-        let mut repo = SqliteGovernanceRepository::open(&path).unwrap();
+        // The fixture is persisted state from before the accounting-scale
+        // migration: load it into that schema, then let reopening migrate it.
+        let repo = SqliteGovernanceRepository::open(&path).unwrap();
+        strip_accounting_scale_columns(&repo.conn);
         repo.conn
             .execute_batch(include_str!("../../../fixtures/legacy-budget-periods.sql"))
             .unwrap();
+        drop(repo);
+        let mut repo = SqliteGovernanceRepository::open(&path).unwrap();
         // Compare complete persisted rows, including IDs, version fingerprints,
         // provenance and timestamps, rather than just counts after reopening.
         let snapshot = |repo: &SqliteGovernanceRepository| {
@@ -9501,3 +9952,7 @@ mod tests {
 #[cfg(test)]
 #[path = "persistence/accounting_tests.rs"]
 mod accounting_tests;
+
+#[cfg(test)]
+#[path = "persistence/accounting_scale_tests.rs"]
+mod accounting_scale_tests;
