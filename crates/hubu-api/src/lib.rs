@@ -4886,6 +4886,9 @@ struct ValidatedExecutorSpend {
 
 struct ResolvedExecutorSpend {
     request: ExecutorSpendHttpRequest,
+    /// The exact authorized amount, set once the request's cent projection
+    /// has been checked against the authoritative authorization.
+    authorized_amount: Option<Amount>,
     account_pub_id: String,
     agent_pub_id: String,
     token_id: SpendAuthTokenId,
@@ -4901,10 +4904,13 @@ impl ResolvedExecutorSpend {
             owner_user_id: self.owner_user_id.clone(),
             agent_id: self.agent_id.clone(),
             agent_account_id: self.agent_account_id.clone(),
-            // An amount beyond the accounting range can never equal an
-            // authorization, so saturating makes validation reject it.
-            amount: Amount::from_legacy_cents(self.request.amount_cents)
-                .unwrap_or(Amount::from_units(i64::MAX)),
+            // The wire carries cents. Validate with the exact authorized
+            // amount once it is known; otherwise an amount beyond the
+            // accounting range saturates and can never match.
+            amount: self.authorized_amount.unwrap_or_else(|| {
+                Amount::from_legacy_cents(self.request.amount_cents)
+                    .unwrap_or(Amount::from_units(i64::MAX))
+            }),
             currency: Currency::Usd,
             merchant: self.request.merchant.clone(),
             execution_scope: self.request.execution_scope.clone(),
@@ -4951,6 +4957,13 @@ fn apply_authoritative_executor_identity(
         ));
     }
     resolved.request.task_id = decision.request.task_id.clone();
+    // Cent-denominated executors see the authorization rounded up to a cent;
+    // accept exactly that projection and validate with the exact amount. The
+    // mismatch error is the executor contract's existing wording.
+    if resolved.request.amount_cents != decision.request.amount.legacy_cents_ceil() {
+        return Err(hubu_core::spend::SpendError::PaymentRequestMismatch.into());
+    }
+    resolved.authorized_amount = Some(decision.request.amount);
     Ok((
         decision.operation_key.clone(),
         decision.request.reason.clone(),
@@ -5012,6 +5025,7 @@ fn resolve_executor_spend_request(
 
     Ok(ResolvedExecutorSpend {
         request,
+        authorized_amount: None,
         account_pub_id,
         agent_pub_id,
         token_id,
@@ -9248,6 +9262,50 @@ lease_profiles:
         )
         .expect("read-only resolution must leave the token claimable");
         assert_eq!(claim.status, "claimed");
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn executor_claims_a_sub_cent_authorization_from_its_cent_projection() {
+        let (path, state, agent, authorization) = setup_executor_authorization("sub-cent-claim");
+        let token_id: SpendAuthTokenId = authorization
+            .auth_token_id
+            .clone()
+            .unwrap()
+            .parse()
+            .unwrap();
+        {
+            // Store the authorization as an exact sub-cent amount whose cent
+            // projection (rounded up) is still the 500 cents executors see.
+            let mut spend = state.spend.lock().unwrap();
+            let token = spend.auth_token_record(&token_id).unwrap();
+            let mut decision = spend.decision_record(&token.spend_decision_id).unwrap();
+            decision.request.amount = "4.999995".parse().unwrap();
+            *spend = SpendManager::from_records(vec![decision], vec![token]);
+        }
+        let claim = |amount_cents: i64| {
+            claim_executor_spend(
+                json!({
+                    "spend_auth_token_id": token_id.to_string(),
+                    "account_id": agent.account_id,
+                    "amount_cents": amount_cents,
+                    "merchant": "gongbu.image"
+                })
+                .to_string(),
+                &state,
+            )
+        };
+        let mismatch = claim(499).unwrap_err();
+        assert!(
+            mismatch
+                .to_string()
+                .contains("payment request does not match authorized spend"),
+            "{mismatch}"
+        );
+        assert_eq!(
+            claim(500).expect("cent projection claims").status,
+            "claimed"
+        );
         std::fs::remove_file(path).ok();
     }
 
