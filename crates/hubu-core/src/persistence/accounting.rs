@@ -153,10 +153,10 @@ pub(super) fn post_settlement(
 
 impl SqliteGovernanceRepository {
     pub(super) fn initialize_provider_accounting(&mut self) -> Result<(), StorageError> {
-        ledger::initialize(&self.conn).map_err(ledger_error)?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        ledger::initialize(&tx).map_err(ledger_error)?;
         tx.execute_batch("CREATE TABLE IF NOT EXISTS ledger_legacy_gaps (source_key TEXT PRIMARY KEY, reason TEXT NOT NULL);")?;
         let ids = {
             let mut stmt = tx.prepare("SELECT c.id FROM spend_executor_claims c WHERE c.status='settled'

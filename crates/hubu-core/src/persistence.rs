@@ -1077,11 +1077,39 @@ impl SqliteGovernanceRepository {
         Ok(repository)
     }
 
+    /// Creates and migrates the schema. Several steps drop guard triggers,
+    /// backfill rows and recreate the triggers, so each phase holds the
+    /// database write lock (`BEGIN IMMEDIATE`): concurrent opens of the same
+    /// file serialize instead of interleaving with another connection's
+    /// half-applied migration or observing a window without guard triggers.
     fn init(&mut self) -> Result<(), StorageError> {
+        // Foreign-key enforcement is per connection and SQLite ignores changes
+        // to it inside a transaction, so enable it before any phase begins.
+        self.conn.pragma_update(None, "foreign_keys", true)?;
+        self.in_init_transaction(Self::init_schema_and_policy_migrations)?;
+        // The legacy budget-table rebuild must disable foreign keys, so it owns
+        // its immediate transaction instead of joining an init phase.
+        self.migrate_versioned_budgets()?;
+        self.in_init_transaction(Self::init_spend_migrations)?;
+        self.initialize_provider_accounting()?;
+        Ok(())
+    }
+
+    fn in_init_transaction(
+        &mut self,
+        phase: fn(&mut Self) -> Result<(), StorageError>,
+    ) -> Result<(), StorageError> {
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = phase(self).and_then(|()| Ok(self.conn.execute_batch("COMMIT")?));
+        if result.is_err() && !self.conn.is_autocommit() {
+            let _ = self.conn.execute_batch("ROLLBACK");
+        }
+        result
+    }
+
+    fn init_schema_and_policy_migrations(&mut self) -> Result<(), StorageError> {
         self.conn.execute_batch(
             "
-            PRAGMA foreign_keys = ON;
-
             CREATE TABLE IF NOT EXISTS policy_assignments (
                 owner_user_id TEXT NOT NULL,
                 scope_type TEXT NOT NULL,
@@ -1371,7 +1399,10 @@ impl SqliteGovernanceRepository {
         self.migrate_declarative_policies()?;
         self.migrate_user_caps_to_spending_targets()?;
         self.migrate_executor_claim_budget_holds()?;
-        self.migrate_versioned_budgets()?;
+        Ok(())
+    }
+
+    fn init_spend_migrations(&mut self) -> Result<(), StorageError> {
         self.migrate_budget_administrative_state()?;
         // A legacy budget-table rebuild replaces the holds table and its
         // indexes, so restore executor-claim uniqueness on the new table.
@@ -1384,7 +1415,6 @@ impl SqliteGovernanceRepository {
         self.enforce_executor_settlement_receipt_immutability()?;
         self.enforce_budget_version_immutability()?;
         self.enforce_one_budget_hold_per_spend_decision()?;
-        self.initialize_provider_accounting()?;
         Ok(())
     }
 
@@ -1519,9 +1549,7 @@ impl SqliteGovernanceRepository {
             collect_rows(rows)?
         };
 
-        let transaction = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let transaction = self.conn.savepoint()?;
         transaction.execute_batch(
             "ALTER TABLE policy_assignments RENAME TO policy_assignments_embedded_legacy;
              CREATE TABLE policy_assignments (
@@ -1689,6 +1717,11 @@ impl SqliteGovernanceRepository {
             let transaction = self
                 .conn
                 .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            // A concurrent open may have finished the rebuild while this
+            // connection waited for the write lock.
+            if !table_has_column(&transaction, "budgets", "amount_limit_cents")? {
+                return Ok(());
+            }
             transaction.execute_batch(
                 "DROP TRIGGER IF EXISTS budget_versions_no_update;
                  DROP TRIGGER IF EXISTS budget_versions_no_delete;
@@ -2031,9 +2064,7 @@ impl SqliteGovernanceRepository {
             ));
         }
 
-        let transaction = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let transaction = self.conn.savepoint()?;
         if has_legacy_status {
             let unknown: Option<(String, String)> = transaction
                 .query_row(
@@ -6135,6 +6166,55 @@ mod tests {
         ] {
             assert!(table_has_column(&repo.conn, "spend_executor_claims", column).unwrap());
         }
+    }
+
+    const CONCURRENT_OPENERS: usize = 8;
+
+    fn open_concurrently(path: &std::path::Path) {
+        let barrier = Arc::new(Barrier::new(CONCURRENT_OPENERS));
+        let handles = (0..CONCURRENT_OPENERS)
+            .map(|_| {
+                let barrier = Arc::clone(&barrier);
+                let path = path.to_path_buf();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    SqliteGovernanceRepository::open(&path).map(drop)
+                })
+            })
+            .collect::<Vec<_>>();
+        for handle in handles {
+            handle.join().unwrap().unwrap();
+        }
+    }
+
+    #[test]
+    fn concurrent_opens_create_one_fresh_database() {
+        for round in 0..5 {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join(format!("fresh-{round}.sqlite"));
+            open_concurrently(&path);
+            let mut repo = SqliteGovernanceRepository::open(&path).unwrap();
+            persist_claimed_executor_spend(&mut repo, Utc::now() + Duration::minutes(5));
+        }
+    }
+
+    #[test]
+    fn concurrent_opens_of_initialized_database_succeed() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("concurrent-open.sqlite");
+        let (_, _, hold) = {
+            let mut seed = SqliteGovernanceRepository::open(&path).unwrap();
+            persist_claimed_executor_spend(&mut seed, Utc::now() + Duration::minutes(5))
+        };
+
+        for _ in 0..5 {
+            open_concurrently(&path);
+        }
+
+        let repo = SqliteGovernanceRepository::open(&path).unwrap();
+        let holds = repo.load_budget_holds().unwrap();
+        assert_eq!(holds.len(), 1);
+        assert_eq!(holds[0].id, hold.id);
     }
 
     #[test]

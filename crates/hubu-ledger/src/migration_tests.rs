@@ -96,6 +96,27 @@ fn failed_schema_migration_rolls_back_tables_values_and_triggers() {
     assert!(conn.execute("DELETE FROM ledger_entries", []).is_err());
 }
 #[test]
+fn failed_schema_migration_inside_caller_transaction_leaves_nothing_to_commit() {
+    let conn = Connection::open_in_memory().unwrap();
+    old_schema(&conn, "invalid-old-direction");
+    conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+    assert!(domain::initialize(&conn).is_err());
+    conn.execute_batch("COMMIT").unwrap();
+    assert_eq!(
+        conn.query_row("SELECT direction FROM ledger_entries", [], |r| r
+            .get::<_, String>(0))
+            .unwrap(),
+        "invalid-old-direction"
+    );
+    assert!(conn
+        .prepare("SELECT exact_amount FROM ledger_entries")
+        .is_err());
+    assert!(conn
+        .prepare("SELECT kind FROM ledger_transactions")
+        .is_err());
+    assert!(conn.execute("DELETE FROM ledger_entries", []).is_err());
+}
+#[test]
 fn compatibility_posting_rejects_foreign_accounts_and_handles_large_balanced_totals() {
     let mut ledger = SqliteLedger::in_memory().unwrap();
     let owner = UserId::new();

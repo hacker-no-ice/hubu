@@ -119,9 +119,29 @@ fn invalid(message: &str) -> LedgerError {
 
 /// Installs or upgrades the deployed wallet tables in one transaction. Historical
 /// IDs and cents remain intact; exact provider entries have NULL legacy cents.
+/// Inside a caller's transaction the upgrade runs in a savepoint that is rolled
+/// back on failure, so the caller can never commit a partial upgrade; otherwise
+/// it takes the write lock up front so concurrent opens serialize instead of
+/// failing a read-to-write lock upgrade.
 pub fn initialize(conn: &Connection) -> Result<(), LedgerError> {
+    if !conn.is_autocommit() {
+        conn.execute_batch("SAVEPOINT ledger_initialize")?;
+        return match install(conn) {
+            Ok(()) => Ok(conn.execute_batch("RELEASE ledger_initialize")?),
+            Err(error) => {
+                conn.execute_batch("ROLLBACK TO ledger_initialize; RELEASE ledger_initialize;")?;
+                Err(error)
+            }
+        };
+    }
     conn.pragma_update(None, "foreign_keys", "ON")?;
-    let tx = conn.unchecked_transaction()?;
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+    install(&tx)?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn install(tx: &Connection) -> Result<(), LedgerError> {
     tx.execute_batch("CREATE TABLE IF NOT EXISTS ledger_accounts (
         id TEXT PRIMARY KEY, owner_user_id TEXT NOT NULL, name TEXT NOT NULL,
         kind TEXT NOT NULL, currency TEXT NOT NULL, created_at TEXT NOT NULL);
@@ -170,7 +190,6 @@ pub fn initialize(conn: &Connection) -> Result<(), LedgerError> {
         CREATE TRIGGER IF NOT EXISTS ledger_entries_no_delete BEFORE DELETE ON ledger_entries BEGIN SELECT RAISE(ABORT, 'ledger entries are immutable'); END;
         CREATE TRIGGER IF NOT EXISTS ledger_metadata_no_update BEFORE UPDATE ON ledger_transaction_metadata BEGIN SELECT RAISE(ABORT, 'ledger metadata is immutable'); END;
         CREATE TRIGGER IF NOT EXISTS ledger_metadata_no_delete BEFORE DELETE ON ledger_transaction_metadata BEGIN SELECT RAISE(ABORT, 'ledger metadata is immutable'); END;")?;
-    tx.commit()?;
     Ok(())
 }
 
