@@ -1,5 +1,6 @@
 use super::BudgetUpdateError;
 use hubu_common::ids::BudgetId;
+use hubu_common::money::Amount;
 
 /// Manager command for changing the total limit of one stable logical
 /// budget. Transport ownership checks and public-id parsing remain outside this
@@ -8,7 +9,7 @@ use hubu_common::ids::BudgetId;
 pub struct UpdateBudgetLimitRequest {
     pub budget_id: BudgetId,
     pub expected_revision: u64,
-    pub amount_limit_cents: i64,
+    pub amount_limit: Amount,
     pub actor: String,
     pub source: Option<String>,
     pub reason: Option<String>,

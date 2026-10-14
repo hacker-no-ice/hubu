@@ -18,6 +18,12 @@ pub enum BudgetManagerError {
     #[error("budget balance not found")]
     MissingBudgetBalance,
 
+    #[error("budget balance exceeds the representable range")]
+    BalanceOverflow,
+
+    #[error("settled charge exceeds the budget hold")]
+    ChargeExceedsHold,
+
     #[error("budget is unavailable: {0}")]
     BudgetUnavailable(BudgetAvailability),
 
@@ -71,6 +77,7 @@ impl From<BudgetEvaluationError> for BudgetManagerError {
 }
 
 use crate::storage::StorageError;
+use hubu_common::money::Amount;
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum BudgetUpdateError {
     #[error("budget update amount must be positive")]
@@ -94,12 +101,10 @@ pub enum BudgetUpdateError {
     #[error("expired budget cannot be updated")]
     BudgetExpired,
 
-    #[error(
-        "budget limit {requested_amount_cents} is below committed usage {committed_amount_cents}"
-    )]
+    #[error("budget limit {requested_amount} is below committed usage {committed_amount}")]
     LimitBelowCommitted {
-        requested_amount_cents: i64,
-        committed_amount_cents: i64,
+        requested_amount: Amount,
+        committed_amount: Amount,
     },
 
     #[error(

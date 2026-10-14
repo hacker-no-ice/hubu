@@ -26,6 +26,17 @@ fn exact_cost(cost: &crate::spend::SpendExecutorVendorCost) -> ExactMoney {
     }
 }
 
+/// The budget charge for an exact ledger cost: rounded up once to accounting
+/// scale (10⁻⁶).
+fn budget_units(cost: &ExactMoney) -> Result<Amount, StorageError> {
+    const UNIT_AT_SCALE_18: i128 = 1_000_000_000_000;
+    let scaled = cost.scaled().map_err(ledger_error)?;
+    let units = scaled / UNIT_AT_SCALE_18 + i128::from(scaled % UNIT_AT_SCALE_18 != 0);
+    i64::try_from(units)
+        .map(Amount::from_units)
+        .map_err(|_| invalid("budget amount overflow"))
+}
+
 pub(super) fn post_settlement(
     conn: &rusqlite::Transaction<'_>,
     claim: &SpendExecutorClaimRecord,
@@ -58,15 +69,15 @@ pub(super) fn post_settlement(
     let request: SpendRequest = serde_json::from_str(&json)?;
     if request.owner_user_id != claim.owner_user_id
         || request.agent_id != claim.agent_id
-        || receipt.authorized_max_cents != hold.amount_cents
+        || receipt.authorized_max != hold.amount
         || receipt.claim_id != claim.id
         || receipt.currency != hold.currency
         || receipt.receipt.actual_vendor_cost.currency != hold.currency
-        || receipt.budget_charge_cents
+        || receipt.budget_charge
             != receipt
                 .receipt
                 .actual_vendor_cost
-                .conservative_budget_charge_cents()
+                .budget_charge()
                 .map_err(invalid)?
     {
         return Err(invalid(
@@ -118,9 +129,11 @@ pub(super) fn post_settlement(
             operation_key: claim.operation_key.clone(),
         }),
         effective_cost: cost,
-        budget_charge_delta_cents: Some(receipt.budget_charge_cents),
+        // Ledger budget charges are still recorded in cents.
+        budget_charge_delta_cents: Some(receipt.budget_charge.legacy_cents_ceil()),
         rounding_delta_amount: Some(
-            (i128::from(receipt.budget_charge_cents) * CENT_AT_SCALE_18 - expense).to_string(),
+            (i128::from(receipt.budget_charge.legacy_cents_ceil()) * CENT_AT_SCALE_18 - expense)
+                .to_string(),
         ),
         original_transaction_id: None,
         previous_transaction_id: None,
@@ -291,18 +304,23 @@ impl SqliteGovernanceRepository {
                     .map_err(ledger_error)?;
             let balance = load_budget_balance_by_id(&tx, &context.budget_id)?
                 .ok_or_else(|| invalid("missing adjustment budget"))?;
+            // The balance moves by the exact difference at accounting scale;
+            // ledger metadata still records the charge delta in cents.
+            let consumed_delta = budget_units(&command.corrected_cost)?
+                .checked_sub(budget_units(&previous_meta.effective_cost)?)
+                .ok_or_else(|| invalid("adjustment balance overflow"))?;
             let consumed = balance
-                .consumed_amount_cents
-                .checked_add(amount)
-                .filter(|v| *v >= 0)
+                .consumed_amount
+                .checked_add(consumed_delta)
+                .filter(|v| !v.is_negative())
                 .ok_or_else(|| invalid("invalid adjusted consumption"))?;
             let remaining = balance
-                .remaining_amount_cents
-                .checked_sub(amount)
+                .remaining_amount
+                .checked_sub(consumed_delta)
                 .ok_or_else(|| invalid("adjustment balance overflow"))?;
             let updated = BudgetBalance {
-                consumed_amount_cents: consumed,
-                remaining_amount_cents: remaining,
+                consumed_amount: consumed,
+                remaining_amount: remaining,
                 ..balance.clone()
             };
             super::compare_and_set_balance(&tx, &balance, &updated, &Utc::now().to_rfc3339())?;
@@ -399,10 +417,11 @@ impl SqliteGovernanceRepository {
             budget_id: query.budget_id,
             agent_id: query.agent_id,
             transactions,
-            consumed_amount_cents: balance.consumed_amount_cents,
+            consumed_amount_cents: balance.consumed_amount.legacy_cents_ceil(),
             recorded_budget_charges_cents: total,
             unaccounted_consumption_cents: balance
-                .consumed_amount_cents
+                .consumed_amount
+                .legacy_cents_ceil()
                 .checked_sub(total)
                 .ok_or_else(|| invalid("coverage difference overflow"))?,
             owner_transactions_without_budget_context: unlinked,
@@ -497,7 +516,7 @@ fn backfill_wallet_context(tx: &rusqlite::Transaction<'_>) -> Result<(), Storage
         if request.owner_user_id != record.owner_user_id
             || request.agent_id.to_string() != *decision_agent_id
             || request.agent_account_id.to_string() != *account
-            || request.amount_cents != *amount
+            || Amount::from_legacy_cents(*amount).ok() != Some(request.amount)
             || record.entries.len() != 2
             || debits.len() != 1
             || credits.len() != 1

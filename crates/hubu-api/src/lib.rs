@@ -850,7 +850,11 @@ impl SpendAuthorizationValidator for SharedSpendAuthorizer {
                 owner_user_id: request.owner_user_id.clone(),
                 agent_id: request.agent_id.clone(),
                 agent_account_id: request.agent_account_id.clone(),
-                amount_cents: request.amount_cents,
+                amount: Amount::from_legacy_cents(request.amount_cents).map_err(|_| {
+                    PaymentError::AuthorizationRejected {
+                        reason: "payment amount exceeds the accounting range".to_string(),
+                    }
+                })?,
                 currency: request.currency,
                 merchant: request.merchant.clone(),
                 execution_scope: request.execution_scope.clone(),
@@ -2018,15 +2022,15 @@ fn budget_version_error_response(error: &anyhow::Error) -> Option<HttpResponse> 
                 None,
             ),
             BudgetUpdateError::LimitBelowCommitted {
-                requested_amount_cents,
-                committed_amount_cents,
+                requested_amount,
+                committed_amount,
             } => budget_error_response(
                 422,
                 "budget limit is below committed usage",
                 "budget_limit_below_committed",
                 Some(json!({
-                    "requested_amount_cents": requested_amount_cents,
-                    "committed_amount_cents": committed_amount_cents,
+                    "requested_amount_cents": requested_amount.legacy_cents_floor(),
+                    "committed_amount_cents": committed_amount.legacy_cents_ceil(),
                 })),
                 Some(json!({
                     "action": "increase_limit_to_committed_usage",
@@ -3005,6 +3009,12 @@ fn hex_encode(bytes: &[u8]) -> String {
     encoded
 }
 
+/// Converts a cent amount from the HTTP wire into accounting units.
+fn legacy_cents_amount(cents: i64) -> Result<Amount> {
+    Amount::from_legacy_cents(cents)
+        .map_err(|_| anyhow!("amount of {cents} cents exceeds the supported range"))
+}
+
 fn add_policy(body: String, state: &ServerState) -> Result<AddPolicyHttpResponse> {
     let request: AddPolicyHttpRequest = serde_json::from_str(&body)?;
 
@@ -3521,7 +3531,7 @@ fn create_budget_at(
         .create_single_budget_with_provenance(
             CreateSingleBudgetRequest {
                 agent_id: agent_id.clone(),
-                amount_limit_cents: request.amount_cents,
+                amount_limit: legacy_cents_amount(request.amount_cents)?,
                 currency: Currency::Usd,
                 period,
             },
@@ -3535,7 +3545,7 @@ fn create_budget_at(
             "budget_id": response.budget.id.to_string(),
             "user_id": user.user_id.to_string(),
             "agent_id": agent_id.to_string(),
-            "amount_cents": response.version.amount_limit_cents,
+            "amount_cents": response.version.amount_limit.legacy_cents_floor(),
             "currency": response.budget.currency.to_string(),
             "starting_at": response.budget.period.starting_at.to_rfc3339(),
             "ending_before": response.budget.period.ending_before.map(|value| value.to_rfc3339()),
@@ -3576,7 +3586,7 @@ fn set_spending_target(body: String, state: &ServerState) -> Result<SetSpendingT
         .map_err(|_| anyhow!("spending target manager lock poisoned"))?
         .create_target(CreateSpendingTargetRequest {
             owner_user_id: user.user_id.clone(),
-            target_amount_cents: request.amount_cents,
+            target_amount: legacy_cents_amount(request.amount_cents)?,
             currency: Currency::Usd,
             period,
         })?;
@@ -3781,7 +3791,8 @@ fn update_budget_limit_at(
             UpdateBudgetLimitRequest {
                 budget_id,
                 expected_revision,
-                amount_limit_cents: request.amount_limit_cents,
+                amount_limit: Amount::from_legacy_cents(request.amount_limit_cents)
+                    .map_err(|_| BudgetVersionHttpError::InvalidAmount)?,
                 actor: authenticated_user.pub_id,
                 source: Some(BUDGET_UPDATE_SOURCE.to_string()),
                 reason: request.reason,
@@ -4085,7 +4096,7 @@ fn approval_for_approved_spend(
             account_pub_id.to_string(),
             agent_pub_id.to_string(),
             &hubu_core::spend::SpendRequest {
-                amount_cents: approval.amount_cents,
+                amount: approval.amount,
                 currency: approval.currency,
                 owner_user_id: approval.user.user_id.clone(),
                 agent_id: approval.agent_id.clone(),
@@ -4121,7 +4132,7 @@ fn approval_for_rejected_spend(
             account_pub_id.to_string(),
             agent_pub_id.to_string(),
             &hubu_core::spend::SpendRequest {
-                amount_cents: rejection.amount_cents,
+                amount: rejection.amount,
                 currency: rejection.currency,
                 owner_user_id: rejection.user.user_id.clone(),
                 agent_id: rejection.agent_id.clone(),
@@ -4157,7 +4168,7 @@ fn approval_review_response(
             operation_key,
             account_id,
             agent_id,
-            amount_cents: request.amount_cents,
+            amount_cents: request.amount.legacy_cents_ceil(),
             currency: request.currency.to_string(),
             merchant: request.merchant.clone(),
             execution_scope: request.execution_scope.clone(),
@@ -4208,7 +4219,7 @@ fn stored_spend_scope_inputs(
     approval: &ApprovedSpendAuthorization,
 ) -> SpendScopeInputsHttpResponse {
     spend_scope_inputs(
-        approval.amount_cents,
+        approval.amount.legacy_cents_ceil(),
         approval.currency,
         true,
         approval.merchant.as_deref(),
@@ -4221,7 +4232,7 @@ fn stored_rejection_scope_inputs(
     rejection: &RejectedSpendAuthorization,
 ) -> SpendScopeInputsHttpResponse {
     spend_scope_inputs(
-        rejection.amount_cents,
+        rejection.amount.legacy_cents_ceil(),
         rejection.currency,
         true,
         rejection.merchant.as_deref(),
@@ -4476,7 +4487,7 @@ fn resolve_executor_spend(body: String, state: &ServerState) -> Result<ExecutorS
             spend_auth_token_id: token.id.to_string(),
             agent_id: Some(agent_pub_id.clone()),
             account_id: Some(account.pub_id.clone()),
-            amount_cents: decision.request.amount_cents,
+            amount_cents: decision.request.amount.legacy_cents_ceil(),
             merchant: decision.request.merchant.clone(),
             execution_scope: decision.request.execution_scope.clone(),
             task_id: decision.request.task_id.clone(),
@@ -4794,12 +4805,12 @@ fn settle_executor_spend_request(
         claim_id: claim_state.claim.id.to_string(),
         status: executor_claim_status_name(&claim_state.claim.status).to_string(),
         receipt: ExecutorSpendSettlementReceiptHttpResponse {
-            authorized_max_cents: receipt.authorized_max_cents,
+            authorized_max_cents: receipt.authorized_max.legacy_cents_ceil(),
             actual_vendor_cost: receipt.receipt.actual_vendor_cost.clone(),
-            actual_vendor_cost_cents: receipt.budget_charge_cents,
-            budget_charge_cents: receipt.budget_charge_cents,
-            released_amount_cents: receipt.released_amount_cents,
-            overrun_amount_cents: receipt.overrun_amount_cents,
+            actual_vendor_cost_cents: receipt.budget_charge.legacy_cents_ceil(),
+            budget_charge_cents: receipt.budget_charge.legacy_cents_ceil(),
+            released_amount_cents: receipt.released_amount.legacy_cents_floor(),
+            overrun_amount_cents: receipt.overrun_amount.legacy_cents_ceil(),
             currency: receipt.currency.to_string(),
             provider_request_id: receipt.receipt.provider_request_id.clone(),
             price_model_snapshot: receipt.receipt.price_model_snapshot.clone(),
@@ -4875,6 +4886,9 @@ struct ValidatedExecutorSpend {
 
 struct ResolvedExecutorSpend {
     request: ExecutorSpendHttpRequest,
+    /// The exact authorized amount, set once the request's cent projection
+    /// has been checked against the authoritative authorization.
+    authorized_amount: Option<Amount>,
     account_pub_id: String,
     agent_pub_id: String,
     token_id: SpendAuthTokenId,
@@ -4890,7 +4904,13 @@ impl ResolvedExecutorSpend {
             owner_user_id: self.owner_user_id.clone(),
             agent_id: self.agent_id.clone(),
             agent_account_id: self.agent_account_id.clone(),
-            amount_cents: self.request.amount_cents,
+            // The wire carries cents. Validate with the exact authorized
+            // amount once it is known; otherwise an amount beyond the
+            // accounting range saturates and can never match.
+            amount: self.authorized_amount.unwrap_or_else(|| {
+                Amount::from_legacy_cents(self.request.amount_cents)
+                    .unwrap_or(Amount::from_units(i64::MAX))
+            }),
             currency: Currency::Usd,
             merchant: self.request.merchant.clone(),
             execution_scope: self.request.execution_scope.clone(),
@@ -4937,6 +4957,13 @@ fn apply_authoritative_executor_identity(
         ));
     }
     resolved.request.task_id = decision.request.task_id.clone();
+    // Cent-denominated executors see the authorization rounded up to a cent;
+    // accept exactly that projection and validate with the exact amount. The
+    // mismatch error is the executor contract's existing wording.
+    if resolved.request.amount_cents != decision.request.amount.legacy_cents_ceil() {
+        return Err(hubu_core::spend::SpendError::PaymentRequestMismatch.into());
+    }
+    resolved.authorized_amount = Some(decision.request.amount);
     Ok((
         decision.operation_key.clone(),
         decision.request.reason.clone(),
@@ -4998,6 +5025,7 @@ fn resolve_executor_spend_request(
 
     Ok(ResolvedExecutorSpend {
         request,
+        authorized_amount: None,
         account_pub_id,
         agent_pub_id,
         token_id,
@@ -5135,7 +5163,7 @@ fn executor_spend_from_claim_state(
             spend_auth_token_id: claim_state.token.id.to_string(),
             agent_id: Some(agent_pub_id.clone()),
             account_id: Some(account.pub_id.clone()),
-            amount_cents: claim_state.decision.request.amount_cents,
+            amount_cents: claim_state.decision.request.amount.legacy_cents_ceil(),
             merchant: claim_state.decision.request.merchant.clone(),
             execution_scope: claim_state.decision.request.execution_scope.clone(),
             task_id: claim_state.decision.request.task_id.clone(),
@@ -5330,7 +5358,7 @@ fn evaluate_and_reserve_spend_at(
                 user: user.clone(),
                 agent_id: agent_id.clone(),
                 agent_account_id: account.id,
-                amount_cents: request.amount_cents,
+                amount: legacy_cents_amount(request.amount_cents)?,
                 currency,
                 merchant: request.merchant.clone(),
                 execution_scope,
@@ -5733,19 +5761,19 @@ fn budget_hold_response(update: BudgetHoldUpdate) -> BudgetHoldHttpResponse {
             hold_id: response.hold.id.to_string(),
             budget_id: public_budget_id(&response.hold.budget_id),
             status: "settled".to_string(),
-            amount_cents: response.hold.amount_cents,
-            consumed_amount_cents: response.balance.consumed_amount_cents,
-            frozen_amount_cents: response.balance.frozen_amount_cents,
-            remaining_amount_cents: response.balance.remaining_amount_cents,
+            amount_cents: response.hold.amount.legacy_cents_ceil(),
+            consumed_amount_cents: response.balance.consumed_amount.legacy_cents_ceil(),
+            frozen_amount_cents: response.balance.frozen_amount.legacy_cents_ceil(),
+            remaining_amount_cents: response.balance.remaining_amount.legacy_cents_floor(),
         },
         BudgetHoldUpdate::Released(response) => BudgetHoldHttpResponse {
             hold_id: response.hold.id.to_string(),
             budget_id: public_budget_id(&response.hold.budget_id),
             status: "released".to_string(),
-            amount_cents: response.hold.amount_cents,
-            consumed_amount_cents: response.balance.consumed_amount_cents,
-            frozen_amount_cents: response.balance.frozen_amount_cents,
-            remaining_amount_cents: response.balance.remaining_amount_cents,
+            amount_cents: response.hold.amount.legacy_cents_ceil(),
+            consumed_amount_cents: response.balance.consumed_amount.legacy_cents_ceil(),
+            frozen_amount_cents: response.balance.frozen_amount.legacy_cents_ceil(),
+            remaining_amount_cents: response.balance.remaining_amount.legacy_cents_floor(),
         },
         BudgetHoldUpdate::Frozen(response) => frozen_budget_hold_response(response),
     }
@@ -5756,10 +5784,10 @@ fn frozen_budget_hold_response(response: ReserveBudgetResponse) -> BudgetHoldHtt
         hold_id: response.hold.id.to_string(),
         budget_id: public_budget_id(&response.hold.budget_id),
         status: "frozen".to_string(),
-        amount_cents: response.hold.amount_cents,
-        consumed_amount_cents: response.balance.consumed_amount_cents,
-        frozen_amount_cents: response.balance.frozen_amount_cents,
-        remaining_amount_cents: response.balance.remaining_amount_cents,
+        amount_cents: response.hold.amount.legacy_cents_ceil(),
+        consumed_amount_cents: response.balance.consumed_amount.legacy_cents_ceil(),
+        frozen_amount_cents: response.balance.frozen_amount.legacy_cents_ceil(),
+        remaining_amount_cents: response.balance.remaining_amount.legacy_cents_floor(),
     }
 }
 
@@ -5771,10 +5799,10 @@ fn budget_hold_state_response(
         hold_id: hold.id.to_string(),
         budget_id: public_budget_id(&hold.budget_id),
         status: budget_hold_status_name(&hold.status).to_string(),
-        amount_cents: hold.amount_cents,
-        consumed_amount_cents: balance.consumed_amount_cents,
-        frozen_amount_cents: balance.frozen_amount_cents,
-        remaining_amount_cents: balance.remaining_amount_cents,
+        amount_cents: hold.amount.legacy_cents_ceil(),
+        consumed_amount_cents: balance.consumed_amount.legacy_cents_ceil(),
+        frozen_amount_cents: balance.frozen_amount.legacy_cents_ceil(),
+        remaining_amount_cents: balance.remaining_amount.legacy_cents_floor(),
     }
 }
 
@@ -5800,7 +5828,7 @@ fn evaluated_budget_response(
         agent_id: registration_agent_pub_id(&current.budget.agent_id, state)?,
         current_version_id: public_budget_version_id(&current.version.id),
         current_revision: current.version.revision,
-        amount_limit_cents: current.version.amount_limit_cents,
+        amount_limit_cents: current.version.amount_limit.legacy_cents_floor(),
         currency: current.budget.currency.to_string(),
         starting_at: current.budget.period.starting_at.to_rfc3339(),
         ending_before: current
@@ -5809,9 +5837,9 @@ fn evaluated_budget_response(
             .ending_before
             .map(|ending_before| ending_before.to_rfc3339()),
         status: budget.availability.as_str().to_string(),
-        consumed_amount_cents: current.balance.consumed_amount_cents,
-        frozen_amount_cents: current.balance.frozen_amount_cents,
-        remaining_amount_cents: current.balance.remaining_amount_cents,
+        consumed_amount_cents: current.balance.consumed_amount.legacy_cents_ceil(),
+        frozen_amount_cents: current.balance.frozen_amount.legacy_cents_ceil(),
+        remaining_amount_cents: current.balance.remaining_amount.legacy_cents_floor(),
     })
 }
 
@@ -5831,7 +5859,7 @@ fn budget_version_http_response(
             .as_ref()
             .map(public_budget_version_id),
         predecessor_revision,
-        amount_limit_cents: version.amount_limit_cents,
+        amount_limit_cents: version.amount_limit.legacy_cents_floor(),
         effective_at: version.effective_at.to_rfc3339(),
         actor: public_budget_version_actor(version.actor),
         source: version.source,
@@ -5856,10 +5884,11 @@ fn spending_target_response(
         &budgets_for_user_id(&target.owner_user_id, state)?,
         &target,
     );
-    let exceeded_by_cents = (allocated_amount_cents - target.target_amount_cents).max(0);
+    let exceeded_by_cents =
+        (allocated_amount_cents - target.target_amount.legacy_cents_floor()).max(0);
     Ok(SpendingTargetHttpResponse {
         target_id: public_spending_target_id(&target.id),
-        target_amount_cents: target.target_amount_cents,
+        target_amount_cents: target.target_amount.legacy_cents_floor(),
         allocated_amount_cents,
         exceeded_by_cents,
         is_exceeded: exceeded_by_cents > 0,
@@ -5899,10 +5928,10 @@ fn spending_target_warnings_for_periods(
         .filter_map(|target| {
             let allocated_amount_cents = max_concurrent_allocated_amount(&budgets, &target);
             let exceeded_by_cents =
-                (allocated_amount_cents - target.target_amount_cents).max(0);
+                (allocated_amount_cents - target.target_amount.legacy_cents_floor()).max(0);
             (exceeded_by_cents > 0).then(|| SpendingTargetWarningHttpResponse {
                 target_id: public_spending_target_id(&target.id),
-                target_amount_cents: target.target_amount_cents,
+                target_amount_cents: target.target_amount.legacy_cents_floor(),
                 allocated_amount_cents,
                 exceeded_by_cents,
                 message: format!(
@@ -5941,9 +5970,11 @@ fn max_concurrent_allocated_amount(budgets: &[BudgetWithBalance], target: &Spend
         if ending_before.is_some_and(|ending_before| ending_before <= starting_at) {
             continue;
         }
-        *changes.entry(starting_at).or_default() += budget.version.amount_limit_cents;
+        *changes.entry(starting_at).or_default() +=
+            budget.version.amount_limit.legacy_cents_floor();
         if let Some(ending_before) = ending_before {
-            *changes.entry(ending_before).or_default() -= budget.version.amount_limit_cents;
+            *changes.entry(ending_before).or_default() -=
+                budget.version.amount_limit.legacy_cents_floor();
         }
     }
 
@@ -7816,7 +7847,9 @@ lease_profiles:
                 BudgetAdministrativeState::Active
             );
             assert_eq!(
-                repo.load_budget_balances().unwrap()[0].remaining_amount_cents,
+                repo.load_budget_balances().unwrap()[0]
+                    .remaining_amount
+                    .legacy_cents_floor(),
                 1000
             );
         }
@@ -8111,7 +8144,7 @@ lease_profiles:
             .create_single_budget_with_provenance(
                 CreateSingleBudgetRequest {
                     agent_id,
-                    amount_limit_cents: 10_000,
+                    amount_limit: Amount::from_legacy_cents(10_000).unwrap(),
                     currency: Currency::Usd,
                     period: TimePeriod::new(now - Duration::hours(1), None).unwrap(),
                 },
@@ -8615,7 +8648,7 @@ lease_profiles:
                 .create_single_budget_with_provenance(
                     CreateSingleBudgetRequest {
                         agent_id,
-                        amount_limit_cents: 1_000,
+                        amount_limit: Amount::from_legacy_cents(1_000).unwrap(),
                         currency: Currency::Usd,
                         period: TimePeriod::new(starting_at, Some(ending_before)).unwrap(),
                     },
@@ -8628,15 +8661,15 @@ lease_profiles:
                 balance: created.balance,
             };
             if exhausted {
-                snapshot.balance.consumed_amount_cents = 1_000;
-                snapshot.balance.remaining_amount_cents = 0;
+                snapshot.balance.consumed_amount = Amount::from_legacy_cents(1_000).unwrap();
+                snapshot.balance.remaining_amount = Amount::ZERO;
             }
             if revoked {
                 snapshot.budget.administrative_state = BudgetAdministrativeState::Revoked;
                 snapshot.budget.updated_at = now;
             }
             let conn = rusqlite::Connection::open(&path).unwrap();
-            conn.execute("UPDATE budget_balances SET consumed_amount_cents = ?2, remaining_amount_cents = ?3, consumed_amount = ?2 * 10000, remaining_amount = ?3 * 10000 WHERE budget_id = ?1", rusqlite::params![snapshot.budget.id.to_string(), snapshot.balance.consumed_amount_cents, snapshot.balance.remaining_amount_cents]).unwrap();
+            conn.execute("UPDATE budget_balances SET consumed_amount_cents = ?2, remaining_amount_cents = ?3, consumed_amount = ?2 * 10000, remaining_amount = ?3 * 10000 WHERE budget_id = ?1", rusqlite::params![snapshot.budget.id.to_string(), snapshot.balance.consumed_amount.legacy_cents_ceil(), snapshot.balance.remaining_amount.legacy_cents_floor()]).unwrap();
             if revoked {
                 conn.execute("UPDATE budgets SET administrative_state = 'revoked', updated_at = ?2 WHERE id = ?1", rusqlite::params![snapshot.budget.id.to_string(), now.to_rfc3339()]).unwrap();
             }
@@ -9229,6 +9262,50 @@ lease_profiles:
         )
         .expect("read-only resolution must leave the token claimable");
         assert_eq!(claim.status, "claimed");
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn executor_claims_a_sub_cent_authorization_from_its_cent_projection() {
+        let (path, state, agent, authorization) = setup_executor_authorization("sub-cent-claim");
+        let token_id: SpendAuthTokenId = authorization
+            .auth_token_id
+            .clone()
+            .unwrap()
+            .parse()
+            .unwrap();
+        {
+            // Store the authorization as an exact sub-cent amount whose cent
+            // projection (rounded up) is still the 500 cents executors see.
+            let mut spend = state.spend.lock().unwrap();
+            let token = spend.auth_token_record(&token_id).unwrap();
+            let mut decision = spend.decision_record(&token.spend_decision_id).unwrap();
+            decision.request.amount = "4.999995".parse().unwrap();
+            *spend = SpendManager::from_records(vec![decision], vec![token]);
+        }
+        let claim = |amount_cents: i64| {
+            claim_executor_spend(
+                json!({
+                    "spend_auth_token_id": token_id.to_string(),
+                    "account_id": agent.account_id,
+                    "amount_cents": amount_cents,
+                    "merchant": "gongbu.image"
+                })
+                .to_string(),
+                &state,
+            )
+        };
+        let mismatch = claim(499).unwrap_err();
+        assert!(
+            mismatch
+                .to_string()
+                .contains("payment request does not match authorized spend"),
+            "{mismatch}"
+        );
+        assert_eq!(
+            claim(500).expect("cent projection claims").status,
+            "claimed"
+        );
         std::fs::remove_file(path).ok();
     }
 
@@ -11027,7 +11104,7 @@ rules: []
         };
         let account = resolve_agent_account_for_spend(&request, &user, &state).unwrap();
         let spend_request = hubu_core::spend::SpendRequest {
-            amount_cents: request.amount_cents,
+            amount: Amount::from_legacy_cents(request.amount_cents).unwrap(),
             currency: Currency::Usd,
             owner_user_id: user.user_id.clone(),
             agent_id: account.agent_id,

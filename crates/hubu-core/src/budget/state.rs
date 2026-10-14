@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use hubu_common::ids::{
     AgentId, BudgetHoldId, BudgetId, BudgetVersionId, SpendDecisionId, SpendExecutorClaimId,
 };
-use hubu_common::money::Currency;
+use hubu_common::money::{Amount, Currency};
 use hubu_common::time::TimePeriod;
 use serde_json::json;
 
@@ -56,7 +56,7 @@ impl BudgetState {
     ) -> Result<Self, BudgetManagerError> {
         let mut manager = Self::new();
         for version in versions {
-            if version.amount_limit_cents <= 0
+            if version.amount_limit <= Amount::ZERO
                 || version.revision == 0
                 || version.actor.trim().is_empty()
                 || version.source.trim().is_empty()
@@ -198,24 +198,23 @@ impl BudgetState {
                     balance.budget_id
                 ))
             })?;
-            if balance.consumed_amount_cents < 0 || balance.frozen_amount_cents < 0 {
+            if balance.consumed_amount.is_negative() || balance.frozen_amount.is_negative() {
                 return Err(invalid_persisted_budget_state(format!(
                     "budget {} has a negative consumed or frozen balance",
                     balance.budget_id
                 )));
             }
-            let amount_limit_cents =
-                manager.budget_versions[&budget.current_version_id].amount_limit_cents;
-            let derived_remaining = amount_limit_cents
-                .checked_sub(balance.consumed_amount_cents)
-                .and_then(|value| value.checked_sub(balance.frozen_amount_cents))
+            let amount_limit = manager.budget_versions[&budget.current_version_id].amount_limit;
+            let derived_remaining = amount_limit
+                .checked_sub(balance.consumed_amount)
+                .and_then(|value| value.checked_sub(balance.frozen_amount))
                 .ok_or_else(|| {
                     invalid_persisted_budget_state(format!(
                         "budget {} balance exceeds the representable range",
                         balance.budget_id
                     ))
                 })?;
-            if balance.remaining_amount_cents != derived_remaining {
+            if balance.remaining_amount != derived_remaining {
                 return Err(invalid_persisted_budget_state(format!(
                     "budget {} remaining balance does not derive from its current version",
                     balance.budget_id
@@ -238,7 +237,7 @@ impl BudgetState {
                 )));
             }
         }
-        let mut frozen_by_budget = HashMap::<BudgetId, i64>::new();
+        let mut frozen_by_budget = HashMap::<BudgetId, Amount>::new();
         for hold in holds {
             let version = manager
                 .budget_versions
@@ -253,7 +252,7 @@ impl BudgetState {
             if version.budget_id != hold.budget_id
                 || !manager.budget_balances.contains_key(&hold.budget_id)
                 || budget.is_none_or(|budget| budget.currency != hold.currency)
-                || hold.amount_cents <= 0
+                || hold.amount <= Amount::ZERO
             {
                 return Err(invalid_persisted_budget_state(format!(
                     "hold {} has mismatched logical budget attribution",
@@ -274,22 +273,19 @@ impl BudgetState {
                 BudgetHoldStatus::Frozen | BudgetHoldStatus::Claimed
             ) {
                 let frozen_amount = frozen_by_budget.entry(hold.budget_id.clone()).or_default();
-                *frozen_amount = frozen_amount
-                    .checked_add(hold.amount_cents)
-                    .ok_or_else(|| {
-                        invalid_persisted_budget_state(format!(
-                            "budget {} frozen holds exceed the representable range",
-                            hold.budget_id
-                        ))
-                    })?;
+                *frozen_amount = frozen_amount.checked_add(hold.amount).ok_or_else(|| {
+                    invalid_persisted_budget_state(format!(
+                        "budget {} frozen holds exceed the representable range",
+                        hold.budget_id
+                    ))
+                })?;
             }
             if manager.budget_holds.insert(hold.id.clone(), hold).is_some() {
                 return Err(invalid_persisted_budget_state("duplicate budget hold id"));
             }
         }
         for (budget_id, balance) in &manager.budget_balances {
-            if frozen_by_budget.get(budget_id).copied().unwrap_or_default()
-                != balance.frozen_amount_cents
+            if frozen_by_budget.get(budget_id).copied().unwrap_or_default() != balance.frozen_amount
             {
                 return Err(invalid_persisted_budget_state(format!(
                     "budget {budget_id} frozen balance does not match its active holds"
@@ -333,7 +329,7 @@ impl BudgetState {
     ) -> Result<CreateSingleBudgetResponse, BudgetManagerError> {
         self.create_budget_for_period(
             request.agent_id,
-            request.amount_limit_cents,
+            request.amount_limit,
             request.currency,
             request.period,
             &provenance,
@@ -358,7 +354,7 @@ impl BudgetState {
         request: ReserveBudgetRequest,
         now: DateTime<Utc>,
     ) -> Result<ReserveBudgetResponse, BudgetManagerError> {
-        if request.amount_cents <= 0 {
+        if request.amount <= Amount::ZERO {
             log_budget_reservation_rejected(&request, "amount_must_be_positive");
             return Err(BudgetManagerError::AmountMustBePositive);
         }
@@ -402,20 +398,27 @@ impl BudgetState {
                 BudgetManagerError::MissingBudgetBalance
             })?;
 
-        if balance.remaining_amount_cents < request.amount_cents {
+        if balance.remaining_amount < request.amount {
             log_budget_reservation_rejected(&request, "insufficient_remaining_budget");
             return Err(BudgetManagerError::InsufficientRemainingBudget);
         }
 
-        balance.remaining_amount_cents -= request.amount_cents;
-        balance.frozen_amount_cents += request.amount_cents;
+        let (Some(remaining_amount), Some(frozen_amount)) = (
+            balance.remaining_amount.checked_sub(request.amount),
+            balance.frozen_amount.checked_add(request.amount),
+        ) else {
+            log_budget_reservation_rejected(&request, "balance_overflow");
+            return Err(BudgetManagerError::BalanceOverflow);
+        };
+        balance.remaining_amount = remaining_amount;
+        balance.frozen_amount = frozen_amount;
 
         let hold = BudgetHold {
             id: BudgetHoldId::new(),
             budget_id: request.budget_id,
             budget_version_id: version.id.clone(),
             spend_decision_id: request.spend_decision_id,
-            amount_cents: request.amount_cents,
+            amount: request.amount,
             currency: request.currency,
             status: BudgetHoldStatus::Frozen,
             executor_claim_id: None,
@@ -436,11 +439,11 @@ impl BudgetState {
                 "budget_version_id": hold.budget_version_id.to_string(),
                 "hold_id": hold.id.to_string(),
                 "spend_decision_id": hold.spend_decision_id.to_string(),
-                "amount_cents": hold.amount_cents,
+                "amount": hold.amount.display(),
                 "currency": hold.currency.to_string(),
-                "consumed_amount_cents": balance.consumed_amount_cents,
-                "frozen_amount_cents": balance.frozen_amount_cents,
-                "remaining_amount_cents": balance.remaining_amount_cents,
+                "consumed_amount": balance.consumed_amount.display(),
+                "frozen_amount": balance.frozen_amount.display(),
+                "remaining_amount": balance.remaining_amount.display(),
                 "expires_at": hold.expires_at.to_rfc3339(),
             }),
         );
@@ -473,10 +476,13 @@ impl BudgetState {
         })
     }
 
-    /// Settle a frozen budget hold after payment succeeds.
+    /// Settle a frozen budget hold after payment succeeds, consuming what the
+    /// rail actually charged and releasing the rest of the hold. A charge
+    /// above the hold is rejected.
     pub(super) fn settle_budget(
         &mut self,
         hold_id: &BudgetHoldId,
+        charged: Amount,
     ) -> Result<SettleBudgetResponse, BudgetManagerError> {
         let hold = self.budget_holds.get_mut(hold_id).ok_or_else(|| {
             log_event(
@@ -521,9 +527,36 @@ impl BudgetState {
                 BudgetManagerError::MissingBudgetBalance
             })?;
 
+        if charged.is_negative() || charged > hold.amount {
+            log_event(
+                "warn",
+                "budget_settle_rejected",
+                json!({
+                    "reason": "charge_exceeds_hold",
+                    "budget_id": hold.budget_id.to_string(),
+                    "hold_id": hold.id.to_string(),
+                    "amount": hold.amount.display(),
+                    "charged": charged.display(),
+                }),
+            );
+            return Err(BudgetManagerError::ChargeExceedsHold);
+        }
+        let released = hold
+            .amount
+            .checked_sub(charged)
+            .ok_or(BudgetManagerError::BalanceOverflow)?;
+        let frozen_amount = balance.frozen_amount.checked_sub(hold.amount);
+        let consumed_amount = balance.consumed_amount.checked_add(charged);
+        let remaining_amount = balance.remaining_amount.checked_add(released);
+        let (Some(frozen_amount), Some(consumed_amount), Some(remaining_amount)) =
+            (frozen_amount, consumed_amount, remaining_amount)
+        else {
+            return Err(BudgetManagerError::BalanceOverflow);
+        };
         hold.settle()?;
-        balance.frozen_amount_cents -= hold.amount_cents;
-        balance.consumed_amount_cents += hold.amount_cents;
+        balance.frozen_amount = frozen_amount;
+        balance.consumed_amount = consumed_amount;
+        balance.remaining_amount = remaining_amount;
 
         log_event(
             "info",
@@ -532,10 +565,11 @@ impl BudgetState {
                 "budget_id": hold.budget_id.to_string(),
                 "hold_id": hold.id.to_string(),
                 "spend_decision_id": hold.spend_decision_id.to_string(),
-                "amount_cents": hold.amount_cents,
-                "consumed_amount_cents": balance.consumed_amount_cents,
-                "frozen_amount_cents": balance.frozen_amount_cents,
-                "remaining_amount_cents": balance.remaining_amount_cents,
+                "amount": hold.amount.display(),
+                "charged": charged.display(),
+                "consumed_amount": balance.consumed_amount.display(),
+                "frozen_amount": balance.frozen_amount.display(),
+                "remaining_amount": balance.remaining_amount.display(),
             }),
         );
         Ok(SettleBudgetResponse {
@@ -577,9 +611,15 @@ impl BudgetState {
                 BudgetManagerError::MissingBudgetBalance
             })?;
 
+        let (Some(frozen_amount), Some(remaining_amount)) = (
+            balance.frozen_amount.checked_sub(hold.amount),
+            balance.remaining_amount.checked_add(hold.amount),
+        ) else {
+            return Err(BudgetManagerError::BalanceOverflow);
+        };
         hold.release()?;
-        balance.frozen_amount_cents -= hold.amount_cents;
-        balance.remaining_amount_cents += hold.amount_cents;
+        balance.frozen_amount = frozen_amount;
+        balance.remaining_amount = remaining_amount;
 
         log_event(
             "info",
@@ -588,10 +628,10 @@ impl BudgetState {
                 "budget_id": hold.budget_id.to_string(),
                 "hold_id": hold.id.to_string(),
                 "spend_decision_id": hold.spend_decision_id.to_string(),
-                "amount_cents": hold.amount_cents,
-                "consumed_amount_cents": balance.consumed_amount_cents,
-                "frozen_amount_cents": balance.frozen_amount_cents,
-                "remaining_amount_cents": balance.remaining_amount_cents,
+                "amount": hold.amount.display(),
+                "consumed_amount": balance.consumed_amount.display(),
+                "frozen_amount": balance.frozen_amount.display(),
+                "remaining_amount": balance.remaining_amount.display(),
             }),
         );
         Ok(ReleaseBudgetResponse {
@@ -643,10 +683,16 @@ impl BudgetState {
                     BudgetManagerError::MissingBudgetBalance
                 })?;
 
+            let (Some(frozen_amount), Some(remaining_amount)) = (
+                balance.frozen_amount.checked_sub(hold.amount),
+                balance.remaining_amount.checked_add(hold.amount),
+            ) else {
+                return Err(BudgetManagerError::BalanceOverflow);
+            };
             hold.status = BudgetHoldStatus::Expired;
             hold.updated_at = now;
-            balance.frozen_amount_cents -= hold.amount_cents;
-            balance.remaining_amount_cents += hold.amount_cents;
+            balance.frozen_amount = frozen_amount;
+            balance.remaining_amount = remaining_amount;
 
             log_event(
                 "info",
@@ -655,10 +701,10 @@ impl BudgetState {
                     "budget_id": hold.budget_id.to_string(),
                     "hold_id": hold.id.to_string(),
                     "spend_decision_id": hold.spend_decision_id.to_string(),
-                    "amount_cents": hold.amount_cents,
-                    "consumed_amount_cents": balance.consumed_amount_cents,
-                    "frozen_amount_cents": balance.frozen_amount_cents,
-                    "remaining_amount_cents": balance.remaining_amount_cents,
+                    "amount": hold.amount.display(),
+                    "consumed_amount": balance.consumed_amount.display(),
+                    "frozen_amount": balance.frozen_amount.display(),
+                    "remaining_amount": balance.remaining_amount.display(),
                     "expires_at": hold.expires_at.to_rfc3339(),
                 }),
             );
@@ -793,7 +839,7 @@ impl BudgetState {
     fn create_budget_for_period(
         &mut self,
         agent_id: AgentId,
-        amount_limit_cents: i64,
+        amount_limit: Amount,
         currency: Currency,
         period: TimePeriod,
         provenance: &BudgetVersionProvenance,
@@ -814,7 +860,7 @@ impl BudgetState {
         }
 
         let budget_with_balance =
-            build_budget_for_period(agent_id, amount_limit_cents, currency, period, provenance)?;
+            build_budget_for_period(agent_id, amount_limit, currency, period, provenance)?;
         self.insert_budget(&budget_with_balance);
 
         Ok(CreateSingleBudgetResponse {
@@ -891,7 +937,7 @@ fn log_budget_reservation_rejected(request: &ReserveBudgetRequest, reason: &str)
             "reason": reason,
             "budget_id": request.budget_id.to_string(),
             "spend_decision_id": request.spend_decision_id.to_string(),
-            "amount_cents": request.amount_cents,
+            "amount": request.amount.display(),
             "currency": request.currency.to_string(),
             "expires_at": request.expires_at.to_rfc3339(),
         }),
@@ -911,7 +957,7 @@ fn periods_overlap(left: &TimePeriod, right: &TimePeriod) -> bool {
 
 fn build_budget_for_period(
     agent_id: AgentId,
-    amount_limit_cents: i64,
+    amount_limit: Amount,
     currency: Currency,
     period: TimePeriod,
     provenance: &BudgetVersionProvenance,
@@ -922,16 +968,16 @@ fn build_budget_for_period(
     let budget = Budget::new(BudgetId::new(), agent_id, currency, period);
     let version = BudgetVersion::initial(
         &budget,
-        amount_limit_cents,
+        amount_limit,
         provenance.actor.clone(),
         provenance.source.clone(),
         provenance.reason.clone(),
     )?;
     let balance = BudgetBalance {
         budget_id: budget.id.clone(),
-        consumed_amount_cents: 0,
-        frozen_amount_cents: 0,
-        remaining_amount_cents: version.amount_limit_cents,
+        consumed_amount: Amount::ZERO,
+        frozen_amount: Amount::ZERO,
+        remaining_amount: version.amount_limit,
     };
 
     Ok(BudgetWithBalance {

@@ -37,6 +37,13 @@ Future release template
   deprecated), and policy explanations show `USD 0.005` instead of minor
   units. Until budgets move to sub-cent accounting, spend requests are still
   whole cents.
+- Budgets are accounted in micro-units (`10⁻⁶` USD). Each exact provider cost
+  is rounded up once, to the nearest micro-unit, when it settles, so a
+  USD 0.001 executor call now consumes USD 0.001 of budget instead of a full
+  cent, and 1,000 such calls fit a USD 1.00 budget. Wallet payments consume
+  what the rail actually charged and release the rest of the hold. HTTP, MCP,
+  and CLI amounts are still whole cents for now: consumed and frozen amounts
+  are rounded up and limits and remaining amounts rounded down.
 
 ### Breaking or operational changes
 

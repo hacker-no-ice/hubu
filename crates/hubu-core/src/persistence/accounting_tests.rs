@@ -6,6 +6,7 @@ use super::tests::{
 use super::*;
 use crate::budget::BudgetManager;
 use crate::ledger::{AccountingAdjustment, BudgetLedgerQuery, LedgerService};
+use crate::test_money::cents;
 use chrono::Duration;
 use hubu_common::ids::AgentAccountId;
 use hubu_ledger::{domain as ledger, ExactMoney, TransactionKind, TransactionRecord};
@@ -175,8 +176,8 @@ fn canonical_posting_failure_rolls_back_every_settlement_write() {
     let balance = load_budget_balance_by_id(&repo.conn, &hold.budget_id)
         .unwrap()
         .unwrap();
-    assert_eq!(balance.consumed_amount_cents, 0);
-    assert_eq!(balance.frozen_amount_cents, 2500);
+    assert_eq!(balance.consumed_amount, cents(0));
+    assert_eq!(balance.frozen_amount, cents(2500));
 }
 
 #[test]
@@ -226,8 +227,8 @@ fn mismatched_budget_rolls_back_every_settlement_write() {
         let balance = load_budget_balance_by_id(&repo.conn, &hold.budget_id)
             .unwrap()
             .unwrap();
-        assert_eq!(balance.consumed_amount_cents, 0);
-        assert_eq!(balance.frozen_amount_cents, 2500);
+        assert_eq!(balance.consumed_amount, cents(0));
+        assert_eq!(balance.frozen_amount, cents(2500));
     }
 }
 
@@ -259,8 +260,8 @@ fn canonical_postings_replay_after_restart_and_backfill_without_reconsuming() {
         assert_eq!(records(&repo).len(), 1);
         assert!(records(&repo)[0].metadata.as_ref().unwrap().legacy_backfill);
         assert_eq!(
-            repo.load_budget_balances().unwrap()[0].consumed_amount_cents,
-            2000
+            repo.load_budget_balances().unwrap()[0].consumed_amount,
+            Amount::from_units(19_991_000)
         );
     }
 }
@@ -348,8 +349,8 @@ fn canonical_backfill_marks_incomplete_evidence_instead_of_inventing_postings() 
             1
         );
         assert_eq!(
-            repo.load_budget_balances().unwrap()[0].consumed_amount_cents,
-            2000
+            repo.load_budget_balances().unwrap()[0].consumed_amount,
+            cents(2000)
         );
     }
 }
@@ -377,8 +378,8 @@ fn ledger_corrections_append_publish_cache_and_leave_original_receipt_intact() {
             .get_budget_by_id(&settled.hold.budget_id)
             .unwrap()
             .balance
-            .consumed_amount_cents,
-        1001
+            .consumed_amount,
+        Amount::from_units(10_001_000)
     );
     assert_eq!(
         LedgerService::adjust(&mut manager, command.clone()).unwrap(),
@@ -401,8 +402,8 @@ fn ledger_corrections_append_publish_cache_and_leave_original_receipt_intact() {
             .get_budget_by_id(&settled.hold.budget_id)
             .unwrap()
             .balance
-            .remaining_amount_cents,
-        -10001
+            .remaining_amount,
+        Amount::from_units(-100_001_000)
     );
     let mut refund = adjustment(&overrun, 0, 18);
     refund.operation_key = "refund".into();
@@ -418,7 +419,7 @@ fn ledger_corrections_append_publish_cache_and_leave_original_receipt_intact() {
             Utc::now(),
         )
         .unwrap();
-    assert_eq!(replay.balance.consumed_amount_cents, 0);
+    assert_eq!(replay.balance.consumed_amount, cents(0));
     assert_eq!(replay.receipt, settled.receipt);
     assert_eq!(
         records(&repo).iter().find(|r| r.id == original.id).unwrap(),
@@ -451,14 +452,14 @@ fn ledger_adjustment_failure_preserves_cache_and_database() {
             .get_budget_by_id(&settled.hold.budget_id)
             .unwrap()
             .balance
-            .consumed_amount_cents,
-        2000
+            .consumed_amount,
+        cents(2000)
     );
     let repo = shared.lock().unwrap();
     assert_eq!(records(&repo).len(), 1);
     assert_eq!(
-        repo.load_budget_balances().unwrap()[0].consumed_amount_cents,
-        2000
+        repo.load_budget_balances().unwrap()[0].consumed_amount,
+        cents(2000)
     );
 }
 
@@ -735,8 +736,8 @@ fn backfill_sql_failure_cannot_commit_partial_or_unbalanced_postings() {
             0
         );
         assert_eq!(
-            repo.load_budget_balances().unwrap()[0].consumed_amount_cents,
-            2000
+            repo.load_budget_balances().unwrap()[0].consumed_amount,
+            cents(2000)
         );
     }
 }
@@ -856,8 +857,8 @@ fn legacy_wallet_context_backfill_preserves_postings_and_rejects_corrupt_credit(
             assert_eq!(report.unaccounted_consumption_cents, 0);
         }
         assert_eq!(
-            repo.load_budget_balances().unwrap()[0].consumed_amount_cents,
-            2500
+            repo.load_budget_balances().unwrap()[0].consumed_amount,
+            cents(2500)
         );
     }
 }

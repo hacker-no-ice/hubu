@@ -219,8 +219,7 @@ fn value_name(value: &PolicyValue) -> String {
 impl Field {
     pub fn value_from(&self, request: &SpendRequest) -> Option<PolicyValue> {
         match self {
-            // Request amounts are still whole cents; keep them exact.
-            Field::Amount => Some(PolicyValue::MoneyCents(request.amount_cents)),
+            Field::Amount => Some(PolicyValue::Money(request.amount)),
             Field::Currency => Some(PolicyValue::Currency(request.currency)),
             Field::AgentId => Some(PolicyValue::AgentId(request.agent_id.clone())),
             Field::Merchant => request.merchant.clone().map(PolicyValue::String),
@@ -479,6 +478,7 @@ mod money_string {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_money::cents;
     use hubu_common::execution_scope::{
         ExecutionScope, ScopeIdentity, EXECUTION_SCOPE_SCHEMA_VERSION,
     };
@@ -486,7 +486,7 @@ mod tests {
 
     fn spend_request() -> SpendRequest {
         SpendRequest {
-            amount_cents: 4_500,
+            amount: cents(4_500),
             currency: Currency::Usd,
             owner_user_id: test_user_id(),
             agent_id: AgentId::new(),
@@ -646,33 +646,32 @@ mod tests {
 
     #[test]
     fn legacy_amounts_beyond_the_accounting_range_stay_exact_and_ordered() {
+        // The largest request sits between two legacy caps that are both
+        // beyond the accounting range; they must not collapse into one value.
         let mut request = spend_request();
-        request.amount_cents = i64::MAX;
-        assert!(Condition::Gt {
-            field: Field::Amount,
-            value: money("1000000"),
+        request.amount = Amount::from_units(i64::MAX);
+        let below = PolicyValue::MoneyCents(922_337_203_685_477);
+        let above = PolicyValue::MoneyCents(922_337_203_685_478);
+        assert_eq!(above.money(), None);
+        for (cap, lte) in [(below, false), (above, true)] {
+            assert_eq!(
+                Condition::Lte {
+                    field: Field::Amount,
+                    value: cap.clone(),
+                }
+                .eval(&request),
+                lte,
+                "{cap:?}"
+            );
+            assert_eq!(
+                Condition::Gt {
+                    field: Field::Amount,
+                    value: cap,
+                }
+                .eval(&request),
+                !lte
+            );
         }
-        .eval(&request));
-
-        // Both values exceed i64::MAX / 10^4 cents; they must not collapse.
-        request.amount_cents = 922_337_203_685_478;
-        let cap = PolicyValue::MoneyCents(922_337_203_685_477);
-        assert!(!Condition::Lte {
-            field: Field::Amount,
-            value: cap.clone(),
-        }
-        .eval(&request));
-        assert!(Condition::Gt {
-            field: Field::Amount,
-            value: cap,
-        }
-        .eval(&request));
-        assert!(!Condition::Eq {
-            field: Field::Amount,
-            value: PolicyValue::MoneyCents(922_337_203_685_479),
-        }
-        .eval(&request));
-        assert_eq!(PolicyValue::MoneyCents(i64::MAX).money(), None);
     }
 
     #[test]
