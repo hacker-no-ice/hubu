@@ -4,6 +4,7 @@ use hubu_ledger::TransactionRecord;
 
 #[derive(Debug)]
 pub struct HistorySnapshot {
+    pub void_reasons: std::collections::HashMap<hubu_common::ids::SpendDecisionId, String>,
     pub authorization_outcomes:
         std::collections::HashMap<hubu_common::ids::SpendDecisionId, SpendAuthorizationDecision>,
     pub owned_agent_accounts: std::collections::HashMap<AgentId, hubu_common::ids::AgentAccountId>,
@@ -70,6 +71,18 @@ impl SqliteGovernanceRepository {
             let rows = stmt.query_map([owner.to_string()], executor_claim_from_row)?;
             collect_rows(rows)?
         };
+        let void_reasons = {
+            let mut stmt = tx.prepare("SELECT t.spend_decision_id,v.reason FROM spend_authorization_voids v JOIN spend_auth_tokens t ON t.id=v.spend_auth_token_id WHERE t.owner_user_id=?1")?;
+            let reasons = stmt
+                .query_map([owner.to_string()], |row| {
+                    Ok((
+                        parse_id(&row.get::<_, String>(0)?)?,
+                        row.get::<_, String>(1)?,
+                    ))
+                })?
+                .collect::<Result<std::collections::HashMap<_, _>, _>>()?;
+            reasons
+        };
         let receipts = claims
             .iter()
             .map(|c| load_executor_settlement_receipt_by_claim_id(&tx, &c.id))
@@ -104,6 +117,7 @@ impl SqliteGovernanceRepository {
             .filter(|h| budget_ids.contains(&h.budget_id))
             .collect();
         Ok(HistorySnapshot {
+            void_reasons,
             authorization_outcomes,
             owned_agent_accounts,
             transactions,

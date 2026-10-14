@@ -20,6 +20,45 @@ pub use transport::RoutingConfig;
 
 pub(crate) use catalog::{execution_scope_input_schema, tool_definitions};
 
+pub(crate) fn void_rejected_authorization(
+    server: &Server,
+    operation: &crate::operation_registry::ClaimedDurableOperation,
+) -> anyhow::Result<()> {
+    let client = server
+        .backends
+        .hubu
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Hubu unavailable"))?;
+    let account = operation
+        .account_id
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("authorization account binding missing"))?;
+    let response = client.execute_hubu(
+        routing::HubuHttpRequestV1 {
+            method: "POST",
+            path: "/spend/void".into(),
+            body: Some(json!({"spend_auth_token_id":operation.auth_token_id,
+            "operation_key":operation.operation_key, "account_id":account})),
+            capability: routing::HubuRequestCapabilityV1::None,
+        },
+        &server.hubu_routing,
+    );
+    let response = match response {
+        Ok(response) => response,
+        Err(error) if matches!(error.downcast_ref::<ForwardError>(), Some(ForwardError::Application { status:409, error_code:Some(code), .. }) if code == "authorization_not_voidable") =>
+        {
+            // Claim or expiry won the race. Preserve that lifecycle, and stop
+            // retrying a cancellation that can no longer change the budget.
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
+    if response["status"] != "released" || response["reason"] != "executor_rejected_before_claim" {
+        anyhow::bail!("invalid authorization void response");
+    }
+    Ok(())
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error("{message}")]
 struct ResumeSpendFailure {

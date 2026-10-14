@@ -31,7 +31,7 @@ executor reports.
 
 | Concern | Owner | Where it is tested |
 | --- | --- | --- |
-| Authorization, holds, claims, leases, settlement, release, reconciliation, ledger postings, budget charges | Hubu | This suite (scenarios S01–S10) |
+| Authorization, holds, claims, leases, settlement, release, reconciliation, ledger postings, budget charges | Hubu | This suite (scenarios S01–S12) |
 | Gongbu's mapping of Hubu responses to retry/recovery activity classes | Gongbu | `hubu_conformance_retry_decisions_map_to_gongbu_activity_classes` in [`crates/gongbu-api/src/hubu/mod.rs`](../crates/gongbu-api/src/hubu/mod.rs), driven by the corpus `retry_decisions` table |
 | Gongbu workflow against a real Hubu, including dropped claim/settlement responses | Gongbu | [`crates/gongbu-api/tests/hubu_executor_e2e.rs`](../crates/gongbu-api/tests/hubu_executor_e2e.rs) via [`scripts/integration-hubu-gongbu-executor.sh`](../scripts/integration-hubu-gongbu-executor.sh); it starts Hubu with the corpus `server_profile` |
 | Live provider calls, provider adapters, artifacts, and provider-side recovery | Gongbu | Gongbu's opt-in live-provider tests ([Gongbu execution](gongbu-execution.md)); never run by ordinary CI |
@@ -158,6 +158,13 @@ into this protocol.
 | 8. Human reconciliation, both outcomes | `S08` | Executor attempts with only the normal bearer (missing capability) or the bearer presented as the capability (invalid) are rejected for both outcomes, and the queue is unchanged. The human `vendor_billed` path settles with one posting. `vendor_did_not_bill` releases with no posting. Replays are stable. Changed evidence is rejected. |
 | 9. Restart between stages | `S09` | SIGKILL/restart after authorization (including a denied-then-corrected revision), after claim, and after a lost settlement response. Every replay returns the same durable IDs and timestamps. Budget and posting stay consistent. |
 | 10. Operation maximum and agent budget | `S10` | Authorization over the budget, over the remaining balance, and one cent past exhaustion is denied with no hold. A claim above the operation maximum is rejected. Settlement one cent over the maximum is rejected and leaves the hold claimed. Settlement at exactly the maximum succeeds. A denied key can be corrected within the remaining balance. |
+
+Scenarios `S11` and `S12` cover the router's operation-bound admission void:
+wrong private operation keys are rejected; a void returns the full hold with no
+ledger posting, replays after restart, and prevents a later claim; a claim that
+wins first prevents void. Router steps use the normal backend bearer plus the
+private operation key and bound account. They bypass the executor plugin,
+which continues to use token-only claims and claim-only finalization.
 
 The former scenario 11 (executor capability cannot call administrative routes)
 belongs to HUB-32. Add it to this corpus when an executor-scoped credential

@@ -44,8 +44,17 @@ pub(super) fn default_responses(kind: BackendKind) -> HashMap<(String, String), 
                     json!({
                         "decision":"allow",
                         "spend_auth_token_id":"hubu-spend-token-93",
+                        "account_id":"account-93",
                         "requires_human_approval":false
                     }),
+                ),
+            );
+            insert(
+                "POST",
+                "/spend/void",
+                StubResponse::json(
+                    200,
+                    json!({"status":"released","reason":"executor_rejected_before_claim"}),
                 ),
             );
         }
