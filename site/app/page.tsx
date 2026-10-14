@@ -30,6 +30,7 @@ const worksToday = [
 const primaryLinks = [
   ["Documentation", "/docs/overview"],
   ["Demos", "/demos"],
+  ["Engineering Blogs", "/blogs"],
   ["Architecture", "/architecture/"],
   ["Send feedback", "/docs/feedback"],
   ["GitHub", "https://github.com/hacker-no-ice/hubu"],
