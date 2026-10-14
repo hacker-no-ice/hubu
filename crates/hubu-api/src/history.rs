@@ -269,6 +269,10 @@ fn transaction(
     if let Some(metadata) = meta {
         metadata.effective_cost.scaled()?;
     }
+    let charge_units = meta
+        .map(|m| m.budget_charge_units())
+        .transpose()?
+        .flatten();
     let rounding = meta
         .and_then(|m| m.rounding_delta_amount.as_deref())
         .map(|v| v.parse::<i128>())
@@ -316,7 +320,7 @@ fn transaction(
         "effective_cost":meta.map(|m|&m.effective_cost),
         "cost_semantics":meta.map(|m|if m.kind==hubu_core::ledger::TransactionKind::Adjustment {"corrected_total"} else {"original_total"}),
         "purpose_reference":reference(meta.and_then(|m|m.purpose.as_deref())),
-        "budget_charge_delta_cents":meta.and_then(|m|m.budget_charge_delta_cents),
+        "budget_charge_delta_cents":charge_units.map(|units|Amount::from_units(units).legacy_cents_ceil()),
         "rounding_delta_amount":rounding,
         "original_transaction_id":meta.and_then(|m|m.original_transaction_id.as_ref()).filter(owned_transaction),
         "previous_transaction_id":meta.and_then(|m|m.previous_transaction_id.as_ref()).filter(owned_transaction),
@@ -377,16 +381,23 @@ pub(super) fn ledger(request: &HttpRequest, state: &ServerState) -> Result<Value
                 })
             })
             .filter_map(|t| t.metadata.as_ref())
-            .filter_map(|m| m.budget_charge_delta_cents)
+            .map(|m| m.budget_charge_units())
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
             .map(i128::from)
             .sum();
-        let total = i64::try_from(total)?;
+        let total = Amount::from_units(i64::try_from(total)?);
+        let unaccounted = balance
+            .consumed_amount
+            .checked_sub(total)
+            .ok_or_else(|| anyhow!("coverage overflow"))?;
         json!({"budget_id":public_budget_id(id),
         "agent_id":query.get("agent_id"),
         "currency":budget.currency.to_string(),
         "consumed_amount_cents":balance.consumed_amount.legacy_cents_ceil(),
-        "recorded_budget_charges_cents":total,
-        "unaccounted_consumption_cents":balance.consumed_amount.legacy_cents_ceil().checked_sub(total).ok_or_else(||anyhow!("coverage overflow"))?,
+        "recorded_budget_charges_cents":total.legacy_cents_ceil(),
+        "unaccounted_consumption_cents":unaccounted.legacy_cents_ceil(),
         "pending_hold_count":data.holds.iter().filter(|h|&h.budget_id==id && (matches!(h.status,BudgetHoldStatus::Claimed) || (matches!(h.status,BudgetHoldStatus::Frozen) && h.expires_at>now))).count(),
         "owner_transactions_without_budget_context":data.transactions.iter().filter(|t|linked_context(t,&data).is_none()).count(),
         "historical_wallet_reconciliation_complete":false})

@@ -5,7 +5,7 @@ use crate::ledger::{AccountingAdjustment, BudgetLedgerQuery, BudgetLedgerReport}
 use hubu_common::ids::LedgerTransactionId;
 use hubu_ledger::{
     domain as ledger, ExactMoney, GovernedSpendContext, LedgerAccountKind, TransactionKind,
-    TransactionMetadata, TransactionRecord, CENT_AT_SCALE_18,
+    TransactionMetadata, TransactionRecord, BUDGET_CHARGE_SCALE, BUDGET_UNIT_AT_SCALE_18,
 };
 
 fn invalid(message: &str) -> StorageError {
@@ -29,12 +29,9 @@ fn exact_cost(cost: &crate::spend::SpendExecutorVendorCost) -> ExactMoney {
 /// The budget charge for an exact ledger cost: rounded up once to accounting
 /// scale (10⁻⁶).
 fn budget_units(cost: &ExactMoney) -> Result<Amount, StorageError> {
-    const UNIT_AT_SCALE_18: i128 = 1_000_000_000_000;
-    let scaled = cost.scaled().map_err(ledger_error)?;
-    let units = scaled / UNIT_AT_SCALE_18 + i128::from(scaled % UNIT_AT_SCALE_18 != 0);
-    i64::try_from(units)
+    cost.budget_units(BUDGET_CHARGE_SCALE)
         .map(Amount::from_units)
-        .map_err(|_| invalid("budget amount overflow"))
+        .map_err(ledger_error)
 }
 
 pub(super) fn post_settlement(
@@ -129,10 +126,11 @@ pub(super) fn post_settlement(
             operation_key: claim.operation_key.clone(),
         }),
         effective_cost: cost,
-        // Ledger budget charges are still recorded in cents.
-        budget_charge_delta_cents: Some(receipt.budget_charge.legacy_cents_ceil()),
+        budget_charge_delta_cents: None,
+        budget_charge_delta: Some(receipt.budget_charge.units()),
+        budget_charge_scale: Some(BUDGET_CHARGE_SCALE),
         rounding_delta_amount: Some(
-            (i128::from(receipt.budget_charge.legacy_cents_ceil()) * CENT_AT_SCALE_18 - expense)
+            (i128::from(receipt.budget_charge.units()) * BUDGET_UNIT_AT_SCALE_18 - expense)
                 .to_string(),
         ),
         original_transaction_id: None,
@@ -293,19 +291,11 @@ impl SqliteGovernanceRepository {
         let delta = cost
             .checked_sub(old)
             .ok_or_else(|| invalid("correction delta overflow"))?;
-        let (charge, rounding) = if let Some(context) = &original_meta.context {
-            let amount = command
-                .corrected_cost
-                .budget_cents()
-                .map_err(ledger_error)?
-                - previous_meta
-                    .effective_cost
-                    .budget_cents()
-                    .map_err(ledger_error)?;
+        let charge = if let Some(context) = &original_meta.context {
             let balance = load_budget_balance_by_id(&tx, &context.budget_id)?
                 .ok_or_else(|| invalid("missing adjustment budget"))?;
-            // The balance moves by the exact difference at accounting scale;
-            // ledger metadata still records the charge delta in cents.
+            // Each total is rounded up once; the balance and the recorded
+            // charge move by the difference of those accounting-scale charges.
             let consumed_delta = budget_units(&command.corrected_cost)?
                 .checked_sub(budget_units(&previous_meta.effective_cost)?)
                 .ok_or_else(|| invalid("adjustment balance overflow"))?;
@@ -324,19 +314,23 @@ impl SqliteGovernanceRepository {
                 ..balance.clone()
             };
             super::compare_and_set_balance(&tx, &balance, &updated, &Utc::now().to_rfc3339())?;
-            (
-                Some(amount),
-                Some((i128::from(amount) * CENT_AT_SCALE_18 - delta).to_string()),
-            )
+            Some(consumed_delta.units())
         } else {
-            (None, None)
+            None
         };
         let mut meta = original_meta.clone();
         meta.kind = TransactionKind::Adjustment;
         meta.source_key = key;
         meta.effective_cost = command.corrected_cost;
-        meta.budget_charge_delta_cents = charge;
-        meta.rounding_delta_amount = rounding;
+        match charge {
+            Some(units) => meta.set_budget_charge(units, delta),
+            None => {
+                meta.budget_charge_delta_cents = None;
+                meta.budget_charge_delta = None;
+                meta.budget_charge_scale = None;
+                meta.rounding_delta_amount = None;
+            }
+        }
         meta.original_transaction_id = Some(original.id.clone());
         meta.previous_transaction_id = Some(previous.id);
         meta.reason = Some(command.reason);
@@ -404,26 +398,34 @@ impl SqliteGovernanceRepository {
                     .is_some_and(|c| c.agent_id == query.agent_id && c.budget_id == query.budget_id)
             })
             .collect();
-        let total: i128 = transactions
-            .iter()
-            .filter_map(|r| r.metadata.as_ref()?.budget_charge_delta_cents)
-            .map(i128::from)
-            .sum();
-        let total = i64::try_from(total).map_err(|_| invalid("charge total overflow"))?;
+        let mut total = Amount::ZERO;
+        for record in &transactions {
+            let Some(metadata) = record.metadata.as_ref() else {
+                continue;
+            };
+            if let Some(units) = metadata.budget_charge_units().map_err(ledger_error)? {
+                total = total
+                    .checked_add(Amount::from_units(units))
+                    .ok_or_else(|| invalid("charge total overflow"))?;
+            }
+        }
         let balance = load_budget_balance_by_id(&tx, &query.budget_id)?
             .ok_or_else(|| invalid("missing accounting budget"))?;
+        let unaccounted = balance
+            .consumed_amount
+            .checked_sub(total)
+            .ok_or_else(|| invalid("coverage difference overflow"))?;
         let pending:i64=tx.query_row("SELECT COUNT(*) FROM budget_holds WHERE budget_id=?1 AND status IN ('frozen','claimed')",[query.budget_id.to_string()],|r|r.get(0))?;
         Ok(BudgetLedgerReport {
             budget_id: query.budget_id,
             agent_id: query.agent_id,
             transactions,
+            consumed_amount: balance.consumed_amount,
+            recorded_budget_charges: total,
+            unaccounted_consumption: unaccounted,
             consumed_amount_cents: balance.consumed_amount.legacy_cents_ceil(),
-            recorded_budget_charges_cents: total,
-            unaccounted_consumption_cents: balance
-                .consumed_amount
-                .legacy_cents_ceil()
-                .checked_sub(total)
-                .ok_or_else(|| invalid("coverage difference overflow"))?,
+            recorded_budget_charges_cents: total.legacy_cents_ceil(),
+            unaccounted_consumption_cents: unaccounted.legacy_cents_ceil(),
             owner_transactions_without_budget_context: unlinked,
             pending_hold_count: pending,
         })
@@ -549,7 +551,13 @@ fn backfill_wallet_context(tx: &rusqlite::Transaction<'_>) -> Result<(), Storage
                 operation_key: operation.clone(),
             }),
             effective_cost: expected,
-            budget_charge_delta_cents: Some(*amount),
+            budget_charge_delta_cents: None,
+            budget_charge_delta: Some(
+                amount
+                    .checked_mul(10_000)
+                    .ok_or_else(|| invalid("wallet charge overflow"))?,
+            ),
+            budget_charge_scale: Some(BUDGET_CHARGE_SCALE),
             rounding_delta_amount: Some("0".into()),
             original_transaction_id: None,
             previous_transaction_id: None,

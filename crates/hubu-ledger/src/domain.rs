@@ -6,6 +6,10 @@ use rusqlite::OptionalExtension;
 use serde_json::Value;
 
 pub const CENT_AT_SCALE_18: i128 = 10_000_000_000_000_000;
+/// One budget accounting unit (10⁻⁶) at scale 18.
+pub const BUDGET_UNIT_AT_SCALE_18: i128 = 1_000_000_000_000;
+/// Scale of budget charges recorded in new ledger metadata.
+pub const BUDGET_CHARGE_SCALE: u32 = 6;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExactMoney {
@@ -27,9 +31,17 @@ impl ExactMoney {
             .ok_or_else(|| invalid("exact amount overflow"))
     }
     pub fn budget_cents(&self) -> Result<i64, LedgerError> {
+        self.budget_units(2)
+    }
+    /// The exact amount rounded up once to `scale` fractional digits.
+    pub fn budget_units(&self, scale: u32) -> Result<i64, LedgerError> {
+        if scale > 18 {
+            return Err(invalid("budget scale cannot exceed 18"));
+        }
         let amount = self.scaled()?;
-        i64::try_from(amount / CENT_AT_SCALE_18 + i128::from(amount % CENT_AT_SCALE_18 != 0))
-            .map_err(|_| invalid("budget cents overflow"))
+        let unit = 10_i128.pow(18 - scale);
+        i64::try_from(amount / unit + i128::from(amount % unit != 0))
+            .map_err(|_| invalid("budget units overflow"))
     }
     pub fn at_scale_18(amount: i128, currency: Currency) -> Self {
         Self {
@@ -75,7 +87,14 @@ pub struct TransactionMetadata {
     pub agent_account_id: Option<AgentAccountId>,
     pub context: Option<GovernedSpendContext>,
     pub effective_cost: ExactMoney,
+    /// Legacy budget charge in whole cents, recorded before accounting-scale
+    /// charges. New metadata uses `budget_charge_delta` instead.
     pub budget_charge_delta_cents: Option<i64>,
+    /// Budget charge in units of 10^-`budget_charge_scale`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_charge_delta: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_charge_scale: Option<u32>,
     /// Signed coefficient at scale 18: budget charge minus exact expense delta.
     pub rounding_delta_amount: Option<String>,
     pub original_transaction_id: Option<LedgerTransactionId>,
@@ -88,6 +107,36 @@ pub struct TransactionMetadata {
     pub adjustment_evidence: Option<String>,
     pub legacy_backfill: bool,
     pub missing_evidence: Vec<String>,
+}
+
+impl TransactionMetadata {
+    /// Budget charge at accounting scale. Legacy cent charges read exactly as
+    /// `cents × 10⁴`; stored metadata is never rewritten.
+    pub fn budget_charge_units(&self) -> Result<Option<i64>, LedgerError> {
+        match (
+            self.budget_charge_delta,
+            self.budget_charge_scale,
+            self.budget_charge_delta_cents,
+        ) {
+            (Some(units), Some(BUDGET_CHARGE_SCALE), None) => Ok(Some(units)),
+            (None, None, Some(cents)) => cents
+                .checked_mul(10_000)
+                .map(Some)
+                .ok_or_else(|| invalid("budget charge overflow")),
+            (None, None, None) => Ok(None),
+            _ => Err(invalid("budget charge evidence is ambiguous")),
+        }
+    }
+
+    /// Records an accounting-scale budget charge and its rounding evidence
+    /// against `expense_delta` (at scale 18).
+    pub fn set_budget_charge(&mut self, units: i64, expense_delta: i128) {
+        self.budget_charge_delta_cents = None;
+        self.budget_charge_delta = Some(units);
+        self.budget_charge_scale = Some(BUDGET_CHARGE_SCALE);
+        self.rounding_delta_amount =
+            Some((i128::from(units) * BUDGET_UNIT_AT_SCALE_18 - expense_delta).to_string());
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -250,6 +299,15 @@ pub fn attach_metadata(
     if current.entries.len() < 2 || debits != credits {
         return Err(invalid("canonical transaction is not balanced"));
     }
+    // New metadata records charges at accounting scale; legacy metadata in
+    // cents. Each is validated in its own units.
+    metadata.budget_charge_units()?;
+    let accounting_scale_charge = metadata.budget_charge_scale.is_some();
+    let (charge_scale, charge_unit_at_scale_18) = if accounting_scale_charge {
+        (BUDGET_CHARGE_SCALE, BUDGET_UNIT_AT_SCALE_18)
+    } else {
+        (2, CENT_AT_SCALE_18)
+    };
     let expected_charge = if metadata.kind == TransactionKind::Adjustment {
         let original_id = metadata
             .original_transaction_id
@@ -286,8 +344,8 @@ pub fn attach_metadata(
         }
         if metadata.context.is_some() {
             Some(
-                metadata.effective_cost.budget_cents()?
-                    - previous_meta.effective_cost.budget_cents()?,
+                metadata.effective_cost.budget_units(charge_scale)?
+                    - previous_meta.effective_cost.budget_units(charge_scale)?,
             )
         } else {
             None
@@ -300,16 +358,21 @@ pub fn attach_metadata(
             return Err(invalid("expense evidence does not match posting"));
         }
         if metadata.context.is_some() {
-            Some(metadata.effective_cost.budget_cents()?)
+            Some(metadata.effective_cost.budget_units(charge_scale)?)
         } else {
             None
         }
     };
-    if metadata.budget_charge_delta_cents != expected_charge {
+    let recorded_charge = if accounting_scale_charge {
+        metadata.budget_charge_delta
+    } else {
+        metadata.budget_charge_delta_cents
+    };
+    if recorded_charge != expected_charge {
         return Err(invalid("budget charge does not match exact expense"));
     }
     if let Some(charge) = expected_charge {
-        let expected = i128::from(charge) * CENT_AT_SCALE_18 - expense;
+        let expected = i128::from(charge) * charge_unit_at_scale_18 - expense;
         if metadata.rounding_delta_amount.as_deref() != Some(expected.to_string().as_str()) {
             return Err(invalid("rounding evidence does not match posting"));
         }
@@ -332,8 +395,7 @@ pub fn attach_metadata(
     }
 
     if metadata.context.is_some()
-        && (metadata.budget_charge_delta_cents.is_none()
-            || metadata.rounding_delta_amount.is_none())
+        && (metadata.budget_charge_units()?.is_none() || metadata.rounding_delta_amount.is_none())
     {
         return Err(invalid(
             "governed transaction requires budget charge and rounding evidence",

@@ -606,11 +606,10 @@ fn two_providers_for_one_task_have_independent_receipts_and_postings() {
             agent.agent_id, budget.budget.budget_id
         ),
     );
-    // Budget consumption is exact (0.001 + 0.002 = 0.003, projected up to 1 cent)
-    // while ledger charges are still recorded per settlement in whole cents.
-    // HUB-275 moves ledger charges and this coverage report to µ units.
+    // 0.001 + 0.002 is recorded exactly (3000µ) and projects up to 1 cent.
     assert_eq!(history["coverage"]["consumed_amount_cents"], 1);
-    assert_eq!(history["coverage"]["recorded_budget_charges_cents"], 2);
+    assert_eq!(history["coverage"]["recorded_budget_charges_cents"], 1);
+    assert_eq!(history["coverage"]["unaccounted_consumption_cents"], 0);
     assert!(history["next_cursor"].is_string());
     std::fs::remove_file(path).ok();
 }

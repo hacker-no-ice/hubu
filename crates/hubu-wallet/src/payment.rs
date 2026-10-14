@@ -243,6 +243,9 @@ where
                 &mut self.ledger_accounts_by_user,
                 &request.owner_user_id,
             )?;
+            let budget_charge_units = request.amount_cents.checked_mul(10_000).ok_or_else(|| {
+                LedgerError::InvalidData("payment amount exceeds the budget unit range".into())
+            })?;
             let ledger_transaction = self.ledger.record_transaction_with_metadata(
                 request.owner_user_id.clone(),
                 Some(payment_id.to_string()),
@@ -268,7 +271,9 @@ where
                     source_key: format!("payment:{payment_id}"),
                     agent_id: Some(request.agent_id.clone()), agent_account_id: Some(request.agent_account_id.clone()),
                     effective_cost: hubu_ledger::ExactMoney { amount: request.amount_cents.to_string(), scale: 2, currency: request.currency },
-                    budget_charge_delta_cents: context.as_ref().map(|_|request.amount_cents),
+                    budget_charge_delta_cents: None,
+                    budget_charge_delta: context.as_ref().map(|_|budget_charge_units),
+                    budget_charge_scale: context.as_ref().map(|_|hubu_ledger::BUDGET_CHARGE_SCALE),
                     rounding_delta_amount: context.as_ref().map(|_|"0".to_string()), context,
                     original_transaction_id: None, previous_transaction_id: None,
                     provider: request.execution_scope.as_ref().map(|scope|scope.provider.id.clone()),

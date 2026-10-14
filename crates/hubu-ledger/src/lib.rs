@@ -236,8 +236,8 @@ impl SqliteLedger {
                 ));
             }
             if metadata.context.is_some()
-                && (metadata.budget_charge_delta_cents
-                    != Some(metadata.effective_cost.budget_cents()?)
+                && (metadata.budget_charge_units()?
+                    != Some(metadata.effective_cost.budget_units(BUDGET_CHARGE_SCALE)?)
                     || metadata.rounding_delta_amount.as_deref() != Some("0"))
             {
                 return Err(LedgerError::InvalidData(

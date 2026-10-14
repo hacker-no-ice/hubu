@@ -44,6 +44,13 @@ Future release template
   what the rail actually charged and release the rest of the hold. HTTP, MCP,
   and CLI amounts are still whole cents for now: consumed and frozen amounts
   are rounded up and limits and remaining amounts rounded down.
+- New ledger postings record the budget charge in micro-units
+  (`budget_charge_delta` with `budget_charge_scale: 6`), and the rounding
+  delta is measured against that charge. Existing postings keep their cent
+  charge and are read exactly as `cents × 10⁴`; stored ledger evidence is
+  never rewritten. The budget coverage report reconciles in micro-units, so
+  budget consumption matches recorded charges exactly and differs from the
+  exact provider total by less than one micro-unit per settlement.
 
 ### Breaking or operational changes
 
