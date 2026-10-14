@@ -202,6 +202,7 @@ pub(super) fn is_approved_http_route(method: &str, path: &str) -> bool {
                 | ("GET", "/user/spending-target")
                 | ("POST", "/spend")
                 | ("POST", "/spend/authorize")
+                | ("POST", "/spend/void")
                 | ("GET", "/spend/approval")
                 | ("POST", "/spend/approval/resolve")
                 | ("GET", "/agents")

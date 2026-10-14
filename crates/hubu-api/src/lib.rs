@@ -1827,6 +1827,7 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
             resolve_executor_spend(request.body, state).map(to_json)
         }
         ("POST", "/spend/executor/claim") => claim_executor_spend(request.body, state).map(to_json),
+        ("POST", "/spend/void") => void_unclaimed_authorization(request.body, state),
         ("GET", "/spend/executor/claim") => {
             get_executor_claim(request.query.get("claim_id").map(String::as_str), state)
                 .map(to_json)
@@ -1868,6 +1869,18 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
             }
             if let Some(response) = registration_error_response(&error) {
                 return response;
+            }
+            if matches!(
+                error.downcast_ref::<hubu_core::persistence::AuthorizationVoidError>(),
+                Some(
+                    hubu_core::persistence::AuthorizationVoidError::ClaimedOrUsed
+                        | hubu_core::persistence::AuthorizationVoidError::RevokedOrFinalized
+                )
+            ) {
+                return HttpResponse {
+                    status: 409,
+                    body: json!({"error":error.to_string(),"error_code":"authorization_not_voidable"}),
+                };
             }
             let message = error.to_string();
             let (status, retry_guidance) = spend_retry_error_response(&error);
@@ -2234,9 +2247,22 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
             "approval_resolve": "POST /spend/approval/resolve",
             "settle": "POST /spend/executor/settle",
             "release": "POST /spend/executor/release",
+            "void_unclaimed": "POST /spend/void",
             "reconciliation_queue": "GET /spend/executor/reconciliation",
             "reconcile_vendor_billed": "POST /spend/executor/settle",
             "reconcile_vendor_did_not_bill": "POST /spend/executor/release"
+        },
+        "void_unclaimed_request": {
+            "caller": "trusted router",
+            "required": ["spend_auth_token_id", "account_id", "operation_key"],
+            "reason": "executor_rejected_before_claim",
+            "rules": [
+                "requires the backend bearer and the private operation key bound to this account and authorization; never exposed as an agent-facing MCP tool",
+                "void and claim are mutually exclusive in one SQLite write transaction",
+                "void requires an unused, unrevoked token with no claim and a frozen hold; exact void replay is idempotent",
+                "no charge or ledger posting is created",
+                "timeouts, ambiguous dispatch and retry exhaustion never justify voiding"
+            ]
         },
         "operation_key_policy": {
             "responsibility": "agent platform or orchestrator, not the autonomous model",
@@ -4495,6 +4521,56 @@ fn claim_executor_spend(
     executor_claim_response(&claim_state.claim, spend, state)
 }
 
+/// Backend-only cancellation. The private operation key is an operation-scoped
+/// capability retained by the router, never an agent-facing MCP argument.
+fn void_unclaimed_authorization(body: String, state: &ServerState) -> Result<Value> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Request {
+        spend_auth_token_id: String,
+        account_id: String,
+        operation_key: String,
+    }
+    let request: Request = serde_json::from_str(&body)?;
+    let user = authenticated_user_context(state)?;
+    let account = state
+        .registration
+        .lock()
+        .map_err(|_| anyhow!("registration lock poisoned"))?
+        .account_for_pub_id(&request.account_id)?
+        .ok_or_else(|| anyhow!("unknown owned account"))?;
+    if account.owner_user_id != user.user_id {
+        return Err(anyhow!("unknown owned account"));
+    }
+    let token = request.spend_auth_token_id.parse()?;
+    let mut spend = state
+        .spend
+        .lock()
+        .map_err(|_| anyhow!("spend lock poisoned"))?;
+    let mut budgets = state
+        .budgets
+        .lock()
+        .map_err(|_| anyhow!("budget lock poisoned"))?;
+    let mut repository = state
+        .governance
+        .lock()
+        .map_err(|_| anyhow!("governance lock poisoned"))?;
+    let result = ExecutorClaimService.void_unclaimed(
+        &user.user_id,
+        &account.id,
+        &token,
+        &request.operation_key,
+        &mut spend,
+        &mut budgets,
+        &mut repository,
+    )?;
+    Ok(
+        json!({"status":"released", "reason":"executor_rejected_before_claim",
+        "decision_id": result.token.spend_decision_id,
+        "idempotent_replay": result.idempotent_replay}),
+    )
+}
+
 fn get_executor_claim(
     claim_id: Option<&str>,
     state: &ServerState,
@@ -6170,6 +6246,7 @@ fn write_response(stream: &mut TcpStream, response: HttpResponse) -> Result<()> 
 
 #[cfg(test)]
 mod tests {
+    mod authorization_void;
     mod history;
     use super::*;
     use chrono::Duration;

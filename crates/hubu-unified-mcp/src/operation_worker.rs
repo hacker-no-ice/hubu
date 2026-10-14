@@ -44,6 +44,13 @@ impl Server {
         let Some(operation) = operation else {
             return Ok(false);
         };
+        if operation.void_pending {
+            // Cleanup has its own durable retry path. Never redispatch provider
+            // work or alter the original terminal result after admission rejection.
+            crate::hubu::void_rejected_authorization(self, &operation).map_err(|_| ())?;
+            self.with_registry(|registry| registry.finish_authorization_void(&operation))?;
+            return Ok(true);
+        }
         if operation.deadline_expired {
             self.fail_operation(&operation, "operation_deadline_exhausted")?;
             return Ok(true);
@@ -114,7 +121,16 @@ impl Server {
             } else {
                 None
             };
-            return self.fail_operation(operation, durable_failure_code(error.code, diagnostic));
+            let code = durable_failure_code(error.code, diagnostic);
+            if definitive_unclaimed_rejection(
+                &error,
+                operation.execution_id.is_some(),
+                operation.dispatch_attempts,
+            ) {
+                self.with_registry(|registry| registry.reject_durable_admission(operation, code))?;
+                return Ok(());
+            }
+            return self.fail_operation(operation, code);
         }
         let (attempts, limit, base, pending_code, exhausted_code) =
             if operation.execution_id.is_none() {
@@ -172,6 +188,14 @@ impl Server {
     }
 }
 
+fn definitive_unclaimed_rejection(
+    error: &gongbu::DurableCallError,
+    has_execution: bool,
+    attempts: u32,
+) -> bool {
+    !error.retryable && error.code == "invalid_request" && !has_execution && attempts == 0
+}
+
 fn durable_failure_code(
     code: &str,
     diagnostic: Option<gongbu::AdmissionDiagnostic>,
@@ -194,6 +218,35 @@ fn exponential_delay(base: Duration, exponent: u32) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_first_attempt_definitive_admission_rejections_void() {
+        let rejection = gongbu::DurableCallError {
+            code: "invalid_request",
+            retryable: false,
+            admission_diagnostic: None,
+        };
+        assert!(definitive_unclaimed_rejection(&rejection, false, 0));
+        assert!(!definitive_unclaimed_rejection(&rejection, true, 0));
+        assert!(!definitive_unclaimed_rejection(&rejection, false, 1));
+        for code in [
+            "timeout",
+            "dispatch_retry_exhausted",
+            "unavailable",
+            "invalid_response",
+            "unauthorized",
+            "not_found",
+        ] {
+            for retryable in [true, false] {
+                let error = gongbu::DurableCallError {
+                    code,
+                    retryable,
+                    admission_diagnostic: None,
+                };
+                assert!(!definitive_unclaimed_rejection(&error, false, 0));
+            }
+        }
+    }
 
     #[test]
     fn retry_delay_is_exponential_and_saturating() {

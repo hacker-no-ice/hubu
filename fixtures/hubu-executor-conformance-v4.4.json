@@ -1,8 +1,8 @@
 {
   "schema": "hubu-executor-conformance-v1",
-  "corpus_version": "2026-10-02.5",
+  "corpus_version": "2026-10-13.1",
   "protocol_version": "hubu-spend-executor-v4.4",
-  "description": "Executor-neutral black-box conformance fixtures for the Hubu spend-executor contract. Every request targets the public Hubu HTTP API. Executors claim by the spend_auth_token_id and settle or release by the claim_id Hubu issued; the retired v4.3 agent_id/operation_key identity appears only in steps marked legacy_identity_probe, which must be rejected. Server-generated IDs and timestamps are captured and asserted by relation, never by literal value. Executor responses never carry the private operation key.",
+  "description": "Executor-neutral black-box conformance fixtures for the Hubu spend-executor contract. Every request targets the public Hubu HTTP API. Executors claim by the spend_auth_token_id and settle or release by the claim_id Hubu issued; the retired v4.3 agent_id/operation_key identity appears only in steps marked legacy_identity_probe, which must be rejected. Server-generated IDs and timestamps are captured and asserted by relation, never by literal value. Executor responses never carry the private operation key. Router-only admission voids use a private operation-key and account binding; they do not change claim-based executor release identity.",
   "server_profile": {
     "lease_config_yaml": "authorization_ttl_seconds: 300\ndefault_lease_profile: default\nlease_profiles:\n  default:\n    claim_ttl_seconds: 900\n  conformance_short:\n    claim_ttl_seconds: 1\n",
     "required_lease_profiles": {
@@ -89,6 +89,21 @@
       "actor": "observer",
       "method": "GET",
       "path": "/spend/authorizations"
+    },
+    "void": {
+      "actor": "router",
+      "method": "POST",
+      "path": "/spend/void"
+    },
+    "authorization_history": {
+      "actor": "observer",
+      "method": "GET",
+      "path": "/spend/authorizations"
+    },
+    "watch": {
+      "actor": "observer",
+      "method": "GET",
+      "path": "/watch"
     }
   },
   "retry_decisions": {
@@ -3235,6 +3250,249 @@
                 "equals": 1
               }
             ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "S11",
+      "title": "admission void restores the full hold, survives restart and rejects a later claim",
+      "setup": {
+        "budget_cents": 500
+      },
+      "steps": [
+        {
+          "id": "authorize",
+          "operation": "authorize",
+          "expect": {
+            "status": 200,
+            "match": {
+              "decision": "allow",
+              "budget_hold.frozen_amount_cents": 400
+            },
+            "capture": {
+              "void_token": "auth_token_id",
+              "void_decision": "decision_id",
+              "void_scope": "execution_scope"
+            }
+          },
+          "body": {
+            "operation_key": "conformance:v4.4:s11:void",
+            "account_id": "${agent.account_id}",
+            "amount_cents": 400,
+            "reason": "Admission void conformance",
+            "execution_scope": "${defs.scope}"
+          }
+        },
+        {
+          "id": "wrong-operation",
+          "operation": "void",
+          "expect": {
+            "status": 400
+          },
+          "body": {
+            "spend_auth_token_id": "${void_token}",
+            "account_id": "${agent.account_id}",
+            "operation_key": "another-private-operation"
+          }
+        },
+        {
+          "id": "still-reserved",
+          "operation": "budgets",
+          "expect": {
+            "status": 200,
+            "match": {
+              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents": 400,
+              "budgets[agent_id=${agent.agent_id}].remaining_amount_cents": 100,
+              "budgets[agent_id=${agent.agent_id}].consumed_amount_cents": 0
+            }
+          }
+        },
+        {
+          "id": "void",
+          "operation": "void",
+          "expect": {
+            "status": 200,
+            "match": {
+              "status": "released",
+              "reason": "executor_rejected_before_claim",
+              "idempotent_replay": false
+            }
+          },
+          "body": {
+            "spend_auth_token_id": "${void_token}",
+            "account_id": "${agent.account_id}",
+            "operation_key": "conformance:v4.4:s11:void"
+          }
+        },
+        {
+          "id": "budget-returned",
+          "operation": "budgets",
+          "expect": {
+            "status": 200,
+            "match": {
+              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents": 0,
+              "budgets[agent_id=${agent.agent_id}].remaining_amount_cents": 500,
+              "budgets[agent_id=${agent.agent_id}].consumed_amount_cents": 0
+            }
+          }
+        },
+        {
+          "id": "void-replay",
+          "operation": "void",
+          "expect": {
+            "status": 200,
+            "match": {
+              "idempotent_replay": true
+            }
+          },
+          "body": {
+            "spend_auth_token_id": "${void_token}",
+            "account_id": "${agent.account_id}",
+            "operation_key": "conformance:v4.4:s11:void"
+          }
+        },
+        {
+          "id": "claim-after-void",
+          "operation": "claim",
+          "expect": {
+            "status": 400
+          },
+          "body": {
+            "spend_auth_token_id": "${void_token}",
+            "account_id": "${agent.account_id}",
+            "amount_cents": 400,
+            "execution_scope": "${void_scope}"
+          }
+        },
+        {
+          "id": "restart",
+          "control": "restart_hubu"
+        },
+        {
+          "id": "void-after-restart",
+          "operation": "void",
+          "expect": {
+            "status": 200,
+            "match": {
+              "idempotent_replay": true
+            }
+          },
+          "body": {
+            "spend_auth_token_id": "${void_token}",
+            "account_id": "${agent.account_id}",
+            "operation_key": "conformance:v4.4:s11:void"
+          }
+        },
+        {
+          "id": "budget-after-restart",
+          "operation": "budgets",
+          "expect": {
+            "status": 200,
+            "match": {
+              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents": 0,
+              "budgets[agent_id=${agent.agent_id}].remaining_amount_cents": 500,
+              "budgets[agent_id=${agent.agent_id}].consumed_amount_cents": 0
+            }
+          }
+        },
+        {
+          "id": "authorization-history",
+          "operation": "authorization_history",
+          "expect": {
+            "status": 200,
+            "match": {
+              "authorization_records[authorization_id=${void_decision}].release_reason": "executor_rejected_before_claim",
+              "authorization_records[authorization_id=${void_decision}].ledger_transaction_ids": []
+            }
+          },
+          "query": {
+            "agent_id": "${agent.agent_id}"
+          }
+        },
+        {
+          "id": "watch",
+          "operation": "watch",
+          "expect": {
+            "status": 200,
+            "match": {
+              "recent_events[id=${void_decision}].release_reason": "executor_rejected_before_claim"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "S12",
+      "title": "claim wins before an admission void and keeps the reserved budget",
+      "setup": {
+        "budget_cents": 500
+      },
+      "steps": [
+        {
+          "id": "authorize",
+          "operation": "authorize",
+          "expect": {
+            "status": 200,
+            "match": {
+              "decision": "allow",
+              "budget_hold.frozen_amount_cents": 400
+            },
+            "capture": {
+              "void_token": "auth_token_id",
+              "void_decision": "decision_id",
+              "void_scope": "execution_scope"
+            }
+          },
+          "body": {
+            "operation_key": "conformance:v4.4:s12:void",
+            "account_id": "${agent.account_id}",
+            "amount_cents": 400,
+            "reason": "Admission void conformance",
+            "execution_scope": "${defs.scope}"
+          }
+        },
+        {
+          "id": "claim",
+          "operation": "claim",
+          "expect": {
+            "status": 200,
+            "match": {
+              "status": "claimed"
+            }
+          },
+          "body": {
+            "spend_auth_token_id": "${void_token}",
+            "account_id": "${agent.account_id}",
+            "amount_cents": 400,
+            "execution_scope": "${void_scope}"
+          }
+        },
+        {
+          "id": "void-after-claim",
+          "operation": "void",
+          "expect": {
+            "status": 409,
+            "match": {
+              "error_code": "authorization_not_voidable"
+            }
+          },
+          "body": {
+            "spend_auth_token_id": "${void_token}",
+            "account_id": "${agent.account_id}",
+            "operation_key": "conformance:v4.4:s12:void"
+          }
+        },
+        {
+          "id": "budget-stays-claimed",
+          "operation": "budgets",
+          "expect": {
+            "status": 200,
+            "match": {
+              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents": 400,
+              "budgets[agent_id=${agent.agent_id}].remaining_amount_cents": 100,
+              "budgets[agent_id=${agent.agent_id}].consumed_amount_cents": 0
+            }
           }
         }
       ]

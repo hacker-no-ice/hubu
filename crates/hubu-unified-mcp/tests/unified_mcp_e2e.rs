@@ -809,6 +809,7 @@ fn transient_dispatch_exhaustion_reaches_safe_terminal_failure() {
         "dispatch_retry_exhausted"
     );
     assert_eq!(gongbu.request_count("POST", "/v2/executions"), 5);
+    assert_eq!(hubu.request_count("POST", "/spend/void"), 0);
     mcp.finish(&[HUBU_TOKEN, GONGBU_TOKEN, &operation_key]);
 }
 
@@ -1055,6 +1056,17 @@ fn durable_admission_diagnostic_survives_replay_and_restart() {
 
     let hubu = BackendStub::start(BackendKind::Hubu);
     let gongbu = BackendStub::start(BackendKind::Gongbu);
+    hubu.respond_sequence_json(
+        "POST",
+        "/spend/void",
+        [
+            (503, json!({"error":"temporary Hubu outage"})),
+            (
+                200,
+                json!({"status":"released","reason":"executor_rejected_before_claim"}),
+            ),
+        ],
+    );
     let state = tempfile::tempdir().unwrap();
     let state_path = state.path().join("operations.sqlite3");
     let arguments = execution_arguments_for("hubu-spend-token-93", PROMPT);
@@ -1119,6 +1131,32 @@ fn durable_admission_diagnostic_survives_replay_and_restart() {
         assert!(!failed.to_string().contains(private));
     }
     assert_eq!(gongbu.request_count("POST", "/v2/executions"), 1);
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let pending: bool = Connection::open(&state_path).unwrap().query_row(
+            "SELECT authorization_void_pending FROM harness_operations WHERE operation_handle=?1",
+            [&handle], |row|row.get(0)).unwrap();
+        if !pending {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "admission void cleanup did not finish"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(hubu.request_count("POST", "/spend/void"), 2);
+    let void_request = hubu
+        .requests()
+        .into_iter()
+        .find(|r| r.path == "/spend/void")
+        .unwrap();
+    let body: Value =
+        serde_json::from_str(void_request.raw.split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(body["operation_key"], operation_key);
+    assert_eq!(body["account_id"], "account-93");
+    assert_eq!(body["spend_auth_token_id"], "hubu-spend-token-93");
 
     let persisted: (String, Option<String>, u32, Option<String>, Option<String>) =
         Connection::open(&state_path)

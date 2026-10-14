@@ -1,5 +1,7 @@
 mod accounting;
+mod authorization_void;
 mod history;
+pub use authorization_void::{AuthorizationVoidError, AuthorizationVoidResult};
 pub use history::HistorySnapshot;
 
 use std::path::Path;
@@ -420,7 +422,33 @@ impl SqliteGovernanceRepository {
         hold: &BudgetHold,
         balance: &BudgetBalance,
     ) -> Result<(), StorageError> {
-        let sqlite_tx = self.conn.transaction()?;
+        let sqlite_tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // Recheck durable token state under the same write lock as voiding.
+        // Manager validation alone can be stale in another server process.
+        let existing = load_executor_claim_by_id(&sqlite_tx, &claim.id)?;
+        if existing.is_none() {
+            let token = load_spend_auth_token_by_id(&sqlite_tx, &claim.spend_auth_token_id)?
+                .ok_or_else(|| StorageError::InvalidData("unknown spend auth token".into()))?;
+            if token.used_at.is_some()
+                || token.used_by_payment_id.is_some()
+                || token.revoked_at.is_some()
+                || token.expires_at <= Utc::now()
+            {
+                return Err(StorageError::InvalidData(
+                    "spend auth token is used, revoked or expired".into(),
+                ));
+            }
+            let available: bool = sqlite_tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM budget_holds WHERE id=?1 AND spend_decision_id=?2 AND status='frozen' AND executor_claim_id IS NULL)",
+                params![hold.id.to_string(), token.spend_decision_id.to_string()], |row| row.get(0))?;
+            if !available || token.owner_user_id != claim.owner_user_id {
+                return Err(StorageError::InvalidData(
+                    "authorization is no longer available to claim".into(),
+                ));
+            }
+        }
         validate_hold_and_balance_relationship(&sqlite_tx, hold, balance, false)?;
         sqlite_tx.execute(
             "INSERT INTO spend_executor_claims
@@ -468,7 +496,8 @@ impl SqliteGovernanceRepository {
             hold_rows,
             "executor claim hold attribution differs from persisted state",
         )?;
-        upsert_balance(&sqlite_tx, balance)?;
+        // Claiming changes hold ownership, not budget usage. Do not overwrite
+        // a balance that another connection may have updated.
         sqlite_tx.commit()?;
         Ok(())
     }
@@ -1169,6 +1198,12 @@ impl SqliteGovernanceRepository {
                 reconciled_at TEXT,
                 reconciled_by_user_id TEXT,
                 FOREIGN KEY(spend_auth_token_id) REFERENCES spend_auth_tokens(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS spend_authorization_voids (
+                spend_auth_token_id TEXT PRIMARY KEY REFERENCES spend_auth_tokens(id),
+                reason TEXT NOT NULL,
+                voided_at TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS spend_executor_settlement_receipts (
