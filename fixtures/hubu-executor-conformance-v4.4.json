@@ -936,8 +936,8 @@
             "status": 200,
             "match": {
               "budgets[agent_id=${agent.agent_id}].frozen_amount_cents": 0,
-              "budgets[agent_id=${agent.agent_id}].consumed_amount_cents": 602,
-              "budgets[agent_id=${agent.agent_id}].remaining_amount_cents": 398
+              "budgets[agent_id=${agent.agent_id}].consumed_amount_cents": 601,
+              "budgets[agent_id=${agent.agent_id}].remaining_amount_cents": 399
             }
           }
         },
@@ -981,9 +981,9 @@
                 "scale": 4,
                 "currency": "usd"
               },
-              "coverage.consumed_amount_cents": 602,
+              "coverage.consumed_amount_cents": 601,
               "coverage.recorded_budget_charges_cents": 602,
-              "coverage.unaccounted_consumption_cents": 0,
+              "coverage.unaccounted_consumption_cents": -1,
               "coverage.pending_hold_count": 0
             },
             "counts": [

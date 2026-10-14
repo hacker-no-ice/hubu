@@ -336,11 +336,11 @@ impl ExecutorClaimService {
                 "spend_auth_token_id": state.token.id.to_string(),
                 "decision_id": state.decision.id.to_string(),
                 "hold_id": state.budget_hold.id.to_string(),
-                "authorized_max_cents": receipt.authorized_max_cents,
+                "authorized_max": receipt.authorized_max,
                 "actual_vendor_cost": receipt.receipt.actual_vendor_cost,
-                "budget_charge_cents": receipt.budget_charge_cents,
-                "released_amount_cents": receipt.released_amount_cents,
-                "overrun_amount_cents": receipt.overrun_amount_cents,
+                "budget_charge": receipt.budget_charge,
+                "released_amount": receipt.released_amount,
+                "overrun_amount": receipt.overrun_amount,
                 "provider_request_id": receipt.receipt.provider_request_id,
                 "artifact_reference": receipt.receipt.artifact_reference,
                 "merchant": state.decision.request.merchant,
@@ -379,7 +379,7 @@ impl ExecutorClaimService {
                 "idempotent_replay": state.idempotent_replay,
                 "decision_id": state.decision.id.to_string(),
                 "hold_id": state.budget_hold.id.to_string(),
-                "amount_cents": state.budget_hold.amount_cents,
+                "amount": state.budget_hold.amount,
                 "merchant": state.decision.request.merchant,
                 "task_id": state.decision.request.task_id,
                 "reason": state.decision.request.reason,
@@ -450,7 +450,7 @@ impl ExecutorClaimService {
                 "reconciled_by_user_id": request.owner_user_id.to_string(),
                 "idempotent_replay": state.idempotent_replay,
                 "hold_id": state.budget_hold.id.to_string(),
-                "amount_cents": state.budget_hold.amount_cents,
+                "amount": state.budget_hold.amount,
             }),
         );
         Ok(state)
@@ -553,6 +553,7 @@ fn claim_state_from_records(
 
 #[cfg(test)]
 mod tests {
+    use crate::test_money::cents;
     use chrono::Duration;
     use hubu_common::{
         ids::AgentAccountId, models::UserContext, money::Currency, time::TimePeriod,
@@ -621,7 +622,7 @@ mod tests {
             let budget = budget_manager
                 .create_single_budget(CreateSingleBudgetRequest {
                     agent_id: agent_id.clone(),
-                    amount_limit_cents: 1_000,
+                    amount_limit: cents(1_000),
                     currency: Currency::Usd,
                     period,
                 })
@@ -651,7 +652,7 @@ mod tests {
                         user: user.clone(),
                         agent_id: agent_id.clone(),
                         agent_account_id: account_id.clone(),
-                        amount_cents: 500,
+                        amount: cents(500),
                         currency: Currency::Usd,
                         merchant: Some("vendor.example".to_string()),
                         execution_scope: None,
@@ -693,7 +694,7 @@ mod tests {
                             owner_user_id: self.user.user_id.clone(),
                             agent_id: self.agent_id.clone(),
                             agent_account_id: self.account_id.clone(),
-                            amount_cents: self.authorization.amount_cents,
+                            amount: self.authorization.amount,
                             currency: self.authorization.currency,
                             merchant: self.authorization.merchant.clone(),
                             execution_scope: self.authorization.execution_scope.clone(),
@@ -757,15 +758,15 @@ mod tests {
             SpendExecutorClaimStatus::Settled
         ));
         assert!(settled.token.used_at.is_some());
-        assert_eq!(settled.budget_balance.consumed_amount_cents, 400);
-        assert_eq!(settled.budget_balance.remaining_amount_cents, 600);
+        assert_eq!(settled.budget_balance.consumed_amount, cents(400));
+        assert_eq!(settled.budget_balance.remaining_amount, cents(600));
         assert_eq!(
             settled
                 .settlement_receipt
                 .as_ref()
                 .expect("receipt should be returned")
-                .authorized_max_cents,
-            500
+                .authorized_max,
+            cents(500)
         );
     }
 
@@ -816,8 +817,8 @@ mod tests {
             reconciled.claim.reconciliation_evidence.as_deref(),
             Some("provider export confirms billing")
         );
-        assert_eq!(reconciled.budget_balance.consumed_amount_cents, 400);
-        assert_eq!(reconciled.budget_balance.remaining_amount_cents, 600);
+        assert_eq!(reconciled.budget_balance.consumed_amount, cents(400));
+        assert_eq!(reconciled.budget_balance.remaining_amount, cents(600));
 
         let pending = harness
             .service
@@ -859,6 +860,6 @@ mod tests {
             SpendExecutorClaimStatus::Released
         ));
         assert!(reconciled.token.revoked_at.is_some());
-        assert_eq!(reconciled.budget_balance.remaining_amount_cents, 1_000);
+        assert_eq!(reconciled.budget_balance.remaining_amount, cents(1_000));
     }
 }

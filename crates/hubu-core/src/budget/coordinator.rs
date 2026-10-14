@@ -1,5 +1,6 @@
 use super::{BudgetLimitUpdateError, BudgetUpdateError, UpdateBudgetLimitRequest};
 use chrono::{DateTime, Utc};
+use hubu_common::money::Amount;
 use serde_json::json;
 
 use crate::{
@@ -78,7 +79,7 @@ impl BudgetCoordinator {
     where
         R: BudgetVersionRepository,
     {
-        if request.amount_limit_cents <= 0 {
+        if request.amount_limit <= Amount::ZERO {
             return Err(BudgetUpdateError::AmountLimitMustBePositive.into());
         }
         if request.expected_revision == 0 {
@@ -105,7 +106,7 @@ impl BudgetCoordinator {
         let append = AppendBudgetVersionRequest {
             budget_id: request.budget_id,
             expected_revision: request.expected_revision,
-            amount_limit_cents: request.amount_limit_cents,
+            amount_limit: request.amount_limit,
             actor,
             source,
             reason,
@@ -124,8 +125,8 @@ impl BudgetCoordinator {
                 "predecessor_revision": result.predecessor_revision,
                 "current_version_id": result.current.version.id.to_string(),
                 "current_revision": result.current.version.revision,
-                "amount_limit_cents": result.applied_version.amount_limit_cents,
-                "remaining_amount_cents": result.current.balance.remaining_amount_cents,
+                "amount_limit": result.applied_version.amount_limit.display(),
+                "remaining_amount": result.current.balance.remaining_amount.display(),
                 "idempotent_replay": result.idempotent_replay,
             }),
         );

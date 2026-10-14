@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use hubu_common::ids::{
     AgentId, BudgetHoldId, BudgetId, BudgetVersionId, SpendDecisionId, SpendExecutorClaimId,
 };
-use hubu_common::money::Currency;
+use hubu_common::money::{Amount, Currency};
 use hubu_common::time::TimePeriod;
 use sha2::{Digest, Sha256};
 
@@ -52,7 +52,7 @@ pub struct BudgetVersion {
     pub budget_id: BudgetId,
     pub revision: u64,
     pub predecessor_version_id: Option<BudgetVersionId>,
-    pub amount_limit_cents: i64,
+    pub amount_limit: Amount,
     pub effective_at: DateTime<Utc>,
     pub actor: String,
     pub source: String,
@@ -64,12 +64,12 @@ pub struct BudgetVersion {
 impl BudgetVersion {
     pub fn initial(
         budget: &Budget,
-        amount_limit_cents: i64,
+        amount_limit: Amount,
         actor: impl Into<String>,
         source: impl Into<String>,
         reason: Option<String>,
     ) -> Result<Self, BudgetError> {
-        if amount_limit_cents <= 0 {
+        if amount_limit <= Amount::ZERO {
             return Err(BudgetError::AmountLimitMustBePositive);
         }
         let actor = actor.into();
@@ -79,14 +79,14 @@ impl BudgetVersion {
             budget_id: budget.id.clone(),
             revision: 1,
             predecessor_version_id: None,
-            amount_limit_cents,
+            amount_limit,
             effective_at: budget.created_at,
             actor,
             source,
             reason,
             request_fingerprint: initial_budget_request_fingerprint(
                 &budget.agent_id,
-                amount_limit_cents,
+                amount_limit,
                 budget.currency,
                 &budget.period,
             ),
@@ -95,16 +95,27 @@ impl BudgetVersion {
     }
 }
 
+/// Whole-cent amounts keep the original cents canonical form so requests
+/// fingerprinted before accounting-scale amounts still replay; sub-cent
+/// amounts use an explicitly scaled form.
 pub fn initial_budget_request_fingerprint(
     agent_id: &AgentId,
-    amount_limit_cents: i64,
+    amount_limit: Amount,
     currency: Currency,
     period: &TimePeriod,
 ) -> String {
+    let amount_field = match whole_cents(amount_limit) {
+        Some(cents) => format!("amount_limit_cents={cents}"),
+        None => format!(
+            "amount_limit={}\namount_scale={}",
+            amount_limit.units(),
+            hubu_common::money::ACCOUNTING_SCALE
+        ),
+    };
     let canonical = format!(
-        "agent_id={}\namount_limit_cents={}\ncurrency={}\nstarting_at={}\nending_before={}",
+        "agent_id={}\n{}\ncurrency={}\nstarting_at={}\nending_before={}",
         agent_id,
-        amount_limit_cents,
+        amount_field,
         currency,
         period.starting_at.to_rfc3339(),
         period
@@ -125,7 +136,7 @@ pub fn initial_budget_request_fingerprint(
 pub fn budget_update_request_fingerprint(
     budget_id: &BudgetId,
     expected_revision: u64,
-    amount_limit_cents: i64,
+    amount_limit: Amount,
     actor: &str,
     source: &str,
     reason: Option<&str>,
@@ -133,17 +144,34 @@ pub fn budget_update_request_fingerprint(
     let actor = actor.trim();
     let source = source.trim();
     let reason = reason.map(str::trim).filter(|reason| !reason.is_empty());
-    let canonical = serde_json::to_vec(&(
-        "hubu-budget-limit-update-v1",
-        budget_id.to_string(),
-        expected_revision,
-        amount_limit_cents,
-        actor,
-        source,
-        reason,
-    ))
+    // v1 carries whole cents, so retries of pre-upgrade requests still match;
+    // v2 carries accounting-scale units for sub-cent limits.
+    let canonical = match whole_cents(amount_limit) {
+        Some(cents) => serde_json::to_vec(&(
+            "hubu-budget-limit-update-v1",
+            budget_id.to_string(),
+            expected_revision,
+            cents,
+            actor,
+            source,
+            reason,
+        )),
+        None => serde_json::to_vec(&(
+            "hubu-budget-limit-update-v2",
+            budget_id.to_string(),
+            expected_revision,
+            amount_limit.units(),
+            actor,
+            source,
+            reason,
+        )),
+    }
     .expect("canonical budget update fields are always JSON serializable");
     format!("sha256:{:x}", Sha256::digest(canonical))
+}
+
+fn whole_cents(amount: Amount) -> Option<i64> {
+    (amount.legacy_cents_floor() == amount.legacy_cents_ceil()).then(|| amount.legacy_cents_floor())
 }
 
 /// Persisted administrative state of a logical budget.
@@ -218,10 +246,12 @@ pub enum BudgetEvaluationError {
     BalanceBudgetMismatch,
     #[error("budget balance exceeds the representable range")]
     BalanceOverflow,
-    #[error("budget remaining cache {cached_amount_cents} does not equal derived remaining {derived_amount_cents}")]
+    #[error(
+        "budget remaining cache {cached_amount} does not equal derived remaining {derived_amount}"
+    )]
     RemainingBalanceMismatch {
-        cached_amount_cents: i64,
-        derived_amount_cents: i64,
+        cached_amount: Amount,
+        derived_amount: Amount,
     },
 }
 
@@ -246,14 +276,14 @@ pub fn evaluate_budget_availability(
         return Err(BudgetEvaluationError::BalanceBudgetMismatch);
     }
     let derived_remaining = current_version
-        .amount_limit_cents
-        .checked_sub(balance.consumed_amount_cents)
-        .and_then(|remaining| remaining.checked_sub(balance.frozen_amount_cents))
+        .amount_limit
+        .checked_sub(balance.consumed_amount)
+        .and_then(|remaining| remaining.checked_sub(balance.frozen_amount))
         .ok_or(BudgetEvaluationError::BalanceOverflow)?;
-    if balance.remaining_amount_cents != derived_remaining {
+    if balance.remaining_amount != derived_remaining {
         return Err(BudgetEvaluationError::RemainingBalanceMismatch {
-            cached_amount_cents: balance.remaining_amount_cents,
-            derived_amount_cents: derived_remaining,
+            cached_amount: balance.remaining_amount,
+            derived_amount: derived_remaining,
         });
     }
 
@@ -267,7 +297,7 @@ pub fn evaluate_budget_availability(
         .is_some_and(|ending_before| ending_before <= now)
     {
         Ok(BudgetAvailability::Expired)
-    } else if derived_remaining <= 0 {
+    } else if derived_remaining <= Amount::ZERO {
         Ok(BudgetAvailability::Exhausted)
     } else {
         Ok(BudgetAvailability::Active)
@@ -283,9 +313,9 @@ pub fn evaluate_budget_availability(
 #[derive(Debug, Clone)]
 pub struct BudgetBalance {
     pub budget_id: BudgetId,
-    pub consumed_amount_cents: i64,
-    pub frozen_amount_cents: i64,
-    pub remaining_amount_cents: i64,
+    pub consumed_amount: Amount,
+    pub frozen_amount: Amount,
+    pub remaining_amount: Amount,
 }
 
 /// Reserved budget created from an approved spend decision.
@@ -299,7 +329,7 @@ pub struct BudgetHold {
     pub budget_id: BudgetId,
     pub budget_version_id: BudgetVersionId,
     pub spend_decision_id: SpendDecisionId,
-    pub amount_cents: i64,
+    pub amount: Amount,
     pub currency: Currency,
     pub status: BudgetHoldStatus,
     pub executor_claim_id: Option<SpendExecutorClaimId>,
@@ -376,6 +406,7 @@ pub enum BudgetHoldStatus {
 
 #[cfg(test)]
 mod tests {
+    use crate::test_money::cents;
     use chrono::{Duration, TimeZone};
 
     use super::*;
@@ -384,7 +415,7 @@ mod tests {
         administrative_state: BudgetAdministrativeState,
         starting_at: DateTime<Utc>,
         ending_before: Option<DateTime<Utc>>,
-        remaining_amount_cents: i64,
+        remaining_amount: i64,
     ) -> (Budget, BudgetVersion, BudgetBalance) {
         let mut budget = Budget::new(
             BudgetId::new(),
@@ -393,12 +424,12 @@ mod tests {
             TimePeriod::new(starting_at, ending_before).unwrap(),
         );
         budget.administrative_state = administrative_state;
-        let version = BudgetVersion::initial(&budget, 100, "actor", "test", None).unwrap();
+        let version = BudgetVersion::initial(&budget, cents(100), "actor", "test", None).unwrap();
         let balance = BudgetBalance {
             budget_id: budget.id.clone(),
-            consumed_amount_cents: 100 - remaining_amount_cents,
-            frozen_amount_cents: 0,
-            remaining_amount_cents,
+            consumed_amount: cents(100 - remaining_amount),
+            frozen_amount: cents(0),
+            remaining_amount: cents(remaining_amount),
         };
         (budget, version, balance)
     }
@@ -409,7 +440,7 @@ mod tests {
         let canonical = budget_update_request_fingerprint(
             &budget_id,
             7,
-            12_345,
+            cents(12_345),
             "actor:user-1",
             "api",
             Some("quarterly increase"),
@@ -424,18 +455,25 @@ mod tests {
             budget_update_request_fingerprint(
                 &budget_id,
                 7,
-                12_345,
+                cents(12_345),
                 "  actor:user-1  ",
                 " api ",
                 Some(" quarterly increase "),
             )
         );
         assert_eq!(
-            budget_update_request_fingerprint(&budget_id, 7, 12_345, "actor:user-1", "api", None,),
             budget_update_request_fingerprint(
                 &budget_id,
                 7,
-                12_345,
+                cents(12_345),
+                "actor:user-1",
+                "api",
+                None,
+            ),
+            budget_update_request_fingerprint(
+                &budget_id,
+                7,
+                cents(12_345),
                 "actor:user-1",
                 "api",
                 Some("   "),
@@ -540,7 +578,7 @@ mod tests {
         );
 
         version.id = budget.current_version_id.clone();
-        balance.remaining_amount_cents = 99;
+        balance.remaining_amount = cents(99);
         assert!(matches!(
             evaluate_budget_availability(&budget, &version, &balance, start),
             Err(BudgetEvaluationError::RemainingBalanceMismatch { .. })

@@ -107,8 +107,8 @@ fn durable_void_wins_against_a_claim_using_stale_in_memory_state() {
         .contains("revoked"));
     assert!(competing.load_executor_claims().unwrap().is_empty());
     assert_eq!(
-        competing.load_budget_balances().unwrap()[0].remaining_amount_cents,
-        500
+        competing.load_budget_balances().unwrap()[0].remaining_amount,
+        Amount::from_legacy_cents(500).unwrap()
     );
     assert!(state
         .spend

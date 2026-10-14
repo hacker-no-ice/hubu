@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use hubu_common::ids::{AgentId, BudgetId, SpendDecisionId};
-use hubu_common::money::Currency;
+use hubu_common::money::{Amount, Currency};
 use hubu_common::time::TimePeriod;
 
 use crate::budget::model::{
@@ -11,7 +11,7 @@ use crate::budget::model::{
 #[derive(Debug, Clone)]
 pub struct CreateSingleBudgetRequest {
     pub agent_id: AgentId,
-    pub amount_limit_cents: i64,
+    pub amount_limit: Amount,
     pub currency: Currency,
     pub period: TimePeriod,
 }
@@ -27,7 +27,7 @@ pub struct CreateSingleBudgetResponse {
 pub struct ReserveBudgetRequest {
     pub budget_id: BudgetId,
     pub spend_decision_id: SpendDecisionId,
-    pub amount_cents: i64,
+    pub amount: Amount,
     pub currency: Currency,
     pub expires_at: DateTime<Utc>,
 }

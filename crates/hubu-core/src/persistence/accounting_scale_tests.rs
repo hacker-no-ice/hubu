@@ -6,6 +6,7 @@ use super::tests::{
 };
 use super::*;
 use crate::spending_target::{SpendingTarget, SpendingTargetStatus};
+use crate::test_money::cents;
 use chrono::Duration;
 use hubu_common::ids::SpendingTargetId;
 use hubu_common::time::TimePeriod;
@@ -188,23 +189,29 @@ fn legacy_database(path: &Path) -> LegacyFixture {
         Currency::Usd,
         TimePeriod::new(now + Duration::days(2), Some(now + Duration::days(3))).unwrap(),
     );
-    let scheduled_version =
-        BudgetVersion::initial(&scheduled, 4_200, "test:owner", "test:scheduled", None).unwrap();
+    let scheduled_version = BudgetVersion::initial(
+        &scheduled,
+        cents(4_200),
+        "test:owner",
+        "test:scheduled",
+        None,
+    )
+    .unwrap();
     repo.save_budget_with_balance(
         &scheduled,
         &scheduled_version,
         &BudgetBalance {
             budget_id: scheduled.id.clone(),
-            consumed_amount_cents: 0,
-            frozen_amount_cents: 0,
-            remaining_amount_cents: 4_200,
+            consumed_amount: cents(0),
+            frozen_amount: cents(0),
+            remaining_amount: cents(4_200),
         },
     )
     .unwrap();
     repo.save_spending_target(&SpendingTarget {
         id: SpendingTargetId::new(),
         owner_user_id: user_id(),
-        target_amount_cents: 12_345,
+        target_amount: cents(12_345),
         currency: Currency::Usd,
         period: TimePeriod::new(now, Some(now + Duration::days(30))).unwrap(),
         status: SpendingTargetStatus::Active,
@@ -307,11 +314,11 @@ fn legacy_database_migrates_exactly_with_backup_triggers_and_working_lifecycle()
     let settled = load_budget_balance_by_id(&repo.conn, &fixture.settled_budget)
         .unwrap()
         .unwrap();
-    assert_eq!(settled.consumed_amount_cents, 1);
-    assert_eq!(settled.remaining_amount_cents, 9_999);
+    assert_eq!(settled.consumed_amount, cents(1));
+    assert_eq!(settled.remaining_amount, cents(9_999));
     assert_eq!(
-        repo.load_spending_targets().unwrap()[0].target_amount_cents,
-        12_345
+        repo.load_spending_targets().unwrap()[0].target_amount,
+        cents(12_345)
     );
 
     let now = Utc::now();
@@ -325,8 +332,11 @@ fn legacy_database_migrates_exactly_with_backup_triggers_and_working_lifecycle()
             now,
         )
         .unwrap();
-    assert_eq!(settled_in_flight.balance.consumed_amount_cents, 1);
-    assert_eq!(settled_in_flight.balance.frozen_amount_cents, 0);
+    assert_eq!(
+        settled_in_flight.balance.consumed_amount,
+        Amount::from_units(3_100)
+    );
+    assert_eq!(settled_in_flight.balance.frozen_amount, cents(0));
     repo.reconcile_executor_claim_as_billed_transactionally(
         &fixture.expired.id,
         &user_id(),
@@ -434,7 +444,7 @@ fn fresh_database_gets_accounting_columns_without_a_backup() {
 }
 
 #[test]
-fn missing_or_sub_cent_authoritative_amounts_are_invalid_data() {
+fn missing_authoritative_amounts_are_invalid_data() {
     let mut repo = SqliteGovernanceRepository::in_memory().unwrap();
     let (_, _, hold) = persist_claimed_executor_spend_with_operation_key(
         &mut repo,
@@ -454,19 +464,10 @@ fn missing_or_sub_cent_authoritative_amounts_are_invalid_data() {
             .contains("accounting-scale amount is missing"),
         "{error}"
     );
-
-    repo.conn
-        .execute(
-            "UPDATE budget_balances SET consumed_amount = 1 WHERE budget_id = ?1",
-            params![hold.budget_id.to_string()],
-        )
-        .unwrap();
-    let error = repo.load_budget_balances().unwrap_err();
-    assert!(error.to_string().contains("is not a whole cent"), "{error}");
 }
 
 #[test]
-fn writes_dual_write_exact_units_and_legacy_cents() {
+fn sub_cent_settlement_writes_exact_units_and_conservative_legacy_projections() {
     let mut repo = SqliteGovernanceRepository::in_memory().unwrap();
     let (claim, _, hold) = persist_claimed_executor_spend_with_operation_key(
         &mut repo,
@@ -482,30 +483,63 @@ fn writes_dual_write_exact_units_and_legacy_cents() {
         Utc::now(),
     )
     .unwrap();
-    for (table, column, legacy_column) in AMOUNT_PAIRS {
-        let mismatched: i64 = repo
-            .conn
-            .query_row(
-                &format!(
-                    "SELECT COUNT(*) FROM {table}
-                     WHERE {column} IS NOT {legacy_column} * 10000 OR amount_scale IS NOT 6"
-                ),
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(mismatched, 0, "{table}.{column}");
-    }
-    let balance = load_budget_balance_by_id(&repo.conn, &hold.budget_id)
+    let balance: (i64, i64, i64, i64, i64, i64) = repo
+        .conn
+        .query_row(
+            "SELECT consumed_amount, consumed_amount_cents, frozen_amount, frozen_amount_cents,
+                    remaining_amount, remaining_amount_cents
+             FROM budget_balances WHERE budget_id = ?1",
+            params![hold.budget_id.to_string()],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .unwrap();
+    // Consumed rounds up and remaining rounds down, so a legacy reader never
+    // sees more available budget than exists.
+    assert_eq!(balance, (3_100, 1, 0, 0, 99_996_900, 9_999));
+    let receipt: (i64, i64, i64, i64, i64, i64, i64) = repo
+        .conn
+        .query_row(
+            "SELECT authorized_max, authorized_max_cents, budget_charge, budget_charge_cents,
+                    released_amount, released_amount_cents, actual_vendor_cost_cents
+             FROM spend_executor_settlement_receipts",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(receipt, (25_000_000, 2_500, 3_100, 1, 24_996_900, 2_499, 1));
+    let loaded = load_budget_balance_by_id(&repo.conn, &hold.budget_id)
         .unwrap()
         .unwrap();
     assert_eq!(
         (
-            balance.consumed_amount_cents,
-            balance.frozen_amount_cents,
-            balance.remaining_amount_cents
+            loaded.consumed_amount,
+            loaded.frozen_amount,
+            loaded.remaining_amount
         ),
-        (1, 0, 9_999)
+        (
+            Amount::from_units(3_100),
+            cents(0),
+            Amount::from_units(99_996_900)
+        )
     );
 }
 
