@@ -1,22 +1,37 @@
-//! Upgrade drill for the v0.2.4 micro-unit migration on a COPY of a real
-//! Gongbu database. Opt-in; run with:
+//! Upgrade drill for the v0.2.4 micro-unit migration on a real Gongbu
+//! database. Opt-in; run with:
 //!
 //! ```text
-//! GONGBU_UPGRADE_DRILL_DB=/tmp/drill/gongbu.sqlite3 \
+//! GONGBU_UPGRADE_DRILL_SOURCE=<path to gongbu.sqlite3> \
 //!   cargo test -p gongbu-api --test upgrade_drill -- --ignored --nocapture
 //! ```
 //!
-//! Make the copy with `sqlite3 -readonly <live db> ".backup '<copy>'"`; the
-//! drill refuses to open a database inside a stack profile.
+//! The drill never writes to the source: it opens it read-only, copies it
+//! with `VACUUM INTO` into a private temporary directory, and migrates only
+//! that copy. The source may be a live stack database.
 
 use gongbu_api::{
     execution::{Error as PersistenceError, Repository},
     provider_contract::PricingSnapshot,
     redaction::Redactor,
 };
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+/// Copy `source` into `directory` through a read-only connection.
+fn private_copy(source: &Path, directory: &Path) -> PathBuf {
+    let copy = directory.join("gongbu.sqlite3");
+    let reader = Connection::open_with_flags(
+        source,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .expect("open the source database read-only");
+    reader
+        .execute("VACUUM INTO ?1", [copy.to_str().expect("utf-8 temp path")])
+        .expect("copy the source database");
+    copy
+}
 
 struct LegacyRow {
     execution_id: String,
@@ -26,7 +41,7 @@ struct LegacyRow {
     receipt: Option<(i64, Value)>,
 }
 
-fn legacy_rows(path: &PathBuf) -> Vec<LegacyRow> {
+fn legacy_rows(path: &Path) -> Vec<LegacyRow> {
     let connection = Connection::open(path).unwrap();
     let mut statement = connection
         .prepare(
@@ -99,15 +114,13 @@ fn verify(repository: &Repository, rows: &[LegacyRow]) {
 }
 
 #[test]
-#[ignore = "upgrade drill on a copy of a real database; set GONGBU_UPGRADE_DRILL_DB"]
+#[ignore = "upgrade drill on a private copy of a real database; set GONGBU_UPGRADE_DRILL_SOURCE"]
 fn accounting_units_upgrade_drill_on_a_copy() {
-    let path = PathBuf::from(
-        std::env::var("GONGBU_UPGRADE_DRILL_DB").expect("set GONGBU_UPGRADE_DRILL_DB"),
+    let source = PathBuf::from(
+        std::env::var("GONGBU_UPGRADE_DRILL_SOURCE").expect("set GONGBU_UPGRADE_DRILL_SOURCE"),
     );
-    assert!(
-        !path.to_string_lossy().contains("/profiles/"),
-        "refusing to open a stack profile database; use a backup copy"
-    );
+    let directory = tempfile::tempdir().unwrap();
+    let path = private_copy(&source, directory.path());
     let rows = legacy_rows(&path);
     assert!(!rows.is_empty(), "the drill copy has no executions");
     for open in ["migrate", "reopen"] {

@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
 """Upgrade drill for the v0.2.4 micro-unit migration on a COPY of a real Hubu DB.
 
-The drill never touches the live database. Make the copy first with SQLite's
-online backup, for example:
-
-    sqlite3 -readonly ~/.../state/hubu/hubu.sqlite3 ".backup '/tmp/drill/hubu.sqlite3'"
-
-Then run:
+The drill never writes to the database you name. It opens ``--source-db``
+read-only, copies it with SQLite's online backup into a private temporary
+directory, and runs every phase against that copy. The source may be a live
+stack database; it is never migrated or modified.
 
     python3 scripts/upgrade-drill-amount-precision.py \\
         --old-server-bin ~/.local/bin/hubu-server \\
         --new-server-bin target/debug/hubu-server \\
-        --hubu-db /tmp/drill/hubu.sqlite3 [--report drill.json]
+        --source-db ~/.../state/hubu/hubu.sqlite3 [--report drill.json]
 
 Phases:
 
@@ -171,17 +169,37 @@ def amounts(database: Path) -> dict[str, Any]:
         connection.close()
 
 
+def private_copy(source: Path, workdir: Path) -> Path:
+    """Copy ``source`` into ``workdir`` through a read-only connection."""
+    check(source.is_file(), f"{source} is not a database file")
+    copy = workdir / "hubu.sqlite3"
+    reader = sqlite3.connect(f"file:{source.resolve()}?mode=ro", uri=True)
+    writer = sqlite3.connect(copy)
+    try:
+        reader.backup(writer)
+    finally:
+        writer.close()
+        reader.close()
+    check(copy.resolve().parent == workdir.resolve(), "drill copy escaped its directory")
+    return copy
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--old-server-bin", type=Path, required=True)
     parser.add_argument("--new-server-bin", type=Path, required=True)
-    parser.add_argument("--hubu-db", type=Path, required=True, help="a COPY of the Hubu database")
+    parser.add_argument(
+        "--source-db", type=Path, required=True, help="Hubu database to copy; opened read-only, never modified"
+    )
     parser.add_argument("--report", type=Path)
     args = parser.parse_args()
-    database = args.hubu_db.resolve()
-    check("/profiles/" not in str(database), "refusing to run on a profile database; use a backup copy")
     workdir = Path(tempfile.mkdtemp(prefix="hubu-upgrade-drill-"))
-    report: dict[str, Any] = {"schema": "hubu-amount-precision-upgrade-drill-v1", "database_copy": str(database)}
+    database = private_copy(args.source_db, workdir)
+    report: dict[str, Any] = {
+        "schema": "hubu-amount-precision-upgrade-drill-v1",
+        "source": str(args.source_db.resolve()),
+        "database_copy": str(database),
+    }
 
     # -- Phase 1: pre-upgrade state with the old binary -------------------
     old = Server(args.old_server_bin, database, workdir, "old")
