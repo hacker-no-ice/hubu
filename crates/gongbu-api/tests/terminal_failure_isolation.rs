@@ -124,22 +124,59 @@ async fn run() {
     let client = reqwest::Client::new();
     wait_until_ready(&client, &base_url).await;
 
-    for (operation_key, expected_status) in [
-        ("hubu-401", ExecutionStatus::Failed),
-        ("hubu-scope-mismatch", ExecutionStatus::Failed),
-        ("hubu-expired", ExecutionStatus::Failed),
-        ("hubu-other-proven", ExecutionStatus::Failed),
-        ("provider-rejected", ExecutionStatus::Released),
+    for (scenario_token, expected_status, expected_code) in [
+        ("hubu-401", ExecutionStatus::Failed, "hubu_request_rejected"),
+        (
+            "hubu-scope-mismatch",
+            ExecutionStatus::Failed,
+            "hubu_scope_mismatch",
+        ),
+        (
+            "hubu-expired",
+            ExecutionStatus::Failed,
+            "hubu_authorization_expired",
+        ),
+        (
+            "hubu-other-proven",
+            ExecutionStatus::Failed,
+            "hubu_other_proven_failure",
+        ),
+        (
+            "provider-rejected",
+            ExecutionStatus::Released,
+            "provider_rejected",
+        ),
     ] {
-        let execution = submit(&client, &base_url, operation_key).await;
+        let execution = submit(&client, &base_url, scenario_token).await;
+        assert_eq!(execution.spend_auth_token_id, scenario_token);
         let terminal = wait_for_terminal(&client, &base_url, &execution.execution_id).await;
-        assert_eq!(terminal.status, expected_status);
+        assert_eq!(
+            terminal.status, expected_status,
+            "scenario {scenario_token}"
+        );
+        let observed_code = if expected_status == ExecutionStatus::Released {
+            // A confirmed release clears the execution failure field; the
+            // provider attempt retains the proven rejection that caused it.
+            repository
+                .get_provider_attempt_for_execution(&execution.execution_id)
+                .unwrap()
+                .failure_code
+        } else {
+            terminal
+                .failure
+                .as_ref()
+                .map(|failure| failure.code.clone())
+        };
+        assert_eq!(observed_code.as_deref(), Some(expected_code));
         assert_eq!(ready_status(&client, &base_url).await, StatusCode::OK);
         assert!(
             temporal.is_running(),
-            "managed Temporal exited after {operation_key}"
+            "managed Temporal exited after {scenario_token}"
         );
-        assert!(!server.is_finished(), "Gongbu exited after {operation_key}");
+        assert!(
+            !server.is_finished(),
+            "Gongbu exited after {scenario_token}"
+        );
     }
 
     let valid = submit(&client, &base_url, "valid-after-failures").await;
@@ -427,12 +464,12 @@ async fn live_status(client: &reqwest::Client, base_url: &str) -> StatusCode {
 async fn submit(
     client: &reqwest::Client,
     base_url: &str,
-    operation_key: &str,
+    scenario_token: &str,
 ) -> ExecutionResponse {
     let response = client
         .post(format!("{base_url}/v2/executions"))
         .bearer_auth(CALLER_TOKEN)
-        .json(&request(operation_key))
+        .json(&request(scenario_token))
         .send()
         .await
         .unwrap();
@@ -469,10 +506,10 @@ async fn wait_for_terminal(
     panic!("execution {execution_id} did not become terminal");
 }
 
-fn request(operation_key: &str) -> Value {
+fn request(scenario_token: &str) -> Value {
     json!({
         "schema_version": 2,
-        "spend_auth_token_id": operation_key,
+        "spend_auth_token_id": scenario_token,
         "input": {"prompt": "cat", "image_count": 1},
         "input_schema_version": 1,
         "target_id": "gongbu:target:v1:050acc365f58cc4d45a99e3c491925193d81e848452209ef5eba2d54b5550efa"
@@ -526,7 +563,9 @@ struct ScenarioHubu;
 
 impl HubuActivities for ScenarioHubu {
     fn preflight(&self, execution: &Execution) -> Result<(), ActivityError> {
-        let code = match execution.operation_key.as_str() {
+        // The scenario follows the consumed authorization continuation. Gongbu's
+        // operation identity derives from the decision ID and remains opaque.
+        let code = match execution.hubu_token_reference.as_str() {
             "hubu-401" => Some("hubu_request_rejected"),
             "hubu-scope-mismatch" => Some("hubu_scope_mismatch"),
             "hubu-expired" => Some("hubu_authorization_expired"),
@@ -596,7 +635,7 @@ impl ProviderActivities for ScenarioProvider {
     }
 
     fn invoke(&self, execution: &Execution, _: &str) -> Result<ProviderSuccess, ActivityError> {
-        if execution.operation_key == "provider-rejected" {
+        if execution.hubu_token_reference.as_str() == "provider-rejected" {
             return Err(ActivityError::Proven("provider_rejected".into()));
         }
         Ok(ProviderSuccess {
