@@ -19,7 +19,9 @@ use std::os::unix::fs::OpenOptionsExt;
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
 use hubu_common::{
-    build::{build_info, EXECUTOR_CONTRACT},
+    build::{
+        build_info, EXECUTOR_CONTRACT, LEGACY_EXECUTOR_CONTRACT, SUPPORTED_EXECUTOR_CONTRACTS,
+    },
     execution_scope::{
         resolve_execution_scope, ExecutionScope, ExecutionScopeSelector, ScopeIdentity,
         EXECUTION_SCOPE_SCHEMA_VERSION,
@@ -33,7 +35,7 @@ use hubu_common::{
         AgentType, CodeReference, ModelIdentity, RuntimeEnvironment, RuntimeIdentity,
     },
     models::{User, UserContext},
-    money::{Amount, Currency},
+    money::{Amount, Currency, ACCOUNTING_SCALE},
     time::TimePeriod,
 };
 use hubu_core::{
@@ -1391,6 +1393,10 @@ struct PolicyConditionHttpResponse {
 
 #[derive(Debug, Deserialize)]
 struct ExecutorSpendHttpRequest {
+    /// The executor contract the request speaks. Absent means
+    /// `hubu-spend-executor-v4.4`, whose amounts are whole cents.
+    #[serde(default)]
+    contract_version: Option<String>,
     /// Optional assertion of the authorization's currency. Hubu always uses
     /// the authoritative currency and rejects a mismatching assertion.
     #[serde(default)]
@@ -1398,10 +1404,125 @@ struct ExecutorSpendHttpRequest {
     spend_auth_token_id: String,
     agent_id: Option<String>,
     account_id: Option<String>,
-    amount_cents: i64,
+    /// v4.5: the exact authorized amount with an explicit scale.
+    #[serde(default)]
+    amount: Option<ExecutorAmountHttpRequest>,
+    /// v4.4: the authorization rounded up to a whole cent.
+    #[serde(default)]
+    amount_cents: Option<i64>,
     merchant: Option<String>,
     execution_scope: Option<ExecutionScope>,
     task_id: Option<String>,
+}
+
+/// A v4.5 executor amount: `units` of 10^-`scale` of `currency`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExecutorAmountHttpRequest {
+    units: String,
+    #[serde(default)]
+    scale: Option<u32>,
+    currency: String,
+}
+
+/// An executor request's amount, normalized from its contract version.
+#[derive(Debug, Clone, Copy)]
+enum ExecutorWireAmount {
+    /// v4.4: the authorization rounded up to a whole cent.
+    LegacyCents(i64),
+    /// v4.5: the exact authorization.
+    Exact { amount: Amount, currency: Currency },
+}
+
+impl ExecutorSpendHttpRequest {
+    /// Read the amount the way the request's contract version defines it.
+    fn wire_amount(&self) -> Result<ExecutorWireAmount> {
+        match self.contract_version.as_deref() {
+            None | Some(LEGACY_EXECUTOR_CONTRACT) => {
+                if self.amount.is_some() {
+                    return Err(anyhow!(
+                        "the exact amount object requires contract_version \"{EXECUTOR_CONTRACT}\"; {LEGACY_EXECUTOR_CONTRACT} requests send amount_cents"
+                    ));
+                }
+                let cents = self.amount_cents.ok_or_else(|| {
+                    anyhow!(
+                        "{LEGACY_EXECUTOR_CONTRACT} executor requests must include amount_cents"
+                    )
+                })?;
+                if cents <= 0 {
+                    return Err(anyhow!("executor spend amount must be positive"));
+                }
+                Ok(ExecutorWireAmount::LegacyCents(cents))
+            }
+            Some(EXECUTOR_CONTRACT) => {
+                if self.amount_cents.is_some() {
+                    return Err(anyhow!(
+                        "{EXECUTOR_CONTRACT} executor requests send the exact amount object, not amount_cents"
+                    ));
+                }
+                let amount = self.amount.as_ref().ok_or_else(|| {
+                    anyhow!(
+                        "{EXECUTOR_CONTRACT} executor requests must include amount {{units, scale, currency}}"
+                    )
+                })?;
+                let scale = amount
+                    .scale
+                    .ok_or_else(|| anyhow!("executor amount.scale is required"))?;
+                if scale != ACCOUNTING_SCALE {
+                    return Err(anyhow!(
+                        "executor amount.scale must be {ACCOUNTING_SCALE}; got {scale}"
+                    ));
+                }
+                let units = amount.units.as_str();
+                if units.is_empty() || !units.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return Err(anyhow!(
+                        "executor amount.units must be a non-negative integer string"
+                    ));
+                }
+                let units = units
+                    .parse::<i64>()
+                    .map_err(|_| anyhow!("executor amount.units is out of range"))?;
+                if units == 0 {
+                    return Err(anyhow!("executor spend amount must be positive"));
+                }
+                let currency = amount
+                    .currency
+                    .trim()
+                    .to_ascii_lowercase()
+                    .parse::<Currency>()
+                    .map_err(|error| anyhow!(error))?;
+                Ok(ExecutorWireAmount::Exact {
+                    amount: Amount::from_units(units),
+                    currency,
+                })
+            }
+            Some(other) => Err(anyhow!(
+                "unsupported executor contract_version {other:?}; supported versions: {}",
+                SUPPORTED_EXECUTOR_CONTRACTS.join(", ")
+            )),
+        }
+    }
+
+    /// The request as Hubu echoes it for an authorization it already holds.
+    fn authoritative(
+        decision: &hubu_core::spend::SpendDecisionRecord,
+        spend_auth_token_id: String,
+        agent_id: String,
+        account_id: String,
+    ) -> Self {
+        Self {
+            contract_version: None,
+            currency: Some(decision.request.currency.to_string()),
+            spend_auth_token_id,
+            agent_id: Some(agent_id),
+            account_id: Some(account_id),
+            amount: None,
+            amount_cents: Some(decision.request.amount.legacy_cents_ceil()),
+            merchant: decision.request.merchant.clone(),
+            execution_scope: decision.request.execution_scope.clone(),
+            task_id: decision.request.task_id.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1507,6 +1628,9 @@ struct ExecutorSpendHttpResponse {
     decision_id: String,
     account_id: String,
     agent_id: String,
+    /// The exact authorized amount (v4.5).
+    amount: MoneyHttpResponse,
+    /// The authorization rounded up to a whole cent (v4.4).
     amount_cents: i64,
     currency: String,
     merchant: Option<String>,
@@ -2285,6 +2409,21 @@ fn authenticate_approval_capability(capability: Option<&str>, state: &ServerStat
 fn spend_executor_guidance(state: &ServerState) -> Value {
     json!({
         "protocol_version": EXECUTOR_CONTRACT,
+        "supported_protocol_versions": SUPPORTED_EXECUTOR_CONTRACTS,
+        "amounts": {
+            "accounting_scale": ACCOUNTING_SCALE,
+            "currencies": ["usd", "usdc"],
+            "exact": "an amount object {units, scale, currency}: units is an integer string of 10^-scale of currency; executors send scale 6 and never use floating point",
+            "contract_version": format!("validate and claim requests send contract_version \"{EXECUTOR_CONTRACT}\" with the exact amount that resolve returned"),
+            "legacy": format!("a request without contract_version is {LEGACY_EXECUTOR_CONTRACT}: it sends amount_cents, the authorization rounded up to a whole cent, and is accepted during the transition"),
+            "rejected": [
+                "a missing or unsupported amount.scale",
+                "an unknown contract_version",
+                "amount_cents together with the exact amount",
+                "an exact amount or currency that differs from the authorization"
+            ],
+            "responses": "executor responses carry the exact amount object and the amount_cents projection for every contract version"
+        },
         "role_boundary": {
             "hubu": [
                 "register agents and owners",
@@ -2377,10 +2516,11 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
             "required": [
                 "operation_key",
                 "account_id",
-                "amount_cents",
+                "amount (exact decimal string, at most 6 decimal places; amount_cents is deprecated)",
                 "reason"
             ],
             "optional": [
+                "currency (usd or usdc; defaults to usd)",
                 "task_id",
                 "execution_scope",
                 "merchant (legacy only)",
@@ -2398,7 +2538,8 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
             "mcp": "hubu_resolve_spend_approval is protected by the narrow spend-approval client gate"
         },
         "validate_request": {
-            "required": ["spend_auth_token_id", "account_id", "amount_cents"],
+            "required": ["spend_auth_token_id", "account_id", "contract_version", "amount.units", "amount.scale", "amount.currency"],
+            "legacy_v4_4_required": ["spend_auth_token_id", "account_id", "amount_cents"],
             "rejected": ["operation_key", "agent_id"],
             "note": "read-only scope inspection; it never authorizes irreversible work"
         },
@@ -2406,15 +2547,24 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
             "required": [
                 "spend_auth_token_id",
                 "account_id",
+                "contract_version",
+                "amount.units",
+                "amount.scale",
+                "amount.currency"
+            ],
+            "legacy_v4_4_required": [
+                "spend_auth_token_id",
+                "account_id",
                 "amount_cents"
             ],
             "optional": [
+                "currency (assertion only; must equal the authorization's currency)",
                 "execution_scope",
                 "merchant (legacy only)",
                 "task_id (compatibility assertion only; Hubu uses the authorization snapshot)"
             ],
             "rejected": ["operation_key", "agent_id"],
-            "currency": "usd in v4"
+            "currency": "the authorization's currency, usd or usdc; budgets are per currency"
         },
         "settle_request": {
             "identity": "claim_id",
@@ -2464,7 +2614,7 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
             "operation_key is platform-assigned, immutable, and scoped to the authorized agent; authorization retries must use the same spend scope",
             "task_id is an optional trusted external correlation and reason is independent human-readable authorization context; neither must equal operation_key",
             "Hubu resolves task_id and reason from the authorization snapshot for executor and reconciliation evidence; a supplied executor task_id is only a compatibility assertion and must match",
-            "account_id, amount_cents, complete canonical execution_scope, and legacy merchant must match the original authorized spend",
+            "account_id, the exact amount and currency (or, for v4.4, its whole-cent projection), complete canonical execution_scope, and legacy merchant must match the original authorized spend",
             "typed execution_scope identifiers resolve against Hubu's trusted catalog; unknown or ambiguous identifiers are rejected",
             "provider, executor, capability, and billing_merchant are independently policy-addressable stable identities",
             "lease_profile is selected during authorization and cannot be changed by the executor",
@@ -2478,8 +2628,8 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
         "settlement_rules": [
             "settle only after the executor has performed irreversible billable work",
             "release only before irreversible billable work has occurred",
-            "settlement atomically persists the immutable exact provider cost and full frozen pricing snapshot, marks the claim settled and token used, conservatively consumes the ceiling in budget cents, and releases the authorization remainder",
-            "actual vendor cost is an integer major-unit decimal with scale at most 18; Hubu never uses floating point and rounds fractional budget cents up",
+            "settlement atomically persists the immutable exact provider cost and full frozen pricing snapshot, marks the claim settled and token used, consumes the cost rounded up to the budget's micro-unit (scale 6), and releases the authorization remainder",
+            "actual vendor cost is an integer major-unit decimal with scale at most 18 in the hold's own currency; Hubu never uses floating point and rounds only digits beyond scale 6 up",
             "normal settlement rejects a conservative budget charge above the authorized maximum; human vendor-billed reconciliation records an already-incurred overrun explicitly",
             "an identical settlement retry returns the original settlement_id and receipt without consuming budget twice; a changed receipt is rejected",
             "finalization resolves by claim_id; an executor that lost the claim response replays the identical claim, which returns the existing claim even after the authorization expires",
@@ -4610,16 +4760,13 @@ fn resolve_executor_spend(body: String, state: &ServerState) -> Result<ExecutorS
         reason: decision.request.reason.clone(),
         lease_profile: decision.request.lease_profile.clone(),
         status: "available".to_string(),
-        request: ExecutorSpendHttpRequest {
-            currency: Some(decision.request.currency.to_string()),
-            spend_auth_token_id: token.id.to_string(),
-            agent_id: Some(agent_pub_id.clone()),
-            account_id: Some(account.pub_id.clone()),
-            amount_cents: decision.request.amount.legacy_cents_ceil(),
-            merchant: decision.request.merchant.clone(),
-            execution_scope: decision.request.execution_scope.clone(),
-            task_id: decision.request.task_id.clone(),
-        },
+        request: ExecutorSpendHttpRequest::authoritative(
+            &decision,
+            token.id.to_string(),
+            agent_pub_id.clone(),
+            account.pub_id.clone(),
+        ),
+        authorized_amount: decision.request.amount,
         account_pub_id: account.pub_id,
         agent_pub_id,
         token_id: token.id.clone(),
@@ -5008,6 +5155,8 @@ struct ValidatedExecutorSpend {
     lease_profile: String,
     status: String,
     request: ExecutorSpendHttpRequest,
+    /// The exact authorized amount, whatever the request's contract version.
+    authorized_amount: Amount,
     account_pub_id: String,
     agent_pub_id: String,
     token_id: SpendAuthTokenId,
@@ -5018,6 +5167,8 @@ struct ValidatedExecutorSpend {
 
 struct ResolvedExecutorSpend {
     request: ExecutorSpendHttpRequest,
+    /// The request's amount as its contract version defines it.
+    wire_amount: ExecutorWireAmount,
     /// The exact authorized amount, set once the request's cent projection
     /// has been checked against the authoritative authorization.
     authorized_amount: Option<Amount>,
@@ -5038,14 +5189,21 @@ impl ResolvedExecutorSpend {
             owner_user_id: self.owner_user_id.clone(),
             agent_id: self.agent_id.clone(),
             agent_account_id: self.agent_account_id.clone(),
-            // The wire carries cents. Validate with the exact authorized
+            // A v4.4 wire carries cents. Validate with the exact authorized
             // amount once it is known; otherwise an amount beyond the
             // accounting range saturates and can never match.
-            amount: self.authorized_amount.unwrap_or_else(|| {
-                Amount::from_legacy_cents(self.request.amount_cents)
-                    .unwrap_or(Amount::from_units(i64::MAX))
+            amount: self
+                .authorized_amount
+                .unwrap_or_else(|| match self.wire_amount {
+                    ExecutorWireAmount::LegacyCents(cents) => {
+                        Amount::from_legacy_cents(cents).unwrap_or(Amount::from_units(i64::MAX))
+                    }
+                    ExecutorWireAmount::Exact { amount, .. } => amount,
+                }),
+            currency: self.authorized_currency.unwrap_or(match self.wire_amount {
+                ExecutorWireAmount::LegacyCents(_) => Currency::Usd,
+                ExecutorWireAmount::Exact { currency, .. } => currency,
             }),
-            currency: self.authorized_currency.unwrap_or(Currency::Usd),
             merchant: self.request.merchant.clone(),
             execution_scope: self.request.execution_scope.clone(),
             task_id: self.request.task_id.clone(),
@@ -5065,6 +5223,7 @@ impl ResolvedExecutorSpend {
             lease_profile,
             status: "available".to_string(),
             request: self.request,
+            authorized_amount: self.authorized_amount.unwrap_or(budget_hold.amount),
             account_pub_id: self.account_pub_id,
             agent_pub_id: self.agent_pub_id,
             token_id: self.token_id,
@@ -5091,10 +5250,19 @@ fn apply_authoritative_executor_identity(
         ));
     }
     resolved.request.task_id = decision.request.task_id.clone();
-    // Cent-denominated executors see the authorization rounded up to a cent;
-    // accept exactly that projection and validate with the exact amount. The
-    // mismatch error is the executor contract's existing wording.
-    if resolved.request.amount_cents != decision.request.amount.legacy_cents_ceil() {
+    // v4.4 executors see the authorization rounded up to a cent; accept
+    // exactly that projection and validate with the exact amount. v4.5
+    // executors send the exact amount and currency. The mismatch error is the
+    // executor contract's existing wording.
+    let matches_authorization = match resolved.wire_amount {
+        ExecutorWireAmount::LegacyCents(cents) => {
+            cents == decision.request.amount.legacy_cents_ceil()
+        }
+        ExecutorWireAmount::Exact { amount, currency } => {
+            amount == decision.request.amount && currency == decision.request.currency
+        }
+    };
+    if !matches_authorization {
         return Err(hubu_core::spend::SpendError::PaymentRequestMismatch.into());
     }
     if let Some(asserted) = resolved.request.currency.as_deref() {
@@ -5120,9 +5288,7 @@ fn resolve_executor_spend_request(
     mut request: ExecutorSpendHttpRequest,
     state: &ServerState,
 ) -> Result<ResolvedExecutorSpend> {
-    if request.amount_cents <= 0 {
-        return Err(anyhow!("executor spend amount must be positive"));
-    }
+    let wire_amount = request.wire_amount()?;
     reconcile_expired_budget_holds(state)?;
     request.execution_scope = match request.execution_scope.as_ref() {
         Some(scope) => {
@@ -5151,7 +5317,7 @@ fn resolve_executor_spend_request(
         operation_key: None,
         agent_id: request.agent_id.clone(),
         account_id: request.account_id.clone(),
-        amount_cents: Some(request.amount_cents),
+        amount_cents: None,
         amount: None,
         currency: request.currency.clone(),
         reason: "executor authorization snapshot lookup".to_string(),
@@ -5171,6 +5337,7 @@ fn resolve_executor_spend_request(
 
     Ok(ResolvedExecutorSpend {
         request,
+        wire_amount,
         authorized_amount: None,
         authorized_currency: None,
         account_pub_id,
@@ -5233,7 +5400,8 @@ fn validate_executor_spend_request(
             "hold_id": budget_hold.id.to_string(),
             "account_pub_id": resolved.account_pub_id,
             "agent_pub_id": resolved.agent_pub_id,
-            "amount_cents": resolved.request.amount_cents,
+            "amount": budget_hold.amount,
+            "currency": budget_hold.currency,
             "merchant": resolved.request.merchant.clone(),
             "task_id": resolved.request.task_id.clone(),
         }),
@@ -5306,16 +5474,13 @@ fn executor_spend_from_claim_state(
         reason: claim_state.decision.request.reason.clone(),
         lease_profile: claim_state.decision.request.lease_profile.clone(),
         status: executor_claim_status_name(&claim_state.claim.status).to_string(),
-        request: ExecutorSpendHttpRequest {
-            currency: Some(claim_state.decision.request.currency.to_string()),
-            spend_auth_token_id: claim_state.token.id.to_string(),
-            agent_id: Some(agent_pub_id.clone()),
-            account_id: Some(account.pub_id.clone()),
-            amount_cents: claim_state.decision.request.amount.legacy_cents_ceil(),
-            merchant: claim_state.decision.request.merchant.clone(),
-            execution_scope: claim_state.decision.request.execution_scope.clone(),
-            task_id: claim_state.decision.request.task_id.clone(),
-        },
+        request: ExecutorSpendHttpRequest::authoritative(
+            &claim_state.decision,
+            claim_state.token.id.to_string(),
+            agent_pub_id.clone(),
+            account.pub_id.clone(),
+        ),
+        authorized_amount: claim_state.decision.request.amount,
         account_pub_id: account.pub_id,
         agent_pub_id,
         token_id: claim_state.token.id.clone(),
@@ -5392,7 +5557,8 @@ fn executor_spend_response_with_hold(
         decision_id: validated.validation.spend_decision_id.to_string(),
         account_id: validated.account_pub_id.clone(),
         agent_id: validated.agent_pub_id.clone(),
-        amount_cents: validated.request.amount_cents,
+        amount: MoneyHttpResponse::new(validated.authorized_amount, hold.currency),
+        amount_cents: validated.authorized_amount.legacy_cents_ceil(),
         currency: hold.currency.to_string(),
         merchant: validated.request.merchant.clone(),
         execution_scope: validated.request.execution_scope.clone(),
@@ -7431,7 +7597,7 @@ lease_profiles:
         );
         assert_eq!(
             response.body["executor_contract"],
-            "hubu-spend-executor-v4.4"
+            "hubu-spend-executor-v4.5"
         );
         assert!(response.body["source_commit"]
             .as_str()
@@ -9394,8 +9560,13 @@ lease_profiles:
             assert_eq!(response.status, 200);
             assert_eq!(
                 response.body["protocol_version"],
-                "hubu-spend-executor-v4.4"
+                "hubu-spend-executor-v4.5"
             );
+            assert_eq!(
+                response.body["supported_protocol_versions"],
+                json!(["hubu-spend-executor-v4.5", "hubu-spend-executor-v4.4"])
+            );
+            assert_eq!(response.body["amounts"]["accounting_scale"], 6);
             assert!(response.body["role_boundary"]["hubu"]
                 .as_array()
                 .expect("hubu role list should be an array")
@@ -9813,6 +9984,169 @@ lease_profiles:
             budget.balance.consumed_amount,
             "0.0031".parse::<Amount>().unwrap()
         );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn v4_4_and_v4_5_executors_claim_against_the_same_hubu() {
+        let path =
+            std::env::temp_dir().join(format!("hubu-api-executor-v45-{}.sqlite", UserId::new()));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        init(
+            json!({"display_name": "Alice Example", "email": "alice@example.com"}).to_string(),
+            &state,
+        )
+        .unwrap();
+        let agent = register_agent(
+            json!({"name": "v45-executor-agent", "version": "v1"}).to_string(),
+            &state,
+        )
+        .unwrap();
+        add_policy(
+            json!({"agent_id": agent.agent_id, "daily_limit_cents": 500}).to_string(),
+            &state,
+        )
+        .unwrap();
+        create_test_agent_budget(&state, &agent.agent_id, 500);
+        let authorize = |operation_key: &str, amount: &str| {
+            let authorization = authorize_spend(
+                json!({
+                    "operation_key": operation_key,
+                    "account_id": agent.account_id,
+                    "amount": amount,
+                    "reason": "executor contract versions",
+                    "merchant": "gongbu.image",
+                })
+                .to_string(),
+                &state,
+            )
+            .unwrap();
+            assert_eq!(authorization.decision, "allow");
+            authorization.auth_token_id.unwrap()
+        };
+        let half_cent = authorize("v45-half-cent", "0.005");
+        let legacy = authorize("v44-whole-cents", "1.25");
+
+        let resolved = serde_json::to_value(
+            resolve_executor_spend(
+                json!({"spend_auth_token_id": half_cent}).to_string(),
+                &state,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            resolved["amount"],
+            json!({"units": "5000", "scale": 6, "currency": "usd", "display": "0.005"})
+        );
+        assert_eq!(resolved["amount_cents"], 1);
+
+        let v45 = |token: &str, amount: Value| {
+            json!({
+                "spend_auth_token_id": token,
+                "account_id": agent.account_id,
+                "contract_version": "hubu-spend-executor-v4.5",
+                "amount": amount,
+                "merchant": "gongbu.image"
+            })
+        };
+        let exact = json!({"units": "5000", "scale": 6, "currency": "usd"});
+        let mut with_cents = v45(&half_cent, exact.clone());
+        with_cents["amount_cents"] = json!(1);
+        let mut unknown_version = v45(&half_cent, exact.clone());
+        unknown_version["contract_version"] = json!("hubu-spend-executor-v9");
+        let mut v44_with_exact = v45(&half_cent, exact.clone());
+        v44_with_exact
+            .as_object_mut()
+            .unwrap()
+            .remove("contract_version");
+        for (body, expected) in [
+            (
+                v45(&half_cent, json!({"units": "5000", "currency": "usd"})),
+                "amount.scale is required",
+            ),
+            (
+                v45(
+                    &half_cent,
+                    json!({"units": "1", "scale": 2, "currency": "usd"}),
+                ),
+                "amount.scale must be 6",
+            ),
+            (
+                v45(
+                    &half_cent,
+                    json!({"units": "-5000", "scale": 6, "currency": "usd"}),
+                ),
+                "non-negative integer string",
+            ),
+            (
+                v45(
+                    &half_cent,
+                    json!({"units": "0", "scale": 6, "currency": "usd"}),
+                ),
+                "must be positive",
+            ),
+            (with_cents, "not amount_cents"),
+            (unknown_version, "unsupported executor contract_version"),
+            (v44_with_exact, "requires contract_version"),
+            (
+                v45(
+                    &half_cent,
+                    json!({"units": "5001", "scale": 6, "currency": "usd"}),
+                ),
+                "payment request does not match authorized spend",
+            ),
+            (
+                v45(
+                    &half_cent,
+                    json!({"units": "5000", "scale": 6, "currency": "usdc"}),
+                ),
+                "payment request does not match authorized spend",
+            ),
+            (
+                // The 1.25 authorization cannot be claimed as its 125-cent
+                // projection's neighbour in exact units either.
+                v45(
+                    &legacy,
+                    json!({"units": "1250001", "scale": 6, "currency": "usd"}),
+                ),
+                "payment request does not match authorized spend",
+            ),
+        ] {
+            let error = claim_executor_spend(body.to_string(), &state).unwrap_err();
+            assert!(error.to_string().contains(expected), "{expected}: {error}");
+        }
+
+        // A v4.5 executor claims the exact half cent.
+        let validated =
+            validate_executor_spend(v45(&half_cent, exact.clone()).to_string(), &state).unwrap();
+        assert_eq!(validated.status, "available");
+        let claim = serde_json::to_value(
+            claim_executor_spend(v45(&half_cent, exact).to_string(), &state).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(claim["status"], "claimed");
+        assert_eq!(claim["spend"]["amount"]["units"], "5000");
+        assert_eq!(claim["spend"]["amount_cents"], 1);
+
+        // A v4.4 executor still claims with whole cents on the same Hubu.
+        let claim = serde_json::to_value(
+            claim_executor_spend(
+                json!({
+                    "spend_auth_token_id": legacy,
+                    "account_id": agent.account_id,
+                    "amount_cents": 125,
+                    "merchant": "gongbu.image"
+                })
+                .to_string(),
+                &state,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(claim["status"], "claimed");
+        assert_eq!(claim["spend"]["amount"]["units"], "1250000");
+        assert_eq!(claim["spend"]["amount_cents"], 125);
         std::fs::remove_file(path).ok();
     }
 
