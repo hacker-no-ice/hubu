@@ -347,7 +347,7 @@ async fn start_managed_hubu(
     let policy = hubu_root.join("sandbox-policy.yaml");
     fs::write(
         &policy,
-        "id: gongbu_sandbox_policy\nversion: v1\ndefault_effect: deny\nrules:\n  - id: allow_sandbox\n    effect: allow\n    reason: deterministic Gongbu compatibility fixture\n    when:\n      op: lte\n      field: amount\n      value:\n        money_cents: 10000\n",
+        "id: gongbu_sandbox_policy\nversion: v1\ndefault_effect: deny\nrules:\n  - id: allow_sandbox\n    effect: allow\n    reason: deterministic Gongbu compatibility fixture\n    when:\n      op: lte\n      field: amount\n      value:\n        money: \"100.00\"\n",
     )?;
     run_hubu_cli(
         &release.cli_binary,

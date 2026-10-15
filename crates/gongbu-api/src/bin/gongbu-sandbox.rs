@@ -493,7 +493,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(snapshot.selector.unwrap().image_size, "2k");
-        assert_eq!(snapshot.estimated_amount_minor, 11);
+        assert_eq!(snapshot.estimated_units, 101_000);
     }
 
     #[test]
