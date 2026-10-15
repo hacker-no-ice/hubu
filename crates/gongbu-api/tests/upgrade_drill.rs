@@ -75,7 +75,10 @@ fn verify(repository: &Repository, rows: &[LegacyRow]) {
         // Frozen schema 2 snapshots load and re-serialize byte for byte.
         let snapshot: PricingSnapshot =
             serde_json::from_value(row.pricing_snapshot.clone()).unwrap();
-        assert_eq!(serde_json::to_value(&snapshot).unwrap(), row.pricing_snapshot);
+        assert_eq!(
+            serde_json::to_value(&snapshot).unwrap(),
+            row.pricing_snapshot
+        );
         match repository.get_hubu_authorization_snapshot(&row.execution_id) {
             Ok(authorization) => assert_eq!(
                 Some(authorization.amount_units),
@@ -114,5 +117,8 @@ fn accounting_units_upgrade_drill_on_a_copy() {
         println!("{open}: {} executions verified", rows.len());
     }
     let receipts = rows.iter().filter(|row| row.receipt.is_some()).count();
-    println!("upgrade drill passed: {} executions, {receipts} receipts", rows.len());
+    println!(
+        "upgrade drill passed: {} executions, {receipts} receipts",
+        rows.len()
+    );
 }
