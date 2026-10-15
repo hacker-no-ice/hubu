@@ -5,10 +5,11 @@ automatic admission, human intervention, authorization and financial resolution.
 It provides typed facts and append-only storage in Hubu's existing governance
 database. Gongbu retains its own execution database and provider authority.
 
-This is the storage foundation delivered by HUB-291. Production capture,
-aggregate queries, HTTP and unified MCP reads are separate follow-up work.
-Installing this schema does **not** establish complete capture or make an empty
-event table evidence that no requests were denied.
+HUB-291 supplies the storage foundation. HUB-292 captures new policy evaluations
+and automatic admission/authorization outcomes. Human, executor/reconciliation
+capture, aggregate queries, HTTP and unified MCP reads follow separately.
+Installing the schema alone does **not** establish complete capture or make an
+empty event table evidence that no requests were denied.
 
 ## Facts and identity
 
@@ -66,6 +67,26 @@ separately. Lifecycle counts overlap: one attempt can be escalated, approved and
 later enter reconciliation. Multiple matching deny rules do not multiply the
 denied-attempt count. Later success or resolution does not erase earlier facts.
 
+## Automatic capture
+
+The API carries the selected policy payload and its public resource, revision
+and hash as one immutable snapshot. Core writers derive facts from that snapshot
+and the typed admission branch; they do not accept arbitrary API-supplied facts
+or recover a denial cause from prose. Direct core callers without a selected
+resource retain explicit unavailable policy provenance.
+
+Policy evaluation, terminal denial and automatic authorization each commit their
+facts with the authoritative transition. Reservation evidence preserves the
+budget version and balance before reservation and checks that snapshot against
+SQLite inside the write transaction. A failed append rolls back its parent
+transition. Exact replay does not regenerate facts, timestamps, explanations or
+coverage from current configuration.
+
+Only integrated policy and automatic-admission sources establish owner capture
+coverage. Existing history is not backfilled, and uninvolved streams stay
+undeclared. Reconciliation capture remains disabled until HUB-294 establishes
+source eligibility and matching open/close semantics.
+
 ## Evidence and financial meaning
 
 Structured evidence can retain the policy/rule or budget revision and safe
@@ -107,5 +128,6 @@ unknown. Missing record coverage never implies zero activity.
 
 Implementation: [typed lifecycle contract](../crates/hubu-core/src/spend/lifecycle.rs)
 and [lifecycle persistence](../crates/hubu-core/src/persistence/lifecycle.rs).
+Automatic writers live in [transactional capture](../crates/hubu-core/src/persistence/automatic_lifecycle.rs).
 Existing public reads remain described by the
 [ledger and authorization history contract](ledger-history.md).

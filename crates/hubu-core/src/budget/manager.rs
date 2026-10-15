@@ -72,6 +72,14 @@ impl BudgetManager {
         })
     }
 
+    pub(crate) fn rollback_unpersisted_reservation(
+        &mut self,
+        hold: &BudgetHold,
+        before: &BudgetBalance,
+    ) {
+        self.state.rollback_unpersisted_reservation(hold, before);
+    }
+
     pub(crate) fn apply_committed_state(&mut self, state: BudgetState) {
         self.state = state;
     }

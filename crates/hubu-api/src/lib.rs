@@ -190,7 +190,9 @@ struct ServerState {
     spend: Arc<Mutex<SpendManager>>,
     budgets: Mutex<BudgetManager>,
     spending_targets: Mutex<SpendingTargetManager>,
-    policies: Mutex<HashMap<(UserId, PolicyAssignmentScope), Policy>>,
+    policies: Mutex<
+        HashMap<(UserId, PolicyAssignmentScope), hubu_core::persistence::SelectedSpendPolicy>,
+    >,
     governance: Arc<Mutex<SqliteGovernanceRepository>>,
     payment_attempts: Mutex<SqlitePaymentAttemptRepository>,
     payments: Mutex<LocalPaymentManager>,
@@ -247,8 +249,8 @@ impl ServerState {
             .into_iter()
             .map(|assignment| {
                 (
-                    (assignment.owner_user_id, assignment.scope),
-                    assignment.policy,
+                    (assignment.owner_user_id.clone(), assignment.scope.clone()),
+                    assignment.into(),
                 )
             })
             .collect();
@@ -3243,8 +3245,8 @@ fn add_policy(body: String, state: &ServerState) -> Result<AddPolicyHttpResponse
         .map_err(|_| anyhow!("policy store lock poisoned"))?;
     for assignment in resource_assignments {
         policies.insert(
-            (assignment.owner_user_id, assignment.scope),
-            assignment.policy,
+            (assignment.owner_user_id.clone(), assignment.scope.clone()),
+            assignment.into(),
         );
     }
     drop(policies);
@@ -5503,7 +5505,7 @@ fn evaluate_and_reserve_spend_at(
                 .lease_profile_for_operation(&agent_id, &operation_key)
                 .unwrap_or_else(|| state.lease_config.default_lease_profile.clone())
         });
-        SpendApprovalService.authorize_at(
+        SpendApprovalService.authorize_selected_at(
             AuthorizeSpendRequest {
                 operation_key: operation_key.clone(),
                 user: user.clone(),
@@ -5825,7 +5827,7 @@ fn policy_for_spend(
     state: &ServerState,
     user_id: &UserId,
     agent_id: &AgentId,
-) -> Result<Option<Policy>> {
+) -> Result<Option<hubu_core::persistence::SelectedSpendPolicy>> {
     let policies = state
         .policies
         .lock()
@@ -12704,5 +12706,294 @@ rules: []
             "GET",
             "/spend/health"
         )));
+    }
+
+    fn automatic_capture_policy_yaml(cap: &str) -> String {
+        format!(
+            "id: reused_capture_identity\nversion: reused-label\ndefault_effect: allow\nrules:\n  - id: deny_over_cap\n    effect: deny\n    when:\n      op: gt\n      field: amount\n      value:\n        money: \"{cap}\"\n    reason: request exceeds cap\n"
+        )
+    }
+
+    fn automatic_capture_policy_evidence(state: &ServerState, decision_id: &str) -> Value {
+        let owner = authenticated_user_context(state).unwrap();
+        state
+            .governance
+            .lock()
+            .unwrap()
+            .lifecycle_snapshot(&owner.user_id, None)
+            .unwrap()
+            .events
+            .into_iter()
+            .map(|record| serde_json::to_value(record.event).unwrap())
+            .find(|event| {
+                event["correlation"]["decision_id"] == decision_id
+                    && event["fact"]["kind"] == "initial_policy"
+            })
+            .expect("the actual initial policy evaluation should be captured")["explanation"]
+            ["policy"]["value"]
+            .clone()
+    }
+
+    fn automatic_capture_assert_policy_ref(
+        state: &ServerState,
+        decision_id: &str,
+        policy: &AddPolicyHttpResponse,
+    ) -> Value {
+        let evidence = automatic_capture_policy_evidence(state, decision_id);
+        assert_eq!(evidence["policy_id"], policy.policy_id);
+        assert_eq!(evidence["revision"], policy.revision);
+        assert_eq!(evidence["payload_hash"], policy.payload_hash);
+        evidence
+    }
+
+    #[test]
+    fn automatic_capture_preserves_default_override_and_reused_label_replay_provenance() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = ServerState::new_with_db_path(temp.path().join("capture.sqlite")).unwrap();
+        let override_agent = register_agent(
+            json!({"name":"capture-override", "version":"v1"}).to_string(),
+            &state,
+        )
+        .unwrap();
+        let default_agent = register_agent(
+            json!({"name":"capture-default", "version":"v1"}).to_string(),
+            &state,
+        )
+        .unwrap();
+        create_test_agent_budget(&state, &override_agent.agent_id, 100);
+        create_test_agent_budget(&state, &default_agent.agent_id, 100);
+        let default = add_policy(
+            json!({"declarative_key":"capture-default", "policy_yaml":automatic_capture_policy_yaml("0.10")}).to_string(),
+            &state,
+        )
+        .unwrap();
+        let initial_override = add_policy(
+            json!({"agent_id":override_agent.agent_id, "declarative_key":"capture-override", "policy_yaml":automatic_capture_policy_yaml("0.01")}).to_string(),
+            &state,
+        )
+        .unwrap();
+        assert_ne!(default.policy_id, initial_override.policy_id);
+        assert_eq!(default.policy_version, initial_override.policy_version);
+
+        let denied_body = json!({"operation_key":"capture-old-override", "account_id":override_agent.account_id, "amount_cents":5, "reason":"inspect the selected override"}).to_string();
+        let denied = authorize_spend(denied_body.clone(), &state).unwrap();
+        assert_eq!(denied.decision, "deny");
+        let original_evidence =
+            automatic_capture_assert_policy_ref(&state, &denied.decision_id, &initial_override);
+        assert_eq!(
+            original_evidence["amount_constraints"][0]["configured"]["amount"]["units"],
+            "10000"
+        );
+        let allowed = authorize_spend(
+            json!({"operation_key":"capture-default-allow", "account_id":default_agent.account_id, "amount_cents":5, "reason":"inspect the selected default"}).to_string(),
+            &state,
+        )
+        .unwrap();
+        assert_eq!(allowed.decision, "allow");
+        automatic_capture_assert_policy_ref(&state, &allowed.decision_id, &default);
+
+        let revised_override = add_policy(
+            json!({"agent_id":override_agent.agent_id, "declarative_key":"capture-override", "expected_revision":1, "policy_yaml":automatic_capture_policy_yaml("0.10")}).to_string(),
+            &state,
+        )
+        .unwrap();
+        assert_eq!(revised_override.policy_id, initial_override.policy_id);
+        assert_eq!(
+            revised_override.policy_version,
+            initial_override.policy_version
+        );
+        assert_eq!(revised_override.revision, 2);
+        assert_ne!(revised_override.payload_hash, initial_override.payload_hash);
+        let owner = authenticated_user_context(&state).unwrap();
+        let before_replay = state
+            .governance
+            .lock()
+            .unwrap()
+            .lifecycle_snapshot(&owner.user_id, None)
+            .unwrap();
+        let replay = authorize_spend(denied_body, &state).unwrap();
+        assert_eq!(replay.decision, "deny");
+        assert_eq!(replay.decision_id, denied.decision_id);
+        assert!(replay.idempotent_replay);
+        assert_eq!(
+            automatic_capture_policy_evidence(&state, &replay.decision_id),
+            original_evidence
+        );
+        let after_replay = state
+            .governance
+            .lock()
+            .unwrap()
+            .lifecycle_snapshot(&owner.user_id, None)
+            .unwrap();
+        assert_eq!(before_replay.watermark, after_replay.watermark);
+
+        let updated = authorize_spend(
+            json!({"operation_key":"capture-new-override", "account_id":override_agent.account_id, "amount_cents":5, "reason":"inspect the revised override"}).to_string(),
+            &state,
+        )
+        .unwrap();
+        assert_eq!(updated.decision, "allow");
+        automatic_capture_assert_policy_ref(&state, &updated.decision_id, &revised_override);
+    }
+
+    #[test]
+    fn automatic_capture_pins_selected_payload_before_a_same_label_revision_change() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = ServerState::new_with_db_path(temp.path().join("capture.sqlite")).unwrap();
+        let agent = register_agent(
+            json!({"name":"capture-pinned-selection", "version":"v1"}).to_string(),
+            &state,
+        )
+        .unwrap();
+        create_test_agent_budget(&state, &agent.agent_id, 100);
+        let original = add_policy(
+            json!({"agent_id":agent.agent_id, "policy_yaml":automatic_capture_policy_yaml("0.01")})
+                .to_string(),
+            &state,
+        )
+        .unwrap();
+        let owner = authenticated_user_context(&state).unwrap();
+        let internal_agent = resolve_agent_id_for_user(&agent.agent_id, &owner, &state).unwrap();
+        let selected = policy_for_spend(&state, &owner.user_id, &internal_agent)
+            .unwrap()
+            .unwrap();
+        let revised = add_policy(
+            json!({"agent_id":agent.agent_id, "expected_revision":1, "policy_yaml":automatic_capture_policy_yaml("0.10")}).to_string(),
+            &state,
+        )
+        .unwrap();
+        assert_eq!(revised.policy_version, original.policy_version);
+        assert_eq!(revised.revision, 2);
+        let account = state
+            .registration
+            .lock()
+            .unwrap()
+            .account_for_pub_id(&agent.account_id)
+            .unwrap()
+            .unwrap();
+        let outcome = {
+            let mut spend = state.spend.lock().unwrap();
+            let mut budgets = state.budgets.lock().unwrap();
+            let mut governance = state.governance.lock().unwrap();
+            SpendApprovalService
+                .authorize_selected_at(
+                    AuthorizeSpendRequest {
+                        operation_key: "capture-pinned-old-selection".into(),
+                        user: owner,
+                        agent_id: internal_agent,
+                        agent_account_id: account.id,
+                        amount: legacy_cents_amount(5).unwrap(),
+                        currency: Currency::Usd,
+                        merchant: None,
+                        execution_scope: None,
+                        task_id: None,
+                        reason: "the selection occurred before the policy edit".into(),
+                        lease_profile: "default".into(),
+                    },
+                    &selected,
+                    &mut spend,
+                    &mut budgets,
+                    &mut *governance,
+                    Utc::now(),
+                )
+                .unwrap()
+        };
+        let SpendAuthorizationOutcome::Rejected(denied) = outcome else {
+            panic!("the pinned earlier cap must still deny the request")
+        };
+        assert_eq!(denied.decision, Effect::Deny);
+        automatic_capture_assert_policy_ref(
+            &state,
+            &denied.evaluation.decision_id.to_string(),
+            &original,
+        );
+        let current = authorize_spend(
+            json!({"operation_key":"capture-current-selection", "account_id":agent.account_id, "amount_cents":5, "reason":"use the current cached revision"}).to_string(),
+            &state,
+        )
+        .unwrap();
+        assert_eq!(current.decision, "allow");
+        automatic_capture_assert_policy_ref(&state, &current.decision_id, &revised);
+    }
+
+    #[test]
+    fn automatic_capture_refreshes_shared_assignment_refs_and_rehydrates_after_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("capture.sqlite");
+        let state = ServerState::new_with_db_path(&path).unwrap();
+        let first = register_agent(
+            json!({"name":"capture-shared-one", "version":"v1"}).to_string(),
+            &state,
+        )
+        .unwrap();
+        let second = register_agent(
+            json!({"name":"capture-shared-two", "version":"v1"}).to_string(),
+            &state,
+        )
+        .unwrap();
+        for agent in [&first, &second] {
+            create_test_agent_budget(&state, &agent.agent_id, 100);
+        }
+        let initial = add_policy(
+            json!({"agent_id":first.agent_id, "policy_yaml":automatic_capture_policy_yaml("0.01")})
+                .to_string(),
+            &state,
+        )
+        .unwrap();
+        let attached = add_policy(
+            json!({"agent_id":second.agent_id, "expected_revision":1, "policy_yaml":automatic_capture_policy_yaml("0.01")}).to_string(),
+            &state,
+        )
+        .unwrap();
+        assert_eq!(initial.policy_id, attached.policy_id);
+        let revised = add_policy(
+            json!({"agent_id":first.agent_id, "expected_revision":1, "policy_yaml":automatic_capture_policy_yaml("0.10")}).to_string(),
+            &state,
+        )
+        .unwrap();
+        assert_eq!(revised.revision, 2);
+        let mut before_restart = Vec::new();
+        for (index, agent) in [&first, &second].into_iter().enumerate() {
+            let body = json!({"operation_key":format!("capture-shared-before-{index}"), "account_id":agent.account_id, "amount_cents":5, "reason":"verify every refreshed assignment"}).to_string();
+            let response = authorize_spend(body.clone(), &state).unwrap();
+            assert_eq!(response.decision, "allow");
+            automatic_capture_assert_policy_ref(&state, &response.decision_id, &revised);
+            before_restart.push((body, response.decision_id));
+        }
+        drop(state);
+        let reopened = ServerState::new_with_db_path(&path).unwrap();
+        let owner = authenticated_user_context(&reopened).unwrap();
+        let watermark = reopened
+            .governance
+            .lock()
+            .unwrap()
+            .lifecycle_snapshot(&owner.user_id, None)
+            .unwrap()
+            .watermark;
+        for (body, decision_id) in before_restart {
+            let replay = authorize_spend(body, &reopened).unwrap();
+            assert!(replay.idempotent_replay);
+            assert_eq!(replay.decision_id, decision_id);
+            automatic_capture_assert_policy_ref(&reopened, &decision_id, &revised);
+        }
+        assert_eq!(
+            reopened
+                .governance
+                .lock()
+                .unwrap()
+                .lifecycle_snapshot(&owner.user_id, None)
+                .unwrap()
+                .watermark,
+            watermark
+        );
+        for (index, agent) in [&first, &second].into_iter().enumerate() {
+            let response = authorize_spend(
+                json!({"operation_key":format!("capture-shared-after-{index}"), "account_id":agent.account_id, "amount_cents":5, "reason":"verify the rehydrated policy snapshot"}).to_string(),
+                &reopened,
+            )
+            .unwrap();
+            assert_eq!(response.decision, "allow");
+            automatic_capture_assert_policy_ref(&reopened, &response.decision_id, &revised);
+        }
     }
 }

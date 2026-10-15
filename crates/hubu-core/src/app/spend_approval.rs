@@ -17,11 +17,12 @@ use crate::{
         BudgetBalance, BudgetHold, BudgetManager, BudgetManagerError, ReleaseBudgetResponse,
         ReserveBudgetRequest, ReserveBudgetResponse, SettleBudgetResponse,
     },
-    persistence::{BudgetRepository, SpendAttemptAdmission, SpendRepository},
+    persistence::{BudgetRepository, SelectedSpendPolicy, SpendAttemptAdmission, SpendRepository},
     policy::model::{Effect, Policy},
     spend::{
-        IssuedSpendAuthToken, SpendAuthTokenRecord, SpendAuthorizationDecision,
-        SpendEvaluationResponse, SpendManager, SpendRequest, SpendRetryAction, SpendRetryGuidance,
+        AdmissionDenialReason, IssuedSpendAuthToken, LifecycleObservationId, SpendAuthTokenRecord,
+        SpendAuthorizationDecision, SpendEvaluationResponse, SpendManager, SpendRequest,
+        SpendRetryAction, SpendRetryGuidance,
     },
     storage::StorageError,
     telemetry::log_event,
@@ -238,6 +239,54 @@ impl SpendApprovalService {
     where
         G: SpendRepository + BudgetRepository,
     {
+        self.authorize_with_policy_context(
+            request,
+            policy,
+            None,
+            spend_manager,
+            budget_manager,
+            governance,
+            now,
+        )
+    }
+
+    pub fn authorize_selected_at<G>(
+        &self,
+        request: AuthorizeSpendRequest,
+        policy: &SelectedSpendPolicy,
+        spend_manager: &mut SpendManager,
+        budget_manager: &mut BudgetManager,
+        governance: &mut G,
+        now: DateTime<Utc>,
+    ) -> Result<SpendAuthorizationOutcome, SpendApprovalError>
+    where
+        G: SpendRepository + BudgetRepository,
+    {
+        self.authorize_with_policy_context(
+            request,
+            policy.policy(),
+            Some(policy),
+            spend_manager,
+            budget_manager,
+            governance,
+            now,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn authorize_with_policy_context<G>(
+        &self,
+        request: AuthorizeSpendRequest,
+        policy: &Policy,
+        selected: Option<&SelectedSpendPolicy>,
+        spend_manager: &mut SpendManager,
+        budget_manager: &mut BudgetManager,
+        governance: &mut G,
+        now: DateTime<Utc>,
+    ) -> Result<SpendAuthorizationOutcome, SpendApprovalError>
+    where
+        G: SpendRepository + BudgetRepository,
+    {
         if request.amount <= Amount::ZERO {
             return Err(SpendApprovalError::NonPositiveAmount);
         }
@@ -265,15 +314,27 @@ impl SpendApprovalService {
             Utc::now(),
         )?;
         let mut evaluation = match admission {
-            SpendAttemptAdmission::Admitted { revision } => spend_manager
+            SpendAttemptAdmission::Admitted { revision } => match spend_manager
                 .evaluate_spend_at_revision(
                     &request.user,
                     &operation_key,
-                    spend_request,
+                    spend_request.clone(),
                     policy,
                     revision,
                     &actor,
-                )?,
+                ) {
+                Ok(evaluation) => evaluation,
+                Err(error) => {
+                    governance.save_automatic_evaluation_failure(
+                        &spend_request,
+                        &operation_key,
+                        revision,
+                        &LifecycleObservationId::new(),
+                        Utc::now(),
+                    )?;
+                    return Err(error.into());
+                }
+            },
             SpendAttemptAdmission::ExactReplay { .. } => {
                 if !spend_manager.has_decision_for_scope(
                     &request.agent_id,
@@ -404,6 +465,12 @@ impl SpendApprovalService {
                 }
             }
 
+            if latest.as_ref().is_some_and(|(decision, _)| {
+                *decision == SpendAuthorizationDecision::PendingApproval
+            }) {
+                return Err(SpendApprovalError::PendingExactReplay { operation_key });
+            }
+
             if evaluation.evaluation.decision != Effect::Allow {
                 attach_attempt_audit(
                     governance,
@@ -484,16 +551,30 @@ impl SpendApprovalService {
             )));
         }
 
-        governance.save_spend_decision(&decision_record)?;
+        if let Err(error) = governance.save_automatic_policy_transition(&decision_record, selected)
+        {
+            spend_manager.discard_unpersisted_decision(&evaluation.decision_id);
+            return Err(error.into());
+        }
 
         if evaluation.evaluation.decision != Effect::Allow {
             if evaluation.evaluation.decision == Effect::Deny {
-                governance.record_spend_attempt_outcome(
+                if let Err(error) = governance.save_automatic_denied_transition(
                     &decision_record,
-                    SpendAuthorizationDecision::Denied,
+                    selected,
+                    None,
+                    AdmissionDenialReason::Policy,
                     &evaluation.evaluation.reasons,
-                    Utc::now(),
-                )?;
+                    Utc::now().max(decision_record.created_at),
+                    now,
+                ) {
+                    let _ = governance.save_automatic_failure(
+                        &decision_record,
+                        &LifecycleObservationId::new(),
+                        Utc::now(),
+                    );
+                    return Err(error.into());
+                }
                 attach_attempt_audit(
                     governance,
                     &mut evaluation,
@@ -536,23 +617,44 @@ impl SpendApprovalService {
             .auth_token
             .clone()
             .ok_or(SpendApprovalError::MissingSpendAuthToken)?;
-        let budget_id = match active_budget_id_for_spend(
+        let (selected_budget, unavailable_budget) = match automatic_budget_selection(
             budget_manager,
             &request.agent_id,
             request.currency,
             now,
         ) {
-            Ok(budget_id) => budget_id,
-            Err(SpendApprovalError::MissingActiveBudget { currency }) => {
+            Ok(selection) => selection,
+            Err(error) => {
                 spend_manager.discard_auth_token_for_decision(&evaluation.decision_id);
-                let reasons =
-                    vec![SpendApprovalError::MissingActiveBudget { currency }.to_string()];
-                governance.record_spend_attempt_outcome(
+                governance.save_automatic_failure(
                     &decision_record,
-                    SpendAuthorizationDecision::Denied,
-                    &reasons,
+                    &LifecycleObservationId::new(),
                     Utc::now(),
                 )?;
+                return Err(error);
+            }
+        };
+        let before = match selected_budget {
+            Some(budget) => budget,
+            None => {
+                spend_manager.discard_auth_token_for_decision(&evaluation.decision_id);
+                let reasons = vec!["no active USD budget found for agent".to_string()];
+                if let Err(error) = governance.save_automatic_denied_transition(
+                    &decision_record,
+                    selected,
+                    unavailable_budget.as_ref(),
+                    AdmissionDenialReason::NoAvailableBudget,
+                    &reasons,
+                    Utc::now().max(decision_record.created_at),
+                    now,
+                ) {
+                    let _ = governance.save_automatic_failure(
+                        &decision_record,
+                        &LifecycleObservationId::new(),
+                        Utc::now(),
+                    );
+                    return Err(error.into());
+                }
                 attach_attempt_audit(
                     governance,
                     &mut evaluation,
@@ -566,9 +668,8 @@ impl SpendApprovalService {
                     request, evaluation, &reason,
                 )));
             }
-            Err(error) => return Err(error),
         };
-
+        let budget_id = before.budget.id.clone();
         let budget_reservation = match budget_manager.reserve_budget_at(
             ReserveBudgetRequest {
                 budget_id: budget_id.clone(),
@@ -583,12 +684,22 @@ impl SpendApprovalService {
             Err(BudgetManagerError::InsufficientRemainingBudget) => {
                 spend_manager.discard_auth_token_for_decision(&evaluation.decision_id);
                 let reasons = vec!["budget does not have enough remaining balance".to_string()];
-                governance.record_spend_attempt_outcome(
+                if let Err(error) = governance.save_automatic_denied_transition(
                     &decision_record,
-                    SpendAuthorizationDecision::Denied,
+                    selected,
+                    Some(&before),
+                    AdmissionDenialReason::InsufficientBudget,
                     &reasons,
-                    Utc::now(),
-                )?;
+                    Utc::now().max(decision_record.created_at),
+                    now,
+                ) {
+                    let _ = governance.save_automatic_failure(
+                        &decision_record,
+                        &LifecycleObservationId::new(),
+                        Utc::now(),
+                    );
+                    return Err(error.into());
+                }
                 attach_attempt_audit(
                     governance,
                     &mut evaluation,
@@ -615,32 +726,42 @@ impl SpendApprovalService {
                     "budget does not have enough remaining balance",
                 )));
             }
-            Err(error) => return Err(error.into()),
-        };
-
-        if let Some(token_record) = &token_record {
-            if let Err(error) = governance.save_spend_auth_token(token_record) {
-                let budget_release = budget_manager.release_budget(&budget_reservation.hold.id)?;
-                log_event(
-                    "warn",
-                    "spend_budget_reservation_released",
-                    json!({
-                        "decision_id": evaluation.decision_id.to_string(),
-                        "hold_id": budget_release.hold.id.to_string(),
-                        "remaining_amount": budget_release.balance.remaining_amount,
-                        "error": error.to_string(),
-                    }),
-                );
+            Err(error) => {
+                spend_manager.discard_auth_token_for_decision(&evaluation.decision_id);
+                governance.save_automatic_failure(
+                    &decision_record,
+                    &LifecycleObservationId::new(),
+                    Utc::now(),
+                )?;
                 return Err(error.into());
             }
-        }
-        governance.save_budget_hold(&budget_reservation.hold, &budget_reservation.balance)?;
-        governance.record_spend_attempt_outcome(
+        };
+
+        let token_record = token_record
+            .as_ref()
+            .ok_or(SpendApprovalError::MissingSpendAuthToken)?;
+        if let Err(error) = governance.save_automatic_approved_transition(
             &decision_record,
-            SpendAuthorizationDecision::Allowed,
-            &evaluation.evaluation.reasons,
-            Utc::now(),
-        )?;
+            selected,
+            token_record,
+            &budget_reservation.hold,
+            &budget_reservation.balance,
+            &before,
+            Utc::now().max(decision_record.created_at),
+            now,
+        ) {
+            budget_manager
+                .rollback_unpersisted_reservation(&budget_reservation.hold, &before.balance);
+            spend_manager.discard_auth_token_for_decision(&evaluation.decision_id);
+            // This separate observation only follows a rolled-back grant. It
+            // cannot publish an authorization or a terminal denial.
+            let _ = governance.save_automatic_failure(
+                &decision_record,
+                &LifecycleObservationId::new(),
+                Utc::now(),
+            );
+            return Err(error.into());
+        }
         attach_attempt_audit(
             governance,
             &mut evaluation,
@@ -1169,6 +1290,41 @@ fn release_authorized_hold(
     budget_manager.release_budget(&budget_reservation.hold.id)
 }
 
+fn automatic_budget_selection(
+    manager: &BudgetManager,
+    agent: &AgentId,
+    currency: Currency,
+    at: DateTime<Utc>,
+) -> Result<
+    (
+        Option<crate::budget::BudgetWithBalance>,
+        Option<crate::budget::BudgetWithBalance>,
+    ),
+    SpendApprovalError,
+> {
+    let evaluated = manager.get_evaluated_budgets_by_agent_id(agent, at)?;
+    if let Some(b) = evaluated
+        .iter()
+        .find(|b| b.current.budget.currency == Currency::Usd && b.availability.allows_reservation())
+    {
+        return Ok((Some(b.current.clone()), None));
+    }
+    // A single current exhausted allocation was examined by the real selector.
+    // Other historical/future/revoked allocations do not explain this denial.
+    let mut exhausted = evaluated.into_iter().filter(|b| {
+        b.current.budget.currency == Currency::Usd
+            && b.current.budget.currency == currency
+            && b.availability == crate::budget::BudgetAvailability::Exhausted
+    });
+    let candidate = exhausted.next();
+    let evidence = if exhausted.next().is_none() {
+        candidate.map(|b| b.current)
+    } else {
+        None
+    };
+    Ok((None, evidence))
+}
+
 /// The agent's active budget in the spend's own currency. Budgets are per
 /// currency, so a spend never falls back to a budget in another currency.
 fn active_budget_id_for_spend(
@@ -1329,6 +1485,12 @@ mod tests {
             let mut budget_manager = BudgetManager::new();
             let mut governance =
                 SqliteGovernanceRepository::in_memory().expect("governance should initialize");
+            crate::persistence::seed_lifecycle_test_identity(
+                &mut governance,
+                &user.user_id,
+                &agent_id,
+                &account_id,
+            );
             let period = TimePeriod::new(
                 Utc::now() - Duration::minutes(1),
                 Some(Utc::now() + Duration::hours(1)),
