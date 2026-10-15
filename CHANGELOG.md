@@ -37,7 +37,10 @@ Future release template
   cents only and refuse USDC payments before any money moves. Policy amount
   values compare in the request's own currency (scope them with a `currency`
   condition), and `POST /policies` returns `warnings` for amount values finer
-  than one cent. `POST /budgets` and the `hubu_create_budget` MCP tool accept
+  than one cent. Spend authorization (`/spend/authorize`, `hubu_authorize_spend`,
+  `hubu_submit_spend`) accepts an exact decimal `amount` such as `"0.005"`
+  (the whole-cent `amount_cents` is deprecated; sending both is rejected) and
+  a `currency`. `POST /budgets` and the `hubu_create_budget` MCP tool accept
   `currency` (`usd` by default); executor resolve/claim responses report the
   authorization's currency, and an executor may assert `currency`.
 

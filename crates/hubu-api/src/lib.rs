@@ -1204,7 +1204,11 @@ struct SpendHttpRequest {
     operation_key: Option<String>,
     agent_id: Option<String>,
     account_id: Option<String>,
-    amount_cents: i64,
+    /// Deprecated whole-cent amount; `amount` is the exact decimal form.
+    #[serde(default)]
+    amount_cents: Option<i64>,
+    #[serde(default)]
+    amount: Option<String>,
     #[serde(default)]
     currency: Option<String>,
     reason: String,
@@ -3016,6 +3020,25 @@ fn hex_encode(bytes: &[u8]) -> String {
         write!(&mut encoded, "{byte:02x}").expect("writing to string should not fail");
     }
     encoded
+}
+
+/// The requested spend amount: the exact decimal `amount`, or the deprecated
+/// whole-cent `amount_cents`. Exactly one must be sent, and it must be positive.
+fn requested_spend_amount(amount: Option<&str>, amount_cents: Option<i64>) -> Result<Amount> {
+    let requested = match (amount, amount_cents) {
+        (Some(_), Some(_)) => {
+            return Err(anyhow!(
+                "send either `amount` or the deprecated `amount_cents`, not both"
+            ))
+        }
+        (Some(amount), None) => amount.parse::<Amount>()?,
+        (None, Some(cents)) => legacy_cents_amount(cents)?,
+        (None, None) => return Err(anyhow!("spend requires `amount`")),
+    };
+    if requested <= Amount::ZERO {
+        return Err(anyhow!("spend amount must be positive"));
+    }
+    Ok(requested)
 }
 
 /// Converts a cent amount from the HTTP wire into accounting units.
@@ -5032,8 +5055,9 @@ fn resolve_executor_spend_request(
         operation_key: None,
         agent_id: request.agent_id.clone(),
         account_id: request.account_id.clone(),
-        amount_cents: request.amount_cents,
-        currency: Some(Currency::Usd.to_string()),
+        amount_cents: Some(request.amount_cents),
+        amount: None,
+        currency: request.currency.clone(),
         reason: "executor authorization snapshot lookup".to_string(),
         task_id: FieldPresence::Missing,
         merchant: request.merchant.clone(),
@@ -5332,8 +5356,11 @@ fn evaluate_and_reserve_spend_at(
         request.execution_scope.as_ref(),
         request.merchant.as_deref(),
     )?;
+    let requested_amount = requested_spend_amount(request.amount.as_deref(), request.amount_cents)?;
     let scope_inputs = spend_scope_inputs(
-        request.amount_cents,
+        request
+            .amount_cents
+            .unwrap_or_else(|| requested_amount.legacy_cents_ceil()),
         currency,
         currency_supplied,
         request.merchant.as_deref(),
@@ -5351,8 +5378,8 @@ fn evaluate_and_reserve_spend_at(
             "agent_pub_id": agent_pub_id,
             "account_pub_id": account_pub_id,
             "user_id": user.user_id.to_string(),
-            "amount_cents": request.amount_cents,
-            "currency": Currency::Usd.to_string(),
+            "amount": requested_amount,
+            "currency": currency.to_string(),
             "merchant": request.merchant.clone(),
             "execution_scope_selector": request.execution_scope.clone(),
             "task_id": task_id.clone(),
@@ -5386,7 +5413,7 @@ fn evaluate_and_reserve_spend_at(
                 user: user.clone(),
                 agent_id: agent_id.clone(),
                 agent_account_id: account.id,
-                amount: legacy_cents_amount(request.amount_cents)?,
+                amount: requested_amount,
                 currency,
                 merchant: request.merchant.clone(),
                 execution_scope,
@@ -9319,7 +9346,8 @@ lease_profiles:
                 json!({
                     "operation_key": operation_key,
                     "account_id": agent.account_id,
-                    "amount_cents": 1,
+                    // An x402 maxAmountRequired of 5000 atomic USDC units.
+                    "amount": "0.005",
                     "currency": "usdc",
                     "reason": "x402 call",
                     "merchant": "gongbu.image",
@@ -9355,6 +9383,35 @@ lease_profiles:
         let authorization = authorize("usdc-call");
         assert_eq!(authorization.decision, "allow");
         let token = authorization.auth_token_id.clone().unwrap();
+        // The hold is exactly 0.005 USDC, not a rounded cent.
+        let hold = state
+            .budgets
+            .lock()
+            .unwrap()
+            .get_budget_hold_by_spend_decision(&authorization.decision_id.parse().unwrap())
+            .unwrap();
+        assert_eq!(hold.amount, "0.005".parse::<Amount>().unwrap());
+        assert_eq!(hold.currency, Currency::Usdc);
+        for (body, expected) in [
+            (
+                json!({"account_id": agent.account_id, "amount": "0.005", "amount_cents": 1,
+                    "currency": "usdc", "reason": "both", "operation_key": "both", "merchant": "gongbu.image"}),
+                "not both",
+            ),
+            (
+                json!({"account_id": agent.account_id, "currency": "usdc", "reason": "neither", "operation_key": "neither",
+                    "merchant": "gongbu.image"}),
+                "spend requires `amount`",
+            ),
+            (
+                json!({"account_id": agent.account_id, "amount": "0.0000001", "currency": "usdc",
+                    "reason": "too precise", "operation_key": "too precise", "merchant": "gongbu.image"}),
+                "at most 6 decimal places",
+            ),
+        ] {
+            let error = authorize_spend(body.to_string(), &state).unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+        }
 
         let resolved =
             resolve_executor_spend(json!({"spend_auth_token_id": token}).to_string(), &state)
@@ -11274,7 +11331,8 @@ rules: []
             operation_key: Some("pending-exact-operation".to_string()),
             agent_id: None,
             account_id: Some(agent.account_id.clone()),
-            amount_cents: 100,
+            amount_cents: Some(100),
+            amount: None,
             currency: None,
             reason: "pending exact request".to_string(),
             task_id: FieldPresence::Missing,
@@ -11284,7 +11342,7 @@ rules: []
         };
         let account = resolve_agent_account_for_spend(&request, &user, &state).unwrap();
         let spend_request = hubu_core::spend::SpendRequest {
-            amount: Amount::from_legacy_cents(request.amount_cents).unwrap(),
+            amount: Amount::from_legacy_cents(request.amount_cents.unwrap()).unwrap(),
             currency: Currency::Usd,
             owner_user_id: user.user_id.clone(),
             agent_id: account.agent_id,

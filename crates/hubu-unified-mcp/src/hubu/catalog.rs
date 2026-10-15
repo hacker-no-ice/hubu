@@ -147,24 +147,34 @@ fn all_tool_definitions() -> Vec<Value> {
             "Submit a mock-only spend request for demos and recover exact retries of that mock operation. Does not execute a real provider payment. Trusted harness metadata supplies normalized operation and optional task identity outside model arguments. Returns a public operation handle and decision-aware recovery guidance; a definitive denial is terminal and corrected work requires a new tool call. Human approval is only required when the decision is needs_approval.",
             json_schema_required(json!({
                 "account_id": { "type": "string" },
-                "amount_cents": { "type": "integer" },
+                "amount": spend_amount_input_schema(),
+                "amount_cents": {
+                    "type": "integer",
+                    "description": "Deprecated whole-cent amount; send `amount` instead, never both."
+                },
+                "currency": spend_currency_input_schema(),
                 "reason": { "type": "string" },
                 "merchant": { "type": "string" },
                 "execution_scope": execution_scope_input_schema(),
                 "lease_profile": { "type": "string" }
-            }), &["account_id", "amount_cents", "reason"]),
+            }), &["account_id", "reason"]),
         ),
         write_tool(
             "hubu_authorize_spend",
             "Authorize an agent spend request. Trusted harness metadata supplies normalized operation and optional task identity outside model arguments. Returns a public operation handle and decision-aware recovery guidance without exposing the private backend operation key; a definitive denial is terminal and corrected work requires a new tool call.",
             json_schema_required(json!({
                 "account_id": { "type": "string" },
-                "amount_cents": { "type": "integer" },
+                "amount": spend_amount_input_schema(),
+                "amount_cents": {
+                    "type": "integer",
+                    "description": "Deprecated whole-cent amount; send `amount` instead, never both."
+                },
+                "currency": spend_currency_input_schema(),
                 "reason": { "type": "string" },
                 "merchant": { "type": "string" },
                 "execution_scope": execution_scope_input_schema(),
                 "lease_profile": { "type": "string" }
-            }), &["account_id", "amount_cents", "reason"]),
+            }), &["account_id", "reason"]),
         ),
         read_tool(
             "hubu_get_spend_approval",
@@ -245,7 +255,7 @@ fn all_tool_definitions() -> Vec<Value> {
                             "properties": {
                                 "amount": { "type": "integer", "minimum": 0 },
                                 "scale": { "type": "integer", "minimum": 0, "maximum": 18 },
-                                "currency": { "type": "string", "enum": ["usd"] }
+                                "currency": { "type": "string", "enum": ["usd", "usdc"] }
                             },
                             "required": ["amount", "scale", "currency"]
                         },
@@ -297,6 +307,25 @@ pub(crate) fn execution_scope_input_schema() -> Value {
             "billing_merchant": {"type":"string","minLength":1}
         },
         "required": ["schema_version","provider","executor","capability","billing_merchant"]
+    })
+}
+
+/// Exact decimal spend amount in the spend currency.
+fn spend_amount_input_schema() -> Value {
+    json!({
+        "type": "string",
+        "pattern": "^\\d+(\\.\\d{1,6})?$",
+        "description": "Exact decimal amount in the spend currency, at most 6 decimal places (for example \"0.005\"). Provide `amount` or the deprecated `amount_cents`, not both."
+    })
+}
+
+/// Budgets are per currency: spend only counts against a budget in its own
+/// currency.
+fn spend_currency_input_schema() -> Value {
+    json!({
+        "type": "string",
+        "enum": ["usd", "usdc"],
+        "description": "Spend currency (default usd). Spend only counts against a budget in this currency."
     })
 }
 

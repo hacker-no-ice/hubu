@@ -264,6 +264,41 @@ fn configured_catalog_matches_the_owned_hubu_contract() {
 }
 
 #[test]
+fn spend_and_budget_tools_accept_exact_amounts_and_currency() {
+    let tools = super::catalog::tool_definitions();
+    let tool = |name: &str| {
+        tools
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .cloned()
+            .unwrap_or_else(|| panic!("{name}"))
+    };
+    for name in ["hubu_authorize_spend", "hubu_submit_spend"] {
+        let schema = &tool(name)["inputSchema"];
+        assert_eq!(
+            schema["required"],
+            json!(["account_id", "reason"]),
+            "{name}"
+        );
+        assert_eq!(schema["properties"]["amount"]["type"], "string", "{name}");
+        assert_eq!(
+            schema["properties"]["amount"]["pattern"], "^\\d+(\\.\\d{1,6})?$",
+            "{name}"
+        );
+        assert!(schema["properties"]["amount_cents"].is_object(), "{name}");
+        assert_eq!(
+            schema["properties"]["currency"]["enum"],
+            json!(["usd", "usdc"]),
+            "{name}"
+        );
+    }
+    assert_eq!(
+        tool("hubu_create_budget")["inputSchema"]["properties"]["currency"]["enum"],
+        json!(["usd", "usdc"])
+    );
+}
+
+#[test]
 fn billed_reconciliation_schema_exposes_exact_cost_and_legacy_cents() {
     let tool = super::catalog::tool_definitions()
         .into_iter()
@@ -274,7 +309,10 @@ fn billed_reconciliation_schema_exposes_exact_cost_and_legacy_cents() {
 
     assert_eq!(exact["properties"]["amount"]["type"], "integer");
     assert_eq!(exact["properties"]["scale"]["maximum"], 18);
-    assert_eq!(exact["properties"]["currency"]["enum"], json!(["usd"]));
+    assert_eq!(
+        exact["properties"]["currency"]["enum"],
+        json!(["usd", "usdc"])
+    );
     assert!(receipt["properties"]["actual_vendor_cost_cents"].is_object());
     assert_eq!(receipt["oneOf"].as_array().map(Vec::len), Some(2));
     assert_eq!(
