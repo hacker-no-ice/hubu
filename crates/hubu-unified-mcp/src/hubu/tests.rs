@@ -198,7 +198,7 @@ fn configured_catalog_matches_the_owned_hubu_contract() {
 
     let expected = super::catalog::tool_definitions();
     assert_eq!(&actual[5..], expected.as_slice());
-    assert_eq!(expected.len(), 28);
+    assert_eq!(expected.len(), 31);
     assert!(!actual
         .iter()
         .any(|tool| tool["name"] == "hubu_replace_budget"));
@@ -330,7 +330,7 @@ fn combined_catalog_exposes_both_approved_sets_under_readiness_gates() {
         None,
     );
     let tools = server.list_tools_for_snapshot();
-    assert_eq!(tools.len(), 39);
+    assert_eq!(tools.len(), 42);
     assert!(tools.contains(&gongbu::operation_status_definition()));
     for definition in super::catalog::tool_definitions()
         .into_iter()
@@ -348,7 +348,7 @@ fn combined_catalog_exposes_both_approved_sets_under_readiness_gates() {
         snapshot.gongbu.reason_code = Some("backend_not_ready");
     }
     let degraded = server.list_tools_for_snapshot();
-    assert_eq!(degraded.len(), 37);
+    assert_eq!(degraded.len(), 40);
     assert!(!degraded
         .iter()
         .any(|tool| tool["name"] == "gongbu_create_execution"));
@@ -573,6 +573,27 @@ fn approved_hubu_routes_prepare_exact_static_requests() {
             HubuRequestCapabilityV1::None,
         ),
         (
+            "hubu_governance_summary",
+            empty.clone(),
+            "GET",
+            "/governance/summary",
+            HubuRequestCapabilityV1::None,
+        ),
+        (
+            "hubu_list_governance_records",
+            empty.clone(),
+            "GET",
+            "/governance/records",
+            HubuRequestCapabilityV1::None,
+        ),
+        (
+            "hubu_get_governance_record",
+            json!({"record_id":"lev_0123456789abcdef0123456789abcdef"}),
+            "GET",
+            "/governance/records/lev_0123456789abcdef0123456789abcdef",
+            HubuRequestCapabilityV1::None,
+        ),
+        (
             "hubu_list_ledger",
             empty.clone(),
             "GET",
@@ -608,7 +629,7 @@ fn approved_hubu_routes_prepare_exact_static_requests() {
             HubuRequestCapabilityV1::Reconciliation,
         ),
     ];
-    assert_eq!(cases.len(), 29);
+    assert_eq!(cases.len(), 32);
     for (name, arguments, method, path, capability) in cases {
         let params = json!({
             "name": name,
@@ -2102,4 +2123,339 @@ fn agent_rename_and_identity_history_are_not_reachable_through_unified_mcp() {
     )
     .unwrap_err();
     assert!(!error.to_string().is_empty());
+}
+
+fn governance_transport_fixture() -> Value {
+    serde_json::from_str(include_str!("../../../../fixtures/governance-mcp-v1.json")).unwrap()
+}
+
+#[test]
+fn governance_catalog_exposes_strict_ungated_read_tools() {
+    let tools = super::catalog::tool_definitions();
+    for name in [
+        "hubu_governance_summary",
+        "hubu_list_governance_records",
+        "hubu_get_governance_record",
+    ] {
+        let tool = tools.iter().find(|tool| tool["name"] == name).unwrap();
+        assert_eq!(tool["inputSchema"]["additionalProperties"], false);
+        assert_eq!(tool["annotations"]["readOnlyHint"], true);
+        assert_eq!(tool["annotations"]["destructiveHint"], false);
+        assert_eq!(tool["annotations"]["x_hubu_human_approval"], "none");
+        assert_eq!(tool["annotations"]["x_hubu_client_approval_mode"], "auto");
+        assert_eq!(tool["annotations"]["x_hubu_runtime_approval"], "none");
+        let properties = &tool["inputSchema"]["properties"];
+        for private in [
+            "owner_id",
+            "operation_key",
+            "claim_id",
+            "spend_auth_token_id",
+        ] {
+            assert!(properties.get(private).is_none());
+        }
+        if name == "hubu_list_governance_records" {
+            assert_eq!(properties["limit"]["minimum"], 1);
+            assert_eq!(properties["limit"]["maximum"], 200);
+            assert_eq!(properties["cursor"]["type"], "string");
+        } else {
+            assert!(properties.get("cursor").is_none());
+            assert!(properties.get("limit").is_none());
+        }
+        if name == "hubu_get_governance_record" {
+            assert_eq!(tool["inputSchema"]["required"], json!(["record_id"]));
+        }
+    }
+}
+
+#[test]
+fn governance_routes_encode_opaque_tokens_once_and_preserve_http_projection() {
+    let fixture = governance_transport_fixture();
+    let snapshot = fixture["summary"]["snapshot"]["token"].as_str().unwrap();
+    let cursor = fixture["cursor"].as_str().unwrap();
+    let body = json!({"schema_version":"hubu-governance-v1","filters":fixture["filters"],"summary":fixture["summary"],"records":fixture["records"],"next_cursor":cursor});
+    let args = json!({
+        "agent_id":"agt_0123456789ab","account_id":"aga_0123456789ab",
+        "categories":["automated_admission","human_resolution"],
+        "outcomes":["automatic_deny","human_declined"],
+        "occurred_from":"2026-10-08T00:00:00+00:00",
+        "occurred_before":"2026-10-15T00:00:00Z",
+        "snapshot":snapshot,"cursor":cursor,"limit":1
+    });
+    let result = route_tool_call_v1(
+        json!({"name":"hubu_list_governance_records","arguments":args}),
+        false,
+        false,
+        None,
+        |request| {
+            assert_eq!(request.method, "GET");
+            assert_eq!(request.capability, HubuRequestCapabilityV1::None);
+            assert!(request.body.is_none());
+            assert!(super::transport::is_approved_http_route(
+                "GET",
+                &request.path
+            ));
+            assert!(!super::transport::is_approved_http_route(
+                "POST",
+                &request.path
+            ));
+            let parsed = reqwest::Url::parse(&format!("http://fixture{}", request.path)).unwrap();
+            assert_eq!(parsed.path(), "/governance/records");
+            let query = parsed
+                .query_pairs()
+                .collect::<std::collections::BTreeMap<_, _>>();
+            assert_eq!(query.get("snapshot").unwrap(), snapshot);
+            assert_eq!(query.get("cursor").unwrap(), cursor);
+            assert_eq!(
+                query.get("categories").unwrap(),
+                "automated_admission,human_resolution"
+            );
+            assert_eq!(
+                query.get("outcomes").unwrap(),
+                "automatic_deny,human_declined"
+            );
+            assert_eq!(
+                query.get("occurred_from").unwrap(),
+                "2026-10-08T00:00:00+00:00"
+            );
+            assert_eq!(query.get("limit").unwrap(), "1");
+            assert_eq!(query.len(), 9);
+            Ok(body.clone())
+        },
+    )
+    .unwrap();
+    assert_ne!(result.get("isError"), Some(&json!(true)));
+    assert_eq!(result["structuredContent"], body);
+    let text: Value = serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(text, body);
+    assert_eq!(
+        text["summary"]["requested"]["per_currency"][0]["units"],
+        "9007199254740993"
+    );
+    assert_eq!(
+        text["records"][0]["requested_amount"]["value"]["units"],
+        "5000"
+    );
+    assert_eq!(text["summary"]["backlog"]["unresolved_reconciliations"], 1);
+    assert_eq!(
+        text["summary"]["record_coverage"][0]["complete_history"],
+        false
+    );
+}
+
+#[test]
+fn governance_detail_preserves_snapshot_scope_and_cannot_select_private_records() {
+    let fixture = governance_transport_fixture();
+    let record_id = fixture["records"][0]["record_id"].as_str().unwrap();
+    let snapshot = fixture["summary"]["snapshot"]["token"].as_str().unwrap();
+    let body = json!({"schema_version":"hubu-governance-v1","filters":fixture["filters"],"summary":fixture["summary"],"record":fixture["records"][0]});
+    let result = route_tool_call_v1(
+        json!({"name":"hubu_get_governance_record","arguments":{"record_id":record_id,"agent_id":"agt_0123456789ab","snapshot":snapshot}}),
+        false, false, None,
+        |request| {
+            let parsed = reqwest::Url::parse(&format!("http://fixture{}", request.path)).unwrap();
+            assert_eq!(parsed.path(), format!("/governance/records/{record_id}"));
+            let query = parsed.query_pairs().collect::<std::collections::BTreeMap<_, _>>();
+            assert_eq!(query.get("snapshot").unwrap(), snapshot);
+            assert_eq!(query.get("agent_id").unwrap(), "agt_0123456789ab");
+            assert_eq!(query.len(), 2);
+            Ok(body.clone())
+        },
+    ).unwrap();
+    assert_eq!(result["structuredContent"], body);
+}
+
+#[test]
+fn governance_invalid_inputs_fail_before_network_without_echoing_query_values() {
+    let canary = "private-operation-canary";
+    let valid_id = "lev_0123456789abcdef0123456789abcdef";
+    let mut cases = vec![
+        ("hubu_governance_summary", json!({"owner_id":canary})),
+        ("hubu_governance_summary", json!({"operation_key":canary})),
+        ("hubu_governance_summary", json!({"cursor":"opaque"})),
+        ("hubu_governance_summary", json!({"limit":1})),
+        ("hubu_governance_summary", json!({"agent_id":null})),
+        ("hubu_governance_summary", json!({"agent_id":""})),
+        (
+            "hubu_governance_summary",
+            json!({"agent_id":"owner-secret"}),
+        ),
+        (
+            "hubu_governance_summary",
+            json!({"account_id":"aga_unsafe/../"}),
+        ),
+        ("hubu_governance_summary", json!({"categories":[]})),
+        (
+            "hubu_governance_summary",
+            json!({"categories":"automated_admission"}),
+        ),
+        (
+            "hubu_governance_summary",
+            json!({"categories":["automated_admission",null]}),
+        ),
+        ("hubu_governance_summary", json!({"outcomes":[canary]})),
+        ("hubu_governance_summary", json!({"outcomes":[]})),
+        ("hubu_governance_summary", json!({"snapshot":{}})),
+        ("hubu_governance_summary", json!({"snapshot":""})),
+        (
+            "hubu_governance_summary",
+            json!({"snapshot":"x".repeat(2049)}),
+        ),
+        (
+            "hubu_governance_summary",
+            json!({"occurred_from":"yesterday"}),
+        ),
+        ("hubu_governance_summary", json!({"occurred_before":42})),
+        (
+            "hubu_governance_summary",
+            json!({"occurred_from":"2026-10-15T00:00:00Z","occurred_before":"2026-10-15T00:00:00Z"}),
+        ),
+        (
+            "hubu_governance_summary",
+            json!({"occurred_from":"2026-10-16T00:00:00Z","occurred_before":"2026-10-15T00:00:00Z"}),
+        ),
+        ("hubu_list_governance_records", json!({"limit":0})),
+        ("hubu_list_governance_records", json!({"limit":201})),
+        ("hubu_list_governance_records", json!({"limit":1.5})),
+        ("hubu_list_governance_records", json!({"limit":"1"})),
+        ("hubu_list_governance_records", json!({"cursor":null})),
+        (
+            "hubu_list_governance_records",
+            json!({"cursor":"x".repeat(4097)}),
+        ),
+        (
+            "hubu_list_governance_records",
+            json!({"record_id":valid_id}),
+        ),
+        ("hubu_get_governance_record", json!({})),
+        ("hubu_get_governance_record", json!({"record_id":null})),
+        (
+            "hubu_get_governance_record",
+            json!({"record_id":"lev_unsafe?operation_key=secret"}),
+        ),
+        ("hubu_get_governance_record", json!({"record_id":canary})),
+        (
+            "hubu_get_governance_record",
+            json!({"record_id":valid_id,"cursor":"opaque"}),
+        ),
+        (
+            "hubu_get_governance_record",
+            json!({"record_id":valid_id,"limit":1}),
+        ),
+    ];
+    for name in [
+        "hubu_governance_summary",
+        "hubu_list_governance_records",
+        "hubu_get_governance_record",
+    ] {
+        cases.push((name, json!([])));
+    }
+    for (name, args) in cases {
+        let error = route_tool_call_v1(
+            json!({"name":name,"arguments":args}),
+            false,
+            false,
+            None,
+            |_| panic!("invalid governance input reached HTTP"),
+        )
+        .unwrap_err();
+        assert!(!error.to_string().contains(canary));
+    }
+}
+
+#[test]
+fn governance_errors_are_typed_safe_and_do_not_echo_backend_diagnostics() {
+    for (status, body, code) in [
+        (
+            400,
+            r#"{"error":"private-operation-canary hubu-token-canary","error_code":"governance_invalid_query"}"#,
+            "governance_invalid_query",
+        ),
+        (
+            404,
+            r#"{"error":"private-operation-canary hubu-token-canary","error_code":"governance_record_not_found"}"#,
+            "governance_record_not_found",
+        ),
+        (
+            500,
+            r#"{"error":"private-operation-canary hubu-token-canary","error_code":"governance_unavailable"}"#,
+            "governance_unavailable",
+        ),
+    ] {
+        let (endpoint, request, handle) = one_shot_http_server(status, body);
+        let server = server_with_backends(&endpoint, None, false, None);
+        let response = tool_call(&server, "hubu_governance_summary", json!({}), None);
+        request.recv_timeout(Duration::from_secs(2)).unwrap();
+        handle.join().unwrap();
+        assert_eq!(response["result"]["isError"], true, "{response}");
+        let structured = &response["result"]["structuredContent"];
+        assert_eq!(structured["http_status"], status);
+        assert_eq!(structured["error_code"], code);
+        let text: Value =
+            serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap())
+                .unwrap();
+        assert_eq!(&text, structured);
+        assert!(!response.to_string().contains("private-operation-canary"));
+        assert!(!response.to_string().contains("hubu-token-canary"));
+    }
+    let (endpoint, request, handle) = one_shot_http_server(
+        403,
+        r#"{"error":"unrecognized-private-canary","error_code":"private-code-canary"}"#,
+    );
+    let server = server_with_backends(&endpoint, None, false, None);
+    let response = tool_call(&server, "hubu_governance_summary", json!({}), None);
+    request.recv_timeout(Duration::from_secs(2)).unwrap();
+    handle.join().unwrap();
+    assert!(!response.to_string().contains("unrecognized-private-canary"));
+    assert!(!response.to_string().contains("private-code-canary"));
+}
+
+#[test]
+fn governance_reads_survive_unavailable_operation_store_and_never_fallback_to_gongbu() {
+    for name in [
+        "hubu_governance_summary",
+        "hubu_list_governance_records",
+        "hubu_get_governance_record",
+    ] {
+        let (endpoint, request, handle) =
+            one_shot_http_server(200, r#"{"schema_version":"hubu-governance-v1"}"#);
+        let mut server = server_with_backends(&endpoint, None, false, None);
+        server.operation_registry = Arc::new(OperationRegistryCapability::Unavailable {
+            reason_code: "configuration_missing",
+        });
+        let args = if name == "hubu_get_governance_record" {
+            json!({"record_id":"lev_0123456789abcdef0123456789abcdef"})
+        } else {
+            json!({})
+        };
+        assert!(server
+            .list_tools_for_snapshot()
+            .iter()
+            .any(|tool| tool["name"] == name));
+        let response = tool_call(&server, name, args, None);
+        assert_ne!(
+            response["result"].get("isError"),
+            Some(&json!(true)),
+            "{response}"
+        );
+        assert!(request
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .starts_with("GET /governance/"));
+        handle.join().unwrap();
+    }
+    let (hubu_endpoint, request, handle) = disconnect_after_request_server();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let server = server_with_backends(
+        &hubu_endpoint,
+        Some(&format!("http://{}", listener.local_addr().unwrap())),
+        false,
+        None,
+    );
+    let response = tool_call(&server, "hubu_governance_summary", json!({}), None);
+    request.recv_timeout(Duration::from_secs(2)).unwrap();
+    handle.join().unwrap();
+    assert_eq!(response["error"]["data"]["code"], "backend_unavailable");
+    assert_eq!(response["error"]["data"]["retryable"], true);
+    assert!(matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock));
 }

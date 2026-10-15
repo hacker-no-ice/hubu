@@ -79,6 +79,30 @@ fn cases() -> Vec<GoldenCase> {
             meta: None,
         },
         GoldenCase {
+            name: "hubu_governance_summary",
+            owner: hubu,
+            method: "GET",
+            path: "/governance/summary",
+            arguments: json!({}),
+            meta: None,
+        },
+        GoldenCase {
+            name: "hubu_list_governance_records",
+            owner: hubu,
+            method: "GET",
+            path: "/governance/records",
+            arguments: json!({}),
+            meta: None,
+        },
+        GoldenCase {
+            name: "hubu_get_governance_record",
+            owner: hubu,
+            method: "GET",
+            path: "/governance/records/lev_0123456789abcdef0123456789abcdef",
+            arguments: json!({"record_id":"lev_0123456789abcdef0123456789abcdef"}),
+            meta: None,
+        },
+        GoldenCase {
             name: "hubu_apply_policy",
             owner: hubu,
             method: "POST",
@@ -335,8 +359,8 @@ fn assert_complete_unique_matrix(cases: &[GoldenCase]) {
     );
     assert_eq!(
         cases.len(),
-        33,
-        "golden matrix must contain exactly 33 cases"
+        36,
+        "golden matrix must contain exactly 36 cases"
     );
     let fixture = routing_fixture();
     let expected_names = fixture["tools"]
@@ -349,8 +373,8 @@ fn assert_complete_unique_matrix(cases: &[GoldenCase]) {
     let expected = expected_names.iter().copied().collect::<BTreeSet<_>>();
     assert_eq!(
         expected_names.len(),
-        33,
-        "routing fixture must map 33 tools"
+        36,
+        "routing fixture must map 36 tools"
     );
     assert_eq!(
         expected.len(),
@@ -366,7 +390,7 @@ fn assert_complete_unique_matrix(cases: &[GoldenCase]) {
             .iter()
             .filter(|case| case.owner == Owner::Hubu)
             .count(),
-        28
+        31
     );
     assert_eq!(
         cases
@@ -419,6 +443,22 @@ fn success_body(case: &GoldenCase) -> Value {
         "gongbu_list_artifacts" => artifact_list_response(),
         "gongbu_list_execution_targets" => json!({"schema_version":2,"targets":[]}),
         "gongbu_get_artifact" => unreachable!("artifact success uses image bytes"),
+        "hubu_governance_summary"
+        | "hubu_list_governance_records"
+        | "hubu_get_governance_record" => {
+            let fixture: Value =
+                serde_json::from_str(include_str!("../../../fixtures/governance-mcp-v1.json"))
+                    .unwrap();
+            let mut body = json!({"schema_version":"hubu-governance-v1","filters":fixture["filters"],"summary":fixture["summary"]});
+            if case.name == "hubu_list_governance_records" {
+                body["records"] = fixture["records"].clone();
+                body["next_cursor"] = Value::Null;
+            } else if case.name == "hubu_get_governance_record" {
+                body["record"] = fixture["records"][0].clone();
+            }
+            body
+        }
+
         "hubu_authorize_spend" => json!({
             "fixture":"HUB-125",
             "tool":case.name,

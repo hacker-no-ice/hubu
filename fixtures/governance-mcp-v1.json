@@ -1,0 +1,311 @@
+{
+  "filters": {
+    "agent_id": "agt_0123456789ab",
+    "account_id": "aga_0123456789ab",
+    "categories": [],
+    "outcomes": [],
+    "occurred_from": "2026-10-08T00:00:00Z",
+    "occurred_before": "2026-10-15T00:00:00Z"
+  },
+  "summary": {
+    "scope": {
+      "agent_id": "agt_0123456789ab",
+      "account_id": "aga_0123456789ab"
+    },
+    "snapshot": {
+      "token": "{\"version\":1,\"binding\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"watermark\":17,\"boundary\":{\"event_id\":\"lev_00000000000000000000000000000017\",\"recorded_at\":\"2026-10-15T00:00:00Z\"}}",
+      "watermark": 17,
+      "captured_evidence_as_of": "2026-10-15T00:00:00Z"
+    },
+    "fact_count": 5,
+    "distinct_attempts": 3,
+    "distinct_operations": 3,
+    "stage_counts_overlap": true,
+    "stages": [
+      {
+        "outcome": "automatic_deny",
+        "fact_count": 1
+      },
+      {
+        "outcome": "escalated",
+        "fact_count": 2
+      },
+      {
+        "outcome": "human_approved",
+        "fact_count": 1
+      },
+      {
+        "outcome": "human_declined",
+        "fact_count": 1
+      }
+    ],
+    "automatic_denials": [
+      {
+        "reason": "policy",
+        "distinct_attempts": 1
+      }
+    ],
+    "requested": {
+      "known_attempts": 3,
+      "unknown_attempts": 0,
+      "per_currency": [
+        {
+          "units": "9007199254740993",
+          "scale": 6,
+          "currency": "usd",
+          "display": "9007199254.740993"
+        },
+        {
+          "units": "5000",
+          "scale": 6,
+          "currency": "usdc",
+          "display": "0.005"
+        }
+      ]
+    },
+    "automatic_denied_requested": {
+      "known_attempts": 1,
+      "unknown_attempts": 0,
+      "per_currency": [
+        {
+          "units": "5000",
+          "scale": 6,
+          "currency": "usdc",
+          "display": "0.005"
+        }
+      ]
+    },
+    "backlog": {
+      "scope": {
+        "agent_id": "agt_0123456789ab",
+        "account_id": "aga_0123456789ab"
+      },
+      "captured_evidence_as_of": "2026-10-15T00:00:00Z",
+      "pending_human_approvals": 1,
+      "unresolved_reconciliations": 1
+    },
+    "record_coverage": [
+      {
+        "category": "automated_admission",
+        "supported": true,
+        "complete_history": false,
+        "capture_declarations": [
+          {
+            "source": "automated_admission",
+            "state": "enabled",
+            "effective_at": "2026-10-09T00:00:00Z",
+            "recorded_at": "2026-10-09T00:00:00Z"
+          }
+        ]
+      },
+      {
+        "category": "execution_failure",
+        "supported": false,
+        "complete_history": false,
+        "capture_declarations": []
+      }
+    ],
+    "unsupported_signals": [
+      "provider_execution_failure",
+      "pre_expiry_billing_uncertainty"
+    ],
+    "explanation_coverage": [
+      {
+        "category": "automated_admission",
+        "facts": 1,
+        "known_requested_amount": 1,
+        "known_policy": 0,
+        "known_budget": 0,
+        "known_execution_scope": 0
+      }
+    ],
+    "legacy_coverage": {
+      "observed_at": "2026-10-09T00:00:00Z",
+      "assessed": true,
+      "unlinked_metrics": [
+        "admission_denied"
+      ],
+      "unlinked_human_approval_backlog": true,
+      "unlinked_reconciliation_backlog": false,
+      "broader_attribution_unknown": false
+    }
+  },
+  "records": [
+    {
+      "record_id": "lev_0123456789abcdef0123456789abcdef",
+      "agent_id": "agt_0123456789ab",
+      "account_id": "aga_0123456789ab",
+      "occurred_at": "2026-10-10T00:00:00Z",
+      "recorded_at": "2026-10-10T00:00:01Z",
+      "attempt_revision": 1,
+      "category": "automated_admission",
+      "outcome": "automatic_deny",
+      "source": "automated_admission",
+      "authorization_release_reason": null,
+      "reconciliation_resolution": null,
+      "automatic_denial_reason": "policy",
+      "requested_amount": {
+        "coverage": "known",
+        "value": {
+          "units": "5000",
+          "scale": 6,
+          "currency": "usdc",
+          "display": "0.005"
+        }
+      },
+      "execution_scope": {
+        "coverage": "unavailable",
+        "reason": "not_captured"
+      },
+      "policy": {
+        "coverage": "unavailable",
+        "reason": "not_captured"
+      },
+      "budget": {
+        "coverage": "unavailable",
+        "reason": "not_captured"
+      }
+    },
+    {
+      "record_id": "lev_00000000000000000000000000000001",
+      "agent_id": "agt_0123456789ab",
+      "account_id": "aga_0123456789ab",
+      "occurred_at": "2026-10-11T00:00:00Z",
+      "recorded_at": "2026-10-11T00:00:01Z",
+      "attempt_revision": 1,
+      "category": "human_escalation",
+      "outcome": "escalated",
+      "source": "human_approval",
+      "authorization_release_reason": null,
+      "reconciliation_resolution": null,
+      "automatic_denial_reason": null,
+      "requested_amount": {
+        "coverage": "known",
+        "value": {
+          "units": "9007199254740993",
+          "scale": 6,
+          "currency": "usd",
+          "display": "9007199254.740993"
+        }
+      },
+      "execution_scope": {
+        "coverage": "unavailable",
+        "reason": "not_captured"
+      },
+      "policy": {
+        "coverage": "unavailable",
+        "reason": "not_captured"
+      },
+      "budget": {
+        "coverage": "unavailable",
+        "reason": "not_captured"
+      }
+    },
+    {
+      "record_id": "lev_00000000000000000000000000000002",
+      "agent_id": "agt_0123456789ab",
+      "account_id": "aga_0123456789ab",
+      "occurred_at": "2026-10-12T00:00:00Z",
+      "recorded_at": "2026-10-12T00:00:01Z",
+      "attempt_revision": 1,
+      "category": "human_resolution",
+      "outcome": "human_approved",
+      "source": "human_approval",
+      "authorization_release_reason": null,
+      "reconciliation_resolution": null,
+      "automatic_denial_reason": null,
+      "requested_amount": {
+        "coverage": "known",
+        "value": {
+          "units": "9007199254740993",
+          "scale": 6,
+          "currency": "usd",
+          "display": "9007199254.740993"
+        }
+      },
+      "execution_scope": {
+        "coverage": "unavailable",
+        "reason": "not_captured"
+      },
+      "policy": {
+        "coverage": "unavailable",
+        "reason": "not_captured"
+      },
+      "budget": {
+        "coverage": "unavailable",
+        "reason": "not_captured"
+      }
+    },
+    {
+      "record_id": "lev_00000000000000000000000000000003",
+      "agent_id": "agt_0123456789ab",
+      "account_id": "aga_0123456789ab",
+      "occurred_at": "2026-10-13T00:00:00Z",
+      "recorded_at": "2026-10-13T00:00:01Z",
+      "attempt_revision": 1,
+      "category": "human_escalation",
+      "outcome": "escalated",
+      "source": "human_approval",
+      "authorization_release_reason": null,
+      "reconciliation_resolution": null,
+      "automatic_denial_reason": null,
+      "requested_amount": {
+        "coverage": "known",
+        "value": {
+          "units": "9007199254740993",
+          "scale": 6,
+          "currency": "usd",
+          "display": "9007199254.740993"
+        }
+      },
+      "execution_scope": {
+        "coverage": "unavailable",
+        "reason": "not_captured"
+      },
+      "policy": {
+        "coverage": "unavailable",
+        "reason": "not_captured"
+      },
+      "budget": {
+        "coverage": "unavailable",
+        "reason": "not_captured"
+      }
+    },
+    {
+      "record_id": "lev_00000000000000000000000000000004",
+      "agent_id": "agt_0123456789ab",
+      "account_id": "aga_0123456789ab",
+      "occurred_at": "2026-10-14T00:00:00Z",
+      "recorded_at": "2026-10-14T00:00:01Z",
+      "attempt_revision": 1,
+      "category": "human_resolution",
+      "outcome": "human_declined",
+      "source": "human_approval",
+      "authorization_release_reason": null,
+      "reconciliation_resolution": null,
+      "automatic_denial_reason": null,
+      "requested_amount": {
+        "coverage": "known",
+        "value": {
+          "units": "9007199254740993",
+          "scale": 6,
+          "currency": "usd",
+          "display": "9007199254.740993"
+        }
+      },
+      "execution_scope": {
+        "coverage": "unavailable",
+        "reason": "not_captured"
+      },
+      "policy": {
+        "coverage": "unavailable",
+        "reason": "not_captured"
+      },
+      "budget": {
+        "coverage": "unavailable",
+        "reason": "not_captured"
+      }
+    }
+  ],
+  "cursor": "{\"version\":1,\"snapshot\":{\"version\":1,\"binding\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"watermark\":17,\"boundary\":{\"event_id\":\"lev_00000000000000000000000000000017\",\"recorded_at\":\"2026-10-15T00:00:00Z\"}},\"after\":{\"occurred_at\":\"2026-10-10T00:00:00Z\",\"sequence\":13,\"event_id\":\"lev_0123456789abcdef0123456789abcdef\"}}"
+}

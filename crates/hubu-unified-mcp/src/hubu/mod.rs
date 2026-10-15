@@ -1,4 +1,5 @@
 mod catalog;
+mod governance;
 mod response;
 mod routing;
 mod transport;
@@ -292,6 +293,18 @@ fn call_tool_with_operation_identity(
             )
         }
         Err(error) => {
+            if governance::is_tool(&name) {
+                if let Some(result) = governance_application_error_tool_result(&error) {
+                    return success_response(id, result);
+                }
+                // New governance reads never echo an unexpected backend body.
+                if matches!(
+                    error.downcast_ref::<ForwardError>(),
+                    Some(ForwardError::Application { .. })
+                ) {
+                    return error_response(id, -32000, "Hubu governance request failed");
+                }
+            }
             if matches!(name.as_str(), "hubu_update_budget" | "hubu_budget_history") {
                 if let Some(result) = budget_application_error_tool_result(&error) {
                     return success_response(id, result);
@@ -313,6 +326,26 @@ fn call_tool_with_operation_identity(
             error_response(id, -32000, &message)
         }
     }
+}
+
+fn governance_application_error_tool_result(error: &anyhow::Error) -> Option<Value> {
+    let ForwardError::Application {
+        status,
+        error_code: Some(code),
+        ..
+    } = error.downcast_ref::<ForwardError>()?
+    else {
+        return None;
+    };
+    let message = match (*status, code.as_str()) {
+        (400, "governance_invalid_query") => "invalid governance query",
+        (404, "governance_record_not_found") => "governance record not found",
+        (500, "governance_unavailable") => "governance evidence is unavailable",
+        _ => return None,
+    };
+    Some(tool_error_result_v1(
+        json!({"error":message, "http_status":status, "error_code":code}),
+    ))
 }
 
 fn budget_application_error_tool_result(error: &anyhow::Error) -> Option<Value> {

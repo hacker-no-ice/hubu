@@ -246,6 +246,9 @@ pub(super) fn route_tool_call_v1(
                 HubuResponseTransformV1::SpendApprovalResolution,
             )
         }
+        name if super::governance::is_tool(name) => {
+            get_request(super::governance::request_path(name, &arguments)?)
+        }
         "hubu_list_agents" => get_request("/agents"),
         "hubu_list_budgets" => {
             if arguments
