@@ -7,6 +7,17 @@ use crate::spend::lifecycle::*;
 use hubu_common::ids::AgentAccountId;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
+impl From<rusqlite::Error> for GovernanceReadError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Unavailable(error.into())
+    }
+}
+impl From<serde_json::Error> for GovernanceReadError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Unavailable(error.into())
+    }
+}
+
 const TOKEN_VERSION: u32 = 1;
 const MAX_SNAPSHOT_BYTES: usize = 2048;
 const MAX_CURSOR_BYTES: usize = 4096;
@@ -55,7 +66,7 @@ impl SqliteGovernanceRepository {
         &self,
         owner: &UserId,
         query: &GovernanceQuery,
-    ) -> Result<GovernancePage, StorageError> {
+    ) -> Result<GovernancePage, GovernanceReadError> {
         let evaluated = self.evaluate_governance(owner, query)?;
         let start = evaluated
             .after
@@ -94,7 +105,7 @@ impl SqliteGovernanceRepository {
         &self,
         owner: &UserId,
         query: &GovernanceQuery,
-    ) -> Result<GovernanceSummary, StorageError> {
+    ) -> Result<GovernanceSummary, GovernanceReadError> {
         reject_list_arguments(query)?;
         Ok(self.evaluate_governance(owner, query)?.summary)
     }
@@ -106,10 +117,10 @@ impl SqliteGovernanceRepository {
         owner: &UserId,
         event_id: &str,
         query: &GovernanceQuery,
-    ) -> Result<Option<GovernanceDetail>, StorageError> {
+    ) -> Result<Option<GovernanceDetail>, GovernanceReadError> {
         reject_list_arguments(query)?;
         if !event_id.starts_with("lev_") || event_id.len() > 100 {
-            return Err(invalid("invalid governance event selector"));
+            return Err(GovernanceReadError::InvalidQuery);
         }
         let evaluated = self.evaluate_governance(owner, query)?;
         Ok(evaluated
@@ -126,7 +137,7 @@ impl SqliteGovernanceRepository {
         &self,
         owner: &UserId,
         query: &GovernanceQuery,
-    ) -> Result<Evaluated, StorageError> {
+    ) -> Result<Evaluated, GovernanceReadError> {
         validate_query(query)?;
         let tx = self.conn.unchecked_transaction()?;
         let scope = resolve_scope(&tx, owner, query)?;
@@ -141,7 +152,7 @@ impl SqliteGovernanceRepository {
                 || c.after.sequence > i64::MAX as u64
                 || c.after.event_id.len() > 100
         }) {
-            return Err(invalid("invalid governance cursor"));
+            return Err(GovernanceReadError::InvalidQuery);
         }
         let supplied: Option<SnapshotToken> = query
             .snapshot
@@ -150,7 +161,7 @@ impl SqliteGovernanceRepository {
             .transpose()?;
         if let (Some(a), Some(b)) = (&supplied, cursor.as_ref().map(|c| &c.snapshot)) {
             if a != b {
-                return Err(invalid("governance snapshot and cursor differ"));
+                return Err(GovernanceReadError::InvalidQuery);
             }
         }
         let requested = supplied.or_else(|| cursor.as_ref().map(|c| c.snapshot.clone()));
@@ -177,9 +188,7 @@ impl SqliteGovernanceRepository {
             .as_ref()
             .is_some_and(|key| !records.iter().any(|r| after_key(r) == *key))
         {
-            return Err(invalid(
-                "governance cursor does not identify a matching visible fact",
-            ));
+            return Err(GovernanceReadError::InvalidQuery);
         }
         let public_snapshot = GovernanceSnapshot {
             token: serde_json::to_string(&token)?,
@@ -197,59 +206,55 @@ impl SqliteGovernanceRepository {
     }
 }
 
-fn invalid(message: &str) -> StorageError {
-    StorageError::InvalidData(message.into())
+fn unavailable(message: &str) -> GovernanceReadError {
+    StorageError::InvalidData(message.into()).into()
 }
-fn reject_list_arguments(query: &GovernanceQuery) -> Result<(), StorageError> {
+fn reject_list_arguments(query: &GovernanceQuery) -> Result<(), GovernanceReadError> {
     if query.cursor.is_some() || query.limit.is_some() {
-        return Err(invalid(
-            "cursor and limit are only valid for governance list",
-        ));
+        return Err(GovernanceReadError::InvalidQuery);
     }
     Ok(())
 }
-fn validate_query(query: &GovernanceQuery) -> Result<(), StorageError> {
+fn validate_query(query: &GovernanceQuery) -> Result<(), GovernanceReadError> {
     if query
         .occurred_from
         .zip(query.occurred_before)
         .is_some_and(|(from, before)| from >= before)
     {
-        return Err(invalid(
-            "governance occurred_from must be before occurred_before",
-        ));
+        return Err(GovernanceReadError::InvalidQuery);
     }
     if query.limit.is_some_and(|n| n == 0 || n > 200)
         || query.categories.len() > 12
         || query.outcomes.len() > 17
     {
-        return Err(invalid("invalid governance query bounds"));
+        return Err(GovernanceReadError::InvalidQuery);
     }
     Ok(())
 }
-fn decode<T: serde::de::DeserializeOwned>(raw: &str, max: usize) -> Result<T, StorageError> {
+fn decode<T: serde::de::DeserializeOwned>(raw: &str, max: usize) -> Result<T, GovernanceReadError> {
     if raw.is_empty() || raw.len() > max {
-        return Err(invalid("invalid governance token size"));
+        return Err(GovernanceReadError::InvalidQuery);
     }
-    serde_json::from_str(raw).map_err(|_| invalid("malformed governance token"))
+    serde_json::from_str(raw).map_err(|_| GovernanceReadError::InvalidQuery)
 }
 fn resolve_scope(
     conn: &Connection,
     owner: &UserId,
     query: &GovernanceQuery,
-) -> Result<Scope, StorageError> {
+) -> Result<Scope, GovernanceReadError> {
     let known: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM users WHERE id=?1)",
         [owner.to_string()],
         |r| r.get(0),
     )?;
     if !known {
-        return Err(invalid("unknown governance owner"));
+        return Err(GovernanceReadError::InvalidQuery);
     }
     let mut agent = None;
     let mut agent_public = None;
     if let Some(selector) = &query.agent_public_id {
         if !selector.starts_with("agt_") || selector.len() > 100 {
-            return Err(invalid("invalid governance agent selector"));
+            return Err(GovernanceReadError::InvalidQuery);
         }
         let value: Option<(String, String)> = conn
             .query_row(
@@ -258,30 +263,34 @@ fn resolve_scope(
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
-        let (id, public) = value.ok_or_else(|| invalid("unknown or foreign governance agent"))?;
-        agent = Some(id.parse().map_err(|_| invalid("invalid stored agent"))?);
+        let (id, public) = value.ok_or(GovernanceReadError::InvalidQuery)?;
+        agent = Some(
+            id.parse()
+                .map_err(|_| unavailable("invalid stored agent"))?,
+        );
         agent_public = Some(public);
     }
     let mut account = None;
     let mut account_public = None;
     if let Some(selector) = &query.account_public_id {
         if !selector.starts_with("aga_") || selector.len() > 100 {
-            return Err(invalid("invalid governance account selector"));
+            return Err(GovernanceReadError::InvalidQuery);
         }
         let value: Option<(String, String, String, String)> = conn.query_row("SELECT a.id,a.pub_id,i.id,i.pub_id FROM agent_accounts a JOIN agent_identities i ON i.id=a.agent_id WHERE a.owner_user_id=?1 AND i.owner_user_id=?1 AND a.pub_id=?2", params![owner.to_string(), selector], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
         let (id, public, agent_id, public_agent) =
-            value.ok_or_else(|| invalid("unknown or foreign governance account"))?;
+            value.ok_or(GovernanceReadError::InvalidQuery)?;
         let implied: AgentId = agent_id
             .parse()
-            .map_err(|_| invalid("invalid stored agent"))?;
+            .map_err(|_| unavailable("invalid stored agent"))?;
         if agent.as_ref().is_some_and(|selected| *selected != implied) {
-            return Err(invalid(
-                "governance account does not belong to selected agent",
-            ));
+            return Err(GovernanceReadError::InvalidQuery);
         }
         agent = Some(implied);
         agent_public = Some(public_agent);
-        account = Some(id.parse().map_err(|_| invalid("invalid stored account"))?);
+        account = Some(
+            id.parse()
+                .map_err(|_| unavailable("invalid stored account"))?,
+        );
         account_public = Some(public);
     }
     Ok(Scope {
@@ -297,7 +306,7 @@ fn filter_binding(
     owner: &UserId,
     scope: &GovernanceScope,
     query: &GovernanceQuery,
-) -> Result<String, StorageError> {
+) -> Result<String, GovernanceReadError> {
     let categories: BTreeSet<_> = query.categories.iter().collect();
     let outcomes: BTreeSet<_> = query.outcomes.iter().collect();
     let canonical = serde_json::to_vec(&(
@@ -317,7 +326,7 @@ fn checked_snapshot(
     owner: &UserId,
     binding: &str,
     supplied: Option<SnapshotToken>,
-) -> Result<SnapshotToken, StorageError> {
+) -> Result<SnapshotToken, GovernanceReadError> {
     let latest: u64 = conn.query_row(
         "SELECT COALESCE(MAX(sequence),0) FROM spend_lifecycle_records WHERE owner_user_id=?1",
         [owner.to_string()],
@@ -325,14 +334,13 @@ fn checked_snapshot(
     )?;
     let watermark = supplied.as_ref().map(|t| t.watermark).unwrap_or(latest);
     if watermark > i64::MAX as u64 || watermark > latest {
-        return Err(invalid("governance watermark is ahead of owner history"));
+        return Err(GovernanceReadError::InvalidQuery);
     }
     let boundary = if watermark == 0 {
         None
     } else {
         let row: Option<(String,String)> = conn.query_row("SELECT event_id,recorded_at FROM spend_lifecycle_records WHERE owner_user_id=?1 AND sequence=?2", params![owner.to_string(), watermark], |r| Ok((r.get(0)?,r.get(1)?))).optional()?;
-        let (event_id, time) =
-            row.ok_or_else(|| invalid("governance boundary does not belong to owner"))?;
+        let (event_id, time) = row.ok_or(GovernanceReadError::InvalidQuery)?;
         Some(Boundary {
             event_id,
             recorded_at: parse_timestamp(&time)?,
@@ -345,7 +353,7 @@ fn checked_snapshot(
         boundary,
     };
     if supplied.is_some_and(|t| t != verified) {
-        return Err(invalid("governance snapshot scope or boundary mismatch"));
+        return Err(GovernanceReadError::InvalidQuery);
     }
     Ok(verified)
 }
@@ -417,14 +425,14 @@ fn attempt(record: &LifecycleRecord) -> Attempt {
 }
 fn requested_total(
     records: impl Iterator<Item = impl std::borrow::Borrow<LifecycleRecord>>,
-) -> Result<GovernanceRequestedTotal, StorageError> {
+) -> Result<GovernanceRequestedTotal, GovernanceReadError> {
     let mut attempts: BTreeMap<Attempt, Option<LifecycleAmount>> = BTreeMap::new();
     for row in records {
         let record = row.borrow();
         let value = attempts.entry(attempt(record)).or_default();
         if let LifecycleEvidence::Known { value: amount } = &record.event.requested_amount {
             if value.as_ref().is_some_and(|old| old != amount) {
-                return Err(invalid("inconsistent captured requested amount"));
+                return Err(unavailable("inconsistent captured requested amount"));
             }
             *value = Some(amount.clone());
         }
@@ -447,7 +455,7 @@ fn requested_total(
             let value = &mut total.per_currency[index].units;
             *value = value
                 .checked_add(i128::from(amount.amount.units()))
-                .ok_or_else(|| invalid("governance amount total overflow"))?;
+                .ok_or_else(|| unavailable("governance amount total overflow"))?;
         } else {
             total.unknown_attempts += 1;
         }
@@ -464,7 +472,7 @@ fn summarize(
     scoped: &[&LifecycleRecord],
     records: &[LifecycleRecord],
     public_snapshot: GovernanceSnapshot,
-) -> Result<GovernanceSummary, StorageError> {
+) -> Result<GovernanceSummary, GovernanceReadError> {
     let mut attempts = BTreeSet::new();
     let mut operations = BTreeSet::new();
     let mut stages = BTreeMap::new();

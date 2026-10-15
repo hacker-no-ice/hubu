@@ -818,3 +818,70 @@ fn later_inventory_does_not_rewrite_empty_snapshot_or_obey_event_window() {
         .unwrap();
     assert_eq!(frozen, before);
 }
+
+#[test]
+fn caller_validation_and_stored_corruption_have_distinct_redacted_errors() {
+    let mut h = Harness::new(Effect::Deny);
+    let error = h
+        .repo
+        .governance_list(
+            h.owner(),
+            &GovernanceQuery {
+                cursor: Some("{PRIVATE_CLIENT_TOKEN".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(error, GovernanceReadError::InvalidQuery));
+    assert_eq!(error.code(), "governance_invalid_query");
+    assert!(!error.to_string().contains("PRIVATE_CLIENT_TOKEN"));
+
+    let foreign = UserId::new();
+    let agent = AgentId::new();
+    let account = AgentAccountId::new();
+    seed_lifecycle_test_identity(&mut h.repo, &foreign, &agent, &account);
+    let error = h
+        .repo
+        .governance_summary(
+            h.owner(),
+            &GovernanceQuery {
+                account_public_id: Some(format!("aga_{}", account.public_suffix())),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(error, GovernanceReadError::InvalidQuery));
+
+    // Intentional disk-corruption fixture: bypassing append validation here
+    // models a malformed stored payload, never a supported producer operation.
+    h.repo.conn.execute("INSERT INTO spend_lifecycle_records(owner_user_id,semantic_identity,event_id,payload_json,recorded_at) VALUES(?1,'corrupt-fixture','lev_corrupt',?2,?3)",params![h.owner().to_string(),r#"{"record_type":"event","input":"PRIVATE_STORED_PAYLOAD"}"#,Utc::now().to_rfc3339()]).unwrap();
+    let error = h
+        .repo
+        .governance_summary(h.owner(), &GovernanceQuery::default())
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        GovernanceReadError::Unavailable(StorageError::Json(_))
+    ));
+    assert_eq!(error.code(), "governance_unavailable");
+    assert_eq!(error.to_string(), "governance evidence is unavailable");
+    assert!(!error.to_string().contains("PRIVATE_STORED_PAYLOAD"));
+}
+
+#[test]
+fn inconsistent_captured_amount_is_unavailable_instead_of_invalid_query() {
+    let first = synthetic_record(1, 1, Currency::Usd);
+    let mut inconsistent = first.clone();
+    inconsistent.event.requested_amount = LifecycleEvidence::Known {
+        value: LifecycleAmount {
+            amount: Amount::from_units(2),
+            currency: Currency::Usd,
+        },
+    };
+    let error = requested_total([&first, &inconsistent].into_iter()).unwrap_err();
+    assert!(matches!(
+        error,
+        GovernanceReadError::Unavailable(StorageError::InvalidData(_))
+    ));
+    assert_eq!(error.code(), "governance_unavailable");
+}

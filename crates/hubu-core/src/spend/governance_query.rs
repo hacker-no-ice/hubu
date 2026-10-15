@@ -2,9 +2,28 @@
 //! an HTTP/MCP adapter maps it through the shared exact-money response helper.
 //! A stage count is not a distinct attempt count: stages intentionally overlap.
 use super::lifecycle::*;
+use crate::storage::StorageError;
 use chrono::{DateTime, Utc};
 use hubu_common::money::Currency;
 use serde::{Deserialize, Serialize};
+
+/// Stable, redacted read failures. Stored-data/DB errors retain their private
+/// source for diagnostics, while transports can classify without parsing prose.
+#[derive(Debug, thiserror::Error)]
+pub enum GovernanceReadError {
+    #[error("invalid governance query")]
+    InvalidQuery,
+    #[error("governance evidence is unavailable")]
+    Unavailable(#[from] StorageError),
+}
+impl GovernanceReadError {
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::InvalidQuery => "governance_invalid_query",
+            Self::Unavailable(_) => "governance_unavailable",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
