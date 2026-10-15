@@ -561,6 +561,7 @@ impl Api {
             || authorization.account_id.trim().is_empty()
             || authorization.decision_id.trim().is_empty()
             || authorization.amount_cents != pricing_snapshot.estimated_amount_minor
+            || !authorization.is_whole_cent_authorization()
             || !authorization
                 .currency
                 .eq_ignore_ascii_case(&pricing_snapshot.currency)
@@ -1415,6 +1416,7 @@ mod tests {
                 decision_id: format!("decision-{spend_auth_token_id}"),
                 account_id: "account-a".into(),
                 agent_id: "agent-a".into(),
+                amount: None,
                 amount_cents: 100,
                 currency: "USD".into(),
                 merchant: None,
@@ -1433,8 +1435,19 @@ mod tests {
                     remaining_amount_cents: 0,
                 },
             };
+            let exact = |units: &str| crate::hubu::ExactAmount {
+                units: units.into(),
+                scale: 6,
+                currency: "usd".into(),
+                display: Some("ignored".into()),
+            };
             if spend_auth_token_id.starts_with("price-mismatch") {
                 response.amount_cents += 1;
+            } else if spend_auth_token_id.starts_with("sub-cent") {
+                // USD 0.990001 rounds up to the 100-cent price but is less.
+                response.amount = Some(exact("990001"));
+            } else if spend_auth_token_id.starts_with("exact-whole-cents") {
+                response.amount = Some(exact("1000000"));
             } else if spend_auth_token_id.starts_with("identity-mismatch") {
                 response.account_id = "account-b".into();
             } else if spend_auth_token_id.starts_with("scope-mismatch") {
@@ -2882,16 +2895,26 @@ mod tests {
         let fixture = fixture();
         for token in [
             "price-mismatch-1",
+            "sub-cent-1",
             "scope-mismatch-1",
             "token-swap-1",
             "expired-1",
         ] {
-            assert_eq!(call_create(&fixture, &request(token)).status, 400);
+            assert_eq!(
+                call_create(&fixture, &request(token)).status,
+                400,
+                "{token}"
+            );
             assert!(fixture
                 .repository
                 .get_execution_by_hubu_token("account-a", token)
                 .is_err());
         }
+        // A v4.5 Hubu's exact amount that is exactly the cent price is admitted.
+        assert_eq!(
+            execution(&call_create(&fixture, &request("exact-whole-cents-1"))).spend_auth_token_id,
+            "exact-whole-cents-1"
+        );
     }
 
     #[test]

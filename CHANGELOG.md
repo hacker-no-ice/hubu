@@ -77,6 +77,19 @@ Future release template
   records, ledger coverage and the watch projection. See
   [docs/api-amounts.md](docs/api-amounts.md).
 
+- Executor contract `hubu-spend-executor-v4.5` moves executor amounts to
+  exact units. Validate and claim requests send
+  `contract_version: "hubu-spend-executor-v4.5"` with
+  `amount: {"units", "scale": 6, "currency"}`, which must equal the
+  authorization exactly; a missing or unknown `scale`, an unknown
+  `contract_version`, or `amount_cents` alongside `amount` is rejected.
+  Executor responses add the exact `amount` money object. Requests without
+  `contract_version` are v4.4 and keep working with whole cents. The guidance
+  lists both in `supported_protocol_versions`, the conformance suite gains a
+  v4.5 corpus with a sub-cent scenario (the v4.4 corpus still runs in CI), and
+  the `hubu_governed_execution` MCP tool accepts a decimal `amount` and
+  `currency`. See [docs/spend-executor-contract.md](docs/spend-executor-contract.md#v45-exact-amounts).
+
 - The CLI takes and shows exact amounts. `--amount` on `budget create`,
   `budget update`, `spend`, `spend authorize` and `user spending-target set`
   accepts decimals with up to 6 places (`0.005`), and `budget create` takes
@@ -89,6 +102,14 @@ Future release template
   policy warnings. See [docs/cli.md](docs/cli.md#amounts).
 
 ### Breaking or operational changes
+
+- All binaries now report and require executor contract
+  `hubu-spend-executor-v4.5`. Managed stacks regenerate Gongbu's
+  `expected_executor_contract`; hand-written Gongbu configurations must
+  change it to `hubu-spend-executor-v4.5`.
+  Gongbu still sends v4.4 cent requests until its client moves to v4.5, and
+  until then it refuses to admit an authorization that is not a whole number
+  of cents.
 
 - Whole-cent amount fields (`amount_cents`, `amount_limit_cents`,
   `daily_limit_cents`) are deprecated. Requests that use only them still work

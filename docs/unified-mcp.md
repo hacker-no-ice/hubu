@@ -611,7 +611,7 @@ The version-1 compatibility boundary requires:
 | Unified contract | `hubu-gongbu-mcp-v1` |
 | Routing revision | Reported as `routing_revision` by `hubu_unified_capabilities` |
 | MCP protocol | `2024-11-05` |
-| Hubu and Gongbu executor contract | `hubu-spend-executor-v4.4` |
+| Hubu and Gongbu executor contract | `hubu-spend-executor-v4.5` |
 | Gongbu API schema | `2` |
 | Gongbu MCP schema | `2` |
 | Product versions | Exact match across router and configured backends |

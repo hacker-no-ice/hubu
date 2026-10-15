@@ -440,6 +440,10 @@ pub struct ExecutorSpendResponse {
     pub decision_id: String,
     pub account_id: String,
     pub agent_id: String,
+    /// The exact authorization from a `hubu-spend-executor-v4.5` Hubu; older
+    /// Hubu releases send only `amount_cents`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amount: Option<ExactAmount>,
     pub amount_cents: i64,
     pub currency: String,
     pub merchant: Option<String>,
@@ -449,6 +453,34 @@ pub struct ExecutorSpendResponse {
     pub status: String,
     pub expires_at: String,
     pub budget_hold: BudgetHold,
+}
+
+/// A Hubu money object: `units` of 10^-`scale` of `currency`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExactAmount {
+    pub units: String,
+    pub scale: u32,
+    pub currency: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<String>,
+}
+
+impl ExecutorSpendResponse {
+    /// Gongbu prices and settles in whole cents until its client moves to
+    /// contract v4.5. An authorization that is not exactly its own
+    /// `amount_cents` (a sub-cent amount whose ceiling only looks like a cent
+    /// price) must not be admitted, or the provider could charge more than
+    /// Hubu reserved.
+    pub fn is_whole_cent_authorization(&self) -> bool {
+        match &self.amount {
+            None => true,
+            Some(amount) => {
+                amount.scale == 6
+                    && amount.currency.eq_ignore_ascii_case(&self.currency)
+                    && amount.units.parse::<i64>().ok() == self.amount_cents.checked_mul(10_000)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -67,7 +67,7 @@ binary that knows only the legacy columns must use its matching pre-upgrade
 backup; do not use an upgraded database as a rollback mechanism.
 
 The precise-receipt migration does not change the executor contract version
-by itself. The current contract, v4.4, still accepts the legacy cents receipt
+by itself. The current contract, v4.5, still accepts the legacy cents receipt
 shape, and all four binaries must report the same contract version.
 New precise receipts carry exact amount, scale, currency, and the complete
 frozen pricing snapshot. If an older Hubu rejects that additive shape after a
