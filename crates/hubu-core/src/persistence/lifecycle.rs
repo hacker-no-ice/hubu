@@ -381,7 +381,10 @@ fn validate_input(
                 } => policy_decision == Some(crate::policy::Effect::Deny),
                 AutomatedAdmissionOutcome::Denied {
                     reason: AdmissionDenialReason::Unknown,
-                } => policy_decision.is_some(),
+                } => matches!(
+                    policy_decision,
+                    Some(crate::policy::Effect::Allow | crate::policy::Effect::Deny)
+                ),
                 AutomatedAdmissionOutcome::Denied { .. } => {
                     policy_decision == Some(crate::policy::Effect::Allow)
                 }
@@ -476,12 +479,18 @@ fn validate_input(
                 }
             }
             if let LifecycleFact::AuthorizationReleased { reason, .. } = &input.fact {
-                let expected = if *reason == AuthorizationReleaseReason::Expired {
-                    "expired"
-                } else {
-                    "released"
+                let (expected, void_reason) = match reason {
+                    AuthorizationReleaseReason::Expired => ("expired", None),
+                    AuthorizationReleaseReason::ExecutorRejectedBeforeClaim => {
+                        ("released", Some("executor_rejected_before_claim"))
+                    }
+                    AuthorizationReleaseReason::Cancelled => ("released", Some("cancelled")),
                 };
-                let released:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM budget_holds h JOIN spend_auth_tokens t ON t.spend_decision_id=h.spend_decision_id WHERE h.spend_decision_id=?1 AND h.status=?2 AND h.executor_claim_id IS NULL AND NOT EXISTS(SELECT 1 FROM spend_executor_claims cl WHERE cl.spend_auth_token_id=t.id))",params![approval_request_id.to_string(),expected],|row|row.get(0))?;
+                // A released hold alone cannot establish its cause or prove
+                // that no wallet payment used this authorization. Expiry has
+                // no void row; other known causes require the exact durable
+                // void and revocation committed by their authoritative writer.
+                let released:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM budget_holds h JOIN spend_auth_tokens t ON t.spend_decision_id=h.spend_decision_id WHERE h.spend_decision_id=?1 AND h.status=?2 AND h.executor_claim_id IS NULL AND t.used_at IS NULL AND t.used_by_payment_id IS NULL AND NOT EXISTS(SELECT 1 FROM spend_executor_claims cl WHERE cl.spend_auth_token_id=t.id) AND (?3 IS NULL OR (t.revoked_at IS NOT NULL AND EXISTS(SELECT 1 FROM spend_authorization_voids v WHERE v.spend_auth_token_id=t.id AND v.reason=?3))))",params![approval_request_id.to_string(),expected,void_reason],|row|row.get(0))?;
                 if !released {
                     return Err(invalid("lifecycle authorization release is not confirmed"));
                 }

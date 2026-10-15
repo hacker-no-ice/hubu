@@ -1120,3 +1120,168 @@ fn human_resolution_requires_durable_matching_closure_and_replays_after_release(
         .events
         .is_empty());
 }
+
+#[test]
+fn unknown_automatic_denial_cannot_relabel_a_confirmed_human_decline() {
+    let mut repo = SqliteGovernanceRepository::in_memory().unwrap();
+    let declined = Fixture::seed(&mut repo, Effect::NeedsApproval);
+    let mut spend = crate::spend::SpendManager::from_records(
+        repo.load_spend_decisions().unwrap(),
+        repo.load_spend_auth_tokens().unwrap(),
+    );
+    let mut budgets = Fixture::manager(&repo);
+    crate::app::SpendApprovalService
+        .resolve_human_approval(
+            hubu_common::models::UserContext::new(declined.owner.clone()),
+            &declined.decision,
+            crate::app::HumanApprovalDecision::Deny,
+            &mut spend,
+            &mut budgets,
+            &mut repo,
+        )
+        .unwrap();
+    let wrong = declined.event(
+        LifecycleSource::AutomatedAdmission,
+        LifecycleFact::AutomatedAdmission {
+            result: AutomatedAdmissionOutcome::Denied {
+                reason: AdmissionDenialReason::Unknown,
+            },
+        },
+    );
+    assert!(repo.append_lifecycle_event(&wrong).is_err());
+    let correct = declined.event(
+        LifecycleSource::HumanApproval,
+        LifecycleFact::HumanResolutionConfirmed {
+            approval_request_id: declined.decision.clone(),
+            resolution: HumanResolution::Declined,
+            confirmed_by_user_id: declined.owner.clone(),
+        },
+    );
+    repo.append_lifecycle_event(&correct).unwrap();
+    let snapshot = repo.lifecycle_snapshot(&declined.owner, None).unwrap();
+    assert_eq!(snapshot.events.len(), 1);
+    assert_eq!(
+        snapshot.events[0].event.fact.count_category(),
+        LifecycleCount::HumanDeclined
+    );
+    // Missing automatic reason detail remains representable for actual policy
+    // and budget admissions; it never erases the human/automatic distinction.
+    for effect in [Effect::Allow, Effect::Deny] {
+        let automatic = Fixture::seed(&mut repo, effect);
+        let decision = repo
+            .load_spend_decisions()
+            .unwrap()
+            .into_iter()
+            .find(|d| d.id == automatic.decision)
+            .unwrap();
+        repo.record_spend_attempt_outcome(
+            &decision,
+            SpendAuthorizationDecision::Denied,
+            &[],
+            Utc::now(),
+        )
+        .unwrap();
+        let input = automatic.event(
+            LifecycleSource::AutomatedAdmission,
+            LifecycleFact::AutomatedAdmission {
+                result: AutomatedAdmissionOutcome::Denied {
+                    reason: AdmissionDenialReason::Unknown,
+                },
+            },
+        );
+        repo.append_lifecycle_event(&input).unwrap();
+    }
+}
+
+#[test]
+fn authorization_release_matches_void_reason_and_expiry_never_hides_payment_use() {
+    let mut repo = SqliteGovernanceRepository::in_memory().unwrap();
+    let released = Fixture::seed(&mut repo, Effect::Allow);
+    released.authorize(&mut repo);
+    repo.void_unclaimed_authorization(
+        &released.owner,
+        &released.account,
+        &released.token,
+        &released.key,
+    )
+    .unwrap();
+    let wrong = released.event(
+        LifecycleSource::Executor,
+        LifecycleFact::AuthorizationReleased {
+            authorization_id: released.decision.clone(),
+            reason: AuthorizationReleaseReason::Cancelled,
+        },
+    );
+    assert!(repo.append_lifecycle_event(&wrong).is_err());
+    let correct = released.event(
+        LifecycleSource::Executor,
+        LifecycleFact::AuthorizationReleased {
+            authorization_id: released.decision.clone(),
+            reason: AuthorizationReleaseReason::ExecutorRejectedBeforeClaim,
+        },
+    );
+    let first = repo.append_lifecycle_event(&correct).unwrap();
+    let replay = repo.append_lifecycle_event(&correct).unwrap();
+    assert!(replay.idempotent_replay);
+    assert_eq!(replay.record, first.record);
+
+    let expiry_at = Utc::now() + chrono::Duration::hours(2);
+    let expired = Fixture::seed(&mut repo, Effect::Allow);
+    expired.authorize(&mut repo);
+    repo.expire_overdue_budget_holds(expiry_at).unwrap();
+    let mut input = expired.event(
+        LifecycleSource::AutomatedAdmission,
+        LifecycleFact::AuthorizationReleased {
+            authorization_id: expired.decision.clone(),
+            reason: AuthorizationReleaseReason::Expired,
+        },
+    );
+    input.occurred_at = expiry_at;
+    let first = repo.append_lifecycle_event(&input).unwrap();
+    assert_eq!(
+        repo.append_lifecycle_event(&input).unwrap().record,
+        first.record
+    );
+    // The legacy expiry writer can expire a hold even when a wallet token was
+    // already used. Such expiry cannot be asserted as a safe pre-execution release.
+    for used_at in [true, false] {
+        let used = Fixture::seed(&mut repo, Effect::Allow);
+        used.authorize(&mut repo);
+        if used_at {
+            repo.conn
+                .execute(
+                    "UPDATE spend_auth_tokens SET used_at=?2 WHERE id=?1",
+                    params![used.token.to_string(), Utc::now().to_rfc3339()],
+                )
+                .unwrap();
+        } else {
+            repo.conn
+                .execute(
+                    "UPDATE spend_auth_tokens SET used_by_payment_id=?2 WHERE id=?1",
+                    params![used.token.to_string(), PaymentId::new().to_string()],
+                )
+                .unwrap();
+        }
+        repo.expire_overdue_budget_holds(expiry_at).unwrap();
+        let expired_hold = repo
+            .load_budget_holds()
+            .unwrap()
+            .into_iter()
+            .find(|h| h.spend_decision_id == used.decision)
+            .unwrap();
+        assert!(matches!(expired_hold.status, BudgetHoldStatus::Expired));
+        let input = used.event(
+            LifecycleSource::AutomatedAdmission,
+            LifecycleFact::AuthorizationReleased {
+                authorization_id: used.decision.clone(),
+                reason: AuthorizationReleaseReason::Expired,
+            },
+        );
+        assert!(repo.append_lifecycle_event(&input).is_err());
+        assert!(repo
+            .lifecycle_snapshot(&used.owner, None)
+            .unwrap()
+            .events
+            .is_empty());
+    }
+}
