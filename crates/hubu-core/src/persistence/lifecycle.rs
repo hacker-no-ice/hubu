@@ -441,11 +441,25 @@ fn validate_input(
             }
             if let LifecycleFact::HumanResolutionConfirmed {
                 confirmed_by_user_id,
+                resolution,
                 ..
             } = &input.fact
             {
                 if confirmed_by_user_id != &c.owner_user_id {
                     return Err(invalid("unconfirmed lifecycle human resolution"));
+                }
+                // A human attempt that leaves this approval pending is not a
+                // confirmed resolution. Use the accepted durable closure, not
+                // policy needs_approval or an owner label, as its authority.
+                let expected = match resolution {
+                    HumanResolution::Approved => "allowed",
+                    HumanResolution::Declined => "denied",
+                };
+                let canonical:Option<(String,Option<String>)>=conn.query_row("SELECT decision,spend_decision_id FROM spend_authorization_outcomes WHERE agent_id=?1 AND operation_key=?2 AND revision=?3 ORDER BY id DESC LIMIT 1",params![c.agent_id.to_string(),c.operation_key,c.attempt_revision],|row|Ok((row.get(0)?,row.get(1)?))).optional()?;
+                if canonical.as_ref().is_none_or(|(decision, id)| {
+                    decision != expected || id.as_ref() != Some(&approval_request_id.to_string())
+                }) {
+                    return Err(invalid("lifecycle human resolution is not confirmed"));
                 }
             }
             if matches!(

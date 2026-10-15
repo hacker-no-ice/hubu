@@ -118,6 +118,9 @@ pub enum LifecycleFact {
     HumanEscalation {
         approval_request_id: SpendDecisionId,
     },
+    /// Accepted durable closure of this immutable approval request. A human
+    /// approval attempt that fails downstream and remains pending is not a
+    /// confirmed resolution. This fact never synthesizes an authorization fact.
     HumanResolutionConfirmed {
         approval_request_id: SpendDecisionId,
         resolution: HumanResolution,

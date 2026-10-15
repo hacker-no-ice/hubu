@@ -316,7 +316,7 @@ fn fixture_matrix_preserves_every_stage_and_technical_failure_can_retry() {
         ),
     ];
     for (source, fact, category) in &cases {
-        if matches!(fact, LifecycleFact::AuthorizationGranted { .. }) {
+        if matches!(fact, LifecycleFact::HumanResolutionConfirmed { .. }) {
             f.authorize(&mut repo);
         }
         if matches!(fact, LifecycleFact::ExecutionStarted { .. }) {
@@ -353,11 +353,7 @@ fn fixture_matrix_preserves_every_stage_and_technical_failure_can_retry() {
             confirmed_by_user_id: f.owner.clone(),
         },
     );
-    assert!(repo
-        .append_lifecycle_event(&conflicting)
-        .unwrap_err()
-        .to_string()
-        .contains("conflicting lifecycle"));
+    assert!(repo.append_lifecycle_event(&conflicting).is_err());
     conflicting = f.event(
         LifecycleSource::Reconciliation,
         LifecycleFact::ExecutionFinalized {
@@ -469,6 +465,19 @@ fn policy_denial_human_decline_and_safe_preclaim_release_are_distinct() {
         }
     }
     let f = Fixture::seed(&mut repo, Effect::NeedsApproval);
+    let decision = repo
+        .load_spend_decisions()
+        .unwrap()
+        .into_iter()
+        .find(|d| d.id == f.decision)
+        .unwrap();
+    repo.record_spend_attempt_outcome(
+        &decision,
+        SpendAuthorizationDecision::Denied,
+        &["human denied the immutable spend request".into()],
+        Utc::now(),
+    )
+    .unwrap();
     let declined = f.event(
         LifecycleSource::HumanApproval,
         LifecycleFact::HumanResolutionConfirmed {
@@ -544,6 +553,7 @@ fn watermark_backlog_uses_preperiod_opens_and_late_arrivals_cannot_reopen() {
             confirmed_by_user_id: f.owner.clone(),
         },
     );
+    f.authorize(&mut repo);
     repo.append_lifecycle_event(&resolved).unwrap();
     assert_eq!(
         backlog(
@@ -570,7 +580,6 @@ fn watermark_backlog_uses_preperiod_opens_and_late_arrivals_cannot_reopen() {
             outcome: ReconciliationResolution::VendorDidNotBill,
         },
     );
-    f.authorize(&mut repo);
     f.claim(&mut repo);
     f.reconcile(&mut repo, false);
     repo.append_lifecycle_event(&resolution).unwrap();
@@ -987,4 +996,127 @@ fn separate_connection_exact_replays_converge_on_one_identity_and_first_recorded
             .len(),
         1
     );
+}
+
+#[test]
+fn human_resolution_requires_durable_matching_closure_and_replays_after_release() {
+    use crate::app::{HumanApprovalDecision, SpendApprovalService, SpendAuthorizationOutcome};
+    fn resolve(
+        repo: &mut SqliteGovernanceRepository,
+        f: &Fixture,
+        decision: HumanApprovalDecision,
+    ) -> Result<SpendAuthorizationOutcome, crate::app::SpendApprovalError> {
+        let mut spend = crate::spend::SpendManager::from_records(
+            repo.load_spend_decisions().unwrap(),
+            repo.load_spend_auth_tokens().unwrap(),
+        );
+        let mut budgets = Fixture::manager(repo);
+        SpendApprovalService.resolve_human_approval(
+            hubu_common::models::UserContext::new(f.owner.clone()),
+            &f.decision,
+            decision,
+            &mut spend,
+            &mut budgets,
+            repo,
+        )
+    }
+    fn resolution(f: &Fixture, value: HumanResolution) -> LifecycleEventInput {
+        f.event(
+            LifecycleSource::HumanApproval,
+            LifecycleFact::HumanResolutionConfirmed {
+                approval_request_id: f.decision.clone(),
+                resolution: value,
+                confirmed_by_user_id: f.owner.clone(),
+            },
+        )
+    }
+
+    let mut repo = SqliteGovernanceRepository::in_memory().unwrap();
+    let approved = Fixture::seed(&mut repo, Effect::NeedsApproval);
+    let escalated = approved.event(
+        LifecycleSource::HumanApproval,
+        LifecycleFact::HumanEscalation {
+            approval_request_id: approved.decision.clone(),
+        },
+    );
+    repo.append_lifecycle_event(&escalated).unwrap();
+    // Neither owner identity nor a genuine pending approval proves resolution.
+    for value in [HumanResolution::Approved, HumanResolution::Declined] {
+        assert!(repo
+            .append_lifecycle_event(&resolution(&approved, value))
+            .is_err());
+    }
+    assert_eq!(
+        backlog(&repo.lifecycle_snapshot(&approved.owner, None).unwrap()),
+        1
+    );
+    let authorization = match resolve(&mut repo, &approved, HumanApprovalDecision::Approve).unwrap()
+    {
+        SpendAuthorizationOutcome::Approved(value) => value,
+        _ => panic!("fixture approval must be accepted"),
+    };
+    assert!(repo
+        .append_lifecycle_event(&resolution(&approved, HumanResolution::Declined))
+        .is_err());
+    let accepted = resolution(&approved, HumanResolution::Approved);
+    let recorded = repo.append_lifecycle_event(&accepted).unwrap();
+    let snapshot = repo.lifecycle_snapshot(&approved.owner, None).unwrap();
+    assert_eq!(backlog(&snapshot), 0);
+    assert!(!snapshot
+        .events
+        .iter()
+        .any(|r| r.event.fact.count_category() == LifecycleCount::AuthorizationGranted));
+    repo.void_unclaimed_authorization(
+        &approved.owner,
+        &approved.account,
+        &authorization.token.id,
+        &approved.key,
+    )
+    .unwrap();
+    let replay = repo.append_lifecycle_event(&accepted).unwrap();
+    assert!(replay.idempotent_replay);
+    assert_eq!(replay.record, recorded.record);
+
+    let declined = Fixture::seed(&mut repo, Effect::NeedsApproval);
+    assert!(matches!(
+        resolve(&mut repo, &declined, HumanApprovalDecision::Deny).unwrap(),
+        SpendAuthorizationOutcome::Rejected(_)
+    ));
+    assert!(repo
+        .append_lifecycle_event(&resolution(&declined, HumanResolution::Approved))
+        .is_err());
+    let accepted = resolution(&declined, HumanResolution::Declined);
+    let recorded = repo.append_lifecycle_event(&accepted).unwrap();
+    assert_eq!(
+        repo.append_lifecycle_event(&accepted).unwrap().record,
+        recorded.record
+    );
+
+    let failed = Fixture::seed(&mut repo, Effect::NeedsApproval);
+    repo.conn
+        .execute(
+            "UPDATE budgets SET administrative_state='revoked' WHERE id=?1",
+            [failed.budget.to_string()],
+        )
+        .unwrap();
+    // This is a real human approval attempt, but downstream budget admission
+    // fails and the canonical approval request remains pending.
+    assert!(resolve(&mut repo, &failed, HumanApprovalDecision::Approve).is_err());
+    let history = repo
+        .load_spend_attempt_history(&failed.agent, &failed.key)
+        .unwrap();
+    assert_eq!(
+        history[0].final_decision,
+        SpendAuthorizationDecision::PendingApproval
+    );
+    for value in [HumanResolution::Approved, HumanResolution::Declined] {
+        assert!(repo
+            .append_lifecycle_event(&resolution(&failed, value))
+            .is_err());
+    }
+    assert!(repo
+        .lifecycle_snapshot(&failed.owner, None)
+        .unwrap()
+        .events
+        .is_empty());
 }

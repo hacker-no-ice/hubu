@@ -19,6 +19,13 @@ reconciliation entry/resolution. A policy allow or a human action alone does not
 prove an authorization was granted or provider work succeeded. An internal
 evaluation-pending placeholder is not a human escalation.
 
+A confirmed human resolution requires the matching durable closure of the
+immutable approval request: accepted approval is `allowed`, and accepted
+decline is `denied`. An approval attempt that fails its downstream budget check
+and leaves the request pending is not a confirmed resolution. Human resolution
+and authorization grant remain separate recorded facts and counts; recording a
+resolution never synthesizes a grant fact.
+
 Each fact has an opaque public identity and an internal identity linking its
 owner, agent, account, logical operation and immutable request revision. Replays
 and repeated observations reuse the same semantic event identity. A conflicting
