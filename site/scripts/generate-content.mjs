@@ -28,6 +28,7 @@ async function markdownPaths(directory) {
 const unpublishedSources = new Set([
   "docs/budget-architecture.md", // budget internals and lock order
   "docs/governance-observability.md", // internal lifecycle evidence foundation
+  "docs/governance-observability-qualification.md", // maintainer validation evidence
   "docs/ledger-accounting.md", // ledger posting internals
   "docs/operations/repository-security.md", // repository/CI hardening for maintainers
   "docs/operations/benchmarking.md", // developer benchmarking

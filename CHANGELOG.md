@@ -27,6 +27,15 @@ Future release template
 
 ### Highlights
 
+- Governance observability records automatic denials, real human escalation and
+  confirmed approve/decline outcomes, authorization, and authoritative financial
+  claim/reconciliation transitions. New authenticated summary/list/detail HTTP
+  reads and three read-only unified MCP tools share immutable snapshots, exact
+  per-currency requested totals, backlog and explicit coverage. Agents can answer
+  weekly denial questions and inspect supporting records without provider work.
+  See [the governance read contract](docs/governance-observability.md).
+
+
 - USDC is a budget currency. Budgets are per currency: USDC spend counts
   only against a USDC budget and USD spend only against a USD budget, with no
   conversion between them. USDC amounts use the same micro-unit accounting
@@ -78,6 +87,13 @@ Future release template
   [docs/api-amounts.md](docs/api-amounts.md).
 
 ### Breaking or operational changes
+
+- Governance evidence storage is additive. It does not manufacture earlier
+  policy/human history or infer provider failures and pre-expiry billing
+  uncertainty. Collection can lag during downtime or storage failures; empty
+  results include coverage rather than proving zero activity. Existing ledger
+  and authorization read contracts remain available. No dashboard or alerting is
+  included in this observability foundation.
 
 - Whole-cent amount fields (`amount_cents`, `amount_limit_cents`,
   `daily_limit_cents`) are deprecated. Requests that use only them still work
