@@ -143,6 +143,37 @@ impl Condition {
         }
     }
 
+    /// Every money value this condition compares the request amount with.
+    pub fn amount_values(&self) -> Vec<&PolicyValue> {
+        match self {
+            Condition::All { conditions } | Condition::Any { conditions } => conditions
+                .iter()
+                .flat_map(Condition::amount_values)
+                .collect(),
+            Condition::Not { condition } => condition.amount_values(),
+            Condition::Eq { field, value }
+            | Condition::Neq { field, value }
+            | Condition::Gt { field, value }
+            | Condition::Gte { field, value }
+            | Condition::Lt { field, value }
+            | Condition::Lte { field, value } => {
+                if *field == Field::Amount {
+                    vec![value]
+                } else {
+                    Vec::new()
+                }
+            }
+            Condition::In { field, values } => {
+                if *field == Field::Amount {
+                    values.iter().collect()
+                } else {
+                    Vec::new()
+                }
+            }
+            Condition::Exists { .. } => Vec::new(),
+        }
+    }
+
     pub fn validate(&self, rule_id: &str) -> Result<(), PolicyValidationError> {
         match self {
             Condition::All { conditions } => validate_group(rule_id, "all", conditions),

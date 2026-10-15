@@ -100,7 +100,12 @@ not block budget creation or spend.
 
 An agent budget has one owner, a stable logical ID, an immutable currency and
 time window, and a current immutable version containing its total limit and
-change provenance. Consumed and frozen usage belong to the logical budget;
+change provenance. Budgets are per currency (`usd` or `usdc`; `POST /budgets`
+and `hubu_create_budget` accept `currency`, defaulting to `usd`): a spend only
+reserves from an active budget in its own currency, with no conversion, and an
+agent may hold one budget per currency for the same period. Executors see the
+authorization's currency and may assert it; a mismatching assertion is
+rejected. Consumed and frozen usage belong to the logical budget;
 remaining is checked against the current-version limit. Every hold records both
 the logical budget ID and the version that authorized it.
 

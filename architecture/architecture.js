@@ -471,7 +471,7 @@ const components = {
       ["Hard limits per agent", "Each budget belongs to one agent with a fixed currency and period. Overlapping budgets for the same agent and currency are blocked."],
       ["Versioned limits", "Limit changes append immutable versions. Usage carries over, and every hold records the version that authorized it."],
       ["Availability", "Status is derived at request time: revoked, scheduled, expired, exhausted, or active. Only active budgets accept new holds."],
-      ["Settlement", "Charges the exact cost rounded up to cents, capped at the hold, and returns the rest. Release returns the full hold."],
+      ["Settlement", "Charges the exact cost rounded up once to micro-units of the hold's currency, capped at the hold, and returns the rest. Release returns the full hold."],
       ["Overruns need a human", "Ambiguous or over-limit outcomes stay frozen until a human with the reconciliation capability records the real cost."],
       ["Replay-safe", "Authorizations, claims, and settlements are keyed by agent and operation; identical retries return stored state."],
       ["Advisory targets", "Owner spending targets are separate records. Exceeding one produces a warning, never a block."],
@@ -486,7 +486,7 @@ const components = {
       { id: "reserve", label: "Reserve hold", sub: "effective active + version", x: 420, y: 248, w: 210, h: 92, tone: "core", path: "crates/hubu-core/src/budget/state.rs" },
       { id: "payment", label: "Hubu payment", sub: "success/failure", x: 76, y: 414, w: 206, h: 92, tone: "wallet" },
       { id: "executor", label: "Claim service", sub: "same operation + lease", x: 76, y: 548, w: 238, h: 92, tone: "executor", path: "crates/hubu-core/src/app/executor_claim.rs" },
-      { id: "settle", label: "Settle/release", sub: "ceil cents + remainder", x: 420, y: 480, w: 238, h: 92, tone: "core" },
+      { id: "settle", label: "Settle/release", sub: "ceil µ units + remainder", x: 420, y: 480, w: 238, h: 92, tone: "core" },
       { id: "store", label: "Governance store", sub: "append + pointer + balance", x: 780, y: 282, w: 230, h: 96, tone: "data" },
       { id: "reconcile", label: "Human reconciliation", sub: "evidence + overrun", x: 780, y: 500, w: 230, h: 96, tone: "human", path: "crates/hubu-core/src/app/executor_claim.rs" },
     ],
@@ -871,7 +871,7 @@ const sidebarHighlights = {
   budget: [
     "Agent budgets are hard limits; owner targets are advisory.",
     "Authorization freezes one execution-scoped hold.",
-    "Exact costs ceiling-round to cents; overruns wait for human reconciliation.",
+    "Exact costs round up once to micro-units in the budget's own currency (USD or USDC); overruns wait for human reconciliation.",
   ],
   payment: [
     "Requests validate idempotency, spend token, and scope.",

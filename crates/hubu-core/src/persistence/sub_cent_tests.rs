@@ -125,6 +125,7 @@ fn claimed(
         agent_id(),
         usd(limit),
         usd(hold),
+        Currency::Usd,
     );
     (claim, hold)
 }

@@ -1004,6 +1004,9 @@ struct AddPolicyHttpResponse {
     default_decision: String,
     changed: bool,
     assignment_changed: bool,
+    /// Non-blocking authoring warnings, such as sub-cent amount caps.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    warnings: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1049,6 +1052,8 @@ struct AgentHttpResponse {
 #[derive(Debug, Deserialize)]
 struct CreateBudgetHttpRequest {
     amount_cents: i64,
+    /// Budget currency (`usd` when omitted). Budgets are per currency.
+    currency: Option<String>,
     agent_id: Option<String>,
     starting_at: Option<String>,
     ending_before: Option<String>,
@@ -1199,7 +1204,11 @@ struct SpendHttpRequest {
     operation_key: Option<String>,
     agent_id: Option<String>,
     account_id: Option<String>,
-    amount_cents: i64,
+    /// Deprecated whole-cent amount; `amount` is the exact decimal form.
+    #[serde(default)]
+    amount_cents: Option<i64>,
+    #[serde(default)]
+    amount: Option<String>,
     #[serde(default)]
     currency: Option<String>,
     reason: String,
@@ -1336,6 +1345,10 @@ struct PolicyConditionHttpResponse {
 
 #[derive(Debug, Deserialize)]
 struct ExecutorSpendHttpRequest {
+    /// Optional assertion of the authorization's currency. Hubu always uses
+    /// the authoritative currency and rejects a mismatching assertion.
+    #[serde(default)]
+    currency: Option<String>,
     spend_auth_token_id: String,
     agent_id: Option<String>,
     account_id: Option<String>,
@@ -3009,6 +3022,25 @@ fn hex_encode(bytes: &[u8]) -> String {
     encoded
 }
 
+/// The requested spend amount: the exact decimal `amount`, or the deprecated
+/// whole-cent `amount_cents`. Exactly one must be sent, and it must be positive.
+fn requested_spend_amount(amount: Option<&str>, amount_cents: Option<i64>) -> Result<Amount> {
+    let requested = match (amount, amount_cents) {
+        (Some(_), Some(_)) => {
+            return Err(anyhow!(
+                "send either `amount` or the deprecated `amount_cents`, not both"
+            ))
+        }
+        (Some(amount), None) => amount.parse::<Amount>()?,
+        (None, Some(cents)) => legacy_cents_amount(cents)?,
+        (None, None) => return Err(anyhow!("spend requires `amount`")),
+    };
+    if requested <= Amount::ZERO {
+        return Err(anyhow!("spend amount must be positive"));
+    }
+    Ok(requested)
+}
+
 /// Converts a cent amount from the HTTP wire into accounting units.
 fn legacy_cents_amount(cents: i64) -> Result<Amount> {
     Amount::from_legacy_cents(cents)
@@ -3107,6 +3139,7 @@ fn add_policy(body: String, state: &ServerState) -> Result<AddPolicyHttpResponse
         .unwrap_or_else(|| declarative_key.clone());
     let policy_version = policy.version.clone();
     let default_decision = effect_name(policy.default_effect).to_string();
+    let warnings = policy.amount_warnings();
     let (result, resource_assignments) = {
         let mut governance = state
             .governance
@@ -3174,6 +3207,7 @@ fn add_policy(body: String, state: &ServerState) -> Result<AddPolicyHttpResponse
         default_decision,
         changed: result.changed,
         assignment_changed: result.assignment_changed,
+        warnings,
     })
 }
 
@@ -3515,6 +3549,7 @@ fn create_budget_at(
     if request.amount_cents <= 0 {
         return Err(anyhow!("budget amount must be positive"));
     }
+    let budget_currency = normalize_spend_currency(request.currency.as_deref())?;
 
     let authenticated_user = authenticated_user(state)?;
     let user = UserContext::new(authenticated_user.id.clone());
@@ -3532,7 +3567,7 @@ fn create_budget_at(
             CreateSingleBudgetRequest {
                 agent_id: agent_id.clone(),
                 amount_limit: legacy_cents_amount(request.amount_cents)?,
-                currency: Currency::Usd,
+                currency: budget_currency,
                 period,
             },
             BudgetVersionProvenance::new(authenticated_user.pub_id, "hubu-api:create-budget"),
@@ -4484,6 +4519,7 @@ fn resolve_executor_spend(body: String, state: &ServerState) -> Result<ExecutorS
         lease_profile: decision.request.lease_profile.clone(),
         status: "available".to_string(),
         request: ExecutorSpendHttpRequest {
+            currency: Some(decision.request.currency.to_string()),
             spend_auth_token_id: token.id.to_string(),
             agent_id: Some(agent_pub_id.clone()),
             account_id: Some(account.pub_id.clone()),
@@ -4889,6 +4925,8 @@ struct ResolvedExecutorSpend {
     /// The exact authorized amount, set once the request's cent projection
     /// has been checked against the authoritative authorization.
     authorized_amount: Option<Amount>,
+    /// The authorization's currency, set from the authoritative decision.
+    authorized_currency: Option<Currency>,
     account_pub_id: String,
     agent_pub_id: String,
     token_id: SpendAuthTokenId,
@@ -4911,7 +4949,7 @@ impl ResolvedExecutorSpend {
                 Amount::from_legacy_cents(self.request.amount_cents)
                     .unwrap_or(Amount::from_units(i64::MAX))
             }),
-            currency: Currency::Usd,
+            currency: self.authorized_currency.unwrap_or(Currency::Usd),
             merchant: self.request.merchant.clone(),
             execution_scope: self.request.execution_scope.clone(),
             task_id: self.request.task_id.clone(),
@@ -4963,7 +5001,18 @@ fn apply_authoritative_executor_identity(
     if resolved.request.amount_cents != decision.request.amount.legacy_cents_ceil() {
         return Err(hubu_core::spend::SpendError::PaymentRequestMismatch.into());
     }
+    if let Some(asserted) = resolved.request.currency.as_deref() {
+        let asserted = asserted
+            .trim()
+            .to_ascii_lowercase()
+            .parse::<Currency>()
+            .map_err(|error| anyhow!(error))?;
+        if asserted != decision.request.currency {
+            return Err(hubu_core::spend::SpendError::PaymentRequestMismatch.into());
+        }
+    }
     resolved.authorized_amount = Some(decision.request.amount);
+    resolved.authorized_currency = Some(decision.request.currency);
     Ok((
         decision.operation_key.clone(),
         decision.request.reason.clone(),
@@ -5006,8 +5055,9 @@ fn resolve_executor_spend_request(
         operation_key: None,
         agent_id: request.agent_id.clone(),
         account_id: request.account_id.clone(),
-        amount_cents: request.amount_cents,
-        currency: Some(Currency::Usd.to_string()),
+        amount_cents: Some(request.amount_cents),
+        amount: None,
+        currency: request.currency.clone(),
         reason: "executor authorization snapshot lookup".to_string(),
         task_id: FieldPresence::Missing,
         merchant: request.merchant.clone(),
@@ -5026,6 +5076,7 @@ fn resolve_executor_spend_request(
     Ok(ResolvedExecutorSpend {
         request,
         authorized_amount: None,
+        authorized_currency: None,
         account_pub_id,
         agent_pub_id,
         token_id,
@@ -5160,6 +5211,7 @@ fn executor_spend_from_claim_state(
         lease_profile: claim_state.decision.request.lease_profile.clone(),
         status: executor_claim_status_name(&claim_state.claim.status).to_string(),
         request: ExecutorSpendHttpRequest {
+            currency: Some(claim_state.decision.request.currency.to_string()),
             spend_auth_token_id: claim_state.token.id.to_string(),
             agent_id: Some(agent_pub_id.clone()),
             account_id: Some(account.pub_id.clone()),
@@ -5245,7 +5297,7 @@ fn executor_spend_response_with_hold(
         account_id: validated.account_pub_id.clone(),
         agent_id: validated.agent_pub_id.clone(),
         amount_cents: validated.request.amount_cents,
-        currency: Currency::Usd.to_string(),
+        currency: hold.currency.to_string(),
         merchant: validated.request.merchant.clone(),
         execution_scope: validated.request.execution_scope.clone(),
         task_id: validated.request.task_id.clone(),
@@ -5304,8 +5356,11 @@ fn evaluate_and_reserve_spend_at(
         request.execution_scope.as_ref(),
         request.merchant.as_deref(),
     )?;
+    let requested_amount = requested_spend_amount(request.amount.as_deref(), request.amount_cents)?;
     let scope_inputs = spend_scope_inputs(
-        request.amount_cents,
+        request
+            .amount_cents
+            .unwrap_or_else(|| requested_amount.legacy_cents_ceil()),
         currency,
         currency_supplied,
         request.merchant.as_deref(),
@@ -5323,8 +5378,8 @@ fn evaluate_and_reserve_spend_at(
             "agent_pub_id": agent_pub_id,
             "account_pub_id": account_pub_id,
             "user_id": user.user_id.to_string(),
-            "amount_cents": request.amount_cents,
-            "currency": Currency::Usd.to_string(),
+            "amount": requested_amount,
+            "currency": currency.to_string(),
             "merchant": request.merchant.clone(),
             "execution_scope_selector": request.execution_scope.clone(),
             "task_id": task_id.clone(),
@@ -5358,7 +5413,7 @@ fn evaluate_and_reserve_spend_at(
                 user: user.clone(),
                 agent_id: agent_id.clone(),
                 agent_account_id: account.id,
-                amount: legacy_cents_amount(request.amount_cents)?,
+                amount: requested_amount,
                 currency,
                 merchant: request.merchant.clone(),
                 execution_scope,
@@ -9266,6 +9321,157 @@ lease_profiles:
     }
 
     #[test]
+    fn usdc_budgets_authorize_claim_and_settle_through_the_executor_flow() {
+        let path =
+            std::env::temp_dir().join(format!("hubu-api-usdc-executor-{}.sqlite", UserId::new()));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        init(
+            json!({"display_name": "Alice Example", "email": "alice@example.com"}).to_string(),
+            &state,
+        )
+        .unwrap();
+        let agent = register_agent(
+            json!({"name": "usdc-executor-agent", "version": "v1"}).to_string(),
+            &state,
+        )
+        .unwrap();
+        add_policy(
+            json!({"agent_id": agent.agent_id, "daily_limit_cents": 500}).to_string(),
+            &state,
+        )
+        .unwrap();
+        create_test_agent_budget(&state, &agent.agent_id, 500);
+        let authorize = |operation_key: &str| {
+            authorize_spend(
+                json!({
+                    "operation_key": operation_key,
+                    "account_id": agent.account_id,
+                    // An x402 maxAmountRequired of 5000 atomic USDC units.
+                    "amount": "0.005",
+                    "currency": "usdc",
+                    "reason": "x402 call",
+                    "merchant": "gongbu.image",
+                })
+                .to_string(),
+                &state,
+            )
+            .unwrap()
+        };
+
+        // Only a USD budget exists: USDC spend never falls back to it.
+        let denied = authorize("usdc-without-budget");
+        assert_eq!(denied.decision, "deny");
+        assert!(
+            denied
+                .reasons
+                .iter()
+                .any(|reason| reason == "no active USDC budget found for agent"),
+            "{:?}",
+            denied.reasons
+        );
+
+        let usdc_budget = create_budget(
+            json!({"agent_id": agent.agent_id, "amount_cents": 500, "currency": "usdc"})
+                .to_string(),
+            &state,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&usdc_budget).unwrap()["budget"]["currency"],
+            "usdc"
+        );
+        let authorization = authorize("usdc-call");
+        assert_eq!(authorization.decision, "allow");
+        let token = authorization.auth_token_id.clone().unwrap();
+        // The hold is exactly 0.005 USDC, not a rounded cent.
+        let hold = state
+            .budgets
+            .lock()
+            .unwrap()
+            .get_budget_hold_by_spend_decision(&authorization.decision_id.parse().unwrap())
+            .unwrap();
+        assert_eq!(hold.amount, "0.005".parse::<Amount>().unwrap());
+        assert_eq!(hold.currency, Currency::Usdc);
+        for (body, expected) in [
+            (
+                json!({"account_id": agent.account_id, "amount": "0.005", "amount_cents": 1,
+                    "currency": "usdc", "reason": "both", "operation_key": "both", "merchant": "gongbu.image"}),
+                "not both",
+            ),
+            (
+                json!({"account_id": agent.account_id, "currency": "usdc", "reason": "neither", "operation_key": "neither",
+                    "merchant": "gongbu.image"}),
+                "spend requires `amount`",
+            ),
+            (
+                json!({"account_id": agent.account_id, "amount": "0.0000001", "currency": "usdc",
+                    "reason": "too precise", "operation_key": "too precise", "merchant": "gongbu.image"}),
+                "at most 6 decimal places",
+            ),
+        ] {
+            let error = authorize_spend(body.to_string(), &state).unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+
+        let resolved =
+            resolve_executor_spend(json!({"spend_auth_token_id": token}).to_string(), &state)
+                .unwrap();
+        assert_eq!(resolved.currency, "usdc");
+        assert_eq!(resolved.amount_cents, 1);
+
+        let claim_body = |currency: &str| {
+            json!({
+                "spend_auth_token_id": token,
+                "account_id": agent.account_id,
+                "amount_cents": 1,
+                "currency": currency,
+                "merchant": "gongbu.image"
+            })
+            .to_string()
+        };
+        let mismatch = claim_executor_spend(claim_body("usd"), &state).unwrap_err();
+        assert!(
+            mismatch
+                .to_string()
+                .contains("payment request does not match authorized spend"),
+            "{mismatch}"
+        );
+        let claim = claim_executor_spend(claim_body("usdc"), &state).unwrap();
+        assert_eq!(claim.status, "claimed");
+
+        let mut receipt = precise_settlement_receipt_json(31, 4);
+        receipt["actual_vendor_cost"]["currency"] = json!("usdc");
+        receipt["price_model_snapshot"]["currency"] = json!("usdc");
+        finalize_executor_spend(
+            json!({"claim_id": claim.claim_id, "receipt": receipt}).to_string(),
+            &state,
+            true,
+            None,
+        )
+        .unwrap();
+        let budget = state
+            .budgets
+            .lock()
+            .unwrap()
+            .get_budgets_by_agent_id(
+                &resolve_agent_id_for_user(
+                    &agent.agent_id,
+                    &authenticated_user_context(&state).unwrap(),
+                    &state,
+                )
+                .unwrap(),
+            )
+            .into_iter()
+            .find(|budget| budget.budget.currency == Currency::Usdc)
+            .unwrap();
+        assert_eq!(
+            budget.balance.consumed_amount,
+            "0.0031".parse::<Amount>().unwrap()
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
     fn executor_claims_a_sub_cent_authorization_from_its_cent_projection() {
         let (path, state, agent, authorization) = setup_executor_authorization("sub-cent-claim");
         let token_id: SpendAuthTokenId = authorization
@@ -10477,6 +10683,37 @@ rules: []
     }
 
     #[test]
+    fn policy_add_warns_about_sub_cent_amount_caps() {
+        let path = std::env::temp_dir().join(format!(
+            "hubu-api-policy-sub-cent-warning-{}.sqlite",
+            UserId::new()
+        ));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        let yaml = |cap: &str| {
+            format!(
+                "id: cap_policy\nversion: v1\ndefault_effect: deny\nrules:\n  - id: cap\n    effect: allow\n    reason: cap\n    when:\n      op: lte\n      field: amount\n      value:\n        money: \"{cap}\"\n"
+            )
+        };
+        let sub_cent =
+            add_policy(json!({"policy_yaml": yaml("0.005")}).to_string(), &state).unwrap();
+        assert_eq!(sub_cent.warnings.len(), 1);
+        assert!(sub_cent.warnings[0].contains("finer than one cent"));
+        let body = serde_json::to_value(&sub_cent).unwrap();
+        assert!(body["warnings"].is_array());
+        let whole = add_policy(
+            json!({"policy_yaml": yaml("5.00"), "declarative_key": "whole"}).to_string(),
+            &state,
+        )
+        .unwrap();
+        assert!(whole.warnings.is_empty());
+        assert!(serde_json::to_value(&whole)
+            .unwrap()
+            .get("warnings")
+            .is_none());
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
     fn starter_policy_accepts_decimal_daily_limit_and_keeps_legacy_cents_stable() {
         let path = std::env::temp_dir().join(format!(
             "hubu-api-policy-decimal-limit-{}.sqlite",
@@ -11094,7 +11331,8 @@ rules: []
             operation_key: Some("pending-exact-operation".to_string()),
             agent_id: None,
             account_id: Some(agent.account_id.clone()),
-            amount_cents: 100,
+            amount_cents: Some(100),
+            amount: None,
             currency: None,
             reason: "pending exact request".to_string(),
             task_id: FieldPresence::Missing,
@@ -11104,7 +11342,7 @@ rules: []
         };
         let account = resolve_agent_account_for_spend(&request, &user, &state).unwrap();
         let spend_request = hubu_core::spend::SpendRequest {
-            amount: Amount::from_legacy_cents(request.amount_cents).unwrap(),
+            amount: Amount::from_legacy_cents(request.amount_cents.unwrap()).unwrap(),
             currency: Currency::Usd,
             owner_user_id: user.user_id.clone(),
             agent_id: account.agent_id,

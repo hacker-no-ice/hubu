@@ -20,6 +20,33 @@ pub struct Policy {
     pub default_effect: Effect,
 }
 
+impl Policy {
+    /// Authoring warnings that do not make the policy invalid.
+    ///
+    /// Amount values compare in the request's own currency. A value finer than
+    /// one cent can never equal a USD wallet payment, which moves whole cents;
+    /// executor spend and USDC can still match it.
+    pub fn amount_warnings(&self) -> Vec<String> {
+        let mut warnings = Vec::new();
+        for rule in &self.rules {
+            for value in rule.when.amount_values() {
+                if let Some(amount) = value.money() {
+                    if amount.legacy_cents_floor() != amount.legacy_cents_ceil() {
+                        warnings.push(format!(
+                            "rule `{}` compares amount with {amount}, which is finer than one \
+                             cent: USD wallet payments move whole cents and cannot match it \
+                             (executor and USDC spend can). Scope it with a `currency` \
+                             condition if it is meant for one currency.",
+                            rule.id
+                        ));
+                    }
+                }
+            }
+        }
+        warnings
+    }
+}
+
 /// One declarative policy rule.
 ///
 /// If `when` evaluates to true, `effect` contributes to the final decision and

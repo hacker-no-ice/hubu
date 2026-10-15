@@ -46,10 +46,16 @@ validation remain enforced after parsing.
   `money: "5.00"` on the next indented line. `hubu policy export` emits
   this form. Older exports that used YAML tags (`value: !money_cents 500`)
   still load.
-- Write amounts as quoted decimal strings in the budget currency, with at
-  most 6 decimal places: `money: "5.00"` or `money: "0.005"`. Unquoted
-  numbers such as `money: 0.005` are rejected so a YAML float can never round
-  a limit. Signs and exponents are rejected too.
+- Write amounts as quoted decimal strings with at most 6 decimal places:
+  `money: "5.00"` or `money: "0.005"`. Unquoted numbers such as
+  `money: 0.005` are rejected so a YAML float can never round a limit. Signs
+  and exponents are rejected too.
+- Budgets are per currency (`usd` or `usdc`), and an amount value compares
+  with the request amount in the request's own currency. To cap one currency
+  only, combine it with a `currency` condition, for example
+  `all: [currency eq usdc, amount lte "0.005"]`. Hubu warns, without
+  rejecting the policy, when an amount value is finer than one cent, because
+  USD wallet payments move whole cents and cannot match it.
 - The legacy `money_cents: 500` form still loads and means the same as
   `money: "5.00"`. Stored policy revisions that use it are never rewritten.
 - A document must be a single YAML document. Duplicate keys, tab

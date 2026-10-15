@@ -6508,6 +6508,7 @@ mod tests {
             agent,
             cents(10_000),
             cents(2_500),
+            Currency::Usd,
         )
     }
 
@@ -6518,9 +6519,11 @@ mod tests {
         agent: AgentId,
         amount_limit: Amount,
         hold_amount: Amount,
+        currency: Currency,
     ) -> (SpendExecutorClaimRecord, SpendAuthTokenRecord, BudgetHold) {
         let mut decision = spend_decision();
         decision.request.amount = hold_amount;
+        decision.request.currency = currency;
         decision.operation_key = operation_key.to_string();
         decision.request.agent_id = agent.clone();
         let token = SpendAuthTokenRecord {
@@ -6553,7 +6556,7 @@ mod tests {
         let budget = Budget::new(
             BudgetId::new(),
             agent,
-            Currency::Usd,
+            currency,
             TimePeriod::new(
                 Utc::now() - Duration::hours(1),
                 Some(Utc::now() + Duration::hours(1)),
@@ -6586,7 +6589,7 @@ mod tests {
             budget_version_id: budget_version.id.clone(),
             spend_decision_id: decision.id.clone(),
             amount: hold_amount,
-            currency: Currency::Usd,
+            currency,
             status: BudgetHoldStatus::Claimed,
             executor_claim_id: Some(claim.id.clone()),
             created_at: Utc::now(),
@@ -10017,3 +10020,7 @@ mod accounting_scale_tests;
 #[cfg(test)]
 #[path = "persistence/sub_cent_tests.rs"]
 mod sub_cent_tests;
+
+#[cfg(test)]
+#[path = "persistence/usdc_tests.rs"]
+mod usdc_tests;

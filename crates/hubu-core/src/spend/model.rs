@@ -430,13 +430,11 @@ where
     D: Deserializer<'de>,
 {
     let currency = String::deserialize(deserializer)?;
-    if currency.eq_ignore_ascii_case("usd") {
-        Ok(Currency::Usd)
-    } else {
-        Err(D::Error::custom(format!(
+    currency.to_ascii_lowercase().parse().map_err(|_| {
+        D::Error::custom(format!(
             "unsupported actual vendor cost currency `{currency}`"
-        )))
-    }
+        ))
+    })
 }
 
 impl SpendExecutorVendorCost {
