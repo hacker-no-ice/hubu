@@ -299,6 +299,9 @@ fn validate_input(
     let mut request: Option<SpendRequest> = None;
     let mut policy_decision: Option<crate::policy::Effect> = None;
     let mut policy_identity: Option<(String, String)> = None;
+    let mut policy_evaluation: Option<crate::policy::Evaluation> = None;
+    let mut decision_created_at: Option<String> = None;
+    let mut canonical_time: Option<String> = None;
     let admitted:Option<(String,String)> = conn.query_row("SELECT owner_user_id,request_json FROM spend_operation_attempts WHERE agent_id=?1 AND operation_key=?2 AND revision=?3",params![c.agent_id.to_string(),c.operation_key,c.attempt_revision],|row|Ok((row.get(0)?,row.get(1)?))).optional()?;
     if let Some((owner, json)) = admitted {
         if owner != c.owner_user_id.to_string() {
@@ -307,8 +310,8 @@ fn validate_input(
         request = Some(serde_json::from_str(&json)?);
     }
     if let Some(id) = &c.decision_id {
-        let stored:Option<(String,String,String,u64,String,String)>=conn.query_row("SELECT owner_user_id,agent_id,operation_key,revision,request_json,evaluation_json FROM spend_decisions WHERE id=?1",[id.to_string()],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?))).optional()?;
-        let (owner, agent, key, revision, json, evaluation) =
+        let stored:Option<(String,String,String,u64,String,String,String)>=conn.query_row("SELECT owner_user_id,agent_id,operation_key,revision,request_json,evaluation_json,created_at FROM spend_decisions WHERE id=?1",[id.to_string()],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?))).optional()?;
+        let (owner, agent, key, revision, json, evaluation, created_at) =
             stored.ok_or_else(|| invalid("unknown lifecycle decision"))?;
         if owner != c.owner_user_id.to_string()
             || agent != c.agent_id.to_string()
@@ -327,7 +330,12 @@ fn validate_input(
         request = Some(decided);
         let evaluation: crate::policy::Evaluation = serde_json::from_str(&evaluation)?;
         policy_decision = Some(evaluation.decision);
-        policy_identity = Some((evaluation.policy_id, evaluation.policy_version));
+        policy_identity = Some((
+            evaluation.policy_id.clone(),
+            evaluation.policy_version.clone(),
+        ));
+        policy_evaluation = Some(evaluation);
+        decision_created_at = Some(created_at);
     }
     if let Some(r) = &request {
         if r.owner_user_id != c.owner_user_id
@@ -399,13 +407,14 @@ fn validate_input(
                 AutomatedAdmissionOutcome::Admitted => "allowed",
                 AutomatedAdmissionOutcome::Denied { .. } => "denied",
             };
-            let canonical:Option<(String,Option<String>)>=conn.query_row("SELECT decision,spend_decision_id FROM spend_authorization_outcomes WHERE agent_id=?1 AND operation_key=?2 AND revision=?3 ORDER BY id DESC LIMIT 1",params![c.agent_id.to_string(),c.operation_key,c.attempt_revision],|row|Ok((row.get(0)?,row.get(1)?))).optional()?;
-            if canonical.as_ref().is_none_or(|(decision, id)| {
+            let canonical:Option<(String,Option<String>,String)>=conn.query_row("SELECT decision,spend_decision_id,created_at FROM spend_authorization_outcomes WHERE agent_id=?1 AND operation_key=?2 AND revision=?3 ORDER BY id DESC LIMIT 1",params![c.agent_id.to_string(),c.operation_key,c.attempt_revision],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional()?;
+            if canonical.as_ref().is_none_or(|(decision, id, _)| {
                 decision != expected
                     || id.as_ref() != c.decision_id.as_ref().map(ToString::to_string).as_ref()
             }) {
                 return Err(invalid("lifecycle automated outcome is not confirmed"));
             }
+            canonical_time = canonical.map(|(_, _, at)| at);
         }
         LifecycleFact::InitialPolicy { decision } => {
             let expected = match decision {
@@ -416,6 +425,7 @@ fn validate_input(
             if policy_decision != Some(expected) {
                 return Err(invalid("lifecycle initial policy mismatch"));
             }
+            canonical_time = decision_created_at;
         }
         LifecycleFact::HumanEscalation {
             approval_request_id,
@@ -458,12 +468,13 @@ fn validate_input(
                     HumanResolution::Approved => "allowed",
                     HumanResolution::Declined => "denied",
                 };
-                let canonical:Option<(String,Option<String>)>=conn.query_row("SELECT decision,spend_decision_id FROM spend_authorization_outcomes WHERE agent_id=?1 AND operation_key=?2 AND revision=?3 ORDER BY id DESC LIMIT 1",params![c.agent_id.to_string(),c.operation_key,c.attempt_revision],|row|Ok((row.get(0)?,row.get(1)?))).optional()?;
-                if canonical.as_ref().is_none_or(|(decision, id)| {
+                let canonical:Option<(String,Option<String>,String)>=conn.query_row("SELECT decision,spend_decision_id,created_at FROM spend_authorization_outcomes WHERE agent_id=?1 AND operation_key=?2 AND revision=?3 ORDER BY id DESC LIMIT 1",params![c.agent_id.to_string(),c.operation_key,c.attempt_revision],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional()?;
+                if canonical.as_ref().is_none_or(|(decision, id, _)| {
                     decision != expected || id.as_ref() != Some(&approval_request_id.to_string())
                 }) {
                     return Err(invalid("lifecycle human resolution is not confirmed"));
                 }
+                canonical_time = canonical.map(|(_, _, at)| at);
             }
             if matches!(
                 input.fact,
@@ -490,9 +501,15 @@ fn validate_input(
                 // that no wallet payment used this authorization. Expiry has
                 // no void row; other known causes require the exact durable
                 // void and revocation committed by their authoritative writer.
-                let released:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM budget_holds h JOIN spend_auth_tokens t ON t.spend_decision_id=h.spend_decision_id WHERE h.spend_decision_id=?1 AND h.status=?2 AND h.executor_claim_id IS NULL AND t.used_at IS NULL AND t.used_by_payment_id IS NULL AND NOT EXISTS(SELECT 1 FROM spend_executor_claims cl WHERE cl.spend_auth_token_id=t.id) AND (?3 IS NULL OR (t.revoked_at IS NOT NULL AND EXISTS(SELECT 1 FROM spend_authorization_voids v WHERE v.spend_auth_token_id=t.id AND v.reason=?3))))",params![approval_request_id.to_string(),expected,void_reason],|row|row.get(0))?;
-                if !released {
+                canonical_time=conn.query_row("SELECT CASE WHEN ?3 IS NULL THEN h.updated_at ELSE v.voided_at END FROM budget_holds h JOIN spend_auth_tokens t ON t.spend_decision_id=h.spend_decision_id LEFT JOIN spend_authorization_voids v ON v.spend_auth_token_id=t.id AND v.reason=?3 WHERE h.spend_decision_id=?1 AND h.status=?2 AND h.executor_claim_id IS NULL AND t.used_at IS NULL AND t.used_by_payment_id IS NULL AND NOT EXISTS(SELECT 1 FROM spend_executor_claims cl WHERE cl.spend_auth_token_id=t.id) AND (?3 IS NULL OR (t.revoked_at IS NOT NULL AND v.spend_auth_token_id IS NOT NULL)) LIMIT 1",params![approval_request_id.to_string(),expected,void_reason],|row|row.get(0)).optional()?;
+                if canonical_time.is_none() {
                     return Err(invalid("lifecycle authorization release is not confirmed"));
+                }
+            }
+            if matches!(input.fact, LifecycleFact::AuthorizationGranted { .. }) {
+                canonical_time=conn.query_row("SELECT created_at FROM spend_authorization_outcomes WHERE agent_id=?1 AND operation_key=?2 AND revision=?3 AND spend_decision_id=?4 AND decision='allowed' ORDER BY id DESC LIMIT 1",params![c.agent_id.to_string(),c.operation_key,c.attempt_revision,approval_request_id.to_string()],|row|row.get(0)).optional()?;
+                if canonical_time.is_none() {
+                    return Err(invalid("lifecycle authorization grant is not confirmed"));
                 }
             }
         }
@@ -504,6 +521,13 @@ fn validate_input(
             let matched:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM spend_executor_claims cl JOIN spend_auth_tokens t ON t.id=cl.spend_auth_token_id WHERE cl.id=?1 AND cl.owner_user_id=?2 AND cl.agent_id=?3 AND cl.operation_key=?4 AND t.spend_decision_id=?5)",params![claim_id.to_string(),c.owner_user_id.to_string(),c.agent_id.to_string(),c.operation_key,c.decision_id.as_ref().map(ToString::to_string)],|row|row.get(0))?;
             if !matched {
                 return Err(invalid("lifecycle claim correlation mismatch"));
+            }
+            if matches!(input.fact, LifecycleFact::ExecutionStarted { .. }) {
+                canonical_time = Some(conn.query_row(
+                    "SELECT claimed_at FROM spend_executor_claims WHERE id=?1",
+                    [claim_id.to_string()],
+                    |row| row.get(0),
+                )?);
             }
             let financial_outcome = match &input.fact {
                 LifecycleFact::ExecutionFinalized { outcome, .. } => Some((*outcome, false)),
@@ -527,9 +551,17 @@ fn validate_input(
                 if !confirmed {
                     return Err(invalid("lifecycle financial outcome is not confirmed"));
                 }
+                canonical_time=conn.query_row("SELECT CASE WHEN ?2 THEN reconciled_at ELSE finalized_at END FROM spend_executor_claims WHERE id=?1",params![claim_id.to_string(),reconciled],|row|row.get(0))?;
             }
         }
         _ => {}
+    }
+    if let Some(at) = canonical_time {
+        if parse_timestamp(&at)? != input.occurred_at {
+            return Err(invalid(
+                "lifecycle occurrence time differs from authoritative transition",
+            ));
+        }
     }
     if let LifecycleEvidence::Known { value } = &input.explanation.policy {
         if !stable_identifier(&value.policy_id)
@@ -547,13 +579,31 @@ fn validate_input(
         let policy: Policy = serde_json::from_str(
             &policy_json.ok_or_else(|| invalid("unknown owned lifecycle policy revision"))?,
         )?;
-        if policy_identity.as_ref() != Some(&(policy.id.clone(), policy.version.clone()))
-            || value
-                .decisive_rule_ids
-                .iter()
-                .any(|id| !policy.rules.iter().any(|rule| &rule.id == id))
-        {
+        if policy_identity.as_ref() != Some(&(policy.id.clone(), policy.version.clone())) {
             return Err(invalid("lifecycle policy identity or rule mismatch"));
+        }
+        for id in &value.decisive_rule_ids {
+            let evaluation = policy_evaluation
+                .as_ref()
+                .ok_or_else(|| invalid("lifecycle decisive trace unavailable"))?;
+            let rules: Vec<_> = policy.rules.iter().filter(|rule| &rule.id == id).collect();
+            let traces: Vec<_> = evaluation
+                .rule_results
+                .iter()
+                .filter(|result| &result.rule_id == id)
+                .collect();
+            if rules.len() != 1 || traces.len() != 1 {
+                return Err(invalid("lifecycle decisive rule is ambiguous"));
+            }
+            let rule = rules[0];
+            let trace = traces[0];
+            if !trace.matched
+                || trace.effect != Some(evaluation.decision)
+                || rule.effect != evaluation.decision
+                || trace.condition.as_deref() != Some(rule.when.describe().as_str())
+            {
+                return Err(invalid("lifecycle decisive rule differs from stored trace"));
+            }
         }
         for constraint in &value.amount_constraints {
             if !stable_identifier(&constraint.rule_id)
@@ -561,12 +611,43 @@ fn validate_input(
             {
                 return Err(invalid("lifecycle constraint rule mismatch"));
             }
+            let actual = request
+                .as_ref()
+                .ok_or_else(|| invalid("lifecycle constraint request unavailable"))?;
+            let rule = policy
+                .rules
+                .iter()
+                .find(|rule| rule.id == constraint.rule_id)
+                .ok_or_else(|| invalid("lifecycle constraint rule mismatch"))?;
+            let trace = policy_evaluation
+                .as_ref()
+                .and_then(|evaluation| {
+                    evaluation
+                        .rule_results
+                        .iter()
+                        .find(|result| result.rule_id == constraint.rule_id)
+                })
+                .ok_or_else(|| invalid("lifecycle constraint trace unavailable"))?;
+            if trace.condition.as_deref() != Some(rule.when.describe().as_str()) {
+                return Err(invalid(
+                    "lifecycle constraint condition differs from stored trace",
+                ));
+            }
+            if constraint.configured.currency != actual.currency
+                || !constraint_in_positive_all(&rule.when, constraint)
+            {
+                return Err(invalid(
+                    "lifecycle configured constraint differs from policy",
+                ));
+            }
             if constraint.configured.amount.is_negative() {
                 return Err(invalid("negative lifecycle policy threshold"));
             }
             if let LifecycleEvidence::Known { value } = &constraint.evaluated {
-                if value.currency != constraint.configured.currency {
-                    return Err(invalid("lifecycle constraint currency mismatch"));
+                if value.currency != actual.currency || value.amount != actual.amount {
+                    return Err(invalid(
+                        "lifecycle evaluated constraint differs from request",
+                    ));
                 }
             }
         }
@@ -672,6 +753,47 @@ fn validate_input(
         }
     }
     Ok(public_ids)
+}
+/// A matched winning All guarantees its conjuncts. Any/Not branch context is
+/// not representable by this flat safe evidence, so it remains unsupported.
+fn constraint_in_positive_all(
+    condition: &crate::policy::Condition,
+    constraint: &LifecycleAmountConstraint,
+) -> bool {
+    use crate::policy::{Condition, Field};
+    let (comparison, value) = match condition {
+        Condition::All { conditions } => {
+            return conditions
+                .iter()
+                .any(|c| constraint_in_positive_all(c, constraint))
+        }
+        Condition::Eq {
+            field: Field::Amount,
+            value,
+        } => (AmountComparison::Eq, value),
+        Condition::Neq {
+            field: Field::Amount,
+            value,
+        } => (AmountComparison::Neq, value),
+        Condition::Gt {
+            field: Field::Amount,
+            value,
+        } => (AmountComparison::Gt, value),
+        Condition::Gte {
+            field: Field::Amount,
+            value,
+        } => (AmountComparison::Gte, value),
+        Condition::Lt {
+            field: Field::Amount,
+            value,
+        } => (AmountComparison::Lt, value),
+        Condition::Lte {
+            field: Field::Amount,
+            value,
+        } => (AmountComparison::Lte, value),
+        _ => return false,
+    };
+    comparison == constraint.comparison && value.money() == Some(constraint.configured.amount)
 }
 fn stable_identifier(value: &str) -> bool {
     !value.is_empty()

@@ -1,5 +1,5 @@
 use super::*;
-use crate::policy::{Effect, Evaluation, Policy};
+use crate::policy::{Effect, Policy};
 use hubu_common::ids::{AgentAccountId, SpendAuthTokenId, SpendDecisionId};
 use std::collections::HashSet;
 
@@ -18,6 +18,39 @@ fn money(units: i64) -> LifecycleAmount {
     }
 }
 
+/// Fixtures obtain transition times from their real persisted source records;
+/// tests mutate them explicitly when checking incorrect occurrence claims.
+fn fixture_occurrence(
+    repo: &SqliteGovernanceRepository,
+    decision: &SpendDecisionId,
+    fact: &LifecycleFact,
+) -> DateTime<Utc> {
+    let query=match fact {
+        LifecycleFact::InitialPolicy{..}=>Some("SELECT created_at FROM spend_decisions WHERE id=?1"),
+        LifecycleFact::AutomatedAdmission{..}|LifecycleFact::HumanResolutionConfirmed{..}|LifecycleFact::AuthorizationGranted{..}=>Some("SELECT created_at FROM spend_authorization_outcomes WHERE spend_decision_id=?1 ORDER BY id DESC LIMIT 1"),
+        LifecycleFact::AuthorizationReleased{reason:AuthorizationReleaseReason::Expired,..}=>Some("SELECT updated_at FROM budget_holds WHERE spend_decision_id=?1"),
+        LifecycleFact::AuthorizationReleased{reason,..}=>{
+            let reason=match reason {AuthorizationReleaseReason::ExecutorRejectedBeforeClaim=>"executor_rejected_before_claim",AuthorizationReleaseReason::Cancelled=>"cancelled",_=>unreachable!()};
+            let value:Option<String>=repo.conn.query_row("SELECT v.voided_at FROM spend_authorization_voids v JOIN spend_auth_tokens t ON t.id=v.spend_auth_token_id WHERE t.spend_decision_id=?1 AND v.reason=?2",params![decision.to_string(),reason],|r|r.get(0)).optional().unwrap();
+            return value.map(|v|at(&v)).unwrap_or_else(||at("2026-10-10T00:00:00Z"));
+        }
+        LifecycleFact::ExecutionStarted{..}=>Some("SELECT cl.claimed_at FROM spend_executor_claims cl JOIN spend_auth_tokens t ON t.id=cl.spend_auth_token_id WHERE t.spend_decision_id=?1"),
+        LifecycleFact::ExecutionFinalized{..}=>Some("SELECT cl.finalized_at FROM spend_executor_claims cl JOIN spend_auth_tokens t ON t.id=cl.spend_auth_token_id WHERE t.spend_decision_id=?1"),
+        LifecycleFact::ReconciliationResolved{..}=>Some("SELECT cl.reconciled_at FROM spend_executor_claims cl JOIN spend_auth_tokens t ON t.id=cl.spend_auth_token_id WHERE t.spend_decision_id=?1"),
+        _=>None,
+    };
+    query
+        .and_then(|q| {
+            repo.conn
+                .query_row(q, [decision.to_string()], |r| r.get::<_, Option<String>>(0))
+                .optional()
+                .unwrap()
+                .flatten()
+        })
+        .map(|v| at(&v))
+        .unwrap_or_else(|| at("2026-10-10T00:00:00Z"))
+}
+
 /// Reusable scenario fixture: registered ownership and the same immutable
 /// request/decision/token/claim relationship used by future capture producers.
 struct Fixture {
@@ -33,6 +66,23 @@ struct Fixture {
 }
 impl Fixture {
     fn seed(repo: &mut SqliteGovernanceRepository, effect: Effect) -> Self {
+        Self::seed_policy(
+            repo,
+            Policy {
+                id: "authored-fixture".into(),
+                version: "v1".into(),
+                owner_user_id: UserId::new(),
+                default_effect: effect,
+                rules: vec![],
+            },
+            false,
+        )
+    }
+    fn seed_policy(
+        repo: &mut SqliteGovernanceRepository,
+        mut policy: Policy,
+        legacy_trace: bool,
+    ) -> Self {
         crate::storage::init_schema(&repo.conn).unwrap();
         let owner = UserId::new();
         let agent = AgentId::new();
@@ -42,6 +92,7 @@ impl Fixture {
         let token = SpendAuthTokenId::new();
         let now = at("2026-10-10T00:00:00Z");
         let key = "private-operation-key-never-public".to_string();
+        policy.owner_user_id = owner.clone();
         repo.conn.execute("INSERT INTO users(id,pub_id,display_name,status,created_at,updated_at) VALUES(?1,?2,'Owner','active',?3,?3)",params![owner.to_string(),format!("usr_{}",owner.public_suffix()),now.to_rfc3339()]).unwrap();
         repo.conn.execute("INSERT INTO agent_identities(id,pub_id,fingerprint,display_name,owner_user_id,agent_type,agent_status,created_at,updated_at) VALUES(?1,?2,?3,'Fixture agent',?4,'autonomous_agent','active',?5,?5)",params![agent.to_string(),format!("agt_{}",agent.public_suffix()),format!("fingerprint:{agent}"),owner.to_string(),now.to_rfc3339()]).unwrap();
         repo.conn.execute("INSERT INTO agent_accounts(id,pub_id,agent_id,owner_user_id,account_status,created_at,updated_at) VALUES(?1,?2,?3,?4,'active',?5,?5)",params![account.to_string(),format!("aga_{}",account.public_suffix()),agent.to_string(),owner.to_string(),now.to_rfc3339()]).unwrap();
@@ -63,6 +114,14 @@ impl Fixture {
                 .unwrap(),
             SpendAttemptAdmission::Admitted { revision: 1 }
         );
+        let mut evaluation = crate::policy::evaluate_policy(&request, &policy).unwrap();
+        if legacy_trace {
+            for result in &mut evaluation.rule_results {
+                result.condition = None;
+            }
+        }
+        repo.save_policy_assignment(&owner, &PolicyAssignmentScope::UserDefault, &policy)
+            .unwrap();
         repo.save_spend_decision(&SpendDecisionRecord {
             id: decision.clone(),
             owner_user_id: owner.clone(),
@@ -70,13 +129,7 @@ impl Fixture {
             revision: 1,
             actor: owner.to_string(),
             request,
-            evaluation: Evaluation {
-                policy_id: "authored-fixture".into(),
-                policy_version: "v1".into(),
-                decision: effect,
-                reasons: vec!["private policy prose".into()],
-                rule_results: vec![],
-            },
+            evaluation,
             created_at: now,
         })
         .unwrap();
@@ -205,7 +258,12 @@ impl Fixture {
             .unwrap();
         }
     }
-    fn event(&self, source: LifecycleSource, fact: LifecycleFact) -> LifecycleEventInput {
+    fn event(
+        &self,
+        repo: &SqliteGovernanceRepository,
+        source: LifecycleSource,
+        fact: LifecycleFact,
+    ) -> LifecycleEventInput {
         LifecycleEventInput {
             schema_version: LIFECYCLE_SCHEMA_VERSION,
             correlation: LifecycleCorrelation {
@@ -218,7 +276,7 @@ impl Fixture {
                 correction_of_revision: None,
             },
             source,
-            occurred_at: at("2026-10-10T00:00:00.123456Z"),
+            occurred_at: fixture_occurrence(repo, &self.decision, &fact),
             requested_amount: LifecycleEvidence::Known {
                 value: money(5_000),
             },
@@ -227,8 +285,13 @@ impl Fixture {
             explanation: LifecycleExplanation::default(),
         }
     }
-    fn policy(&self, decision: InitialPolicyDecision) -> LifecycleEventInput {
+    fn policy(
+        &self,
+        repo: &SqliteGovernanceRepository,
+        decision: InitialPolicyDecision,
+    ) -> LifecycleEventInput {
         self.event(
+            repo,
             LifecycleSource::PolicyEngine,
             LifecycleFact::InitialPolicy { decision },
         )
@@ -325,7 +388,7 @@ fn fixture_matrix_preserves_every_stage_and_technical_failure_can_retry() {
         if matches!(fact, LifecycleFact::ReconciliationResolved { .. }) {
             f.reconcile(&mut repo, true);
         }
-        let input = f.event(*source, fact.clone());
+        let input = f.event(&repo, *source, fact.clone());
         assert_eq!(input.fact.count_category(), *category);
         let first = repo.append_lifecycle_event(&input).unwrap();
         let replay = repo.append_lifecycle_event(&input).unwrap();
@@ -346,6 +409,7 @@ fn fixture_matrix_preserves_every_stage_and_technical_failure_can_retry() {
         }
     );
     let mut conflicting = f.event(
+        &repo,
         LifecycleSource::HumanApproval,
         LifecycleFact::HumanResolutionConfirmed {
             approval_request_id: f.decision.clone(),
@@ -355,6 +419,7 @@ fn fixture_matrix_preserves_every_stage_and_technical_failure_can_retry() {
     );
     assert!(repo.append_lifecycle_event(&conflicting).is_err());
     conflicting = f.event(
+        &repo,
         LifecycleSource::Reconciliation,
         LifecycleFact::ExecutionFinalized {
             claim_id: f.claim.clone(),
@@ -380,10 +445,11 @@ fn policy_denial_human_decline_and_safe_preclaim_release_are_distinct() {
         ),
     ] {
         let f = Fixture::seed(&mut repo, effect);
-        let input = f.policy(decision);
+        let input = f.policy(&repo, decision);
         assert_eq!(input.fact.count_category(), category);
         repo.append_lifecycle_event(&input).unwrap();
         let synthetic = f.event(
+            &repo,
             LifecycleSource::AutomatedAdmission,
             LifecycleFact::HumanEscalation {
                 approval_request_id: f.decision.clone(),
@@ -391,6 +457,7 @@ fn policy_denial_human_decline_and_safe_preclaim_release_are_distinct() {
         );
         assert!(repo.append_lifecycle_event(&synthetic).is_err());
         let wrong_policy = f.event(
+            &repo,
             LifecycleSource::HumanApproval,
             LifecycleFact::HumanEscalation {
                 approval_request_id: f.decision.clone(),
@@ -412,6 +479,7 @@ fn policy_denial_human_decline_and_safe_preclaim_release_are_distinct() {
             )
             .unwrap();
             let denied = f.event(
+                &repo,
                 LifecycleSource::AutomatedAdmission,
                 LifecycleFact::AutomatedAdmission {
                     result: AutomatedAdmissionOutcome::Denied {
@@ -426,6 +494,7 @@ fn policy_denial_human_decline_and_safe_preclaim_release_are_distinct() {
             repo.append_lifecycle_event(&denied).unwrap();
         } else {
             let failure = f.event(
+                &repo,
                 LifecycleSource::AutomatedAdmission,
                 LifecycleFact::AdmissionFailed {
                     observation_id: LifecycleObservationId::new(),
@@ -434,6 +503,7 @@ fn policy_denial_human_decline_and_safe_preclaim_release_are_distinct() {
             repo.append_lifecycle_event(&failure).unwrap();
             f.authorize(&mut repo);
             let admitted = f.event(
+                &repo,
                 LifecycleSource::AutomatedAdmission,
                 LifecycleFact::AutomatedAdmission {
                     result: AutomatedAdmissionOutcome::Admitted,
@@ -448,6 +518,7 @@ fn policy_denial_human_decline_and_safe_preclaim_release_are_distinct() {
             repo.void_unclaimed_authorization(&f.owner, &f.account, &f.token, &f.key)
                 .unwrap();
             let released = f.event(
+                &repo,
                 LifecycleSource::Executor,
                 LifecycleFact::AuthorizationReleased {
                     authorization_id: f.decision.clone(),
@@ -479,6 +550,7 @@ fn policy_denial_human_decline_and_safe_preclaim_release_are_distinct() {
     )
     .unwrap();
     let declined = f.event(
+        &repo,
         LifecycleSource::HumanApproval,
         LifecycleFact::HumanResolutionConfirmed {
             approval_request_id: f.decision.clone(),
@@ -527,6 +599,7 @@ fn watermark_backlog_uses_preperiod_opens_and_late_arrivals_cannot_reopen() {
         )
         .unwrap();
     let mut escalation = f.event(
+        &repo,
         LifecycleSource::HumanApproval,
         LifecycleFact::HumanEscalation {
             approval_request_id: f.decision.clone(),
@@ -545,7 +618,9 @@ fn watermark_backlog_uses_preperiod_opens_and_late_arrivals_cannot_reopen() {
             .count(),
         0
     );
+    f.authorize(&mut repo);
     let resolved = f.event(
+        &repo,
         LifecycleSource::HumanApproval,
         LifecycleFact::HumanResolutionConfirmed {
             approval_request_id: f.decision.clone(),
@@ -553,7 +628,6 @@ fn watermark_backlog_uses_preperiod_opens_and_late_arrivals_cannot_reopen() {
             confirmed_by_user_id: f.owner.clone(),
         },
     );
-    f.authorize(&mut repo);
     repo.append_lifecycle_event(&resolved).unwrap();
     assert_eq!(
         backlog(
@@ -568,20 +642,22 @@ fn watermark_backlog_uses_preperiod_opens_and_late_arrivals_cannot_reopen() {
         0
     );
     let required = f.event(
+        &repo,
         LifecycleSource::Executor,
         LifecycleFact::ReconciliationRequired {
             claim_id: f.claim.clone(),
         },
     );
+    f.claim(&mut repo);
+    f.reconcile(&mut repo, false);
     let resolution = f.event(
+        &repo,
         LifecycleSource::Reconciliation,
         LifecycleFact::ReconciliationResolved {
             claim_id: f.claim.clone(),
             outcome: ReconciliationResolution::VendorDidNotBill,
         },
     );
-    f.claim(&mut repo);
-    f.reconcile(&mut repo, false);
     repo.append_lifecycle_event(&resolution).unwrap();
     repo.append_lifecycle_event(&required).unwrap();
     assert_eq!(
@@ -595,7 +671,7 @@ fn append_enforces_owner_request_source_and_correlation_and_rolls_back_with_pare
     let mut repo = SqliteGovernanceRepository::in_memory().unwrap();
     let f = Fixture::seed(&mut repo, Effect::Allow);
     let other = Fixture::seed(&mut repo, Effect::Allow);
-    let input = f.policy(InitialPolicyDecision::Allow);
+    let input = f.policy(&repo, InitialPolicyDecision::Allow);
     let mut bad = input.clone();
     bad.correlation.owner_user_id = other.owner.clone();
     assert!(repo.append_lifecycle_event(&bad).is_err());
@@ -650,7 +726,7 @@ fn append_enforces_owner_request_source_and_correlation_and_rolls_back_with_pare
         .unwrap();
     assert_eq!(count, 0);
     repo.append_lifecycle_event(&input).unwrap();
-    repo.append_lifecycle_event(&other.policy(InitialPolicyDecision::Allow))
+    repo.append_lifecycle_event(&other.policy(&repo, InitialPolicyDecision::Allow))
         .unwrap();
     assert_eq!(
         repo.lifecycle_snapshot(&f.owner, None)
@@ -686,7 +762,7 @@ fn additive_migration_restart_replay_and_immutable_request_bytes() {
         repo.lifecycle_snapshot(&f.owner, None).unwrap().watermark,
         0
     );
-    let input = f.policy(InitialPolicyDecision::Allow);
+    let input = f.policy(&repo, InitialPolicyDecision::Allow);
     let first = repo.append_lifecycle_event(&input).unwrap();
     assert!(repo
         .conn
@@ -745,7 +821,7 @@ fn additive_migration_restart_replay_and_immutable_request_bytes() {
 fn evidence_is_exact_explicit_safe_and_rejects_foreign_provenance() {
     let mut repo = SqliteGovernanceRepository::in_memory().unwrap();
     let f = Fixture::seed(&mut repo, Effect::Allow);
-    let mut input = f.policy(InitialPolicyDecision::Allow);
+    let mut input = f.policy(&repo, InitialPolicyDecision::Allow);
     input.explanation.budget = LifecycleEvidence::Known {
         value: LifecycleBudgetEvidence {
             budget_id: format!("bgt_{}", f.budget.public_suffix()),
@@ -798,7 +874,7 @@ fn evidence_is_exact_explicit_safe_and_rejects_foreign_provenance() {
     )
     .is_err());
     let other = Fixture::seed(&mut repo, Effect::Allow);
-    let mut foreign = other.policy(InitialPolicyDecision::Allow);
+    let mut foreign = other.policy(&repo, InitialPolicyDecision::Allow);
     foreign.explanation = input.explanation;
     assert!(repo.append_lifecycle_event(&foreign).is_err());
 }
@@ -823,10 +899,11 @@ fn financial_confirmation_and_source_guards_reject_unresolved_or_contradictory_c
             outcome: ReconciliationResolution::VendorDidNotBill,
         },
     ] {
-        let input = f.event(LifecycleSource::Reconciliation, fact);
+        let input = f.event(&repo, LifecycleSource::Reconciliation, fact);
         assert!(repo.append_lifecycle_event(&input).is_err());
     }
     let preclaim_release = f.event(
+        &repo,
         LifecycleSource::Executor,
         LifecycleFact::AuthorizationReleased {
             authorization_id: f.decision.clone(),
@@ -835,6 +912,7 @@ fn financial_confirmation_and_source_guards_reject_unresolved_or_contradictory_c
     );
     assert!(repo.append_lifecycle_event(&preclaim_release).is_err());
     let false_policy_denial = f.event(
+        &repo,
         LifecycleSource::AutomatedAdmission,
         LifecycleFact::AutomatedAdmission {
             result: AutomatedAdmissionOutcome::Denied {
@@ -845,6 +923,7 @@ fn financial_confirmation_and_source_guards_reject_unresolved_or_contradictory_c
     assert!(repo.append_lifecycle_event(&false_policy_denial).is_err());
     f.reconcile(&mut repo, false);
     let released = f.event(
+        &repo,
         LifecycleSource::Reconciliation,
         LifecycleFact::ExecutionFinalized {
             claim_id: f.claim.clone(),
@@ -853,6 +932,7 @@ fn financial_confirmation_and_source_guards_reject_unresolved_or_contradictory_c
     );
     repo.append_lifecycle_event(&released).unwrap();
     let contradicted = f.event(
+        &repo,
         LifecycleSource::Reconciliation,
         LifecycleFact::ReconciliationResolved {
             claim_id: f.claim.clone(),
@@ -862,6 +942,7 @@ fn financial_confirmation_and_source_guards_reject_unresolved_or_contradictory_c
     assert!(repo.append_lifecycle_event(&contradicted).is_err());
     let pending = Fixture::seed(&mut repo, Effect::NeedsApproval);
     let false_admitted = pending.event(
+        &repo,
         LifecycleSource::AutomatedAdmission,
         LifecycleFact::AutomatedAdmission {
             result: AutomatedAdmissionOutcome::Admitted,
@@ -869,6 +950,7 @@ fn financial_confirmation_and_source_guards_reject_unresolved_or_contradictory_c
     );
     assert!(repo.append_lifecycle_event(&false_admitted).is_err());
     let unconfirmed = pending.event(
+        &repo,
         LifecycleSource::HumanApproval,
         LifecycleFact::HumanResolutionConfirmed {
             approval_request_id: pending.decision.clone(),
@@ -892,6 +974,7 @@ fn financial_confirmation_and_source_guards_reject_unresolved_or_contradictory_c
     )
     .unwrap();
     let contradicted = denied.event(
+        &repo,
         LifecycleSource::AutomatedAdmission,
         LifecycleFact::AutomatedAdmission {
             result: AutomatedAdmissionOutcome::Admitted,
@@ -904,7 +987,7 @@ fn financial_confirmation_and_source_guards_reject_unresolved_or_contradictory_c
 fn corrected_revisions_preserve_denials_and_conflicting_replay_does_not_mutate_facts() {
     let mut repo = SqliteGovernanceRepository::in_memory().unwrap();
     let f = Fixture::seed(&mut repo, Effect::Deny);
-    let original = f.policy(InitialPolicyDecision::Deny);
+    let original = f.policy(&repo, InitialPolicyDecision::Deny);
     let first = repo.append_lifecycle_event(&original).unwrap();
     let mut decision = repo.load_spend_decisions().unwrap().remove(0);
     repo.record_spend_attempt_outcome(
@@ -932,7 +1015,7 @@ fn corrected_revisions_preserve_denials_and_conflicting_replay_does_not_mutate_f
     decision.request = corrected;
     decision.evaluation.decision = Effect::Allow;
     repo.save_spend_decision(&decision).unwrap();
-    let mut second = f.policy(InitialPolicyDecision::Allow);
+    let mut second = f.policy(&repo, InitialPolicyDecision::Allow);
     second.correlation.decision_id = Some(decision.id);
     second.correlation.attempt_revision = 2;
     second.correlation.correction_of_revision = Some(1);
@@ -950,7 +1033,7 @@ fn corrected_revisions_preserve_denials_and_conflicting_replay_does_not_mutate_f
         .append_lifecycle_event(&changed_time)
         .unwrap_err()
         .to_string();
-    assert!(error.contains("conflicting lifecycle"));
+    assert!(error.contains("lifecycle"));
     assert!(!error.contains(&f.key));
     let snapshot = repo.lifecycle_snapshot(&f.owner, None).unwrap();
     assert_eq!(snapshot.events.len(), 2);
@@ -970,7 +1053,7 @@ fn separate_connection_exact_replays_converge_on_one_identity_and_first_recorded
     let path = temp.path().join("concurrent.sqlite");
     let mut seed = SqliteGovernanceRepository::open(&path).unwrap();
     let f = Fixture::seed(&mut seed, Effect::Allow);
-    let input = f.policy(InitialPolicyDecision::Allow);
+    let input = f.policy(&seed, InitialPolicyDecision::Allow);
     drop(seed);
     let left = SqliteGovernanceRepository::open(&path).unwrap();
     let right = SqliteGovernanceRepository::open(&path).unwrap();
@@ -1020,8 +1103,13 @@ fn human_resolution_requires_durable_matching_closure_and_replays_after_release(
             repo,
         )
     }
-    fn resolution(f: &Fixture, value: HumanResolution) -> LifecycleEventInput {
+    fn resolution(
+        repo: &SqliteGovernanceRepository,
+        f: &Fixture,
+        value: HumanResolution,
+    ) -> LifecycleEventInput {
         f.event(
+            repo,
             LifecycleSource::HumanApproval,
             LifecycleFact::HumanResolutionConfirmed {
                 approval_request_id: f.decision.clone(),
@@ -1034,6 +1122,7 @@ fn human_resolution_requires_durable_matching_closure_and_replays_after_release(
     let mut repo = SqliteGovernanceRepository::in_memory().unwrap();
     let approved = Fixture::seed(&mut repo, Effect::NeedsApproval);
     let escalated = approved.event(
+        &repo,
         LifecycleSource::HumanApproval,
         LifecycleFact::HumanEscalation {
             approval_request_id: approved.decision.clone(),
@@ -1043,7 +1132,7 @@ fn human_resolution_requires_durable_matching_closure_and_replays_after_release(
     // Neither owner identity nor a genuine pending approval proves resolution.
     for value in [HumanResolution::Approved, HumanResolution::Declined] {
         assert!(repo
-            .append_lifecycle_event(&resolution(&approved, value))
+            .append_lifecycle_event(&resolution(&repo, &approved, value))
             .is_err());
     }
     assert_eq!(
@@ -1056,9 +1145,9 @@ fn human_resolution_requires_durable_matching_closure_and_replays_after_release(
         _ => panic!("fixture approval must be accepted"),
     };
     assert!(repo
-        .append_lifecycle_event(&resolution(&approved, HumanResolution::Declined))
+        .append_lifecycle_event(&resolution(&repo, &approved, HumanResolution::Declined))
         .is_err());
-    let accepted = resolution(&approved, HumanResolution::Approved);
+    let accepted = resolution(&repo, &approved, HumanResolution::Approved);
     let recorded = repo.append_lifecycle_event(&accepted).unwrap();
     let snapshot = repo.lifecycle_snapshot(&approved.owner, None).unwrap();
     assert_eq!(backlog(&snapshot), 0);
@@ -1083,9 +1172,9 @@ fn human_resolution_requires_durable_matching_closure_and_replays_after_release(
         SpendAuthorizationOutcome::Rejected(_)
     ));
     assert!(repo
-        .append_lifecycle_event(&resolution(&declined, HumanResolution::Approved))
+        .append_lifecycle_event(&resolution(&repo, &declined, HumanResolution::Approved))
         .is_err());
-    let accepted = resolution(&declined, HumanResolution::Declined);
+    let accepted = resolution(&repo, &declined, HumanResolution::Declined);
     let recorded = repo.append_lifecycle_event(&accepted).unwrap();
     assert_eq!(
         repo.append_lifecycle_event(&accepted).unwrap().record,
@@ -1111,7 +1200,7 @@ fn human_resolution_requires_durable_matching_closure_and_replays_after_release(
     );
     for value in [HumanResolution::Approved, HumanResolution::Declined] {
         assert!(repo
-            .append_lifecycle_event(&resolution(&failed, value))
+            .append_lifecycle_event(&resolution(&repo, &failed, value))
             .is_err());
     }
     assert!(repo
@@ -1141,6 +1230,7 @@ fn unknown_automatic_denial_cannot_relabel_a_confirmed_human_decline() {
         )
         .unwrap();
     let wrong = declined.event(
+        &repo,
         LifecycleSource::AutomatedAdmission,
         LifecycleFact::AutomatedAdmission {
             result: AutomatedAdmissionOutcome::Denied {
@@ -1150,6 +1240,7 @@ fn unknown_automatic_denial_cannot_relabel_a_confirmed_human_decline() {
     );
     assert!(repo.append_lifecycle_event(&wrong).is_err());
     let correct = declined.event(
+        &repo,
         LifecycleSource::HumanApproval,
         LifecycleFact::HumanResolutionConfirmed {
             approval_request_id: declined.decision.clone(),
@@ -1182,6 +1273,7 @@ fn unknown_automatic_denial_cannot_relabel_a_confirmed_human_decline() {
         )
         .unwrap();
         let input = automatic.event(
+            &repo,
             LifecycleSource::AutomatedAdmission,
             LifecycleFact::AutomatedAdmission {
                 result: AutomatedAdmissionOutcome::Denied {
@@ -1206,6 +1298,7 @@ fn authorization_release_matches_void_reason_and_expiry_never_hides_payment_use(
     )
     .unwrap();
     let wrong = released.event(
+        &repo,
         LifecycleSource::Executor,
         LifecycleFact::AuthorizationReleased {
             authorization_id: released.decision.clone(),
@@ -1214,6 +1307,7 @@ fn authorization_release_matches_void_reason_and_expiry_never_hides_payment_use(
     );
     assert!(repo.append_lifecycle_event(&wrong).is_err());
     let correct = released.event(
+        &repo,
         LifecycleSource::Executor,
         LifecycleFact::AuthorizationReleased {
             authorization_id: released.decision.clone(),
@@ -1230,6 +1324,7 @@ fn authorization_release_matches_void_reason_and_expiry_never_hides_payment_use(
     expired.authorize(&mut repo);
     repo.expire_overdue_budget_holds(expiry_at).unwrap();
     let mut input = expired.event(
+        &repo,
         LifecycleSource::AutomatedAdmission,
         LifecycleFact::AuthorizationReleased {
             authorization_id: expired.decision.clone(),
@@ -1271,6 +1366,7 @@ fn authorization_release_matches_void_reason_and_expiry_never_hides_payment_use(
             .unwrap();
         assert!(matches!(expired_hold.status, BudgetHoldStatus::Expired));
         let input = used.event(
+            &repo,
             LifecycleSource::AutomatedAdmission,
             LifecycleFact::AuthorizationReleased {
                 authorization_id: used.decision.clone(),
@@ -1283,5 +1379,293 @@ fn authorization_release_matches_void_reason_and_expiry_never_hides_payment_use(
             .unwrap()
             .events
             .is_empty());
+    }
+}
+
+#[test]
+fn authoritative_occurrence_times_cannot_move_confirmed_facts_between_periods() {
+    fn verify(repo: &mut SqliteGovernanceRepository, input: LifecycleEventInput) {
+        let mut wrong = input.clone();
+        wrong.occurred_at -= chrono::Duration::days(40);
+        assert!(repo.append_lifecycle_event(&wrong).is_err());
+        let first = repo.append_lifecycle_event(&input).unwrap();
+        let replay = repo.append_lifecycle_event(&input).unwrap();
+        assert!(replay.idempotent_replay);
+        assert_eq!(first.record, replay.record);
+        assert!(repo.append_lifecycle_event(&wrong).is_err());
+    }
+    let mut repo = SqliteGovernanceRepository::in_memory().unwrap();
+    let f = Fixture::seed(&mut repo, Effect::Allow);
+    let input = f.policy(&repo, InitialPolicyDecision::Allow);
+    verify(&mut repo, input);
+    f.authorize(&mut repo);
+    let input = f.event(
+        &repo,
+        LifecycleSource::AutomatedAdmission,
+        LifecycleFact::AutomatedAdmission {
+            result: AutomatedAdmissionOutcome::Admitted,
+        },
+    );
+    verify(&mut repo, input);
+    let input = f.event(
+        &repo,
+        LifecycleSource::AutomatedAdmission,
+        LifecycleFact::AuthorizationGranted {
+            authorization_id: f.decision.clone(),
+        },
+    );
+    verify(&mut repo, input);
+    f.claim(&mut repo);
+    let input = f.event(
+        &repo,
+        LifecycleSource::Executor,
+        LifecycleFact::ExecutionStarted {
+            claim_id: f.claim.clone(),
+        },
+    );
+    verify(&mut repo, input);
+    f.reconcile(&mut repo, true);
+    let input = f.event(
+        &repo,
+        LifecycleSource::Reconciliation,
+        LifecycleFact::ExecutionFinalized {
+            claim_id: f.claim.clone(),
+            outcome: ExecutionFinalization::Settled,
+        },
+    );
+    verify(&mut repo, input);
+    let input = f.event(
+        &repo,
+        LifecycleSource::Reconciliation,
+        LifecycleFact::ReconciliationResolved {
+            claim_id: f.claim.clone(),
+            outcome: ReconciliationResolution::VendorBilled,
+        },
+    );
+    verify(&mut repo, input);
+    let released = Fixture::seed(&mut repo, Effect::Allow);
+    released.authorize(&mut repo);
+    repo.void_unclaimed_authorization(
+        &released.owner,
+        &released.account,
+        &released.token,
+        &released.key,
+    )
+    .unwrap();
+    let input = released.event(
+        &repo,
+        LifecycleSource::Executor,
+        LifecycleFact::AuthorizationReleased {
+            authorization_id: released.decision.clone(),
+            reason: AuthorizationReleaseReason::ExecutorRejectedBeforeClaim,
+        },
+    );
+    verify(&mut repo, input);
+    let expired = Fixture::seed(&mut repo, Effect::Allow);
+    expired.authorize(&mut repo);
+    repo.expire_overdue_budget_holds(Utc::now() + chrono::Duration::hours(2))
+        .unwrap();
+    let input = expired.event(
+        &repo,
+        LifecycleSource::AutomatedAdmission,
+        LifecycleFact::AuthorizationReleased {
+            authorization_id: expired.decision.clone(),
+            reason: AuthorizationReleaseReason::Expired,
+        },
+    );
+    verify(&mut repo, input);
+    let human = Fixture::seed(&mut repo, Effect::NeedsApproval);
+    human.authorize(&mut repo);
+    let input = human.event(
+        &repo,
+        LifecycleSource::HumanApproval,
+        LifecycleFact::HumanResolutionConfirmed {
+            approval_request_id: human.decision.clone(),
+            resolution: HumanResolution::Approved,
+            confirmed_by_user_id: human.owner.clone(),
+        },
+    );
+    verify(&mut repo, input);
+}
+
+#[test]
+fn decisive_rule_and_amount_provenance_uses_the_stored_winning_trace() {
+    use crate::policy::{Condition, Field, PolicyValue, Rule};
+    fn amount(comparison: AmountComparison, value: i64) -> Condition {
+        let field = Field::Amount;
+        let value = PolicyValue::Money(Amount::from_units(value));
+        match comparison {
+            AmountComparison::Gt => Condition::Gt { field, value },
+            AmountComparison::Lte => Condition::Lte { field, value },
+            _ => unreachable!(),
+        }
+    }
+    fn rule(id: &str, effect: Effect, when: Condition) -> Rule {
+        Rule {
+            id: id.into(),
+            effect,
+            when,
+            reason: "private policy reason".into(),
+        }
+    }
+    fn policy(rules: Vec<Rule>) -> Policy {
+        Policy {
+            id: "same-policy".into(),
+            version: "same-label".into(),
+            owner_user_id: UserId::new(),
+            rules,
+            default_effect: Effect::Allow,
+        }
+    }
+    fn evidence(
+        repo: &SqliteGovernanceRepository,
+        f: &Fixture,
+        id: &str,
+        cap: i64,
+    ) -> LifecyclePolicyEvidence {
+        let resource = repo.load_policies(&f.owner).unwrap().remove(0);
+        LifecyclePolicyEvidence {
+            policy_id: resource.policy_id,
+            revision: resource.current_revision,
+            payload_hash: resource.current_hash,
+            decisive_rule_ids: vec![id.into()],
+            amount_constraints: vec![LifecycleAmountConstraint {
+                rule_id: id.into(),
+                comparison: AmountComparison::Gt,
+                configured: money(cap),
+                evaluated: LifecycleEvidence::Known {
+                    value: money(5_000),
+                },
+            }],
+        }
+    }
+    let winning = Condition::All {
+        conditions: vec![
+            Condition::Eq {
+                field: Field::Currency,
+                value: PolicyValue::Currency(Currency::Usd),
+            },
+            Condition::All {
+                conditions: vec![amount(AmountComparison::Gt, 4_000)],
+            },
+        ],
+    };
+    let authored = policy(vec![
+        rule(
+            "allow",
+            Effect::Allow,
+            amount(AmountComparison::Lte, 10_000),
+        ),
+        rule(
+            "approval",
+            Effect::NeedsApproval,
+            amount(AmountComparison::Gt, 0),
+        ),
+        rule("winner", Effect::Deny, winning),
+        rule(
+            "unmatched",
+            Effect::Deny,
+            amount(AmountComparison::Gt, 6_000),
+        ),
+    ]);
+    let mut repo = SqliteGovernanceRepository::in_memory().unwrap();
+    let f = Fixture::seed_policy(&mut repo, authored.clone(), false);
+    let mut input = f.policy(&repo, InitialPolicyDecision::Deny);
+    let correct = evidence(&repo, &f, "winner", 4_000);
+    for id in ["allow", "approval", "unmatched"] {
+        let mut bad = correct.clone();
+        bad.decisive_rule_ids = vec![id.into()];
+        bad.amount_constraints.clear();
+        input.explanation.policy = LifecycleEvidence::Known { value: bad };
+        assert!(repo.append_lifecycle_event(&input).is_err());
+    }
+    for variant in 0..3 {
+        let mut bad = correct.clone();
+        match variant {
+            0 => bad.amount_constraints[0].configured = money(3_000),
+            1 => bad.amount_constraints[0].comparison = AmountComparison::Lte,
+            _ => {
+                bad.amount_constraints[0].evaluated = LifecycleEvidence::Known {
+                    value: money(4_999),
+                }
+            }
+        }
+        input.explanation.policy = LifecycleEvidence::Known { value: bad };
+        assert!(repo.append_lifecycle_event(&input).is_err());
+    }
+    // New immutable revision reuses every authored label but changes the cap.
+    let mut changed = authored.clone();
+    changed.owner_user_id = f.owner.clone();
+    changed.rules[2].when = amount(AmountComparison::Gt, 3_000);
+    repo.save_policy_assignment(&f.owner, &PolicyAssignmentScope::UserDefault, &changed)
+        .unwrap();
+    input.explanation.policy = LifecycleEvidence::Known {
+        value: evidence(&repo, &f, "winner", 3_000),
+    };
+    assert!(repo.append_lifecycle_event(&input).is_err());
+    let mut changed_effect = authored;
+    changed_effect.owner_user_id = f.owner.clone();
+    changed_effect.rules[2].effect = Effect::Allow;
+    repo.save_policy_assignment(
+        &f.owner,
+        &PolicyAssignmentScope::UserDefault,
+        &changed_effect,
+    )
+    .unwrap();
+    input.explanation.policy = LifecycleEvidence::Known {
+        value: evidence(&repo, &f, "winner", 4_000),
+    };
+    assert!(repo.append_lifecycle_event(&input).is_err());
+    input.explanation.policy = LifecycleEvidence::Known { value: correct };
+    let first = repo.append_lifecycle_event(&input).unwrap();
+    assert_eq!(
+        repo.append_lifecycle_event(&input).unwrap().record,
+        first.record
+    );
+    for when in [
+        Condition::Any {
+            conditions: vec![amount(AmountComparison::Gt, 4_000)],
+        },
+        Condition::Not {
+            condition: Box::new(amount(AmountComparison::Lte, 4_000)),
+        },
+    ] {
+        let ambiguous = Fixture::seed_policy(
+            &mut repo,
+            policy(vec![rule("winner", Effect::Deny, when)]),
+            false,
+        );
+        let mut input = ambiguous.policy(&repo, InitialPolicyDecision::Deny);
+        let mut value = evidence(&repo, &ambiguous, "winner", 4_000);
+        if matches!(repo.load_spend_decisions().unwrap().into_iter().find(|d|d.id==ambiguous.decision).unwrap().evaluation.rule_results[0].condition.as_deref(),Some(c) if c.starts_with("not"))
+        {
+            value.amount_constraints[0].comparison = AmountComparison::Lte;
+        }
+        input.explanation.policy = LifecycleEvidence::Known { value };
+        assert!(repo.append_lifecycle_event(&input).is_err());
+        input.explanation = LifecycleExplanation::default();
+        repo.append_lifecycle_event(&input).unwrap();
+    }
+    for legacy in [false, true] {
+        let rules = if legacy {
+            vec![rule(
+                "winner",
+                Effect::Deny,
+                amount(AmountComparison::Gt, 4_000),
+            )]
+        } else {
+            vec![
+                rule("winner", Effect::Deny, amount(AmountComparison::Gt, 4_000)),
+                rule("winner", Effect::Deny, amount(AmountComparison::Gt, 3_000)),
+            ]
+        };
+        let ambiguous = Fixture::seed_policy(&mut repo, policy(rules), legacy);
+        let mut input = ambiguous.policy(&repo, InitialPolicyDecision::Deny);
+        input.explanation.policy = LifecycleEvidence::Known {
+            value: evidence(&repo, &ambiguous, "winner", 4_000),
+        };
+        assert!(repo.append_lifecycle_event(&input).is_err());
+        input.explanation = LifecycleExplanation::default();
+        repo.append_lifecycle_event(&input).unwrap();
     }
 }

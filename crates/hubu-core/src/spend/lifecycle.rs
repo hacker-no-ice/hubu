@@ -378,7 +378,9 @@ pub struct LifecyclePolicyEvidence {
     pub policy_id: String,
     pub revision: u64,
     pub payload_hash: String,
-    /// Stable identifiers only, not free-form reasons/raw condition expressions.
+    /// Safe partial subset of stored matching rules with the winning initial
+    /// policy effect. Omitted/redacted IDs do not assert that no other rules
+    /// were decisive. Never free-form reasons/raw condition expressions.
     pub decisive_rule_ids: Vec<String>,
     pub amount_constraints: Vec<LifecycleAmountConstraint>,
 }

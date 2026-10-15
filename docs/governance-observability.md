@@ -43,6 +43,14 @@ time and a monotonic recorded sequence identify when it became visible in
 Hubu's evidence store. Unknown historical times or evidence remain unavailable
 rather than being inferred from the current configuration.
 
+Where the authoritative transition has a durable timestamp, occurrence time
+must match it: policy creation, terminal admission/human outcome acceptance,
+authorization acceptance, claim start, finalization and reconciliation resolution
+use their source records. Explicit voids use the matching void timestamp;
+persisted expiry releases use the hold's release update time, rather than its
+earlier expiry eligibility deadline. Failure, escalation and reconciliation-open
+observations retain their producer timestamp when no such source time exists.
+
 One recorded watermark bounds a snapshot. Later-recorded events stay outside
 that snapshot even when their occurrence timestamp is older. Future query
 implementations must use the same boundary for rows, whole-filter totals and
@@ -65,6 +73,13 @@ evaluated values used at the decision, with explicit unavailable fields. Budget
 amounts use the shared exact `Amount` representation at accounting scale 6;
 provider costs retain their separate exact receipt representation. Never
 reconstruct an old available balance from today's budget.
+
+Decisive rule IDs are a safe partial subset of uniquely identified, matched
+rules with the winning stored initial policy effect. Known amount constraints
+must agree with the stored condition snapshot, immutable policy comparison and
+actual request amount. Direct comparisons and positive `all` conjuncts are
+supported; `any`, `not`, ambiguous IDs and missing legacy condition snapshots
+remain absent or unavailable instead of becoming a guessed threshold.
 
 A failed execution does not establish whether the provider billed. Confirmed
 safe release, uncertain billing, and reconciled billed/no-bill outcomes are
