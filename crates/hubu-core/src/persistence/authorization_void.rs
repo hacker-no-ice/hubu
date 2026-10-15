@@ -111,6 +111,12 @@ impl SqliteGovernanceRepository {
         upsert_balance(&tx, &balance)?;
         tx.execute("INSERT INTO spend_authorization_voids(spend_auth_token_id,reason,voided_at) VALUES(?1,'executor_rejected_before_claim',?2)",
             params![token_id.to_string(), now.to_rfc3339()])?;
+        super::financial_lifecycle::capture_authorization_release(
+            &tx,
+            &token.spend_decision_id,
+            crate::spend::lifecycle::AuthorizationReleaseReason::ExecutorRejectedBeforeClaim,
+            now,
+        )?;
         tx.commit()?;
         Ok(AuthorizationVoidResult {
             token,

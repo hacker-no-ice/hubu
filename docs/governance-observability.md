@@ -7,8 +7,9 @@ database. Gongbu retains its own execution database and provider authority.
 
 HUB-291 supplies the storage foundation. HUB-292 captures new policy evaluations
 and automatic admission/authorization outcomes. HUB-293 captures genuine human
-escalation and confirmed resolution. Executor/reconciliation capture, aggregate
-queries, HTTP and unified MCP reads follow separately.
+escalation and confirmed resolution. HUB-294 captures authoritative Hubu claim
+and financial-resolution facts. Aggregate queries, HTTP and unified MCP reads
+follow separately.
 Installing the schema alone does **not** establish complete capture or make an
 empty event table evidence that no requests were denied.
 
@@ -83,10 +84,10 @@ SQLite inside the write transaction. A failed append rolls back its parent
 transition. Exact replay does not regenerate facts, timestamps, explanations or
 coverage from current configuration.
 
-Integrated policy, automatic-admission and human-approval writers establish
-their own owner capture coverage. Existing history is not backfilled, and
-uninvolved streams stay undeclared. Reconciliation capture remains disabled until HUB-294 establishes
-source eligibility and matching open/close semantics.
+Each integrated writer declares its own owner capture coverage. Uninvolved
+streams stay undeclared, and source activation does not establish support for
+every possible fact. Policy and human history are not backfilled; financial
+capture has its own source and eligibility rules below.
 
 ## Human capture
 
@@ -127,6 +128,32 @@ private operation keys, tokens, approval capabilities, credentials, prompts,
 raw provider payloads or artifact URLs that grant access. Typed internal
 evidence is not itself a public serialization contract.
 
+## Financial capture
+
+Claim acceptance, settlement, confirmed release and eligible unclaimed expiry
+record facts with their canonical financial transitions. Claim acceptance proves
+that the executor acquired its lease; it does not prove provider work began.
+A release does not by itself establish a provider failure or a billed/no-bill
+reconciliation result.
+
+Financial reconciliation opens at the stored expiry of an unresolved Hubu claim.
+The writer verifies historical eligibility; claims finalized before expiry never
+open this backlog. Confirmed reconciliation commits its matching open and close
+with financial finalization, even if the collector has not observed expiry yet.
+A late open cannot undo a known closure.
+
+An independent collector observes expired claims on server startup and normally
+every 30 seconds. It records evidence without changing financial state, and reads
+do not trigger collection. Downtime, contention or write failures can delay
+capture. A provable existing expired claim may be observed after activation with
+an older occurrence time; this does not establish complete earlier history or
+invent its uncaptured original transitions.
+
+The current executor contract does not supply durable provider-failure or
+pre-expiry Gongbu uncertainty history. Those categories remain unsupported
+coverage, rather than inferred facts. Gongbu recovery before expiry remains
+separate from Hubu's expired financial-claim backlog.
+
 ## Persistence and historical coverage
 
 Schema initialization is additive and idempotent. It does not rewrite old
@@ -147,3 +174,5 @@ Automatic writers live in [transactional capture](../crates/hubu-core/src/persis
 Human writers live in [confirmed resolution capture](../crates/hubu-core/src/persistence/human_lifecycle.rs).
 Existing public reads remain described by the
 [ledger and authorization history contract](ledger-history.md).
+
+Financial writers live in [claim and reconciliation capture](../crates/hubu-core/src/persistence/financial_lifecycle.rs); the API owns the [independent observer](../crates/hubu-api/src/financial_observer.rs).
