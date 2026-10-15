@@ -2,6 +2,7 @@ mod accounting;
 mod authorization_void;
 mod automatic_lifecycle;
 mod financial_lifecycle;
+mod governance_query;
 mod history;
 mod human_lifecycle;
 mod lifecycle;
