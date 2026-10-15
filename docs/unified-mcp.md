@@ -321,7 +321,7 @@ runtime options, and copy the returned `execution_scope` into authorization:
 {
   "authorization": {
     "account_id": "agent-account-id",
-    "amount_cents": 12,
+    "amount": "0.12",
     "reason": "Generate one product illustration",
     "execution_scope": {
       "schema_version": 1,

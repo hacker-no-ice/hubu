@@ -9,9 +9,21 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-pub const PRICING_SNAPSHOT_SCHEMA_VERSION: i64 = 2;
+/// New snapshots freeze their estimate in micro-units (schema 3). Schema 2
+/// snapshots created before v0.2.4 still load, validate and settle.
+pub const PRICING_SNAPSHOT_SCHEMA_VERSION: i64 = 3;
 pub const MAX_VENDOR_COST_SCALE: u32 = 18;
 const SUPPORTED_CURRENCIES: &[&str] = &["USD"];
+/// Hubu accounts budgets in micro-units: 10^-6 of the currency.
+pub const UNITS_SCALE: u32 = 6;
+/// Micro-units per catalog minor unit (cent).
+pub const UNITS_PER_MINOR: i64 = 10_000;
+
+/// The whole-cent projection of a micro-unit amount, rounded up so a cent
+/// reader never sees less committed spend than exists.
+pub fn units_to_minor_ceil(units: i64) -> i64 {
+    units.div_euclid(UNITS_PER_MINOR) + i64::from(units.rem_euclid(UNITS_PER_MINOR) != 0)
+}
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ContractError {
@@ -154,26 +166,27 @@ impl ActualVendorCost {
         )
     }
 
-    /// Convert to budget minor units by ceiling once. This intentionally never
-    /// understates a positive external charge.
-    pub fn to_budget_minor_units(&self, budget_currency: &str) -> Result<i64> {
+    /// Convert to budget micro-units (scale 6) by ceiling once, exactly as
+    /// Hubu charges the budget. Costs at scale 6 or coarser convert exactly;
+    /// this never understates a positive external charge.
+    pub fn to_budget_units(&self, budget_currency: &str) -> Result<i64> {
         self.validate()?;
         if !self.currency.eq_ignore_ascii_case(budget_currency) {
             return Err(ContractError::IndeterminableCost);
         }
         let amount = i128::from(self.amount);
-        let minor = if self.scale > 2 {
-            let divisor = checked_pow10(self.scale - 2)?;
+        let units = if self.scale > UNITS_SCALE {
+            let divisor = checked_pow10(self.scale - UNITS_SCALE)?;
             amount
                 .checked_add(divisor - 1)
                 .ok_or(ContractError::IndeterminableCost)?
                 / divisor
         } else {
             amount
-                .checked_mul(checked_pow10(2 - self.scale)?)
+                .checked_mul(checked_pow10(UNITS_SCALE - self.scale)?)
                 .ok_or(ContractError::IndeterminableCost)?
         };
-        i64::try_from(minor).map_err(|_| ContractError::IndeterminableCost)
+        i64::try_from(units).map_err(|_| ContractError::IndeterminableCost)
     }
 }
 
@@ -186,7 +199,8 @@ fn checked_pow10(power: u32) -> Result<i128> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreciseSettlement {
     pub actual_vendor_cost: ActualVendorCost,
-    pub budget_amount_minor: i64,
+    /// The budget charge in micro-units, as Hubu computes it.
+    pub budget_units: i64,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -476,9 +490,9 @@ impl PricingCatalog {
                 quantity,
             });
         }
-        let estimated_amount_minor = exact.ceil_i64()?;
+        let estimated_units = exact.to_units_ceil()?;
         Ok(PricingSnapshot {
-            schema_version: 2,
+            schema_version: 3,
             provider: request.provider.clone(),
             model: request.model.clone(),
             catalog_version: self.0.version.clone(),
@@ -489,7 +503,7 @@ impl PricingCatalog {
             components: frozen,
             exact_estimate_numerator: exact.n.to_string(),
             exact_estimate_denominator: exact.d.to_string(),
-            estimated_amount_minor,
+            estimated_units,
             currency: rule.currency.clone(),
         })
     }
@@ -671,8 +685,12 @@ pub fn validate_image_input(request: &NormalizedRequest, input: &serde_json::Val
     validate_image_input_versioned(request, input, 1)
 }
 
+/// A frozen price estimate. Schema 3 records the estimate in micro-units
+/// (`estimated_units`). Schema 2 snapshots, frozen before v0.2.4, keep their
+/// whole-cent `estimated_amount_minor` on the wire byte for byte so their
+/// receipts and retries never change; in memory both carry micro-units.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "PricingSnapshotWire", into = "PricingSnapshotWire")]
 pub struct PricingSnapshot {
     pub schema_version: u32,
     pub provider: String,
@@ -680,15 +698,102 @@ pub struct PricingSnapshot {
     pub catalog_version: String,
     pub catalog_digest: String,
     pub pricing_rule_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selector: Option<PricingSelector>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_dimensions: Option<OutputDimensions>,
     pub components: Vec<FrozenPriceComponent>,
     pub exact_estimate_numerator: String,
     pub exact_estimate_denominator: String,
-    pub estimated_amount_minor: i64,
+    /// The exact estimate rounded up to micro-units.
+    pub estimated_units: i64,
     pub currency: String,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PricingSnapshotWire {
+    schema_version: u32,
+    provider: String,
+    model: String,
+    catalog_version: String,
+    catalog_digest: String,
+    pricing_rule_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    selector: Option<PricingSelector>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    output_dimensions: Option<OutputDimensions>,
+    components: Vec<FrozenPriceComponent>,
+    exact_estimate_numerator: String,
+    exact_estimate_denominator: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    estimated_amount_minor: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    estimated_units: Option<i64>,
+    currency: String,
+}
+
+impl TryFrom<PricingSnapshotWire> for PricingSnapshot {
+    type Error = String;
+
+    fn try_from(wire: PricingSnapshotWire) -> std::result::Result<Self, Self::Error> {
+        let estimated_units = match (
+            wire.schema_version,
+            wire.estimated_amount_minor,
+            wire.estimated_units,
+        ) {
+            (2, Some(minor), None) => minor
+                .checked_mul(UNITS_PER_MINOR)
+                .ok_or("schema 2 pricing estimate is out of range")?,
+            (3, None, Some(units)) => units,
+            (2, _, _) => {
+                return Err("schema 2 pricing snapshots carry estimated_amount_minor".into())
+            }
+            (3, _, _) => return Err("schema 3 pricing snapshots carry estimated_units".into()),
+            (version, _, _) => {
+                return Err(format!("unsupported pricing snapshot schema {version}"))
+            }
+        };
+        Ok(Self {
+            schema_version: wire.schema_version,
+            provider: wire.provider,
+            model: wire.model,
+            catalog_version: wire.catalog_version,
+            catalog_digest: wire.catalog_digest,
+            pricing_rule_id: wire.pricing_rule_id,
+            selector: wire.selector,
+            output_dimensions: wire.output_dimensions,
+            components: wire.components,
+            exact_estimate_numerator: wire.exact_estimate_numerator,
+            exact_estimate_denominator: wire.exact_estimate_denominator,
+            estimated_units,
+            currency: wire.currency,
+        })
+    }
+}
+
+impl From<PricingSnapshot> for PricingSnapshotWire {
+    fn from(snapshot: PricingSnapshot) -> Self {
+        let (estimated_amount_minor, estimated_units) = if snapshot.schema_version == 2 {
+            (Some(snapshot.estimated_units / UNITS_PER_MINOR), None)
+        } else {
+            (None, Some(snapshot.estimated_units))
+        };
+        Self {
+            schema_version: snapshot.schema_version,
+            provider: snapshot.provider,
+            model: snapshot.model,
+            catalog_version: snapshot.catalog_version,
+            catalog_digest: snapshot.catalog_digest,
+            pricing_rule_id: snapshot.pricing_rule_id,
+            selector: snapshot.selector,
+            output_dimensions: snapshot.output_dimensions,
+            components: snapshot.components,
+            exact_estimate_numerator: snapshot.exact_estimate_numerator,
+            exact_estimate_denominator: snapshot.exact_estimate_denominator,
+            estimated_amount_minor,
+            estimated_units,
+            currency: snapshot.currency,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -752,6 +857,17 @@ impl Rational {
         )
         .map_err(|_| ContractError::IndeterminableCost)
     }
+    /// A minor-unit (cent) rational rounded up once to micro-units.
+    fn to_units_ceil(self) -> Result<i64> {
+        Self {
+            n: self
+                .n
+                .checked_mul(i128::from(UNITS_PER_MINOR))
+                .ok_or(ContractError::IndeterminableCost)?,
+            d: self.d,
+        }
+        .ceil_i64()
+    }
     fn to_actual_vendor_cost(self, currency: &str) -> Result<ActualVendorCost> {
         let major_denominator = self
             .d
@@ -799,7 +915,7 @@ fn gcd(mut a: i128, mut b: i128) -> i128 {
 
 impl PricingSnapshot {
     pub fn is_image_only(&self) -> bool {
-        self.schema_version == 2
+        matches!(self.schema_version, 2 | 3)
             && self.components.len() == 1
             && self.components[0].unit == PricingUnit::Image
     }
@@ -816,7 +932,7 @@ impl PricingSnapshot {
     }
     pub fn validate_integrity(&self) -> Result<()> {
         let digest = self.catalog_digest.strip_prefix("sha256:");
-        if self.schema_version != 2
+        if !matches!(self.schema_version, 2 | 3)
             || self.provider.trim().is_empty()
             || self.model.trim().is_empty()
             || self.catalog_version.trim().is_empty()
@@ -825,7 +941,7 @@ impl PricingSnapshot {
                 value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
             })
             || !SUPPORTED_CURRENCIES.contains(&self.currency.as_str())
-            || self.estimated_amount_minor < 0
+            || self.estimated_units < 0
         {
             return Err(ContractError::IndeterminableCost);
         }
@@ -852,17 +968,27 @@ impl PricingSnapshot {
             return Err(ContractError::IndeterminableCost);
         }
         let exact = self.exact_estimate()?;
-        if exact.ceil_i64()? != self.estimated_amount_minor {
+        // Schema 2 froze a whole-cent estimate; schema 3 freezes micro-units.
+        let expected = if self.schema_version == 2 {
+            exact
+                .ceil_i64()?
+                .checked_mul(UNITS_PER_MINOR)
+                .ok_or(ContractError::IndeterminableCost)?
+        } else {
+            exact.to_units_ceil()?
+        };
+        if expected != self.estimated_units {
             return Err(ContractError::IndeterminableCost);
         }
         Ok(())
     }
 
-    pub fn check_authorization(&self, authorized_minor: i64, currency: &str) -> Result<()> {
+    /// `authorized_units` is the Hubu authorization in micro-units.
+    pub fn check_authorization(&self, authorized_units: i64, currency: &str) -> Result<()> {
         self.validate_integrity()?;
-        if authorized_minor < 0
+        if authorized_units < 0
             || !self.currency.eq_ignore_ascii_case(currency)
-            || self.estimated_amount_minor > authorized_minor
+            || self.estimated_units > authorized_units
         {
             return Err(ContractError::InsufficientAuthorization);
         }
@@ -872,7 +998,7 @@ impl PricingSnapshot {
         &self,
         usage: &NormalizedUsage,
         provider_cost: Option<&ActualVendorCost>,
-        authorized_minor: i64,
+        authorized_units: i64,
     ) -> Result<PreciseSettlement> {
         self.validate_integrity()?;
         let mut exact = Rational::zero();
@@ -898,24 +1024,25 @@ impl PricingSnapshot {
             }
             None => exact.to_actual_vendor_cost(&self.currency)?,
         };
-        let amount = actual_vendor_cost.to_budget_minor_units(&self.currency)?;
-        if amount > self.estimated_amount_minor || amount > authorized_minor {
+        let units = actual_vendor_cost.to_budget_units(&self.currency)?;
+        if units > self.estimated_units || units > authorized_units {
             return Err(ContractError::SettlementOverage);
         }
         Ok(PreciseSettlement {
             actual_vendor_cost,
-            budget_amount_minor: amount,
+            budget_units: units,
         })
     }
 
-    pub fn settle(&self, usage: &NormalizedUsage, authorized_minor: i64) -> Result<i64> {
+    /// The budget charge in micro-units for `usage`.
+    pub fn settle(&self, usage: &NormalizedUsage, authorized_units: i64) -> Result<i64> {
         Ok(self
-            .settle_precise(usage, None, authorized_minor)?
-            .budget_amount_minor)
+            .settle_precise(usage, None, authorized_units)?
+            .budget_units)
     }
 
     fn effective_components(&self) -> Result<Vec<FrozenPriceComponent>> {
-        if self.schema_version == 2 && !self.components.is_empty() {
+        if matches!(self.schema_version, 2 | 3) && !self.components.is_empty() {
             Ok(self.components.clone())
         } else {
             Err(ContractError::IndeterminableCost)
@@ -1312,15 +1439,16 @@ pub fn vendor_idempotency_key(
 /// The executor calls this once before claim and again immediately before invoke.
 pub fn enforce_cost(
     snapshot: &PricingSnapshot,
-    authorized_minor: i64,
+    authorized_units: i64,
     currency: &str,
 ) -> Result<()> {
-    snapshot.check_authorization(authorized_minor, currency)
+    snapshot.check_authorization(authorized_units, currency)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     const CATALOG: &str = r#"{"schema_version":2,"catalog_version":"2026-08-05","rules":[{"rule_id":"image-standard","provider":"vendor","model":"image-v1","currency":"usd","components":[{"unit":"image","rate_numerator_minor":125,"rate_denominator":1}]}]}"#;
     fn request() -> NormalizedRequest {
         NormalizedRequest {
@@ -1334,20 +1462,33 @@ mod tests {
         }
     }
     #[test]
-    fn exact_decimal_cost_uses_conservative_minor_unit_ceiling() {
-        let cases = [(1, 1), (10, 1), (11, 2)];
-        for (amount, expected_minor) in cases {
-            let cost = ActualVendorCost::new(amount, 3, "USD").unwrap();
-            assert_eq!(cost.to_budget_minor_units("USD").unwrap(), expected_minor);
+    fn exact_decimal_cost_converts_to_micro_units_and_rounds_only_beyond_scale_six() {
+        // Scale 6 or coarser converts exactly: a sub-cent charge is no
+        // longer rounded up to a whole cent.
+        for (amount, scale, expected_units) in [
+            (1, 3, 1_000),
+            (10, 3, 10_000),
+            (11, 3, 11_000),
+            (1, 4, 100),
+            (58, 3, 58_000),
+            (3, 2, 30_000),
+            (1, 6, 1),
+        ] {
+            let cost = ActualVendorCost::new(amount, scale, "USD").unwrap();
+            assert_eq!(cost.to_budget_units("USD").unwrap(), expected_units);
         }
         assert_eq!(
-            ActualVendorCost::new(1, 4, "USD")
+            ActualVendorCost::new(1, 7, "USD")
                 .unwrap()
-                .to_budget_minor_units("USD")
+                .to_budget_units("USD")
                 .unwrap(),
             1,
-            "a charge below half a cent must still consume one budget cent"
+            "only digits beyond scale 6 round up, to one micro-unit"
         );
+        assert_eq!(units_to_minor_ceil(1), 1);
+        assert_eq!(units_to_minor_ceil(10_000), 1);
+        assert_eq!(units_to_minor_ceil(10_001), 2);
+        assert_eq!(units_to_minor_ceil(0), 0);
     }
 
     #[test]
@@ -1409,15 +1550,15 @@ mod tests {
         };
         let exact_max = ActualVendorCost::new(250, 2, "USD").unwrap();
         let settlement = snapshot
-            .settle_precise(&usage, Some(&exact_max), 250)
+            .settle_precise(&usage, Some(&exact_max), 250_0000)
             .unwrap();
         assert_eq!(settlement.actual_vendor_cost, exact_max);
-        assert_eq!(settlement.budget_amount_minor, 250);
+        assert_eq!(settlement.budget_units, 250_0000);
         assert_eq!(
             snapshot.settle_precise(
                 &usage,
                 Some(&ActualVendorCost::new(25001, 4, "USD").unwrap()),
-                250
+                250_0000
             ),
             Err(ContractError::SettlementOverage)
         );
@@ -1431,7 +1572,7 @@ mod tests {
             s.catalog_digest,
             b.snapshot(&request()).unwrap().catalog_digest
         );
-        assert_eq!(s.estimated_amount_minor, 250);
+        assert_eq!(s.estimated_units, 250_0000);
 
         let spaced = r#"{"schema_version":2,"catalog_version":"v2","rules":[{"rule_id":" z","provider":" p","model":" z","currency":" usd ","components":[{"unit":"image","rate_numerator_minor":1,"rate_denominator":1}]},{"rule_id":"a","provider":"p","model":"a","currency":"USD","components":[{"unit":"image","rate_numerator_minor":2,"rate_denominator":1}]}]}"#;
         let normalized = spaced
@@ -1466,14 +1607,14 @@ mod tests {
             images: Some(2),
             ..Default::default()
         };
-        assert_eq!(s.settle(&usage, 250).unwrap(), 250);
+        assert_eq!(s.settle(&usage, 250_0000).unwrap(), 250_0000);
         assert_eq!(
             s.settle(
                 &NormalizedUsage {
                     images: Some(3),
                     ..Default::default()
                 },
-                250
+                250_0000
             ),
             Err(ContractError::SettlementOverage)
         );
@@ -1496,7 +1637,7 @@ mod tests {
         request.image_size = Some("2k".into());
         let snapshot = catalog.snapshot(&request).unwrap();
         assert_eq!(snapshot.selector.unwrap().image_size, "2k");
-        assert_eq!(snapshot.estimated_amount_minor, 40);
+        assert_eq!(snapshot.estimated_units, 40_0000);
         request.image_size = None;
         assert_eq!(
             catalog.snapshot(&request),
@@ -1531,7 +1672,7 @@ mod tests {
             };
             let snapshot = catalog.snapshot(&request).unwrap();
             assert_eq!(snapshot.pricing_rule_id, rule_id);
-            assert_eq!(snapshot.estimated_amount_minor, amount);
+            assert_eq!(snapshot.estimated_units, amount * 10_000);
             assert_eq!(
                 snapshot
                     .selector
@@ -1620,20 +1761,20 @@ mod tests {
         let snapshot = catalog.snapshot(&request).unwrap();
         assert_eq!(snapshot.exact_estimate_numerator, "1");
         assert_eq!(snapshot.exact_estimate_denominator, "1");
-        assert_eq!(snapshot.estimated_amount_minor, 1);
+        assert_eq!(snapshot.estimated_units, 1_0000);
         let usage = NormalizedUsage {
             images: None,
             input_tokens: Some(2_500),
             output_tokens: Some(2_500),
         };
-        assert_eq!(snapshot.settle(&usage, 1).unwrap(), 1);
+        assert_eq!(snapshot.settle(&usage, 1_0000).unwrap(), 1_0000);
         let serialized = serde_json::to_vec(&snapshot).unwrap();
         let replayed: PricingSnapshot = serde_json::from_slice(&serialized).unwrap();
-        assert_eq!(replayed.settle(&usage, 1).unwrap(), 1);
+        assert_eq!(replayed.settle(&usage, 1_0000).unwrap(), 1_0000);
     }
 
     #[test]
-    fn fractional_components_round_only_at_aggregate_and_authorize_by_ceiling() {
+    fn fractional_cent_rates_quote_and_settle_exactly_in_micro_units() {
         let catalog = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"fractions","rules":[{"rule_id":"text","provider":"vendor","model":"text-v1","currency":"USD","components":[{"unit":"input_token","rate_numerator_minor":1,"rate_denominator":4},{"unit":"output_token","rate_numerator_minor":1,"rate_denominator":4}]}]}"#).unwrap();
         let request = NormalizedRequest {
             provider: "vendor".into(),
@@ -1644,8 +1785,10 @@ mod tests {
             image_size: None,
             output_dimensions: None,
         };
+        // Two quarter-cent tokens cost exactly half a cent: no whole-cent
+        // over-reservation or over-charge.
         let snapshot = catalog.snapshot(&request).unwrap();
-        assert_eq!(snapshot.estimated_amount_minor, 1);
+        assert_eq!(snapshot.estimated_units, 5_000);
         assert_eq!(
             snapshot
                 .settle(
@@ -1654,15 +1797,35 @@ mod tests {
                         input_tokens: Some(1),
                         output_tokens: Some(1)
                     },
-                    1
+                    5_000
                 )
                 .unwrap(),
-            1
+            5_000
         );
+        snapshot.check_authorization(5_000, "USD").unwrap();
         assert_eq!(
-            snapshot.check_authorization(0, "USD"),
+            snapshot.check_authorization(4_999, "USD"),
             Err(ContractError::InsufficientAuthorization)
         );
+        // A rate finer than a micro-unit rounds up once, at the aggregate.
+        let finer = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"finer","rules":[{"rule_id":"text","provider":"vendor","model":"text-v1","currency":"USD","components":[{"unit":"input_token","rate_numerator_minor":1,"rate_denominator":30000},{"unit":"output_token","rate_numerator_minor":1,"rate_denominator":30000}]}]}"#).unwrap();
+        assert_eq!(finer.snapshot(&request).unwrap().estimated_units, 1);
+        // A frozen schema 2 snapshot keeps its whole-cent estimate on the wire.
+        let mut legacy = serde_json::to_value(&snapshot).unwrap();
+        legacy["schema_version"] = json!(2);
+        legacy.as_object_mut().unwrap().remove("estimated_units");
+        legacy["estimated_amount_minor"] = json!(1);
+        let legacy_snapshot: PricingSnapshot = serde_json::from_value(legacy.clone()).unwrap();
+        legacy_snapshot.validate_integrity().unwrap();
+        assert_eq!(legacy_snapshot.estimated_units, 1_0000);
+        assert_eq!(serde_json::to_value(&legacy_snapshot).unwrap(), legacy);
+        assert!(serde_json::from_value::<PricingSnapshot>(json!({
+            "schema_version": 3, "provider": "vendor", "model": "text-v1",
+            "catalog_version": "fractions", "catalog_digest": snapshot.catalog_digest,
+            "pricing_rule_id": "text", "components": [], "exact_estimate_numerator": "1",
+            "exact_estimate_denominator": "2", "estimated_amount_minor": 1, "currency": "USD"
+        }))
+        .is_err());
     }
 
     #[test]
@@ -1689,10 +1852,10 @@ mod tests {
             .unwrap()
             .snapshot(&request())
             .unwrap();
-        enforce_cost(&s, 250, "USD").unwrap();
-        enforce_cost(&s, 250, "usd").unwrap();
+        enforce_cost(&s, 250_0000, "USD").unwrap();
+        enforce_cost(&s, 250_0000, "usd").unwrap();
         assert_eq!(
-            enforce_cost(&s, 249, "USD"),
+            enforce_cost(&s, 249_9999, "USD"),
             Err(ContractError::InsufficientAuthorization)
         );
     }

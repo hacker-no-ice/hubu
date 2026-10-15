@@ -90,15 +90,27 @@ Future release template
   the `hubu_governed_execution` MCP tool accepts a decimal `amount` and
   `currency`. See [docs/spend-executor-contract.md](docs/spend-executor-contract.md#v45-exact-amounts).
 
+- Gongbu quotes, authorizes and settles in micro-units on contract v4.5, the
+  same units Hubu charges. A 4.5-cent FLUX 2K image is quoted, reserved and
+  settled at exactly 0.045 instead of a rounded 5 cents, and Gongbu claims with
+  the exact amount. Admission accepts the exact price or, for callers that
+  still authorize whole cents, the price rounded up to a cent (the remainder
+  is released); any other amount is refused. New pricing snapshots use schema
+  3 (`estimated_units`). The sandbox fixture policy states its cap as
+  `money: "100.00"`.
+
 ### Breaking or operational changes
 
 - All binaries now report and require executor contract
   `hubu-spend-executor-v4.5`. Managed stacks regenerate Gongbu's
   `expected_executor_contract`; hand-written Gongbu configurations must
   change it to `hubu-spend-executor-v4.5`.
-  Gongbu still sends v4.4 cent requests until its client moves to v4.5, and
-  until then it refuses to admit an authorization that is not a whole number
-  of cents.
+  Gongbu now claims on v4.5 with exact amounts.
+- **Gongbu storage migration.** On first start, Gongbu adds micro-unit
+  columns to executions, Hubu authorization snapshots and receipts and
+  backfills them exactly from the cent columns (×10⁴) in one verified
+  transaction; it refuses amounts beyond the micro-unit range. Back up Gongbu
+  state before upgrading.
 
 - Whole-cent amount fields (`amount_cents`, `amount_limit_cents`,
   `daily_limit_cents`) are deprecated. Requests that use only them still work

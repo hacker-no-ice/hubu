@@ -169,10 +169,9 @@ A request without `contract_version` is a v4.4 request. It sends
 `amount_cents`, the authorization rounded up to a whole cent, and Hubu checks
 that projection against the exact authorization. A v4.4 executor therefore
 keeps working against a v4.5 Hubu, but it cannot tell a 0.005 authorization
-from a 0.01 one. Gongbu, which still prices in whole cents, therefore refuses
-to admit an authorization whose exact amount is not a whole number of cents
-until its client moves to v4.5, so a provider can never charge the cent price
-against a smaller sub-cent reservation.
+from a 0.01 one. Gongbu speaks v4.5: it admits only an authorization equal to
+its exact price (or that price rounded up to a cent) and claims with the exact
+amount, so a provider can never charge more than a sub-cent reservation.
 
 Executor responses carry both forms for every contract version: `amount` is
 the exact money object `{units, scale, currency, display}` and `amount_cents`
