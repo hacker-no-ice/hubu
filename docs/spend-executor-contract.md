@@ -18,7 +18,7 @@ settlement auditability.
 
 ## Protocol Version
 
-The current version is `hubu-spend-executor-v4.4`. Agents and executors can
+The current version is `hubu-spend-executor-v4.5`. Agents and executors can
 discover its machine-readable guidance from either public route:
 
 ```http
@@ -26,12 +26,17 @@ GET /spend/executor/guidance
 GET /.well-known/hubu-spend-executor.json
 ```
 
+V4.5 moves executor amounts from whole cents to exact amounts with an explicit
+scale; see [v4.5 exact amounts](#v45-exact-amounts). Hubu keeps accepting v4.4
+executor requests during the transition, and the guidance lists both in
+`supported_protocol_versions`. Every binary in the installation still reports
+and requires the same contract version.
+
 V4.4 identifies executor claims by the `spend_auth_token_id` and finalization
 by the `claim_id` Hubu issued; see
 [v4.4 executor request identity](#v44-executor-request-identity).
-It is intentionally startup-incompatible with v4.3: every binary in the
-installation reports and requires the same contract version, and a v4.3
-executor must migrate its request shapes.
+It is intentionally startup-incompatible with v4.3, and a v4.3 executor must
+migrate its request shapes.
 
 The precise-cost fields were added within `hubu-spend-executor-v4.3` and remain in v4.4. They add a precise
 integer external-cost object, preserves the complete frozen pricing snapshot,
@@ -58,7 +63,8 @@ implements it. To run your own executor behind MCP authorization, follow
 
 Executors can check their lifecycle handling against the black-box
 [executor conformance suite](executor-conformance.md), which replays a
-versioned v4.4 fixture corpus against a real `hubu-server`.
+versioned v4.5 fixture corpus, and the legacy v4.4 corpus, against a real
+`hubu-server`.
 
 The unified MCP continuation binding remains independent of
 the v4.3 cost fields. It makes the existing `auth_token_id` /
@@ -129,6 +135,48 @@ ambiguous outcomes keep the existing expiry and observation paths. A definitive
 rejection after an earlier ambiguous dispatch also keeps its hold. The router
 never infers that no claim exists from a missing execution ID alone. Ordinary
 executor `release` remains identified exclusively by `claim_id`.
+
+## V4.5 Exact Amounts
+
+Hubu accounts every budget, hold and settlement in micro-units: 10^-6 of the
+authorization's currency, `usd` or `usdc`. Budgets are per currency, so an
+authorization only ever reserves a budget in its own currency. See
+[Amounts in the Hubu HTTP API](api-amounts.md).
+
+A v4.5 executor names its contract and sends the exact authorized amount on
+`POST /spend/executor/validate` and `POST /spend/executor/claim`:
+
+```json
+{
+  "spend_auth_token_id": "00000000-0000-4000-8000-000000000123",
+  "account_id": "aga_example",
+  "contract_version": "hubu-spend-executor-v4.5",
+  "amount": {"units": "5000", "scale": 6, "currency": "usd"}
+}
+```
+
+- `units` is an integer string of 10^-`scale` of `currency`. `scale` must be
+  `6`. Copy the `amount` that `POST /spend/executor/resolve` returned; its
+  informational `display` member may be echoed and is ignored.
+- Hubu rejects a missing or different `scale`, an unknown `contract_version`,
+  and a request that sends `amount_cents` as well as `amount`.
+- The amount and currency must equal the authorization exactly. A mismatch is
+  rejected with the existing `payment request does not match authorized
+  spend` error, so the sub-cent authorization above cannot be claimed as
+  `5001` units or as `usdc`.
+
+A request without `contract_version` is a v4.4 request. It sends
+`amount_cents`, the authorization rounded up to a whole cent, and Hubu checks
+that projection against the exact authorization. A v4.4 executor therefore
+keeps working against a v4.5 Hubu, but it cannot tell a 0.005 authorization
+from a 0.01 one. Gongbu speaks v4.5: it admits only an authorization equal to
+its exact price (or that price rounded up to a cent) and claims with the exact
+amount, so a provider can never charge more than a sub-cent reservation.
+
+Executor responses carry both forms for every contract version: `amount` is
+the exact money object `{units, scale, currency, display}` and `amount_cents`
+is the conservative cent projection. Settlement receipts already carry the
+exact provider cost with its own scale (see below).
 
 ## V4.4 Executor Request Identity
 
@@ -273,39 +321,42 @@ units:
 
 This example is exactly USD 4.000001. `amount` is a non-negative JSON integer
 that must fit Hubu's signed 64-bit checked integer representation; `scale` is
-an integer from 0 through 18. V4 budgets and settlement currently support USD
-only. Input accepts the ISO code case-insensitively, and Hubu canonicalizes it
-to `usd` in persisted and response representations. Parsing, comparison,
+an integer from 0 through 18. The currency is `usd` or `usdc` and must equal
+the hold's currency. Input accepts the code case-insensitively, and Hubu
+canonicalizes it to lowercase in persisted and response representations. Parsing, comparison,
 multiplication by powers of ten, and conversion must use checked integer
 arithmetic. Floating point is never permitted.
 
-Hubu budgets use cents in v4. For an exact non-negative cost in the authorized
-currency, Hubu computes `budget_charge_cents` by rounding toward positive
-infinity exactly once:
+Hubu budgets account in micro-units (scale 6). For an exact non-negative cost
+in the authorized currency, Hubu computes `budget_charge` by rounding toward
+positive infinity exactly once:
 
 ```text
-scale > 2: ceil(amount / 10^(scale - 2))
-scale = 2: amount
-scale < 2: amount × 10^(2 - scale)
+scale > 6: ceil(amount / 10^(scale - 6))
+scale = 6: amount
+scale < 6: amount × 10^(6 - scale)
 ```
 
 Every exponentiation, multiplication, addition, and division is checked for
-overflow. This conservative rule means any positive sub-cent cost consumes at
-least one cent and settlement never understates governed consumption. Hubu does
+overflow. Costs at scale 6 or coarser are charged exactly; only digits beyond
+the sixth decimal round up, so settlement never understates governed
+consumption. `budget_charge_cents` is the legacy projection of that charge,
+rounded up to a whole cent. Hubu does
 not round individual pricing components and then add them; Gongbu preserves and
 evaluates its exact frozen pricing snapshot, and Hubu converts the final exact
 vendor cost once.
 
 For USD, the boundary behavior is deterministic:
 
-| Exact `actual_vendor_cost` | `budget_charge_cents` | Result against a 500-cent maximum |
-| --- | ---: | --- |
-| `{amount: 0, scale: 6}` | 0 | accepted |
-| `{amount: 1, scale: 6}` | 1 | accepted; positive fractional cent |
-| `{amount: 10000, scale: 6}` | 1 | accepted; exact one cent |
-| `{amount: 10001, scale: 6}` | 2 | accepted; just above one cent |
-| `{amount: 5000000, scale: 6}` | 500 | accepted at the exact maximum |
-| `{amount: 5000001, scale: 6}` | 501 | normal settlement rejected; reconcile |
+| Exact `actual_vendor_cost` | `budget_charge` | `budget_charge_cents` | Result against a 5.00 maximum |
+| --- | ---: | ---: | --- |
+| `{amount: 0, scale: 6}` | 0.00 | 0 | accepted |
+| `{amount: 1, scale: 6}` | 0.000001 | 1 | accepted; exact micro-unit |
+| `{amount: 1, scale: 7}` | 0.000001 | 1 | accepted; rounded up to a micro-unit |
+| `{amount: 10000, scale: 6}` | 0.01 | 1 | accepted; exact one cent |
+| `{amount: 10001, scale: 6}` | 0.010001 | 2 | accepted; just above one cent |
+| `{amount: 5000000, scale: 6}` | 5.00 | 500 | accepted at the exact maximum |
+| `{amount: 5000001, scale: 6}` | 5.000001 | 501 | normal settlement rejected; reconcile |
 
 The receipt stores the exact `actual_vendor_cost` amount and original scale,
 plus the canonical USD code and complete `price_model_snapshot` supplied by
@@ -398,7 +449,8 @@ guidance.
    {
      "operation_key": "codex:tool-call:01JABC123",
      "account_id": "aga_example",
-     "amount_cents": 500,
+     "amount": "5.00",
+     "currency": "usd",
      "task_id": "release:artwork",
      "execution_scope": {
        "schema_version": 1,
@@ -566,7 +618,8 @@ guidance.
    {
      "spend_auth_token_id": "00000000-0000-4000-8000-000000000123",
      "account_id": "aga_example",
-     "amount_cents": 500,
+     "contract_version": "hubu-spend-executor-v4.5",
+     "amount": {"units": "5000000", "scale": 6, "currency": "usd"},
      "execution_scope": {
        "schema_version": 1,
        "provider": {"id":"provider:google:gemini-developer","display_name":"Google Gemini Developer API"},
@@ -636,10 +689,10 @@ guidance.
    ```
 
    Hubu persists the exact USD 4.000001 receipt and complete pricing snapshot,
-   marks the claim settled and token used, conservatively consumes 401 cents,
-   and releases the 99-cent remainder in one SQLite write transaction. A normal
-   executor settlement is accepted only when its checked `budget_charge_cents`
-   does not exceed the 500-cent authorized maximum. Hubu resolves the claim
+   marks the claim settled and token used, consumes exactly 4.000001 (projected
+   as 401 legacy cents), and releases the 0.999999 remainder in one SQLite write
+   transaction. A normal executor settlement is accepted only when its checked
+   `budget_charge` does not exceed the 5.00 authorized maximum. Hubu resolves the claim
    from the `claim_id`, so an identical retry returns the original
    `settlement_id` and receipt even if the caller lost the response. A retry
    with any changed exact-cost, currency, scale, snapshot, provider, or artifact
@@ -693,6 +746,7 @@ guidance.
     "decision_id": "uuid",
     "account_id": "aga_...",
     "agent_id": "agt_...",
+    "amount": {"units": "5000000", "scale": 6, "currency": "usd", "display": "5.00"},
     "amount_cents": 500,
     "currency": "usd",
     "merchant": null,
@@ -748,6 +802,10 @@ user, and timestamp.
       "scale": 6,
       "currency": "usd"
     },
+    "authorized_max": {"units": "5000000", "scale": 6, "currency": "usd", "display": "5.00"},
+    "budget_charge": {"units": "4000001", "scale": 6, "currency": "usd", "display": "4.000001"},
+    "released_amount": {"units": "999999", "scale": 6, "currency": "usd", "display": "0.999999"},
+    "overrun_amount": {"units": "0", "scale": 6, "currency": "usd", "display": "0.00"},
     "actual_vendor_cost_cents": 401,
     "budget_charge_cents": 401,
     "released_amount_cents": 99,
@@ -973,7 +1031,8 @@ with only the normal bearer are rejected.
 - Executors must settle after irreversible billable work succeeds.
 - Settlement must report exact vendor cost, currency, scale, the complete
   frozen pricing snapshot, and immutable provider receipt metadata.
-- Hubu converts exact provider cost to cents with one checked ceiling operation;
+- Hubu converts exact provider cost to budget micro-units with one checked
+  ceiling operation;
   normal executor settlement cannot exceed the authorized maximum.
 - A confirmed normal overrun stays claimed for human reconciliation. A human
   billed resolution records and consumes the full conservative charge and its

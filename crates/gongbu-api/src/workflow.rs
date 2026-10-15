@@ -777,7 +777,7 @@ impl ExecutionWorkflow<'_> {
         let settlement = match snapshot.settle_precise(
             &usage,
             attempt.actual_vendor_cost.as_ref(),
-            execution.authorized_minor,
+            execution.authorized_units,
         ) {
             Ok(settlement) => settlement,
             Err(error) => {
@@ -797,7 +797,7 @@ impl ExecutionWorkflow<'_> {
                 );
             }
         };
-        let amount = settlement.budget_amount_minor;
+        let amount = settlement.budget_units;
         let receipt = match self.repository.get_receipt_for_execution(execution_id) {
             Ok(receipt) => receipt,
             Err(PersistenceError::NotFound) => {
@@ -805,7 +805,7 @@ impl ExecutionWorkflow<'_> {
                     receipt_id: format!("receipt-{execution_id}"),
                     execution_id: execution_id.into(),
                     provider_attempt_id: attempt.provider_attempt_id,
-                    settlement_minor: amount,
+                    settlement_units: amount,
                     currency: snapshot.currency.clone(),
                     pricing_catalog_version: snapshot.catalog_version,
                     actual_vendor_cost: settlement.actual_vendor_cost,
@@ -1003,7 +1003,7 @@ impl ExecutionWorkflow<'_> {
                     match self.hubu.settle(
                         &execution,
                         &receipt.receipt_id,
-                        receipt.settlement_minor,
+                        receipt.settlement_units,
                     ) {
                         Ok(settlement_id) => {
                             if receipt.settled_at.is_none() {
@@ -1375,7 +1375,7 @@ mod tests {
     }
 
     fn execution_with_quantity(repo: &Repository, key: &str, quantity: i64) -> Execution {
-        repo.create_execution(&CreateExecutionParams { account_id:"account".into(),operation_key:key.into(),hubu_authorization_id:"token-ref".into(),hubu_claim_id:None,hubu_token_reference:HubuTokenReference::new("token-ref").unwrap(),authorized_minor:500,authorization_currency:"USD".into(),normalized_input:json!({"prompt":"cat"}),input_hash:"hash".into(),input_schema_version:1,target:"example/image-v1".into(),config_version:"cfg-1".into(),workload_type:"image_generation".into(),provider:"example".into(),adapter:"fixture".into(),model:"image-v1".into(),provider_config_version:"pcv-1".into(),provider_config_digest:format!("sha256:{}","a".repeat(64)),pricing_snapshot:json!({"schema_version":2,"provider":"example","model":"image-v1","catalog_version":"prices-v2","catalog_digest":format!("sha256:{}","a".repeat(64)),"pricing_rule_id":"image","components":[{"unit":"image","rate_numerator_minor":100,"rate_denominator":1,"quantity":quantity}],"exact_estimate_numerator":(100 * quantity).to_string(),"exact_estimate_denominator":"1","estimated_amount_minor":100 * quantity,"currency":"USD"}),pricing_schema_version:2,execution_scope:None,created_at:"2026-08-05T00:00:00Z".into() }).unwrap()
+        repo.create_execution(&CreateExecutionParams { account_id:"account".into(),operation_key:key.into(),hubu_authorization_id:"token-ref".into(),hubu_claim_id:None,hubu_token_reference:HubuTokenReference::new("token-ref").unwrap(),authorized_units:500_0000,authorization_currency:"USD".into(),normalized_input:json!({"prompt":"cat"}),input_hash:"hash".into(),input_schema_version:1,target:"example/image-v1".into(),config_version:"cfg-1".into(),workload_type:"image_generation".into(),provider:"example".into(),adapter:"fixture".into(),model:"image-v1".into(),provider_config_version:"pcv-1".into(),provider_config_digest:format!("sha256:{}","a".repeat(64)),pricing_snapshot:json!({"schema_version":2,"provider":"example","model":"image-v1","catalog_version":"prices-v2","catalog_digest":format!("sha256:{}","a".repeat(64)),"pricing_rule_id":"image","components":[{"unit":"image","rate_numerator_minor":100,"rate_denominator":1,"quantity":quantity}],"exact_estimate_numerator":(100 * quantity).to_string(),"exact_estimate_denominator":"1","estimated_amount_minor":100 * quantity,"currency":"USD"}),pricing_schema_version:2,execution_scope:None,created_at:"2026-08-05T00:00:00Z".into() }).unwrap()
     }
     struct Hubu {
         claims: Cell<u32>,
@@ -1646,8 +1646,8 @@ mod tests {
         assert_eq!(
             repo.get_receipt_for_execution(&e.execution_id)
                 .unwrap()
-                .settlement_minor,
-            100
+                .settlement_units,
+            100_0000
         );
         w.run(&e.execution_id, "later").unwrap();
         assert_eq!(
@@ -1690,11 +1690,11 @@ mod tests {
             .get_receipt_for_execution(&normal.execution_id)
             .unwrap();
         assert_eq!(receipt.actual_vendor_cost, bfl_cost("1.0001"));
-        assert_eq!(receipt.settlement_minor, 2);
+        assert_eq!(receipt.settlement_units, 10_001);
         normal_workflow
             .run(&normal.execution_id, "normal-replay")
             .unwrap();
-        assert_eq!(hubu.settle_amounts.borrow().as_slice(), &[2]);
+        assert_eq!(hubu.settle_amounts.borrow().as_slice(), &[10_001]);
         assert_eq!(provider.calls.get(), 1);
 
         provider.actual_vendor_cost.replace(bfl_cost("100.0001"));
@@ -1731,7 +1731,7 @@ mod tests {
         overage_workflow
             .run(&overage.execution_id, "overage-replay")
             .unwrap();
-        assert_eq!(hubu.settle_amounts.borrow().as_slice(), &[2]);
+        assert_eq!(hubu.settle_amounts.borrow().as_slice(), &[10_001]);
         assert_eq!(provider.calls.get(), 2);
     }
 
@@ -2073,10 +2073,10 @@ mod tests {
         assert_eq!(hubu.settles.get(), 1);
         let receipt = repository.get_receipt_for_execution(&execution_id).unwrap();
         assert_eq!(receipt.actual_vendor_cost, bfl_cost("1.0001"));
-        assert_eq!(receipt.settlement_minor, 2);
+        assert_eq!(receipt.settlement_units, 10_001);
         workflow.run(&execution_id, "terminal-replay").unwrap();
         assert_eq!(provider.calls.get(), 1);
-        assert_eq!(hubu.settle_amounts.borrow().as_slice(), &[2]);
+        assert_eq!(hubu.settle_amounts.borrow().as_slice(), &[10_001]);
     }
     #[test]
     fn supplied_claim_is_adopted_without_claiming_again() {
@@ -2087,7 +2087,7 @@ mod tests {
             hubu_authorization_id: "token-ref".into(),
             hubu_claim_id: Some("existing-claim".into()),
             hubu_token_reference: HubuTokenReference::new("token-ref").unwrap(),
-            authorized_minor: 500,
+            authorized_units: 500_0000,
             authorization_currency: "USD".into(),
             normalized_input: json!({"prompt":"cat"}),
             input_hash: "hash".into(),
@@ -2282,7 +2282,7 @@ mod tests {
         let interrupted_receipt = repo.get_receipt_for_execution(&e.execution_id).unwrap();
         let receipt_id = interrupted_receipt.receipt_id.clone();
         assert_eq!(interrupted_receipt.actual_vendor_cost, bfl_cost("1.0001"));
-        assert_eq!(interrupted_receipt.settlement_minor, 2);
+        assert_eq!(interrupted_receipt.settlement_units, 10_001);
         let done = w.recover(&e.execution_id, "timer", None).unwrap();
         assert_eq!(done.status, "succeeded");
         assert_eq!(h.settles.get(), 2);
@@ -2293,7 +2293,7 @@ mod tests {
             receipt_id
         );
         assert_eq!(p.calls.get(), 1);
-        assert_eq!(h.settle_amounts.borrow().as_slice(), &[2, 2]);
+        assert_eq!(h.settle_amounts.borrow().as_slice(), &[10_001, 10_001]);
     }
 
     #[test]

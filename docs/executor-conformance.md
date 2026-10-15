@@ -1,16 +1,21 @@
 # Executor Conformance Suite
 
 Hubu publishes a black-box conformance suite for the
-[`hubu-spend-executor-v4.4` contract](spend-executor-contract.md). Any executor
+[`hubu-spend-executor-v4.5` contract](spend-executor-contract.md). Any executor
 can run it to check its understanding of Hubu's lifecycle: Gongbu, the
 first-party reference executor, or an external executor that implements
 authorize → claim → settle/release without running Gongbu.
 
 The suite has three parts:
 
+- [`fixtures/hubu-executor-conformance-v4.5.json`](../fixtures/hubu-executor-conformance-v4.5.json):
+  the versioned fixture corpus. It holds the expected v4.5 requests,
+  responses, error codes, and retry decisions, including exact sub-cent
+  amounts and malformed v4.5 amounts that Hubu must reject.
 - [`fixtures/hubu-executor-conformance-v4.4.json`](../fixtures/hubu-executor-conformance-v4.4.json):
-  the versioned fixture corpus. It holds the expected v4.4 requests,
-  responses, error codes, and retry decisions.
+  the legacy corpus for executors that still send whole cents. Select it with
+  `--corpus`. A target passes the contract check when its guidance lists the
+  corpus version in `supported_protocol_versions`.
 - [`scripts/hubu-executor-conformance.py`](../scripts/hubu-executor-conformance.py):
   a runner that needs only the Python standard library. It replays the corpus
   against the public HTTP API of a real `hubu-server`.
@@ -18,8 +23,8 @@ The suite has three parts:
   the smallest external executor that speaks the plugin protocol.
 
 CI runs [`scripts/integration-executor-conformance.sh`](../scripts/integration-executor-conformance.sh).
-It runs the corpus once with the built-in executor side and once through the
-external plugin.
+It runs the v4.5 corpus once with the built-in executor side and once through
+the external plugin, then the legacy v4.4 corpus with the built-in side.
 
 ## Hubu contract assertions and Gongbu-owned tests
 
@@ -79,7 +84,7 @@ stdin/stdout, one JSON object per line
 (`hubu-executor-conformance-plugin-v1`):
 
 1. The runner sends
-   `{"type":"hello","protocol":"hubu-executor-conformance-plugin-v1","base_url":…,"executor_contract":"hubu-spend-executor-v4.4"}`.
+   `{"type":"hello","protocol":"hubu-executor-conformance-plugin-v1","base_url":…,"executor_contract":"hubu-spend-executor-v4.5"}`.
    The executor answers `{"type":"ready","executor":"<name>"}`.
 2. For each executor step, the runner sends
    `{"type":"invoke","scenario","step","operation","method","path","body","query","reconciliation_capability"}`.
@@ -102,7 +107,7 @@ reports an HTTP response it could not have received, or if the request never
 reached Hubu. Invoke messages don't say which steps drop the response.
 
 A real executor maps each `operation` onto its own Hubu client and returns what
-Hubu answered. `method`, `path`, and `body` give the canonical v4.4 request
+Hubu answered. `method`, `path`, and `body` give the canonical request for the corpus's contract version
 the executor must send. HUB-206 wires its standalone external-executor example
 into this protocol.
 
@@ -118,7 +123,7 @@ into this protocol.
 
 - `schema` (`hubu-executor-conformance-v1`) versions the corpus format.
   `corpus_version` versions the fixture content. `protocol_version` names the
-  Hubu contract under test. A breaking contract version gets a new corpus file,
+  Hubu contract under test. Each contract version gets its own corpus file,
   such as `…-v4.5.json`.
 - `operations` maps each operation name to its public route and default actor.
 - `retry_decisions` names every non-success outcome an executor must handle.
@@ -128,7 +133,7 @@ into this protocol.
   repeating the response.
 - `definitions` holds deterministic inputs: typed scopes, exact costs, and
   complete frozen pricing snapshots. Operation keys are fixed strings such as
-  `conformance:v4.4:s01:op-a`. They are agent-scoped, and the runner
+  `conformance:v4.5:s01:op-a`. They are agent-scoped, and the runner
   registers a fresh agent and budget for every scenario.
 - Server-generated IDs and timestamps are **never** asserted literally. Steps
   `capture` them and assert them by relation: `same`, `different`, `before`,

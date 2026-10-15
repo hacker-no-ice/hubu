@@ -625,7 +625,7 @@ mod tests {
             )
             .unwrap();
         let repository = Repository::in_memory().unwrap();
-        let execution = repository.create_execution(&CreateExecutionParams { account_id:"account".into(), operation_key:"gemini-dev-fixture".into(), hubu_authorization_id:"token-ref".into(), hubu_claim_id:Some("claim".into()), hubu_token_reference:HubuTokenReference::new("token-ref").unwrap(), authorized_minor:10, authorization_currency:"USD".into(), normalized_input:json!({"prompt":"cat","image_count":1}), input_hash:"hash".into(), input_schema_version:1, target:"google/gemini-3.1-flash-lite-image".into(), config_version:"cfg".into(), workload_type:"image_generation".into(), provider:"google".into(), adapter:ADAPTER_ID.into(), model:request().model, provider_config_version:"pcv".into(), provider_config_digest:format!("sha256:{}", "a".repeat(64)), pricing_snapshot:json!({"schema_version":2,"provider":"google","model":"gemini-3.1-flash-lite-image","catalog_version":"prices-v2","catalog_digest":format!("sha256:{}", "a".repeat(64)),"pricing_rule_id":"gemini-dev-image","components":[{"unit":"image","rate_numerator_minor":10,"rate_denominator":1,"quantity":1}],"exact_estimate_numerator":"10","exact_estimate_denominator":"1","estimated_amount_minor":10,"currency":"USD"}), pricing_schema_version:2, execution_scope:None, created_at:"now".into() }).unwrap();
+        let execution = repository.create_execution(&CreateExecutionParams { account_id:"account".into(), operation_key:"gemini-dev-fixture".into(), hubu_authorization_id:"token-ref".into(), hubu_claim_id:Some("claim".into()), hubu_token_reference:HubuTokenReference::new("token-ref").unwrap(), authorized_units:10_0000, authorization_currency:"USD".into(), normalized_input:json!({"prompt":"cat","image_count":1}), input_hash:"hash".into(), input_schema_version:1, target:"google/gemini-3.1-flash-lite-image".into(), config_version:"cfg".into(), workload_type:"image_generation".into(), provider:"google".into(), adapter:ADAPTER_ID.into(), model:request().model, provider_config_version:"pcv".into(), provider_config_digest:format!("sha256:{}", "a".repeat(64)), pricing_snapshot:json!({"schema_version":2,"provider":"google","model":"gemini-3.1-flash-lite-image","catalog_version":"prices-v2","catalog_digest":format!("sha256:{}", "a".repeat(64)),"pricing_rule_id":"gemini-dev-image","components":[{"unit":"image","rate_numerator_minor":10,"rate_denominator":1,"quantity":1}],"exact_estimate_numerator":"10","exact_estimate_denominator":"1","estimated_amount_minor":10,"currency":"USD"}), pricing_schema_version:2, execution_scope:None, created_at:"now".into() }).unwrap();
         let root = tempfile::tempdir().unwrap();
         let service = ArtifactService::new(
             repository,
@@ -703,6 +703,7 @@ mod tests {
         .unwrap()
         .snapshot(&request)
         .unwrap();
+        let max_spend = max_spend * crate::provider_contract::UNITS_PER_MINOR;
         enforce_cost(&snapshot, max_spend, "USD").unwrap();
         let adapter = GeminiDeveloperImageAdapter::from_target(target).unwrap();
         let secret = preflight_selected_secret(&adapter, &MacOsKeychain, target, &request).unwrap();
@@ -745,7 +746,7 @@ mod tests {
             snapshot
                 .settle(outcome.usage.as_ref().unwrap(), max_spend)
                 .unwrap(),
-            snapshot.estimated_amount_minor
+            snapshot.estimated_units
         );
     }
 }
