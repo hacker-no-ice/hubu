@@ -102,6 +102,9 @@ Queries use the latest observation within their watermark. Absent observations
 remain unknown, and broader/unattributed gaps cannot establish a narrower
 account's activity. Inventory describes identity-scoped history, not a filtered
 report period; its stored observation time is not a polling heartbeat.
+Financial observation errors do not suppress inventory collection. Each failed
+owner inventory rolls back independently while other owners continue; a failed
+refresh leaves that owner's prior observation unchanged.
 
 Reads neither collect evidence nor mutate financial state or contact providers.
 Public projections allowlist safe fields and leave money formatting to the

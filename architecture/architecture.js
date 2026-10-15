@@ -331,7 +331,7 @@ const components = {
       ["Idempotent approvals", "Approve and deny are safe to repeat; a conflicting resolution is rejected."],
       ["Atomic finalization", "Receipt, ledger posting, budget charge, claim, and hold commit in one SQLite transaction; identical retries return stored state."],
       ["Startup recovery", "Loads state from SQLite and reconciles expired budget holds on start."],
-      ["Evidence observation", "An independent worker records expired financial claims and scoped legacy-gap presence at startup and normally every 30 seconds. It changes no financial state; reads do not trigger it. Failures retry and may delay capture."],
+      ["Evidence observation", "An independent worker records expired financial claims and scoped legacy-gap presence at startup and normally every 30 seconds. It changes no financial state; reads do not trigger it. Financial and inventory errors are reported separately; failed owner inventories do not stop other owners. Failures retry and may delay capture."],
       ["Bounded logs", "Writes structured JSONL events with fixed-size rotation and skips successful health-probe noise."],
     ],
     links: [sharedLinks.api, sharedLinks.budget, sharedLinks.budgetCoordinator, sharedLinks.appSpend, sharedLinks.appClaims, sharedLinks.spendExecutor, sharedLinks.executorConformance, sharedLinks.externalExecutor, sharedLinks.persistence, sharedLinks.lifecycleFinancial, sharedLinks.financialObserver, sharedLinks.lifecycleCoverage, sharedLinks.telemetry],
