@@ -9,7 +9,10 @@ use crate::ledger::{AccountingAdjustment, BudgetLedgerQuery, LedgerService};
 use crate::test_money::cents;
 use chrono::Duration;
 use hubu_common::ids::AgentAccountId;
-use hubu_ledger::{domain as ledger, ExactMoney, TransactionKind, TransactionRecord};
+use hubu_ledger::{
+    domain as ledger, ExactMoney, TransactionKind, TransactionRecord, BUDGET_UNIT_AT_SCALE_18,
+    CENT_AT_SCALE_18,
+};
 use std::sync::{Arc, Barrier, Mutex};
 
 fn records(repo: &SqliteGovernanceRepository) -> Vec<TransactionRecord> {
@@ -94,11 +97,11 @@ fn canonical_provider_postings_are_precise_balanced_immutable_and_owner_scoped()
     let record = &all[0];
     let meta = record.metadata.as_ref().unwrap();
     assert_eq!(meta.kind, TransactionKind::ExternalProvider);
-    assert_eq!(
-        meta.rounding_delta_amount.as_deref(),
-        Some("9000000000000000")
-    );
-    assert_eq!(meta.budget_charge_delta_cents, Some(2500));
+    // USD 24.991 is exact at accounting scale, so nothing is rounded.
+    assert_eq!(meta.budget_charge_delta, Some(24_991_000));
+    assert_eq!(meta.budget_charge_scale, Some(6));
+    assert_eq!(meta.budget_charge_delta_cents, None);
+    assert_eq!(meta.rounding_delta_amount.as_deref(), Some("0"));
     assert_eq!(record.entries.len(), 2);
     assert_eq!(record.entries[0].amount.amount, "24991000000000000000");
     assert_eq!(record.entries[0].amount, record.entries[1].amount);
@@ -365,14 +368,11 @@ fn ledger_corrections_append_publish_cache_and_leave_original_receipt_intact() {
     let mut manager = BudgetManager::new().with_repository(shared.clone());
     let command = adjustment(&original, 10001, 3);
     let corrected = LedgerService::adjust(&mut manager, command.clone()).unwrap();
-    assert_eq!(
-        corrected
-            .metadata
-            .as_ref()
-            .unwrap()
-            .budget_charge_delta_cents,
-        Some(-999)
-    );
+    let corrected_meta = corrected.metadata.as_ref().unwrap();
+    assert_eq!(corrected_meta.budget_charge_delta, Some(-9_990_000));
+    assert_eq!(corrected_meta.budget_charge_scale, Some(6));
+    assert_eq!(corrected_meta.budget_charge_delta_cents, None);
+    assert_eq!(corrected_meta.rounding_delta_amount.as_deref(), Some("0"));
     assert_eq!(
         manager
             .get_budget_by_id(&settled.hold.budget_id)
@@ -606,7 +606,10 @@ fn agent_budget_query_includes_wallet_provider_adjustments_and_truthful_unlinked
         scale: 2,
         currency: Currency::Usd,
     };
+    // A legacy wallet posting recorded its charge in whole cents.
     metadata.budget_charge_delta_cents = Some(1000);
+    metadata.budget_charge_delta = None;
+    metadata.budget_charge_scale = None;
     metadata.rounding_delta_amount = Some("0".into());
     metadata.source_evidence = serde_json::json!({"payment_id":"wallet-1"});
     let wallet_tx = wallet
@@ -655,7 +658,7 @@ fn agent_budget_query_includes_wallet_provider_adjustments_and_truthful_unlinked
             .unwrap()
             .rounding_delta_amount
             .as_deref(),
-        Some("9000000000000000")
+        Some("0")
     );
     let wallet_record = report
         .transactions
@@ -667,12 +670,9 @@ fn agent_budget_query_includes_wallet_provider_adjustments_and_truthful_unlinked
     assert!(LedgerService::adjust(&mut manager, adjustment(&wallet_record, 900, 2)).is_err());
     let correction = LedgerService::adjust(&mut manager, adjustment(&provider, 0, 3)).unwrap();
     assert_eq!(
-        correction
-            .metadata
-            .as_ref()
-            .unwrap()
-            .budget_charge_delta_cents,
-        Some(-1)
+        correction.metadata.as_ref().unwrap().budget_charge_delta,
+        Some(-1_000),
+        "refunding the exact USD 0.001 charge"
     );
     assert!(correction
         .entries
@@ -681,7 +681,13 @@ fn agent_budget_query_includes_wallet_provider_adjustments_and_truthful_unlinked
     let repo = shared.lock().unwrap();
     let report = query(&repo, &settled.hold.budget_id);
     assert_eq!(report.transactions.len(), 3);
+    // Mixed history: a legacy cent wallet charge plus µ provider charges.
     assert_eq!(report.recorded_budget_charges_cents, 1000);
+    assert_eq!(
+        report.recorded_budget_charges,
+        Amount::from_units(10_000_000)
+    );
+    assert_eq!(report.unaccounted_consumption, Amount::ZERO);
     assert_eq!(report.unaccounted_consumption_cents, 0);
     // Compatibility projection excludes exact provider postings and adjustments.
     assert_eq!(wallet.list_transactions().unwrap().len(), 2);
@@ -861,4 +867,110 @@ fn legacy_wallet_context_backfill_preserves_postings_and_rejects_corrupt_credit(
             cents(2500)
         );
     }
+}
+
+fn coverage_bound_holds(repo: &SqliteGovernanceRepository, budget: &BudgetId, settlements: i128) {
+    let report = query(repo, budget);
+    let exact: i128 = report
+        .transactions
+        .iter()
+        .map(|r| {
+            r.metadata
+                .as_ref()
+                .unwrap()
+                .effective_cost
+                .scaled()
+                .unwrap()
+        })
+        .sum();
+    let consumed_e18 = i128::from(report.consumed_amount.units()) * BUDGET_UNIT_AT_SCALE_18;
+    assert_eq!(report.unaccounted_consumption, Amount::ZERO);
+    assert_eq!(report.recorded_budget_charges, report.consumed_amount);
+    assert!(consumed_e18 >= exact);
+    assert!(consumed_e18 - exact < settlements * BUDGET_UNIT_AT_SCALE_18);
+}
+
+#[test]
+fn e7_sub_micro_cost_charges_one_unit_with_explicit_rounding() {
+    let mut repo = SqliteGovernanceRepository::in_memory().unwrap();
+    owner_fixture(&repo);
+    let settled = settle(&mut repo, 1, 7);
+    let meta = records(&repo).remove(0).metadata.unwrap();
+    assert_eq!(meta.budget_charge_delta, Some(1));
+    assert_eq!(meta.budget_charge_scale, Some(6));
+    // 1µ charged against USD 0.0000001 = 9 × 10^11 at scale 18.
+    assert_eq!(meta.rounding_delta_amount.as_deref(), Some("900000000000"));
+    assert_eq!(settled.balance.consumed_amount, Amount::from_units(1));
+    coverage_bound_holds(&repo, &settled.hold.budget_id, 1);
+}
+
+#[test]
+fn e15_exact_settlement_coverage_is_zero() {
+    let mut repo = SqliteGovernanceRepository::in_memory().unwrap();
+    owner_fixture(&repo);
+    let settled = settle(&mut repo, 1, 3);
+    let report = query(&repo, &settled.hold.budget_id);
+    assert_eq!(report.consumed_amount, Amount::from_units(1_000));
+    assert_eq!(report.recorded_budget_charges, Amount::from_units(1_000));
+    let meta = report.transactions[0].metadata.as_ref().unwrap();
+    assert_eq!(meta.rounding_delta_amount.as_deref(), Some("0"));
+    coverage_bound_holds(&repo, &settled.hold.budget_id, 1);
+}
+
+#[test]
+fn adjustment_chain_crosses_from_a_legacy_cent_posting() {
+    let mut repo = SqliteGovernanceRepository::in_memory().unwrap();
+    owner_fixture(&repo);
+    let settled = settle(&mut repo, 31, 4);
+    // Rewrite the posting and balance as a pre-upgrade build recorded them:
+    // USD 0.0031 charged as one whole cent.
+    let original = records(&repo).remove(0);
+    let mut legacy = original.metadata.clone().unwrap();
+    legacy.budget_charge_delta = None;
+    legacy.budget_charge_scale = None;
+    legacy.budget_charge_delta_cents = Some(1);
+    let expense = legacy.effective_cost.scaled().unwrap();
+    legacy.rounding_delta_amount = Some((CENT_AT_SCALE_18 - expense).to_string());
+    repo.conn
+        .execute_batch("DROP TRIGGER ledger_metadata_no_update;")
+        .unwrap();
+    repo.conn
+        .execute(
+            "UPDATE ledger_transaction_metadata SET record_json = ?2 WHERE transaction_id = ?1",
+            params![
+                original.id.to_string(),
+                serde_json::to_string(&legacy).unwrap()
+            ],
+        )
+        .unwrap();
+    repo.conn
+        .execute_batch(
+            "CREATE TRIGGER ledger_metadata_no_update BEFORE UPDATE ON ledger_transaction_metadata
+             BEGIN SELECT RAISE(ABORT, 'ledger metadata is immutable'); END;
+             UPDATE budget_balances
+             SET consumed_amount = 10000, consumed_amount_cents = 1,
+                 remaining_amount = remaining_amount - 6900
+             WHERE consumed_amount = 3100;",
+        )
+        .unwrap();
+    let legacy_report = query(&repo, &settled.hold.budget_id);
+    assert_eq!(
+        legacy_report.recorded_budget_charges,
+        Amount::from_units(10_000)
+    );
+    assert_eq!(legacy_report.unaccounted_consumption, Amount::ZERO);
+
+    let legacy_record = records(&repo).remove(0);
+    let shared = Arc::new(Mutex::new(repo));
+    let mut manager = BudgetManager::new().with_repository(shared.clone());
+    let corrected = LedgerService::adjust(&mut manager, adjustment(&legacy_record, 50, 4)).unwrap();
+    let meta = corrected.metadata.as_ref().unwrap();
+    // The post-upgrade correction records the exact µ difference (0.005 - 0.0031).
+    assert_eq!(meta.budget_charge_delta, Some(1_900));
+    assert_eq!(meta.budget_charge_delta_cents, None);
+    let repo = shared.lock().unwrap();
+    let report = query(&repo, &settled.hold.budget_id);
+    assert_eq!(report.consumed_amount, Amount::from_units(11_900));
+    assert_eq!(report.recorded_budget_charges, Amount::from_units(11_900));
+    assert_eq!(report.unaccounted_consumption, Amount::ZERO);
 }

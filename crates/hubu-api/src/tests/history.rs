@@ -11,8 +11,17 @@ fn settle(
     auth: &SpendHttpResponse,
     amount: i64,
 ) -> Value {
+    settle_precise(state, agent, auth, amount, 3)
+}
+fn settle_precise(
+    state: &ServerState,
+    agent: &RegisterAgentHttpResponse,
+    auth: &SpendHttpResponse,
+    amount: i64,
+    scale: u32,
+) -> Value {
     let claim = claim_executor_spend(json!({"spend_auth_token_id":auth.auth_token_id,"account_id":agent.account_id,"amount_cents":auth.budget_hold.as_ref().unwrap().amount_cents,"merchant":"gongbu.image"}).to_string(),state).unwrap();
-    let mut receipt = precise_settlement_receipt_json(amount, 3);
+    let mut receipt = precise_settlement_receipt_json(amount, scale);
     receipt["artifact_reference"] =
         json!("https://vendor.example/artifact?token=VERY_PRIVATE_ARTIFACT");
     receipt["provider_request_id"] = json!("Bearer VERY_PRIVATE_PROVIDER");
@@ -96,6 +105,225 @@ fn provider_history_is_canonical_precise_private_and_budget_scoped() {
     // Replaying settlement must not create a duplicate posting or authorization_record.
     assert_eq!(settle(&state, &agent, &auth, 1), settled);
     assert_eq!(read(&state, &url)["transactions"], first["transactions"]);
+    std::fs::remove_file(path).ok();
+}
+
+#[test]
+fn reversing_a_sub_cent_charge_reverses_its_cent_projection() {
+    let (path, state, agent, auth) = setup_executor_authorization("history-sub-cent-reversal");
+    settle(&state, &agent, &auth, 1); // USD 0.001
+    let original: hubu_common::ids::LedgerTransactionId = read(&state, "/ledger/transactions")
+        ["transactions"][0]["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let owner = authenticated_user_context(&state).unwrap().user_id;
+    hubu_core::ledger::LedgerService::adjust(
+        &mut state.budgets.lock().unwrap(),
+        hubu_core::ledger::AccountingAdjustment {
+            owner_user_id: owner,
+            original_transaction_id: original.clone(),
+            expected_previous_transaction_id: original.clone(),
+            operation_key: "sub-cent-reversal".into(),
+            corrected_cost: hubu_core::ledger::ExactMoney {
+                amount: "0".into(),
+                scale: 3,
+                currency: Currency::Usd,
+            },
+            reason: "provider refunded the call".into(),
+            evidence: "invoice://refund".into(),
+        },
+    )
+    .unwrap();
+    let history = read(
+        &state,
+        &format!(
+            "/ledger/transactions?agent_id={}&budget_id={}",
+            agent.agent_id,
+            auth.budget_hold.as_ref().unwrap().budget_id
+        ),
+    );
+    let rows = history["transactions"].as_array().unwrap();
+    let delta = |kind: &str| {
+        rows.iter()
+            .find(|row| row["kind"] == kind)
+            .map(|row| row["budget_charge_delta_cents"].as_i64().unwrap())
+            .unwrap()
+    };
+    // The 0.001 charge projects to 1 cent, so its reversal reports -1 cent and
+    // the rows reconcile with the zero coverage total.
+    assert_eq!(delta("external_provider"), 1);
+    assert_eq!(delta("adjustment"), -1);
+    assert_eq!(history["coverage"]["consumed_amount_cents"], 0);
+    assert_eq!(history["coverage"]["recorded_budget_charges_cents"], 0);
+    // The exact recorded charge is exposed, and the rounding evidence is
+    // measured against it: 1000µ × 10^12 = 0.001 at scale 18 + 0.
+    let original = rows
+        .iter()
+        .find(|row| row["kind"] == "external_provider")
+        .unwrap();
+    assert_eq!(
+        original["budget_charge_delta"],
+        json!({"units": "1000", "scale": 6})
+    );
+    assert_eq!(original["rounding_delta_amount"], "0");
+    let reversal = rows.iter().find(|row| row["kind"] == "adjustment").unwrap();
+    assert_eq!(
+        reversal["budget_charge_delta"],
+        json!({"units": "-1000", "scale": 6})
+    );
+    std::fs::remove_file(path).ok();
+}
+
+#[test]
+fn long_correction_chains_reconcile_row_by_row_with_coverage() {
+    let (path, state, agent, auth) = setup_executor_authorization("history-long-chain");
+    settle(&state, &agent, &auth, 1);
+    let owner = authenticated_user_context(&state).unwrap().user_id;
+    let original: hubu_common::ids::LedgerTransactionId = read(&state, "/ledger/transactions")
+        ["transactions"][0]["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let mut previous = original.clone();
+    for step in 0..40 {
+        // Alternate between sub-cent and whole-cent corrected totals.
+        let amount = if step % 2 == 0 { "7" } else { "15" };
+        let corrected = hubu_core::ledger::LedgerService::adjust(
+            &mut state.budgets.lock().unwrap(),
+            hubu_core::ledger::AccountingAdjustment {
+                owner_user_id: owner.clone(),
+                original_transaction_id: original.clone(),
+                expected_previous_transaction_id: previous.clone(),
+                operation_key: format!("correction-{step}"),
+                corrected_cost: hubu_core::ledger::ExactMoney {
+                    amount: amount.into(),
+                    scale: 3,
+                    currency: Currency::Usd,
+                },
+                reason: "corrected invoice".into(),
+                evidence: format!("invoice://{step}"),
+            },
+        )
+        .unwrap();
+        previous = corrected.id;
+    }
+    let history = read(
+        &state,
+        &format!(
+            "/ledger/transactions?agent_id={}&budget_id={}&limit=100",
+            agent.agent_id,
+            auth.budget_hold.as_ref().unwrap().budget_id
+        ),
+    );
+    let rows = history["transactions"].as_array().unwrap();
+    assert_eq!(rows.len(), 41);
+    let cents: i64 = rows
+        .iter()
+        .map(|row| row["budget_charge_delta_cents"].as_i64().unwrap())
+        .sum();
+    // The final corrected total is USD 0.015, which projects to 2 cents.
+    assert_eq!(cents, 2);
+    assert_eq!(history["coverage"]["recorded_budget_charges_cents"], 2);
+    assert_eq!(history["coverage"]["unaccounted_consumption_cents"], 0);
+    std::fs::remove_file(path).ok();
+}
+
+#[test]
+fn legacy_cent_chain_rows_reconcile_with_coverage_after_a_micro_correction() {
+    let (path, state, agent, auth) = setup_executor_authorization("history-legacy-chain");
+    settle_precise(&state, &agent, &auth, 31, 4); // USD 0.0031
+    let original: hubu_common::ids::LedgerTransactionId = read(&state, "/ledger/transactions")
+        ["transactions"][0]["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    // Rewrite the posting and balance as a pre-upgrade build recorded them:
+    // USD 0.0031 charged as one whole cent (10,000µ after migration).
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let record_json: String = conn
+            .query_row(
+                "SELECT record_json FROM ledger_transaction_metadata WHERE transaction_id = ?1",
+                [original.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut legacy: serde_json::Value = serde_json::from_str(&record_json).unwrap();
+        let object = legacy.as_object_mut().unwrap();
+        object.remove("budget_charge_delta");
+        object.remove("budget_charge_scale");
+        object.insert("budget_charge_delta_cents".into(), json!(1));
+        // 1 cent at scale 18 minus the 0.0031 expense.
+        object.insert("rounding_delta_amount".into(), json!("6900000000000000"));
+        conn.execute_batch("DROP TRIGGER ledger_metadata_no_update;")
+            .unwrap();
+        conn.execute(
+            "UPDATE ledger_transaction_metadata SET record_json = ?2 WHERE transaction_id = ?1",
+            rusqlite::params![original.to_string(), legacy.to_string()],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER ledger_metadata_no_update BEFORE UPDATE ON ledger_transaction_metadata
+             BEGIN SELECT RAISE(ABORT, 'ledger metadata is immutable'); END;
+             UPDATE budget_balances
+             SET consumed_amount = 10000, consumed_amount_cents = 1,
+                 remaining_amount = remaining_amount - 6900,
+                 remaining_amount_cents = remaining_amount_cents - 1
+             WHERE consumed_amount = 3100;",
+        )
+        .unwrap();
+    }
+    drop(state);
+    let state = ServerState::new_with_db_path(&path).unwrap();
+    let owner = authenticated_user_context(&state).unwrap().user_id;
+    hubu_core::ledger::LedgerService::adjust(
+        &mut state.budgets.lock().unwrap(),
+        hubu_core::ledger::AccountingAdjustment {
+            owner_user_id: owner,
+            original_transaction_id: original.clone(),
+            expected_previous_transaction_id: original.clone(),
+            operation_key: "post-upgrade-correction".into(),
+            corrected_cost: hubu_core::ledger::ExactMoney {
+                amount: "50".into(),
+                scale: 4,
+                currency: Currency::Usd,
+            },
+            reason: "corrected invoice".into(),
+            evidence: "invoice://corrected".into(),
+        },
+    )
+    .unwrap();
+    let history = read(
+        &state,
+        &format!(
+            "/ledger/transactions?agent_id={}&budget_id={}",
+            agent.agent_id,
+            auth.budget_hold.as_ref().unwrap().budget_id
+        ),
+    );
+    let rows = history["transactions"].as_array().unwrap();
+    let row = |kind: &str| rows.iter().find(|row| row["kind"] == kind).unwrap();
+    assert_eq!(
+        row("external_provider")["budget_charge_delta"],
+        json!({"units": "1", "scale": 2})
+    );
+    assert_eq!(
+        row("adjustment")["budget_charge_delta"],
+        json!({"units": "1900", "scale": 6})
+    );
+    // 10,000µ + 1,900µ = 11,900µ projects to 2 cents, and the rows add up to it.
+    let cents: i64 = rows
+        .iter()
+        .map(|row| row["budget_charge_delta_cents"].as_i64().unwrap())
+        .sum();
+    assert_eq!(cents, 2);
+    assert_eq!(history["coverage"]["recorded_budget_charges_cents"], 2);
+    assert_eq!(history["coverage"]["consumed_amount_cents"], 2);
+    assert_eq!(history["coverage"]["unaccounted_consumption_cents"], 0);
     std::fs::remove_file(path).ok();
 }
 
@@ -606,11 +834,10 @@ fn two_providers_for_one_task_have_independent_receipts_and_postings() {
             agent.agent_id, budget.budget.budget_id
         ),
     );
-    // Budget consumption is exact (0.001 + 0.002 = 0.003, projected up to 1 cent)
-    // while ledger charges are still recorded per settlement in whole cents.
-    // HUB-275 moves ledger charges and this coverage report to µ units.
+    // 0.001 + 0.002 is recorded exactly (3000µ) and projects up to 1 cent.
     assert_eq!(history["coverage"]["consumed_amount_cents"], 1);
-    assert_eq!(history["coverage"]["recorded_budget_charges_cents"], 2);
+    assert_eq!(history["coverage"]["recorded_budget_charges_cents"], 1);
+    assert_eq!(history["coverage"]["unaccounted_consumption_cents"], 0);
     assert!(history["next_cursor"].is_string());
     std::fs::remove_file(path).ok();
 }

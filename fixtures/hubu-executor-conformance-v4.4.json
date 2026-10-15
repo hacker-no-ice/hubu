@@ -982,8 +982,8 @@
                 "currency": "usd"
               },
               "coverage.consumed_amount_cents": 601,
-              "coverage.recorded_budget_charges_cents": 602,
-              "coverage.unaccounted_consumption_cents": -1,
+              "coverage.recorded_budget_charges_cents": 601,
+              "coverage.unaccounted_consumption_cents": 0,
               "coverage.pending_hold_count": 0
             },
             "counts": [

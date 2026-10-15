@@ -34,14 +34,25 @@ exact scale-2 cents. Zero-cost confirmed provider receipts create balanced
 zero-value lines. Balance checks use checked integer arithmetic; account owner
 and currency must match the transaction's entries.
 
-Budget charges remain separate metadata. USD 0.001 creates expense lines of
-0.001, consumes one budget cent, and records a 0.009 rounding difference. That
-rounding is a budget-control quantity, not provider expense. For each governed
-posting or adjustment:
+Budget charges remain separate metadata. New postings record the charge in
+budget accounting units (`budget_charge_delta` with `budget_charge_scale: 6`):
+USD 0.001 creates expense lines of 0.001 and consumes exactly 1,000 units, with
+no rounding. A cost finer than one unit, such as USD 0.0000001, is rounded up
+once to one unit and records the 0.0000009 difference. That rounding is a
+budget-control quantity, not provider expense. Postings recorded before
+accounting units keep `budget_charge_delta_cents` (scale 2) and are read as
+`cents × 10⁴`; they are never rewritten. For each governed posting or
+adjustment, in the units it was recorded in:
 
 ```text
-budget_charge_delta_cents * 10^16 = signed expense delta at scale 18 + rounding_delta_amount
+budget_charge × 10^(18 − charge scale) = signed expense delta at scale 18 + rounding_delta_amount
 ```
+
+The ledger history API exposes the recorded charge as
+`budget_charge_delta: {units, scale}`, so this invariant can be checked per
+row. Its `budget_charge_delta_cents` is a compatibility projection: the change
+in the rounded-up cent total of the row's correction chain, so the rows of a
+chain always sum to the coverage report's cent projection.
 
 The original exact receipt, provider request ID, pricing snapshot, artifact
 reference and human reconciliation evidence remain attached to provider

@@ -4,6 +4,7 @@ use crate::{
     budget::BudgetManager, persistence::SqliteGovernanceRepository, storage::StorageError,
 };
 use hubu_common::ids::{AgentId, BudgetId, LedgerTransactionId, UserId};
+use hubu_common::money::Amount;
 pub use hubu_ledger::{
     ExactMoney, GovernedSpendContext, TransactionEntry, TransactionKind, TransactionMetadata,
     TransactionRecord,
@@ -30,6 +31,11 @@ pub struct BudgetLedgerReport {
     pub budget_id: BudgetId,
     pub agent_id: AgentId,
     pub transactions: Vec<TransactionRecord>,
+    pub consumed_amount: Amount,
+    pub recorded_budget_charges: Amount,
+    /// `consumed − recorded`; at most one accounting unit per settlement.
+    pub unaccounted_consumption: Amount,
+    /// Legacy cent projections of the fields above.
     pub consumed_amount_cents: i64,
     pub recorded_budget_charges_cents: i64,
     pub unaccounted_consumption_cents: i64,

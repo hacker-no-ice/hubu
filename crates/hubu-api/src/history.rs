@@ -234,6 +234,7 @@ fn linked_context<'a>(
 fn transaction(
     record: &TransactionRecord,
     data: &HistorySnapshot,
+    chain_totals: &ChainChargeTotals,
     state: &ServerState,
 ) -> Result<Value> {
     let meta = record.metadata.as_ref();
@@ -269,6 +270,20 @@ fn transaction(
     if let Some(metadata) = meta {
         metadata.effective_cost.scaled()?;
     }
+    let charge_delta_cents = legacy_budget_charge_delta_cents(record, chain_totals)?;
+    // The charge exactly as recorded: µ units for new postings, whole cents
+    // for legacy ones. `rounding_delta_amount` is measured against this.
+    let recorded_charge = meta.and_then(|m| {
+        match (
+            m.budget_charge_delta,
+            m.budget_charge_scale,
+            m.budget_charge_delta_cents,
+        ) {
+            (Some(units), Some(scale), _) => Some(json!({"units":units.to_string(),"scale":scale})),
+            (None, None, Some(cents)) => Some(json!({"units":cents.to_string(),"scale":2})),
+            _ => None,
+        }
+    });
     let rounding = meta
         .and_then(|m| m.rounding_delta_amount.as_deref())
         .map(|v| v.parse::<i128>())
@@ -316,7 +331,8 @@ fn transaction(
         "effective_cost":meta.map(|m|&m.effective_cost),
         "cost_semantics":meta.map(|m|if m.kind==hubu_core::ledger::TransactionKind::Adjustment {"corrected_total"} else {"original_total"}),
         "purpose_reference":reference(meta.and_then(|m|m.purpose.as_deref())),
-        "budget_charge_delta_cents":meta.and_then(|m|m.budget_charge_delta_cents),
+        "budget_charge_delta":recorded_charge,
+        "budget_charge_delta_cents":charge_delta_cents,
         "rounding_delta_amount":rounding,
         "original_transaction_id":meta.and_then(|m|m.original_transaction_id.as_ref()).filter(owned_transaction),
         "previous_transaction_id":meta.and_then(|m|m.previous_transaction_id.as_ref()).filter(owned_transaction),
@@ -339,6 +355,7 @@ pub(super) fn ledger(request: &HttpRequest, state: &ServerState) -> Result<Value
     let selected = selection(&query, &user, state)?;
     let data = snapshot(state, &user.user_id)?;
     validate_budget(&selected, &data)?;
+    let chain_totals = chain_charge_totals(&data)?;
     let now = Utc::now();
     let matching: Vec<_> = data
         .transactions
@@ -377,16 +394,23 @@ pub(super) fn ledger(request: &HttpRequest, state: &ServerState) -> Result<Value
                 })
             })
             .filter_map(|t| t.metadata.as_ref())
-            .filter_map(|m| m.budget_charge_delta_cents)
+            .map(|m| m.budget_charge_units())
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
             .map(i128::from)
             .sum();
-        let total = i64::try_from(total)?;
+        let total = Amount::from_units(i64::try_from(total)?);
+        let unaccounted = balance
+            .consumed_amount
+            .checked_sub(total)
+            .ok_or_else(|| anyhow!("coverage overflow"))?;
         json!({"budget_id":public_budget_id(id),
         "agent_id":query.get("agent_id"),
         "currency":budget.currency.to_string(),
         "consumed_amount_cents":balance.consumed_amount.legacy_cents_ceil(),
-        "recorded_budget_charges_cents":total,
-        "unaccounted_consumption_cents":balance.consumed_amount.legacy_cents_ceil().checked_sub(total).ok_or_else(||anyhow!("coverage overflow"))?,
+        "recorded_budget_charges_cents":total.legacy_cents_ceil(),
+        "unaccounted_consumption_cents":unaccounted.legacy_cents_ceil(),
         "pending_hold_count":data.holds.iter().filter(|h|&h.budget_id==id && (matches!(h.status,BudgetHoldStatus::Claimed) || (matches!(h.status,BudgetHoldStatus::Frozen) && h.expires_at>now))).count(),
         "owner_transactions_without_budget_context":data.transactions.iter().filter(|t|linked_context(t,&data).is_none()).count(),
         "historical_wallet_reconciliation_complete":false})
@@ -395,7 +419,7 @@ pub(super) fn ledger(request: &HttpRequest, state: &ServerState) -> Result<Value
     };
     let records = matching
         .into_iter()
-        .map(|t| transaction(t, &data, state))
+        .map(|t| transaction(t, &data, &chain_totals, state))
         .collect::<Result<Vec<_>>>()?;
     let (transactions, next_cursor) = page(records, &query, &user.user_id, "ledger")?;
     Ok(json!({"schema_version":VERSION,
@@ -535,6 +559,82 @@ fn authorization_record(
         "purpose_reference":reference(Some(&decision.request.reason)),
         "task_reference":reference(decision.request.task_id.as_deref()),
         "raw_evidence_redacted":true}))
+}
+
+/// Cumulative recorded budget charge (µ units) of each posting's correction
+/// chain, up to and including that posting.
+type ChainChargeTotals = HashMap<hubu_common::ids::LedgerTransactionId, i64>;
+
+/// Computes every chain total once per request: an id index plus memoized
+/// prefixes, so long correction chains stay linear in the number of postings.
+fn chain_charge_totals(data: &HistorySnapshot) -> Result<ChainChargeTotals> {
+    let by_id: HashMap<_, _> = data.transactions.iter().map(|t| (&t.id, t)).collect();
+    let mut totals = ChainChargeTotals::new();
+    for record in &data.transactions {
+        // Walk back to the first posting whose total is known (or the root),
+        // then fill the totals forward.
+        let mut path = Vec::new();
+        let mut current = Some(record);
+        while let Some(posting) = current {
+            if totals.contains_key(&posting.id) {
+                break;
+            }
+            if path.len() > data.transactions.len() {
+                return Err(anyhow!("ledger correction chain does not terminate"));
+            }
+            path.push(posting);
+            current = posting
+                .metadata
+                .as_ref()
+                .and_then(|meta| meta.previous_transaction_id.as_ref())
+                .and_then(|id| by_id.get(id).copied());
+        }
+        let mut running = current.map_or(0, |known| totals[&known.id]);
+        for posting in path.into_iter().rev() {
+            let own = posting
+                .metadata
+                .as_ref()
+                .map(|meta| meta.budget_charge_units())
+                .transpose()?
+                .flatten()
+                .unwrap_or(0);
+            running = running
+                .checked_add(own)
+                .ok_or_else(|| anyhow!("budget charge total overflow"))?;
+            totals.insert(posting.id.clone(), running);
+        }
+    }
+    Ok(totals)
+}
+
+/// Cent projection of one posting's budget charge: the change in the
+/// rounded-up cent projection of its correction chain's cumulative recorded
+/// charge. Summing the rows of a chain therefore always equals the cent
+/// projection of its total, whether the chain mixes legacy cent postings and
+/// µ corrections or reverses a sub-cent charge.
+fn legacy_budget_charge_delta_cents(
+    record: &TransactionRecord,
+    chain_totals: &ChainChargeTotals,
+) -> Result<Option<i64>> {
+    let Some(own) = record
+        .metadata
+        .as_ref()
+        .map(|m| m.budget_charge_units())
+        .transpose()?
+        .flatten()
+    else {
+        return Ok(None);
+    };
+    let cumulative = *chain_totals
+        .get(&record.id)
+        .ok_or_else(|| anyhow!("ledger posting is missing its chain total"))?;
+    let previous = cumulative
+        .checked_sub(own)
+        .ok_or_else(|| anyhow!("budget charge total overflow"))?;
+    Ok(Some(
+        Amount::from_units(cumulative).legacy_cents_ceil()
+            - Amount::from_units(previous).legacy_cents_ceil(),
+    ))
 }
 
 pub(super) fn authorization_records(
