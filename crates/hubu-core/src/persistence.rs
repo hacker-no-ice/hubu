@@ -1,6 +1,7 @@
 mod accounting;
 mod authorization_void;
 mod automatic_lifecycle;
+mod financial_lifecycle;
 mod history;
 mod human_lifecycle;
 mod lifecycle;
@@ -566,6 +567,9 @@ impl SqliteGovernanceRepository {
             hold_rows,
             "executor claim hold attribution differs from persisted state",
         )?;
+        if existing.is_none() {
+            financial_lifecycle::capture_claim(&sqlite_tx, claim)?;
+        }
         // Claiming changes hold ownership, not budget usage. Do not overwrite
         // a balance that another connection may have updated.
         sqlite_tx.commit()?;
@@ -1061,6 +1065,7 @@ impl SqliteGovernanceRepository {
             }
         }
         balance = updated_balance;
+        financial_lifecycle::capture_finalization(&sqlite_tx, &claim)?;
 
         sqlite_tx.commit()?;
         Ok(ExecutorFinalizationResult {
@@ -4053,7 +4058,9 @@ impl SpendRepository for SqliteGovernanceRepository {
 
 impl BudgetRepository for SqliteGovernanceRepository {
     fn expire_overdue_budget_holds(&mut self, now: DateTime<Utc>) -> Result<(), StorageError> {
-        let sqlite_tx = self.conn.transaction()?;
+        let sqlite_tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let expired_holds = {
             let mut stmt = sqlite_tx.prepare(
                 "SELECT id, budget_id, amount
@@ -4101,6 +4108,7 @@ impl BudgetRepository for SqliteGovernanceRepository {
                 compare_and_set_balance(&sqlite_tx, &current, &updated, &now.to_rfc3339())?,
                 "budget balance changed while expiring a hold",
             )?;
+            financial_lifecycle::capture_expired_authorization(&sqlite_tx, &hold_id, now)?;
         }
 
         sqlite_tx.commit()?;

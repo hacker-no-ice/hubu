@@ -134,6 +134,7 @@ pub enum LifecycleFact {
         authorization_id: SpendDecisionId,
         reason: AuthorizationReleaseReason,
     },
+    /// Hubu accepted an exclusive executor claim; provider execution is not proven.
     ExecutionStarted {
         claim_id: SpendExecutorClaimId,
     },
@@ -299,10 +300,9 @@ impl LifecycleFact {
                 source,
                 LifecycleSource::Executor | LifecycleSource::Reconciliation
             ),
-            Self::ReconciliationRequired { .. } => matches!(
-                source,
-                LifecycleSource::Executor | LifecycleSource::Reconciliation
-            ),
+            // Financial lease-expiry backlog, with the matching human-confirmed
+            // financial closure. Gongbu uncertainty is a separate future source.
+            Self::ReconciliationRequired { .. } => source == LifecycleSource::Reconciliation,
             Self::ReconciliationResolved { .. } => source == LifecycleSource::Reconciliation,
         }
     }

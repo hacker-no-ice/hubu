@@ -536,6 +536,15 @@ fn validate_input(
                     |row| row.get(0),
                 )?);
             }
+            if matches!(input.fact, LifecycleFact::ReconciliationRequired { .. }) {
+                let claim = load_executor_claim_by_id(conn, claim_id)?
+                    .ok_or_else(|| invalid("unknown financial reconciliation claim"))?;
+                super::financial_lifecycle::validate_reconciliation_entry(
+                    &claim,
+                    input.occurred_at,
+                )?;
+                canonical_time = Some(claim.expires_at.to_rfc3339());
+            }
             let financial_outcome = match &input.fact {
                 LifecycleFact::ExecutionFinalized { outcome, .. } => Some((*outcome, false)),
                 LifecycleFact::ReconciliationResolved { outcome, .. } => Some((
