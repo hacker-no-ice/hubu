@@ -312,15 +312,31 @@ impl SqliteGovernanceRepository {
             let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
             rows.collect::<Result<Vec<_>, _>>()?
         };
-        for owner in owners {
-            self.observe_lifecycle_coverage_inventory_at(
-                &owner
-                    .parse()
-                    .map_err(|_| invalid("invalid inventory owner"))?,
-                at,
-            )?;
+        let mut failure_count = 0;
+        let mut first_failure = None;
+        for (position, owner) in owners.into_iter().enumerate() {
+            let result = owner
+                .parse()
+                .map_err(|_| invalid("invalid inventory owner"))
+                .and_then(|owner| self.observe_lifecycle_coverage_inventory_at(&owner, at));
+            if let Err(error) = result {
+                failure_count += 1;
+                // Bound diagnostic storage independently of the owner count.
+                // Parsing and transaction errors affect only this owner.
+                if first_failure.is_none() {
+                    first_failure = Some(format!(
+                        "owner at sorted position {}: {error}",
+                        position + 1
+                    ));
+                }
+            }
         }
-        Ok(())
+        match first_failure {
+            Some(first) => Err(invalid(&format!(
+                "coverage inventory observations failed for {failure_count} owner(s); first failure: {first}"
+            ))),
+            None => Ok(()),
+        }
     }
     /// First observed-empty state appends; unchanged scans do not move history.
     /// Scan work may grow when proving absence in large canonical histories.

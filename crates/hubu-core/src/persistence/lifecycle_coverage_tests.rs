@@ -485,3 +485,134 @@ fn unavailable_identity_catalog_never_becomes_an_assessed_empty_inventory() {
         0
     );
 }
+
+#[test]
+fn poisoned_first_owner_does_not_starve_later_owner_updates_or_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("owner-isolation.sqlite");
+    let mut repo = SqliteGovernanceRepository::open(&path).unwrap();
+    let bad = Fixture {
+        owner: "00000000-0000-0000-0000-000000000001".parse().unwrap(),
+        agent: AgentId::new(),
+        account: AgentAccountId::new(),
+    };
+    let good = Fixture {
+        owner: "ffffffff-ffff-ffff-ffff-ffffffffffff".parse().unwrap(),
+        agent: AgentId::new(),
+        account: AgentAccountId::new(),
+    };
+    for f in [&bad, &good] {
+        seed_lifecycle_test_identity(&mut repo, &f.owner, &f.agent, &f.account);
+    }
+    let first: String = repo
+        .conn
+        .query_row("SELECT id FROM users ORDER BY id LIMIT 1", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(first, bad.owner.to_string());
+    repo.conn.execute_batch("CREATE TRIGGER reject_first_inventory BEFORE INSERT ON spend_lifecycle_records WHEN json_extract(NEW.payload_json,'$.record_type')='coverage_inventory' AND NEW.owner_user_id='00000000-0000-0000-0000-000000000001' BEGIN SELECT RAISE(ABORT,'first owner inventory failure'); END;").unwrap();
+    let error = repo
+        .observe_all_lifecycle_coverage_inventories_at(Utc::now())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("1 owner(s)"));
+    assert!(error.contains("first owner inventory failure"));
+    assert_eq!(
+        repo.lifecycle_snapshot(&bad.owner, None).unwrap().watermark,
+        0
+    );
+    let empty = good.inventory(&repo);
+    assert!(empty.scopes.iter().all(|scope| scope.gaps.is_empty()));
+    let decision = good.legacy(&mut repo, Effect::NeedsApproval);
+    assert!(repo
+        .observe_all_lifecycle_coverage_inventories_at(Utc::now())
+        .is_err());
+    let pending = good.inventory(&repo);
+    assert!(pending.sequence > empty.sequence);
+    assert_eq!(
+        account_scope(&pending, &good).backlog_gaps,
+        vec![LifecycleCoverageBacklog::HumanApproval]
+    );
+    assert_eq!(
+        repo.lifecycle_snapshot(&good.owner, Some(empty.sequence))
+            .unwrap()
+            .coverage_inventories
+            .last()
+            .unwrap(),
+        &empty
+    );
+    assert_eq!(
+        repo.lifecycle_snapshot(&bad.owner, None).unwrap().watermark,
+        0
+    );
+    drop(repo);
+    let mut repo = SqliteGovernanceRepository::open(&path).unwrap();
+    assert!(repo
+        .observe_all_lifecycle_coverage_inventories_at(Utc::now())
+        .is_err());
+    assert_eq!(good.inventory(&repo), pending);
+    repo.record_spend_attempt_outcome(
+        &decision,
+        SpendAuthorizationDecision::Denied,
+        &["human declined".into()],
+        Utc::now(),
+    )
+    .unwrap();
+    assert!(repo
+        .observe_all_lifecycle_coverage_inventories_at(Utc::now())
+        .is_err());
+    let closed = good.inventory(&repo);
+    assert!(closed.sequence > pending.sequence);
+    assert!(account_scope(&closed, &good)
+        .gaps
+        .contains(&LifecycleCoverageGap {
+            source: LifecycleSource::HumanApproval,
+            metric: LifecycleCount::HumanDeclined
+        }));
+    assert_eq!(
+        repo.lifecycle_snapshot(&good.owner, Some(pending.sequence))
+            .unwrap()
+            .coverage_inventories
+            .last()
+            .unwrap(),
+        &pending
+    );
+    assert!(repo
+        .lifecycle_snapshot(&good.owner, None)
+        .unwrap()
+        .events
+        .is_empty());
+    assert!(repo
+        .lifecycle_snapshot(&bad.owner, None)
+        .unwrap()
+        .coverage_inventories
+        .is_empty());
+}
+
+#[test]
+fn malformed_owner_id_does_not_prevent_valid_later_owner_assessment() {
+    let mut repo = SqliteGovernanceRepository::in_memory().unwrap();
+    let good = Fixture::new(&mut repo);
+    let at = Utc::now();
+    repo.conn.execute("INSERT INTO users(id,pub_id,display_name,status,created_at,updated_at) VALUES('!invalid-owner','usr_invalidowner','Invalid','active',?1,?1)",[at.to_rfc3339()]).unwrap();
+    let error = repo
+        .observe_all_lifecycle_coverage_inventories_at(at)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("1 owner(s)"));
+    assert!(error.contains("invalid inventory owner"));
+    assert!(good
+        .inventory(&repo)
+        .scopes
+        .iter()
+        .all(|scope| scope.gaps.is_empty()));
+    assert_eq!(
+        repo.conn
+            .query_row(
+                "SELECT COUNT(*) FROM spend_lifecycle_records WHERE owner_user_id='!invalid-owner'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
+    );
+}
