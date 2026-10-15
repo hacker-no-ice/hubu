@@ -20,9 +20,11 @@ The real-history fixture is committed as
 | Shared queries | Core tests cover distinct attempts/operations, corrected revisions, policy/budget edits, late facts, parsed time boundaries, frozen totals/backlog, exact USD/USDC sums, owner isolation, legacy gaps and redaction. |
 | HTTP | 155 API tests and one logging integration pass. Nine new transport scenarios include authenticated malformed raw requests, recursive wide money, frozen reads and database write traps. |
 | Unified MCP | 190 unit tests, 10 other package tests, three golden cases and 29 stamped process cases pass, including summary → pages → detail with identical snapshots, exact amounts and coverage. |
-| Compatibility | Rust 1.88 checks and component suites, strict Clippy, formatting and runtime dependency-boundary checks pass. |
+| Compatibility | Rust 1.88 full locked workspace check (all targets/features) passes at `bd2e7496314e7ef5807e8f0c84511173ff512e25`, including the repaired Gongbu fixture. Component suites, strict Clippy, formatting and runtime dependency-boundary checks pass. |
 | Real history | 121 real HTTP/MCP read responses pass in explicit provisional v4.4 mode, including both human branches, late expiry and closure, corrected attempts, exact wide USD/USDC, isolation and redaction. |
-| Integrated v4.5 execution | Pending HUB-281 and its published dependency baseline. The default v4.5 fixture correctly rejects the current v4.4 server before creating business records. |
+| Published Hubu v4.5 compatibility | All 121 real read responses pass on local composition `c21b78aeb43a17317bac1c821f897e231d5cf189`: observability `d2e15263f18b92aca321c5fed9abc4db05ff2258` plus published HUB-279/PR #328 head `5b3f859c23268748d9c355a6f4c31f19b0044436`. Exact v4.5 USDC claim/settlement passes without runtime edits. No PR was merged. |
+| Existing execution checks | Current-baseline conformance passes 12 built-in and 12 plugin scenarios; standalone MCP, deterministic Hubu–Gongbu execution and Temporal terminal-failure isolation pass. These retain v4.4 compatibility coverage. |
+| Integrated Gongbu v4.5 execution | Pending unpublished HUB-281 and the final baseline. The default v4.5 fixture correctly rejects the original v4.4 server before creating business records. |
 
 ## Deterministic checks
 
@@ -49,6 +51,13 @@ through real Hubu and stdio MCP reads. Positive USDC v4.5 settlement must consum
 3,101 of 5,000 reserved units, release 1,899, and leave the USD budget untouched.
 The Gongbu checks reuse Amount Precision qualification rather than implementing
 another executor or amount representation.
+
+The terminal-failure fixture previously selected scenarios through the retired
+private operation identity. Test-only commit
+`bd2e7496314e7ef5807e8f0c84511173ff512e25` selects the consumed authorization
+continuation and checks the exact failure cause. The repaired Temporal test, its
+workflow regression and strict focused Clippy pass; production behavior is
+unchanged.
 
 ## Limits retained for review
 
