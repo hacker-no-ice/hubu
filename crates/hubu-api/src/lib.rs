@@ -3079,6 +3079,30 @@ fn hex_encode(bytes: &[u8]) -> String {
 
 /// The requested spend amount: the exact decimal `amount`, or the deprecated
 /// whole-cent `amount_cents`. Exactly one must be sent, and it must be positive.
+/// The wallet moves whole US-dollar cents. Refuse a wallet spend it can never
+/// pay before any decision or budget hold exists, so nothing is left to release
+/// (or to race with an executor claim).
+fn refuse_unpayable_wallet_spend(request: &SpendHttpRequest) -> Result<()> {
+    let currency = match request.currency.as_deref() {
+        Some(currency) => currency
+            .trim()
+            .to_ascii_lowercase()
+            .parse::<Currency>()
+            .map_err(|error| anyhow!(error))?,
+        None => Currency::Usd,
+    };
+    if currency != Currency::Usd {
+        return Err(
+            hubu_core::app::SpendApprovalError::UnsupportedPaymentCurrency(currency).into(),
+        );
+    }
+    let amount = requested_spend_amount(request.amount.as_deref(), request.amount_cents)?;
+    if amount.legacy_cents_floor() != amount.legacy_cents_ceil() {
+        return Err(hubu_core::app::SpendApprovalError::SubCentPaymentRail(amount).into());
+    }
+    Ok(())
+}
+
 fn requested_spend_amount(amount: Option<&str>, amount_cents: Option<i64>) -> Result<Amount> {
     decimal_or_legacy_cents(amount, amount_cents, "amount", "amount_cents", "spend")
 }
@@ -4431,6 +4455,7 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
 
 fn spend_at(body: String, state: &ServerState, now: DateTime<Utc>) -> Result<SpendHttpResponse> {
     let request: SpendHttpRequest = serde_json::from_str(&body)?;
+    refuse_unpayable_wallet_spend(&request)?;
     let authorization = match evaluate_and_reserve_spend_at(request, state, now)? {
         SpendAuthorization::Authorized(authorization) => *authorization,
         SpendAuthorization::Response(response) => return Ok(*response),
