@@ -265,10 +265,12 @@ fn validate_no_available_budget(
     decision: &SpendDecisionRecord,
     at: DateTime<Utc>,
 ) -> Result<(), StorageError> {
-    // Same USD selection semantics as the existing admission path. Currency
-    // expansion is coordinated separately; capture must not change admission.
+    // Recheck the same own-currency selection under the SQLite write lock.
+    // A budget in another currency cannot admit or explain this request.
     for budget in load_budgets_from(conn)? {
-        if budget.agent_id != decision.request.agent_id || budget.currency != Currency::Usd {
+        if budget.agent_id != decision.request.agent_id
+            || budget.currency != decision.request.currency
+        {
             continue;
         }
         let current = load_current_budget_snapshot(conn, &budget.id)?
@@ -302,14 +304,14 @@ pub(super) fn save_denied(
             if decision.evaluation.decision == Effect::Allow
                 && before.is_none_or(|b| {
                     b.budget.currency == decision.request.currency
-                        && b.budget.currency == Currency::Usd
                         && b.availability_at(budget_checked_at)
                             .is_ok_and(|a| a == BudgetAvailability::Exhausted)
                 }) => {}
         AdmissionDenialReason::InsufficientBudget
             if decision.evaluation.decision == Effect::Allow
                 && before.is_some_and(|b| {
-                    b.balance.remaining_amount < decision.request.amount
+                    b.budget.currency == decision.request.currency
+                        && b.balance.remaining_amount < decision.request.amount
                         && b.availability_at(budget_checked_at)
                             .is_ok_and(|a| a.allows_reservation())
                 }) => {}

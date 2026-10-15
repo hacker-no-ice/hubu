@@ -638,7 +638,10 @@ impl SpendApprovalService {
             Some(budget) => budget,
             None => {
                 spend_manager.discard_auth_token_for_decision(&evaluation.decision_id);
-                let reasons = vec!["no active USD budget found for agent".to_string()];
+                let reasons = vec![SpendApprovalError::MissingActiveBudget {
+                    currency: request.currency,
+                }
+                .to_string()];
                 if let Err(error) = governance.save_automatic_denied_transition(
                     &decision_record,
                     selected,
@@ -1305,15 +1308,14 @@ fn automatic_budget_selection(
     let evaluated = manager.get_evaluated_budgets_by_agent_id(agent, at)?;
     if let Some(b) = evaluated
         .iter()
-        .find(|b| b.current.budget.currency == Currency::Usd && b.availability.allows_reservation())
+        .find(|b| b.current.budget.currency == currency && b.availability.allows_reservation())
     {
         return Ok((Some(b.current.clone()), None));
     }
     // A single current exhausted allocation was examined by the real selector.
     // Other historical/future/revoked allocations do not explain this denial.
     let mut exhausted = evaluated.into_iter().filter(|b| {
-        b.current.budget.currency == Currency::Usd
-            && b.current.budget.currency == currency
+        b.current.budget.currency == currency
             && b.availability == crate::budget::BudgetAvailability::Exhausted
     });
     let candidate = exhausted.next();

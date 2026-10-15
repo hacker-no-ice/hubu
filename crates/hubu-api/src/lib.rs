@@ -9739,6 +9739,34 @@ lease_profiles:
             .unwrap();
         assert_eq!(hold.amount, "0.005".parse::<Amount>().unwrap());
         assert_eq!(hold.currency, Currency::Usdc);
+        let owner = authenticated_user_context(&state).unwrap().user_id;
+        let captured = state
+            .governance
+            .lock()
+            .unwrap()
+            .lifecycle_snapshot(&owner, None)
+            .unwrap();
+        let admission = captured
+            .events
+            .into_iter()
+            .map(|e| serde_json::to_value(e.event).unwrap())
+            .find(|event| {
+                event["correlation"]["decision_id"] == authorization.decision_id
+                    && event["fact"]["kind"] == "automated_admission"
+            })
+            .unwrap();
+        assert_eq!(
+            admission["requested_amount"]["value"],
+            json!({"amount":{"units":"5000","scale":6},"currency":"usdc"})
+        );
+        assert_eq!(
+            admission["explanation"]["budget"]["value"]["available"]["value"]["currency"],
+            "usdc"
+        );
+        assert_eq!(
+            admission["explanation"]["budget"]["value"]["available"]["value"]["amount"]["units"],
+            "5000000"
+        );
         for (body, expected) in [
             (
                 json!({"account_id": agent.account_id, "amount": "0.005", "amount_cents": 1,

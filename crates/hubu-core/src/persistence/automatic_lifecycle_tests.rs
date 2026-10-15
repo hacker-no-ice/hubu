@@ -21,10 +21,22 @@ impl Harness {
             effect,
         )
     }
-    fn with_repo(
+    fn with_repo(repo: SqliteGovernanceRepository, limit: Option<&str>, effect: Effect) -> Self {
+        Self::with_repo_currency(repo, limit, effect, Currency::Usd)
+    }
+    fn new_currency(limit: Option<&str>, effect: Effect, currency: Currency) -> Self {
+        Self::with_repo_currency(
+            SqliteGovernanceRepository::in_memory().unwrap(),
+            limit,
+            effect,
+            currency,
+        )
+    }
+    fn with_repo_currency(
         mut repo: SqliteGovernanceRepository,
         limit: Option<&str>,
         effect: Effect,
+        currency: Currency,
     ) -> Self {
         let owner = UserId::new();
         let agent = AgentId::new();
@@ -46,7 +58,7 @@ impl Harness {
                 .create_single_budget(CreateSingleBudgetRequest {
                     agent_id: agent.clone(),
                     amount_limit: limit.parse().unwrap(),
-                    currency: Currency::Usd,
+                    currency,
                     period: TimePeriod::new(
                         Utc::now() - chrono::Duration::minutes(1),
                         Some(Utc::now() + chrono::Duration::hours(1)),
@@ -63,7 +75,7 @@ impl Harness {
             agent_id: agent,
             agent_account_id: account,
             amount: "0.005".parse().unwrap(),
-            currency: Currency::Usd,
+            currency,
             merchant: Some("private merchant".into()),
             execution_scope: None,
             task_id: Some("private task".into()),
@@ -77,6 +89,25 @@ impl Harness {
             request,
             selected,
         }
+    }
+    fn add_budget(&mut self, currency: Currency, limit: &str) -> BudgetWithBalance {
+        let b = self
+            .budgets
+            .create_single_budget(CreateSingleBudgetRequest {
+                agent_id: self.request.agent_id.clone(),
+                amount_limit: limit.parse().unwrap(),
+                currency,
+                period: TimePeriod::new(
+                    Utc::now() - chrono::Duration::minutes(1),
+                    Some(Utc::now() + chrono::Duration::hours(1)),
+                )
+                .unwrap(),
+            })
+            .unwrap();
+        self.repo
+            .save_budget_with_balance(&b.budget, &b.version, &b.balance)
+            .unwrap();
+        self.budgets.get_budget_by_id(&b.budget.id).unwrap()
     }
     fn authorize(&mut self) -> Result<SpendAuthorizationOutcome, SpendApprovalError> {
         SpendApprovalService.authorize_selected_at(
@@ -605,4 +636,164 @@ fn enabling_automatic_capture_never_invents_legacy_history() {
     h.authorize().unwrap();
     assert_eq!(h.snapshot().events, captured.events);
     assert_eq!(h.snapshot().capture_markers, captured.capture_markers);
+}
+
+#[test]
+fn each_currency_selects_its_own_budget_and_missing_or_insufficient_denials_are_exact() {
+    for currency in [Currency::Usd, Currency::Usdc] {
+        let other = if currency == Currency::Usd {
+            Currency::Usdc
+        } else {
+            Currency::Usd
+        };
+        for (limit, cause) in [
+            (Some("0.010"), None),
+            (
+                Some("0.004"),
+                Some(AdmissionDenialReason::InsufficientBudget),
+            ),
+            (None, Some(AdmissionDenialReason::NoAvailableBudget)),
+        ] {
+            let mut h = Harness::new_currency(limit, Effect::Allow, currency);
+            let other_budget = h.add_budget(other, "100");
+            if cause.is_none() {
+                h.request.amount = "0.005001".parse().unwrap();
+            }
+            let result = h.authorize().unwrap();
+            assert_eq!(
+                matches!(result, SpendAuthorizationOutcome::Approved(_)),
+                cause.is_none()
+            );
+            let captured = h.snapshot();
+            let admission = &captured.events[1].event;
+            assert_eq!(value(&admission.requested_amount).currency, currency);
+            assert_eq!(value(&admission.requested_amount).amount, h.request.amount);
+            match cause {
+                None => {
+                    let hold = h.repo.load_budget_holds().unwrap().remove(0);
+                    assert_eq!(hold.currency, currency);
+                    assert_eq!(hold.amount.units(), 5001);
+                    assert_ne!(hold.budget_id, other_budget.budget.id);
+                }
+                Some(reason) => {
+                    assert_eq!(
+                        admission.fact,
+                        LifecycleFact::AutomatedAdmission {
+                            result: AutomatedAdmissionOutcome::Denied { reason }
+                        }
+                    );
+                    assert!(h.repo.load_budget_holds().unwrap().is_empty());
+                    if reason == AdmissionDenialReason::NoAvailableBudget {
+                        assert!(matches!(
+                            admission.explanation.budget,
+                            LifecycleEvidence::Unavailable {
+                                reason: EvidenceUnavailableReason::NotCaptured
+                            }
+                        ));
+                        let SpendAuthorizationOutcome::Rejected(rejected) = result else {
+                            unreachable!()
+                        };
+                        assert!(rejected.reasons.contains(
+                            &SpendApprovalError::MissingActiveBudget { currency }.to_string()
+                        ));
+                    }
+                }
+            }
+            if let Some(limit) = limit {
+                let evidence = value(&admission.explanation.budget);
+                assert_eq!(value(&evidence.available).currency, currency);
+                assert_eq!(value(&evidence.available).amount, limit.parse().unwrap());
+                assert_ne!(
+                    evidence.budget_id,
+                    format!("bgt_{}", other_budget.budget.id.public_suffix())
+                );
+            }
+            let unchanged = h.budgets.get_budget_by_id(&other_budget.budget.id).unwrap();
+            assert_eq!(unchanged.balance.remaining_amount, "100".parse().unwrap());
+            assert_eq!(unchanged.balance.frozen_amount, Amount::ZERO);
+            h.authorize().unwrap();
+            assert_eq!(h.snapshot().events, captured.events);
+        }
+    }
+}
+
+#[test]
+fn exhausted_evidence_stays_in_request_currency_even_with_another_currency_available() {
+    for currency in [Currency::Usd, Currency::Usdc] {
+        let other = if currency == Currency::Usd {
+            Currency::Usdc
+        } else {
+            Currency::Usd
+        };
+        for remaining in [0, -1] {
+            let mut h = Harness::new_currency(Some("0.010"), Effect::Allow, currency);
+            let own = h
+                .budgets
+                .get_budgets_by_agent_id(&h.request.agent_id)
+                .remove(0);
+            h.repo.conn.execute("UPDATE budget_balances SET consumed_amount=?1,remaining_amount=?2 WHERE budget_id=?3", params![10000-remaining,remaining,own.budget.id.to_string()]).unwrap();
+            h.budgets = BudgetManager::from_records(
+                h.repo.load_budgets().unwrap(),
+                h.repo.load_budget_versions().unwrap(),
+                h.repo.load_budget_balances().unwrap(),
+                h.repo.load_budget_holds().unwrap(),
+            )
+            .unwrap();
+            h.add_budget(other, "100");
+            h.authorize().unwrap();
+            let captured = h.snapshot();
+            let event = &captured.events[1].event;
+            assert_eq!(
+                event.fact,
+                LifecycleFact::AutomatedAdmission {
+                    result: AutomatedAdmissionOutcome::Denied {
+                        reason: AdmissionDenialReason::NoAvailableBudget
+                    }
+                }
+            );
+            let evidence = value(&event.explanation.budget);
+            assert_eq!(
+                evidence.budget_id,
+                format!("bgt_{}", own.budget.id.public_suffix())
+            );
+            assert_eq!(value(&evidence.available).amount.units(), remaining);
+            assert_eq!(value(&evidence.available).currency, currency);
+            assert_eq!(value(&evidence.limit).currency, currency);
+            assert!(h.repo.load_budget_holds().unwrap().is_empty());
+            h.authorize().unwrap();
+            assert_eq!(h.snapshot().events, captured.events);
+        }
+    }
+}
+
+#[test]
+fn no_available_budget_rechecks_only_matching_currency_under_the_write_lock() {
+    for currency in [Currency::Usd, Currency::Usdc] {
+        let other = if currency == Currency::Usd {
+            Currency::Usdc
+        } else {
+            Currency::Usd
+        };
+        let mut h = Harness::new_currency(None, Effect::Allow, currency);
+        h.add_budget(other, "100");
+        h.authorize().unwrap();
+        let decision = h.repo.load_spend_decisions().unwrap().remove(0);
+        let checked_at = Utc::now();
+        let tx = h
+            .repo
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        validate_no_available_budget(&tx, &decision, checked_at).unwrap();
+        tx.commit().unwrap();
+        h.add_budget(currency, "100");
+        let tx = h
+            .repo
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        let error = validate_no_available_budget(&tx, &decision, checked_at).unwrap_err();
+        assert!(error.to_string().contains("budget selection is stale"));
+        tx.rollback().unwrap();
+    }
 }
