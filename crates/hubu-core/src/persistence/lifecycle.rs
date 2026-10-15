@@ -10,11 +10,15 @@ pub struct AppendLifecycleResult {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "record_type", rename_all = "snake_case", deny_unknown_fields)]
-enum StoredLifecyclePayload {
+pub(super) enum StoredLifecyclePayload {
     Event {
         input: Box<LifecycleEventInput>,
         agent_public_id: String,
         account_public_id: String,
+    },
+    CoverageInventory {
+        schema_version: u32,
+        inventory: super::lifecycle_coverage::StoredCoverageInventory,
     },
     Capture {
         schema_version: u32,
@@ -43,6 +47,20 @@ impl SqliteGovernanceRepository {
              CREATE INDEX IF NOT EXISTS spend_lifecycle_capture_source
                 ON spend_lifecycle_records(owner_user_id, json_extract(payload_json, '$.source'), sequence)
                 WHERE json_extract(payload_json, '$.record_type') = 'capture';
+             CREATE INDEX IF NOT EXISTS spend_decisions_coverage_owner_agent
+                ON spend_decisions(owner_user_id, agent_id);
+             CREATE INDEX IF NOT EXISTS spend_claims_coverage_owner_agent
+                ON spend_executor_claims(owner_user_id, agent_id);
+             CREATE INDEX IF NOT EXISTS spend_outcomes_coverage_attempt
+                ON spend_authorization_outcomes(agent_id, operation_key, revision, id DESC);
+             CREATE INDEX IF NOT EXISTS spend_lifecycle_inventory_owner_sequence
+                ON spend_lifecycle_records(owner_user_id, sequence DESC)
+                WHERE json_extract(payload_json, '$.record_type') = 'coverage_inventory';
+             CREATE INDEX IF NOT EXISTS spend_lifecycle_fact_decision_kind
+                ON spend_lifecycle_records(owner_user_id,
+                   json_extract(payload_json, '$.input.correlation.decision_id'),
+                   json_extract(payload_json, '$.input.fact.kind'))
+                WHERE json_extract(payload_json, '$.record_type') = 'event';
              CREATE TRIGGER IF NOT EXISTS spend_lifecycle_records_no_update
                 BEFORE UPDATE ON spend_lifecycle_records BEGIN
                 SELECT RAISE(ABORT, 'lifecycle evidence is immutable'); END;
@@ -131,78 +149,99 @@ impl SqliteGovernanceRepository {
         through: Option<u64>,
     ) -> Result<LifecycleSnapshot, StorageError> {
         let tx = self.conn.unchecked_transaction()?;
-        let latest: u64 = tx.query_row(
-            "SELECT COALESCE(MAX(sequence),0) FROM spend_lifecycle_records WHERE owner_user_id=?1",
-            [owner.to_string()],
-            |row| row.get(0),
-        )?;
-        let watermark = through.unwrap_or(latest);
-        if watermark > latest {
-            return Err(invalid("lifecycle watermark is ahead of owner history"));
-        }
-        let mut events = Vec::new();
-        let mut capture_markers = Vec::new();
-        let mut stmt = tx.prepare("SELECT sequence,event_id,payload_json,recorded_at FROM spend_lifecycle_records WHERE owner_user_id=?1 AND sequence<=?2 ORDER BY sequence")?;
-        let rows = stmt.query_map(params![owner.to_string(), watermark], |row| {
-            Ok((
-                row.get::<_, u64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-            ))
-        })?;
-        for row in rows {
-            let (sequence, event_id, payload_json, recorded_at) = row?;
-            let recorded_at = parse_timestamp(&recorded_at)?;
-            match serde_json::from_str::<StoredLifecyclePayload>(&payload_json)? {
-                StoredLifecyclePayload::Event {
-                    input,
+        let snapshot = lifecycle_snapshot_from(&tx, owner, through)?;
+        tx.commit()?;
+        Ok(snapshot)
+    }
+}
+
+/// Shares the caller's read transaction, including its private snapshot anchor.
+pub(super) fn lifecycle_snapshot_from(
+    conn: &Connection,
+    owner: &UserId,
+    through: Option<u64>,
+) -> Result<LifecycleSnapshot, StorageError> {
+    let latest: u64 = conn.query_row(
+        "SELECT COALESCE(MAX(sequence),0) FROM spend_lifecycle_records WHERE owner_user_id=?1",
+        [owner.to_string()],
+        |row| row.get(0),
+    )?;
+    let watermark = through.unwrap_or(latest);
+    if watermark > latest {
+        return Err(invalid("lifecycle watermark is ahead of owner history"));
+    }
+    let mut events = Vec::new();
+    let mut capture_markers = Vec::new();
+    let mut coverage_inventories = Vec::new();
+    let mut stmt = conn.prepare("SELECT sequence,event_id,payload_json,recorded_at FROM spend_lifecycle_records WHERE owner_user_id=?1 AND sequence<=?2 ORDER BY sequence")?;
+    let rows = stmt.query_map(params![owner.to_string(), watermark], |row| {
+        Ok((
+            row.get::<_, u64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })?;
+    for row in rows {
+        let (sequence, event_id, payload_json, recorded_at) = row?;
+        let recorded_at = parse_timestamp(&recorded_at)?;
+        match serde_json::from_str::<StoredLifecyclePayload>(&payload_json)? {
+            StoredLifecyclePayload::Event {
+                input,
+                agent_public_id,
+                account_public_id,
+            } => {
+                if input.correlation.owner_user_id != *owner
+                    || input.schema_version != LIFECYCLE_SCHEMA_VERSION
+                {
+                    return Err(invalid("invalid stored lifecycle scope or version"));
+                }
+                events.push(LifecycleRecord {
+                    sequence,
+                    event_id,
                     agent_public_id,
                     account_public_id,
-                } => {
-                    if input.correlation.owner_user_id != *owner
-                        || input.schema_version != LIFECYCLE_SCHEMA_VERSION
-                    {
-                        return Err(invalid("invalid stored lifecycle scope or version"));
-                    }
-                    events.push(LifecycleRecord {
-                        sequence,
-                        event_id,
-                        agent_public_id,
-                        account_public_id,
-                        recorded_at,
-                        event: *input,
-                    });
+                    recorded_at,
+                    event: *input,
+                });
+            }
+            StoredLifecyclePayload::CoverageInventory {
+                schema_version,
+                inventory,
+            } => {
+                if schema_version != LIFECYCLE_SCHEMA_VERSION {
+                    return Err(invalid("unsupported lifecycle inventory schema"));
                 }
-                StoredLifecyclePayload::Capture {
+                coverage_inventories.push(inventory.into_snapshot(sequence, recorded_at)?);
+            }
+            StoredLifecyclePayload::Capture {
+                schema_version,
+                source,
+                state,
+                effective_at,
+            } => {
+                if schema_version != LIFECYCLE_SCHEMA_VERSION {
+                    return Err(invalid("unsupported lifecycle capture version"));
+                }
+                capture_markers.push(LifecycleCaptureMarker {
+                    sequence,
                     schema_version,
                     source,
                     state,
                     effective_at,
-                } => {
-                    if schema_version != LIFECYCLE_SCHEMA_VERSION {
-                        return Err(invalid("unsupported lifecycle capture version"));
-                    }
-                    capture_markers.push(LifecycleCaptureMarker {
-                        sequence,
-                        schema_version,
-                        source,
-                        state,
-                        effective_at,
-                        recorded_at,
-                    });
-                }
+                    recorded_at,
+                });
             }
         }
-        drop(stmt);
-        tx.commit()?;
-        Ok(LifecycleSnapshot {
-            schema_version: LIFECYCLE_SCHEMA_VERSION,
-            watermark,
-            events,
-            capture_markers,
-        })
     }
+    drop(stmt);
+    Ok(LifecycleSnapshot {
+        schema_version: LIFECYCLE_SCHEMA_VERSION,
+        watermark,
+        events,
+        capture_markers,
+        coverage_inventories,
+    })
 }
 
 /// Joins a caller-owned SQLite transaction; never commits or opens a nested
@@ -253,7 +292,7 @@ fn invalid(message: &str) -> StorageError {
 fn identity_hash(value: &impl Serialize) -> Result<String, StorageError> {
     Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(value)?)))
 }
-fn append_payload(
+pub(super) fn append_payload(
     conn: &Connection,
     owner: &UserId,
     identity: &str,

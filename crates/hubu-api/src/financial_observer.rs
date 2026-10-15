@@ -76,6 +76,7 @@ fn observe(repository: &Mutex<SqliteGovernanceRepository>, at: DateTime<Utc>) {
         .map_err(|e| e.to_string())
         .and_then(|mut repo| {
             repo.observe_financial_lifecycle_at(at)
+                .and_then(|_| repo.observe_all_lifecycle_coverage_inventories_at(at))
                 .map_err(|e| e.to_string())
         });
     if let Err(error) = result {
@@ -102,6 +103,7 @@ mod tests {
             .ensure_default_user()
             .unwrap()
             .id;
+        hubu_core::registration::RegistrationManager::open(&path).unwrap();
         let repo = Arc::new(Mutex::new(SqliteGovernanceRepository::open(&path).unwrap()));
         let observer =
             FinancialObserver::start_with_interval(Arc::clone(&repo), Duration::from_secs(3600))
@@ -114,6 +116,11 @@ mod tests {
             .unwrap();
         assert!(snapshot.events.is_empty());
         assert_eq!(snapshot.capture_markers.len(), 2);
+        assert_eq!(snapshot.coverage_inventories.len(), 1);
+        assert!(snapshot.coverage_inventories[0]
+            .scopes
+            .iter()
+            .all(|scope| scope.gaps.is_empty() && scope.backlog_gaps.is_empty()));
         assert!(snapshot
             .capture_markers
             .iter()
@@ -139,6 +146,7 @@ mod tests {
             .ensure_default_user()
             .unwrap()
             .id;
+        hubu_core::registration::RegistrationManager::open(&path).unwrap();
         let repo = Arc::new(Mutex::new(SqliteGovernanceRepository::open(&path).unwrap()));
         let connection = rusqlite::Connection::open(&path).unwrap();
         connection.execute_batch("CREATE TRIGGER reject_observation BEFORE INSERT ON spend_lifecycle_records BEGIN SELECT RAISE(ABORT,'transient observation failure'); END;").unwrap();
@@ -165,6 +173,54 @@ mod tests {
                 .capture_markers
                 .len(),
             2
+        );
+        drop(observer);
+    }
+    #[test]
+    fn inventory_failure_does_not_erase_financial_observation_and_retries_independently() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("inventory-retry.sqlite");
+        let owner = UserManager::open(&path)
+            .unwrap()
+            .ensure_default_user()
+            .unwrap()
+            .id;
+        hubu_core::registration::RegistrationManager::open(&path).unwrap();
+        let repo = Arc::new(Mutex::new(SqliteGovernanceRepository::open(&path).unwrap()));
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection.execute_batch("CREATE TRIGGER reject_inventory BEFORE INSERT ON spend_lifecycle_records WHEN json_extract(NEW.payload_json,'$.record_type')='coverage_inventory' BEGIN SELECT RAISE(ABORT,'inventory observation failure'); END;").unwrap();
+        let observer =
+            FinancialObserver::start_with_interval(Arc::clone(&repo), Duration::from_secs(3600))
+                .unwrap();
+        observer.observe_now();
+        let before = repo
+            .lock()
+            .unwrap()
+            .lifecycle_snapshot(&owner, None)
+            .unwrap();
+        assert_eq!(before.capture_markers.len(), 2);
+        assert!(before.coverage_inventories.is_empty());
+        assert!(before.events.is_empty());
+        connection
+            .execute_batch("DROP TRIGGER reject_inventory")
+            .unwrap();
+        observer.observe_now();
+        let after = repo
+            .lock()
+            .unwrap()
+            .lifecycle_snapshot(&owner, None)
+            .unwrap();
+        assert_eq!(after.capture_markers, before.capture_markers);
+        assert_eq!(after.coverage_inventories.len(), 1);
+        assert!(after.events.is_empty());
+        observer.observe_now();
+        assert_eq!(
+            repo.lock()
+                .unwrap()
+                .lifecycle_snapshot(&owner, None)
+                .unwrap()
+                .watermark,
+            after.watermark
         );
         drop(observer);
     }

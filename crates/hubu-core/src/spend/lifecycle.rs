@@ -24,7 +24,7 @@ pub struct LifecycleCorrelation {
     pub correction_of_revision: Option<u64>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LifecycleSource {
     PolicyEngine,
@@ -158,7 +158,8 @@ pub enum LifecycleFact {
 
 /// Discrete occurred-time facts. Approval is not authorization; a policy allow
 /// is not admission or spend. Distinct corrected revisions remain distinct.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum LifecycleCount {
     PolicyAllow,
     PolicyDeny,
@@ -482,6 +483,47 @@ pub struct LifecycleCaptureMarker {
     pub effective_at: DateTime<Utc>,
     pub recorded_at: DateTime<Utc>,
 }
+/// Aggregate observation of canonical evidence missing from enumerable facts.
+/// Private scope identities deliberately have no public serialization contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LifecycleCoverageScope {
+    Account {
+        agent_id: AgentId,
+        account_id: AgentAccountId,
+    },
+    AgentUnattributed {
+        agent_id: AgentId,
+    },
+    OwnerUnattributed,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LifecycleCoverageGap {
+    pub source: LifecycleSource,
+    pub metric: LifecycleCount,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LifecycleCoverageBacklog {
+    HumanApproval,
+    FinancialReconciliation,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LifecycleCoverageScopeObservation {
+    pub scope: LifecycleCoverageScope,
+    pub gaps: Vec<LifecycleCoverageGap>,
+    pub backlog_gaps: Vec<LifecycleCoverageBacklog>,
+}
+/// A stored observation, not a heartbeat or reconstructed event history.
+/// Missing inventory/scope is unknown; an explicit empty scope was assessed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LifecycleCoverageInventory {
+    pub sequence: u64,
+    pub observed_at: DateTime<Utc>,
+    pub recorded_at: DateTime<Utc>,
+    pub collector_version: u32,
+    pub scopes: Vec<LifecycleCoverageScopeObservation>,
+}
 #[derive(Debug, Clone)]
 pub struct LifecycleSnapshot {
     pub schema_version: u32,
@@ -490,4 +532,6 @@ pub struct LifecycleSnapshot {
     /// Absent means capture not declared: HUB-291 installs no active producers.
     /// Fact presence is independent of per-fact explanation coverage.
     pub capture_markers: Vec<LifecycleCaptureMarker>,
+    /// Aggregate metadata only; excluded from enumerable fact totals.
+    pub coverage_inventories: Vec<LifecycleCoverageInventory>,
 }

@@ -5,6 +5,7 @@ mod financial_lifecycle;
 mod history;
 mod human_lifecycle;
 mod lifecycle;
+mod lifecycle_coverage;
 pub use authorization_void::{AuthorizationVoidError, AuthorizationVoidResult};
 pub use automatic_lifecycle::SelectedSpendPolicy;
 pub use history::HistorySnapshot;
