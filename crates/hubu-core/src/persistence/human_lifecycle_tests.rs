@@ -15,6 +15,9 @@ struct Harness {
 }
 impl Harness {
     fn new(limit: Option<&str>) -> Self {
+        Self::new_currency(limit, Currency::Usd)
+    }
+    fn new_currency(limit: Option<&str>, currency: Currency) -> Self {
         let mut repo = SqliteGovernanceRepository::in_memory().unwrap();
         let owner = UserId::new();
         let agent = AgentId::new();
@@ -39,7 +42,7 @@ impl Harness {
                 .create_single_budget(CreateSingleBudgetRequest {
                     agent_id: agent.clone(),
                     amount_limit: limit.parse().unwrap(),
-                    currency: Currency::Usd,
+                    currency,
                     period: TimePeriod::new(Utc::now() - chrono::Duration::days(1), None).unwrap(),
                 })
                 .unwrap();
@@ -57,7 +60,7 @@ impl Harness {
                 agent_id: agent,
                 agent_account_id: account,
                 amount: "0.005".parse().unwrap(),
-                currency: Currency::Usd,
+                currency,
                 merchant: None,
                 execution_scope: None,
                 task_id: None,
@@ -65,6 +68,21 @@ impl Harness {
                 lease_profile: "default".into(),
             },
         }
+    }
+    fn add_budget(&mut self, currency: Currency, limit: &str) -> BudgetWithBalance {
+        let b = self
+            .budgets
+            .create_single_budget(CreateSingleBudgetRequest {
+                agent_id: self.request.agent_id.clone(),
+                amount_limit: limit.parse().unwrap(),
+                currency,
+                period: TimePeriod::new(Utc::now() - chrono::Duration::days(1), None).unwrap(),
+            })
+            .unwrap();
+        self.repo
+            .save_budget_with_balance(&b.budget, &b.version, &b.balance)
+            .unwrap();
+        self.budgets.get_budget_by_id(&b.budget.id).unwrap()
     }
     fn pending(&mut self) -> SpendDecisionRecord {
         assert!(matches!(
@@ -572,4 +590,127 @@ fn stale_pending_writer_cannot_overwrite_a_confirmed_human_resolution() {
             .final_decision,
         SpendAuthorizationDecision::Denied
     );
+}
+
+#[test]
+fn confirmed_human_branches_preserve_native_currency_with_another_currency_available() {
+    for currency in [Currency::Usd, Currency::Usdc] {
+        let other = if currency == Currency::Usd {
+            Currency::Usdc
+        } else {
+            Currency::Usd
+        };
+        for action in [HumanApprovalDecision::Approve, HumanApprovalDecision::Deny] {
+            let mut h = Harness::new_currency(Some("0.010"), currency);
+            let other_budget = h.add_budget(other, "100");
+            let decision = h.pending();
+            h.resolve(&decision.id, action).unwrap();
+            let confirmed = h.snapshot();
+            assert!(confirmed
+                .events
+                .iter()
+                .all(|record| value(&record.event.requested_amount).currency == currency));
+            let resolution = confirmed
+                .events
+                .iter()
+                .find(|record| {
+                    matches!(
+                        record.event.fact,
+                        LifecycleFact::HumanResolutionConfirmed { .. }
+                    )
+                })
+                .unwrap();
+            assert!(matches!(
+                (&resolution.event.fact, action),
+                (
+                    LifecycleFact::HumanResolutionConfirmed {
+                        resolution: HumanResolution::Approved,
+                        ..
+                    },
+                    HumanApprovalDecision::Approve
+                ) | (
+                    LifecycleFact::HumanResolutionConfirmed {
+                        resolution: HumanResolution::Declined,
+                        ..
+                    },
+                    HumanApprovalDecision::Deny
+                )
+            ));
+            if action == HumanApprovalDecision::Approve {
+                let hold = h.repo.load_budget_holds().unwrap().remove(0);
+                assert_eq!(hold.currency, currency);
+                assert_eq!(hold.amount.units(), 5000);
+                assert_ne!(hold.budget_id, other_budget.budget.id);
+                let evidence = value(&resolution.event.explanation.budget);
+                assert_eq!(value(&evidence.available).currency, currency);
+                assert_eq!(value(&evidence.available).amount.units(), 10000);
+            } else {
+                assert!(h.repo.load_spend_auth_tokens().unwrap().is_empty());
+                assert!(h.repo.load_budget_holds().unwrap().is_empty());
+            }
+            assert_eq!(
+                h.budgets
+                    .get_budget_by_id(&other_budget.budget.id)
+                    .unwrap()
+                    .balance
+                    .remaining_amount,
+                "100".parse().unwrap()
+            );
+            h.hydrate();
+            h.resolve(&decision.id, action).unwrap();
+            assert_eq!(h.snapshot().events, confirmed.events);
+        }
+    }
+}
+
+#[test]
+fn missing_matching_currency_keeps_human_request_pending_without_provisional_token() {
+    for currency in [Currency::Usd, Currency::Usdc] {
+        let other = if currency == Currency::Usd {
+            Currency::Usdc
+        } else {
+            Currency::Usd
+        };
+        let mut h = Harness::new_currency(None, currency);
+        h.add_budget(other, "100");
+        let decision = h.pending();
+        let pending = h.snapshot();
+        assert!(
+            matches!(h.resolve(&decision.id, HumanApprovalDecision::Approve), Err(crate::app::SpendApprovalError::MissingActiveBudget { currency: missing }) if missing == currency)
+        );
+        assert!(h.repo.load_spend_auth_tokens().unwrap().is_empty());
+        assert!(h.repo.load_budget_holds().unwrap().is_empty());
+        assert!(h
+            .spend
+            .evaluate_spend(
+                &h.request.user,
+                &decision.operation_key,
+                decision.request.clone(),
+                h.selected.policy()
+            )
+            .unwrap()
+            .auth_token
+            .is_none());
+        assert_eq!(h.snapshot().events, pending.events);
+        assert_eq!(
+            h.repo
+                .load_spend_attempt_history(&h.request.agent_id, &h.request.operation_key)
+                .unwrap()[0]
+                .final_decision,
+            SpendAuthorizationDecision::PendingApproval
+        );
+        h.add_budget(currency, "0.010");
+        h.resolve(&decision.id, HumanApprovalDecision::Approve)
+            .unwrap();
+        assert_eq!(
+            h.snapshot()
+                .events
+                .iter()
+                .filter(|e| matches!(e.event.fact, LifecycleFact::HumanResolutionConfirmed { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(h.repo.load_spend_auth_tokens().unwrap().len(), 1);
+        assert_eq!(h.repo.load_budget_holds().unwrap()[0].currency, currency);
+    }
 }

@@ -934,9 +934,11 @@ impl SpendApprovalService {
                     decision_record.request.currency,
                     now,
                 )?;
-                let before = budget_manager
-                    .get_budget_by_id(&budget_id)
-                    .ok_or(SpendApprovalError::MissingActiveBudget)?;
+                let before = budget_manager.get_budget_by_id(&budget_id).ok_or(
+                    SpendApprovalError::MissingActiveBudget {
+                        currency: decision_record.request.currency,
+                    },
+                )?;
                 let token =
                     spend_manager.issue_auth_token_for_approved_decision(approval_request_id)?;
                 let token_record = spend_manager
