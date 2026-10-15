@@ -156,7 +156,8 @@ A v4.5 executor names its contract and sends the exact authorized amount on
 ```
 
 - `units` is an integer string of 10^-`scale` of `currency`. `scale` must be
-  `6`. Copy the `amount` that `POST /spend/executor/resolve` returned.
+  `6`. Copy the `amount` that `POST /spend/executor/resolve` returned; its
+  informational `display` member may be echoed and is ignored.
 - Hubu rejects a missing or different `scale`, an unknown `contract_version`,
   and a request that sends `amount_cents` as well as `amount`.
 - The amount and currency must equal the authorization exactly. A mismatch is
@@ -168,7 +169,10 @@ A request without `contract_version` is a v4.4 request. It sends
 `amount_cents`, the authorization rounded up to a whole cent, and Hubu checks
 that projection against the exact authorization. A v4.4 executor therefore
 keeps working against a v4.5 Hubu, but it cannot tell a 0.005 authorization
-from a 0.01 one.
+from a 0.01 one. Gongbu, which still prices in whole cents, therefore refuses
+to admit an authorization whose exact amount is not a whole number of cents
+until its client moves to v4.5, so a provider can never charge the cent price
+against a smaller sub-cent reservation.
 
 Executor responses carry both forms for every contract version: `amount` is
 the exact money object `{units, scale, currency, display}` and `amount_cents`

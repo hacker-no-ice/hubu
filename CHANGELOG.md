@@ -96,7 +96,9 @@ Future release template
   `hubu-spend-executor-v4.5`. Managed stacks regenerate Gongbu's
   `expected_executor_contract`; hand-written Gongbu configurations must
   change it to `hubu-spend-executor-v4.5`.
-  Gongbu still sends v4.4 cent requests until its client moves to v4.5.
+  Gongbu still sends v4.4 cent requests until its client moves to v4.5, and
+  until then it refuses to admit an authorization that is not a whole number
+  of cents.
 
 - Whole-cent amount fields (`amount_cents`, `amount_limit_cents`,
   `daily_limit_cents`) are deprecated. Requests that use only them still work

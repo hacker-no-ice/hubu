@@ -3813,7 +3813,8 @@
             "amount": {
               "units": "5000",
               "scale": 6,
-              "currency": "usd"
+              "currency": "usd",
+              "display": "0.005"
             },
             "execution_scope": "${expanded_scope}"
           },

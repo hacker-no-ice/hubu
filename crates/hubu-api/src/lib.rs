@@ -1415,7 +1415,9 @@ struct ExecutorSpendHttpRequest {
     task_id: Option<String>,
 }
 
-/// A v4.5 executor amount: `units` of 10^-`scale` of `currency`.
+/// A v4.5 executor amount: `units` of 10^-`scale` of `currency`. Executors
+/// may echo the money object resolve returned, so its informational
+/// `display` is accepted and ignored.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ExecutorAmountHttpRequest {
@@ -1423,6 +1425,8 @@ struct ExecutorAmountHttpRequest {
     #[serde(default)]
     scale: Option<u32>,
     currency: String,
+    #[serde(default, rename = "display")]
+    _display: Option<String>,
 }
 
 /// An executor request's amount, normalized from its contract version.
@@ -10117,12 +10121,17 @@ lease_profiles:
             assert!(error.to_string().contains(expected), "{expected}: {error}");
         }
 
-        // A v4.5 executor claims the exact half cent.
+        // A v4.5 executor claims the exact half cent, echoing the money
+        // object resolve returned (including its display).
         let validated =
-            validate_executor_spend(v45(&half_cent, exact.clone()).to_string(), &state).unwrap();
+            validate_executor_spend(v45(&half_cent, exact).to_string(), &state).unwrap();
         assert_eq!(validated.status, "available");
         let claim = serde_json::to_value(
-            claim_executor_spend(v45(&half_cent, exact).to_string(), &state).unwrap(),
+            claim_executor_spend(
+                v45(&half_cent, resolved["amount"].clone()).to_string(),
+                &state,
+            )
+            .unwrap(),
         )
         .unwrap();
         assert_eq!(claim["status"], "claimed");
