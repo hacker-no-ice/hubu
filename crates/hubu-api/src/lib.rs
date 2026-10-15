@@ -1004,6 +1004,9 @@ struct AddPolicyHttpResponse {
     default_decision: String,
     changed: bool,
     assignment_changed: bool,
+    /// Non-blocking authoring warnings, such as sub-cent amount caps.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    warnings: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -3107,6 +3110,7 @@ fn add_policy(body: String, state: &ServerState) -> Result<AddPolicyHttpResponse
         .unwrap_or_else(|| declarative_key.clone());
     let policy_version = policy.version.clone();
     let default_decision = effect_name(policy.default_effect).to_string();
+    let warnings = policy.amount_warnings();
     let (result, resource_assignments) = {
         let mut governance = state
             .governance
@@ -3174,6 +3178,7 @@ fn add_policy(body: String, state: &ServerState) -> Result<AddPolicyHttpResponse
         default_decision,
         changed: result.changed,
         assignment_changed: result.assignment_changed,
+        warnings,
     })
 }
 
@@ -10473,6 +10478,37 @@ rules: []
 
         assert!(error.to_string().contains("failed to parse policy yaml"));
         assert!(error.to_string().contains("daily_limit_cents"));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn policy_add_warns_about_sub_cent_amount_caps() {
+        let path = std::env::temp_dir().join(format!(
+            "hubu-api-policy-sub-cent-warning-{}.sqlite",
+            UserId::new()
+        ));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        let yaml = |cap: &str| {
+            format!(
+                "id: cap_policy\nversion: v1\ndefault_effect: deny\nrules:\n  - id: cap\n    effect: allow\n    reason: cap\n    when:\n      op: lte\n      field: amount\n      value:\n        money: \"{cap}\"\n"
+            )
+        };
+        let sub_cent =
+            add_policy(json!({"policy_yaml": yaml("0.005")}).to_string(), &state).unwrap();
+        assert_eq!(sub_cent.warnings.len(), 1);
+        assert!(sub_cent.warnings[0].contains("finer than one cent"));
+        let body = serde_json::to_value(&sub_cent).unwrap();
+        assert!(body["warnings"].is_array());
+        let whole = add_policy(
+            json!({"policy_yaml": yaml("5.00"), "declarative_key": "whole"}).to_string(),
+            &state,
+        )
+        .unwrap();
+        assert!(whole.warnings.is_empty());
+        assert!(serde_json::to_value(&whole)
+            .unwrap()
+            .get("warnings")
+            .is_none());
         std::fs::remove_file(path).ok();
     }
 

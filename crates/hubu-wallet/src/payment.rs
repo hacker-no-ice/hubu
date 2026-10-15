@@ -17,6 +17,8 @@ use crate::rail::{PaymentRail, PaymentRailError};
 pub enum PaymentError {
     #[error("payment amount must be positive")]
     NonPositiveAmount,
+    #[error("wallet rails move whole US-dollar cents; `{currency}` payments are not supported")]
+    UnsupportedCurrency { currency: Currency },
     #[error("idempotency key cannot be empty")]
     EmptyIdempotencyKey,
     #[error("idempotency key was reused with a different payment request")]
@@ -372,6 +374,14 @@ where
             return Err(PaymentError::NonPositiveAmount);
         }
 
+        // The wallet ledger and both mock rails move whole USD cents. Spend in
+        // other currencies settles through executors against its own budget.
+        if request.currency != Currency::Usd {
+            return Err(PaymentError::UnsupportedCurrency {
+                currency: request.currency,
+            });
+        }
+
         Ok(())
     }
 }
@@ -570,6 +580,26 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("ledger"), "{error}");
         assert_eq!(manager.rail.executions.get(), 0, "the rail never ran");
+    }
+
+    #[test]
+    fn non_usd_payments_are_refused_before_the_rail_runs() {
+        for rail in [PaymentRailKind::FiatMock, PaymentRailKind::StablecoinMock] {
+            let mut request = payment_request(rail);
+            request.currency = Currency::Usdc;
+            let mut manager = payment_manager(&request);
+            let error = manager.submit_payment(request).unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    PaymentError::UnsupportedCurrency {
+                        currency: Currency::Usdc
+                    }
+                ),
+                "{error}"
+            );
+            assert!(manager.authorizer.used_payment_id.is_none());
+        }
     }
 
     #[test]

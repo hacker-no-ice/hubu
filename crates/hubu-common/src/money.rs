@@ -73,18 +73,21 @@ impl FromStr for DecimalMajorAmount {
 #[error("invalid decimal major-unit amount `{0}`; use a non-negative value with at most two decimal places")]
 pub struct ParseDecimalMajorAmountError(String);
 
-/// The currency a budget is denominated in. Budgets stay USD-only; spend in
-/// other assets is converted into this currency (see [`Asset`]).
+/// The currency a budget is denominated in. Budgets are per currency: spend
+/// in a currency only counts against a budget in that same currency, with no
+/// conversion between currencies.
 #[derive(Debug, Copy, Clone, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Currency {
     Usd,
+    Usdc,
 }
 
 impl fmt::Display for Currency {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Currency::Usd => f.write_str("usd"),
+            Currency::Usdc => f.write_str("usdc"),
         }
     }
 }
@@ -95,6 +98,7 @@ impl FromStr for Currency {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
             "usd" => Ok(Currency::Usd),
+            "usdc" => Ok(Currency::Usdc),
             _ => Err(ParseCurrencyError {
                 value: value.to_string(),
             }),
@@ -132,6 +136,7 @@ impl From<Currency> for Asset {
     fn from(currency: Currency) -> Self {
         match currency {
             Currency::Usd => Asset::Usd,
+            Currency::Usdc => Asset::Usdc,
         }
     }
 }
@@ -517,10 +522,14 @@ mod tests {
     }
 
     #[test]
-    fn currency_stays_usd_only() {
+    fn currencies_parse_and_map_to_assets() {
         assert_eq!(serde_json::to_string(&Currency::Usd).unwrap(), "\"usd\"");
-        assert!("usdc".parse::<Currency>().is_err());
-        assert!(serde_json::from_str::<Currency>("\"usdc\"").is_err());
+        assert_eq!(serde_json::to_string(&Currency::Usdc).unwrap(), "\"usdc\"");
+        assert_eq!("usdc".parse::<Currency>().unwrap(), Currency::Usdc);
+        assert_eq!(Asset::from(Currency::Usdc), Asset::Usdc);
+        assert_eq!(Asset::from(Currency::Usdc).native_scale(), 6);
+        assert!("eth".parse::<Currency>().is_err());
+        assert!(serde_json::from_str::<Currency>("\"eth\"").is_err());
     }
 
     #[test]

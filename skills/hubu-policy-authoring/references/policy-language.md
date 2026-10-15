@@ -89,8 +89,8 @@ to guess an id. Resolve the canonical tuple for the target environment.
 
 | Field | Value encoding | Notes |
 | --- | --- | --- |
-| `amount` | `{money: "DECIMAL"}` | Quoted decimal in the budget currency, at most 6 decimal places (`"5.00"`, `"0.005"`). The only field supporting `gt`, `gte`, `lt`, and `lte`. Legacy `{money_cents: INTEGER}` still loads |
-| `currency` | `{currency: usd}` | Hubu currently supports USD |
+| `amount` | `{money: "DECIMAL"}` | Quoted decimal compared in the request's own currency, at most 6 decimal places (`"5.00"`, `"0.005"`). Combine with a `currency` condition to cap one currency only. The only field supporting `gt`, `gte`, `lt`, and `lte`. Legacy `{money_cents: INTEGER}` still loads |
+| `currency` | `{currency: usd}` or `{currency: usdc}` | Budgets are per currency: spend only counts against a budget in its own currency |
 | `agent_id` | `{agent_id: agt_...}` | Use a registered public agent id |
 | `provider` | `{string: provider:...}` | Stable provider id from the trusted scope catalog |
 | `executor` | `{string: executor:...}` | Stable execution-plane adapter id |

@@ -27,6 +27,18 @@ Future release template
 
 ### Highlights
 
+- USDC is a budget currency. Budgets are per currency: USDC spend counts
+  only against a USDC budget and USD spend only against a USD budget, with no
+  conversion between them. USDC amounts use the same micro-unit accounting
+  (one micro-unit is one USDC atomic unit), so an x402-style
+  `maxAmountRequired` hold is exact. Executors may report USDC actual costs
+  against USDC holds; a receipt in another currency than its hold is rejected.
+  Ledger postings and coverage stay per currency. Wallet rails remain USD
+  cents only and refuse USDC payments before any money moves. Policy amount
+  values compare in the request's own currency (scope them with a `currency`
+  condition), and `POST /policies` returns `warnings` for amount values finer
+  than one cent.
+
 - Policies can state exact amounts with `value: {money: "0.005"}`: a quoted
   decimal in the budget currency with up to 6 decimal places. Unquoted
   numbers, signs, exponents, and more than 6 decimal places are rejected when

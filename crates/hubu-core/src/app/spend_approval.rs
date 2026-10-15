@@ -155,6 +155,9 @@ pub enum SpendApprovalError {
     #[error("payment rail charges whole cents and cannot pay a sub-cent authorization of {0}")]
     SubCentPaymentRail(Amount),
 
+    #[error("wallet rails move whole US-dollar cents; settle `{0}` spend through an executor")]
+    UnsupportedPaymentCurrency(Currency),
+
     #[error("spend decision was not recorded")]
     MissingSpendDecision,
 
@@ -886,8 +889,14 @@ impl SpendApprovalService {
         LoadUsedToken:
             FnOnce(&SpendAuthTokenId) -> Result<SpendAuthTokenRecord, SpendApprovalError>,
     {
-        // Wallet rails move whole cents; a sub-cent authorization can never be
-        // charged exactly, so refuse it before any money moves.
+        // Wallet rails move whole US-dollar cents. Other currencies settle
+        // through executors, and a sub-cent authorization can never be
+        // charged exactly, so refuse both before any money moves.
+        if authorization.currency != Currency::Usd {
+            return Err(SpendApprovalError::UnsupportedPaymentCurrency(
+                authorization.currency,
+            ));
+        }
         let amount_cents = authorization.amount.legacy_cents_ceil();
         if authorization.amount.legacy_cents_floor() != amount_cents {
             return Err(SpendApprovalError::SubCentPaymentRail(authorization.amount));
