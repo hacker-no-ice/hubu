@@ -26,7 +26,7 @@ fn fixture_occurrence(
     fact: &LifecycleFact,
 ) -> DateTime<Utc> {
     let query=match fact {
-        LifecycleFact::InitialPolicy{..}=>Some("SELECT created_at FROM spend_decisions WHERE id=?1"),
+        LifecycleFact::InitialPolicy{..}|LifecycleFact::HumanEscalation{..}=>Some("SELECT created_at FROM spend_decisions WHERE id=?1"),
         LifecycleFact::AutomatedAdmission{..}|LifecycleFact::HumanResolutionConfirmed{..}|LifecycleFact::AuthorizationGranted{..}=>Some("SELECT created_at FROM spend_authorization_outcomes WHERE spend_decision_id=?1 ORDER BY id DESC LIMIT 1"),
         LifecycleFact::AuthorizationReleased{reason:AuthorizationReleaseReason::Expired,..}=>Some("SELECT updated_at FROM budget_holds WHERE spend_decision_id=?1"),
         LifecycleFact::AuthorizationReleased{reason,..}=>{
@@ -80,8 +80,16 @@ impl Fixture {
     }
     fn seed_policy(
         repo: &mut SqliteGovernanceRepository,
+        policy: Policy,
+        legacy_trace: bool,
+    ) -> Self {
+        Self::seed_policy_at(repo, policy, legacy_trace, at("2026-10-10T00:00:00Z"))
+    }
+    fn seed_policy_at(
+        repo: &mut SqliteGovernanceRepository,
         mut policy: Policy,
         legacy_trace: bool,
+        now: DateTime<Utc>,
     ) -> Self {
         crate::storage::init_schema(&repo.conn).unwrap();
         let owner = UserId::new();
@@ -90,7 +98,6 @@ impl Fixture {
         let decision = SpendDecisionId::new();
         let claim = SpendExecutorClaimId::new();
         let token = SpendAuthTokenId::new();
-        let now = at("2026-10-10T00:00:00Z");
         let key = "private-operation-key-never-public".to_string();
         policy.owner_user_id = owner.clone();
         repo.conn.execute("INSERT INTO users(id,pub_id,display_name,status,created_at,updated_at) VALUES(?1,?2,'Owner','active',?3,?3)",params![owner.to_string(),format!("usr_{}",owner.public_suffix()),now.to_rfc3339()]).unwrap();
@@ -264,6 +271,21 @@ impl Fixture {
         source: LifecycleSource,
         fact: LifecycleFact,
     ) -> LifecycleEventInput {
+        // If a real source producer already captured this fact, replay its
+        // complete immutable payload rather than inventing different evidence.
+        if let Some(record) = repo
+            .lifecycle_snapshot(&self.owner, None)
+            .unwrap()
+            .events
+            .into_iter()
+            .find(|record| {
+                record.event.correlation.decision_id.as_ref() == Some(&self.decision)
+                    && record.event.source == source
+                    && record.event.fact == fact
+            })
+        {
+            return record.event;
+        }
         LifecycleEventInput {
             schema_version: LIFECYCLE_SCHEMA_VERSION,
             correlation: LifecycleCorrelation {
@@ -584,7 +606,18 @@ fn backlog(snapshot: &LifecycleSnapshot) -> usize {
 #[test]
 fn watermark_backlog_uses_preperiod_opens_and_late_arrivals_cannot_reopen() {
     let mut repo = SqliteGovernanceRepository::in_memory().unwrap();
-    let f = Fixture::seed(&mut repo, Effect::NeedsApproval);
+    let f = Fixture::seed_policy_at(
+        &mut repo,
+        Policy {
+            id: "authored-fixture".into(),
+            version: "v1".into(),
+            owner_user_id: UserId::new(),
+            default_effect: Effect::NeedsApproval,
+            rules: vec![],
+        },
+        false,
+        at("2026-10-09T23:59:59.999999999Z"),
+    );
     assert!(repo
         .lifecycle_snapshot(&f.owner, None)
         .unwrap()
@@ -598,14 +631,13 @@ fn watermark_backlog_uses_preperiod_opens_and_late_arrivals_cannot_reopen() {
             at("2026-10-09T00:00:00Z"),
         )
         .unwrap();
-    let mut escalation = f.event(
+    let escalation = f.event(
         &repo,
         LifecycleSource::HumanApproval,
         LifecycleFact::HumanEscalation {
             approval_request_id: f.decision.clone(),
         },
     );
-    escalation.occurred_at = at("2026-10-09T23:59:59.999999999Z");
     repo.append_lifecycle_event(&escalation).unwrap();
     let frozen = repo.lifecycle_snapshot(&f.owner, None).unwrap();
     assert_eq!(backlog(&frozen), 1);
@@ -1151,10 +1183,14 @@ fn human_resolution_requires_durable_matching_closure_and_replays_after_release(
     let recorded = repo.append_lifecycle_event(&accepted).unwrap();
     let snapshot = repo.lifecycle_snapshot(&approved.owner, None).unwrap();
     assert_eq!(backlog(&snapshot), 0);
-    assert!(!snapshot
-        .events
-        .iter()
-        .any(|r| r.event.fact.count_category() == LifecycleCount::AuthorizationGranted));
+    assert_eq!(
+        snapshot
+            .events
+            .iter()
+            .filter(|r| r.event.fact.count_category() == LifecycleCount::AuthorizationGranted)
+            .count(),
+        1
+    );
     repo.void_unclaimed_authorization(
         &approved.owner,
         &approved.account,

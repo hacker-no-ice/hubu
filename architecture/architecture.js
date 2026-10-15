@@ -32,6 +32,7 @@ const sharedLinks = {
   lifecycleModel: ["Lifecycle evidence contract", "crates/hubu-core/src/spend/lifecycle.rs"],
   lifecycleStore: ["Lifecycle evidence persistence", "crates/hubu-core/src/persistence/lifecycle.rs"],
   lifecycleAutomatic: ["Automatic lifecycle capture", "crates/hubu-core/src/persistence/automatic_lifecycle.rs"],
+  lifecycleHuman: ["Human lifecycle capture", "crates/hubu-core/src/persistence/human_lifecycle.rs"],
   lifecycleContract: ["Lifecycle evidence semantics", "docs/governance-observability.md"],
   spendExecutor: ["Spend executor contract", "docs/spend-executor-contract.md"],
   executorConformance: ["Executor conformance suite", "docs/executor-conformance.md"],
@@ -177,7 +178,7 @@ function spendTraces() {
         {
           nodes: ["app", "ledger"],
           edges: [["app", "ledger"]],
-          caption: "Policy needs approval. Hubu persists a pending decision on an immutable review snapshot.",
+          caption: "Policy needs approval. Hubu atomically records the immutable review request and genuine escalation; evaluation-pending placeholders do not count.",
         },
         {
           nodes: ["agent", "mcp"],
@@ -361,10 +362,11 @@ const components = {
       ["Payments", "Submits wallet payments, records attempts, and settles, releases, or keeps the hold according to the retry policy."],
       ["Executor claims", "Creates claims, lists work needing reconciliation, and finalizes exact receipts atomically, capped at the authorized maximum."],
       ["Budget administration", "Create, update, and revoke go straight to `BudgetManager`."],
-      ["Automatic lifecycle capture", "Policy/admission facts and authorization grants commit with their authoritative transitions. The selected policy revision and pre-reservation budget evidence remain immutable. Other capture streams and read APIs follow separately; schema installation alone does not establish complete history."],
+      ["Automatic lifecycle capture", "Policy/admission facts and authorization grants commit with their authoritative transitions. The selected policy revision and pre-reservation budget evidence remain immutable. Executor capture and read APIs follow separately; schema installation alone does not establish complete history."],
+      ["Human lifecycle capture", "Only a genuine needs_approval decision records escalation. Confirmed approval or decline commits with its accepted outcome; approval records a separate authorization grant. Failed submissions remain pending, and replay preserves the original policy result."],
       ["No HTTP concerns", "Returns domain results; the API owns authentication, public IDs, and JSON shape."],
     ],
-    links: [sharedLinks.appSpend, sharedLinks.appClaims, sharedLinks.spend, sharedLinks.budget, sharedLinks.budgetCoordinator, sharedLinks.persistence, sharedLinks.lifecycleModel, sharedLinks.lifecycleStore, sharedLinks.lifecycleAutomatic, sharedLinks.lifecycleContract, sharedLinks.payment, sharedLinks.paymentAttempt],
+    links: [sharedLinks.appSpend, sharedLinks.appClaims, sharedLinks.spend, sharedLinks.budget, sharedLinks.budgetCoordinator, sharedLinks.persistence, sharedLinks.lifecycleModel, sharedLinks.lifecycleStore, sharedLinks.lifecycleAutomatic, sharedLinks.lifecycleHuman, sharedLinks.lifecycleContract, sharedLinks.payment, sharedLinks.paymentAttempt],
     nodes: [
       { id: "input", label: "Use-case input", sub: "IDs + selected policy", x: 78, y: 112, w: 230, h: 92, tone: "core" },
       { id: "approval", label: "Spend approval", sub: "wait + resolve + pay", x: 410, y: 72, w: 224, h: 92, tone: "core", path: "crates/hubu-core/src/app/spend_approval.rs" },
