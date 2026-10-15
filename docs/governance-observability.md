@@ -8,8 +8,8 @@ database. Gongbu retains its own execution database and provider authority.
 HUB-291 supplies the storage foundation. HUB-292 captures new policy evaluations
 and automatic admission/authorization outcomes. HUB-293 captures genuine human
 escalation and confirmed resolution. HUB-294 captures authoritative Hubu claim
-and financial-resolution facts. Aggregate queries, HTTP and unified MCP reads
-follow separately.
+and financial-resolution facts. HUB-295 provides shared owner-scoped queries;
+HTTP and unified MCP reads follow separately.
 Installing the schema alone does **not** establish complete capture or make an
 empty event table evidence that no requests were denied.
 
@@ -39,7 +39,7 @@ The store validates owner/agent/account relationships before accepting facts.
 Private operation identity is for internal correlation and must not be
 serialized into public API or MCP responses.
 
-## Time, snapshots and eventual queries
+## Time, snapshots and counts
 
 The event's occurrence time records when the transition happened. Recording
 time and a monotonic recorded sequence identify when it became visible in
@@ -51,13 +51,13 @@ must match it: policy creation, terminal admission/human outcome acceptance,
 authorization acceptance, claim start, finalization and reconciliation resolution
 use their source records. Explicit voids use the matching void timestamp;
 persisted expiry releases use the hold's release update time, rather than its
-earlier expiry eligibility deadline. Failure, escalation and reconciliation-open
-observations retain their producer timestamp when no such source time exists.
+earlier expiry eligibility deadline. Human escalation uses decision creation;
+financial reconciliation opens at the stored claim expiry. Technical admission
+failures retain their observation time.
 
 One recorded watermark bounds a snapshot. Later-recorded events stay outside
-that snapshot even when their occurrence timestamp is older. Future query
-implementations must use the same boundary for rows, whole-filter totals and
-backlog.
+that snapshot even when their occurrence timestamp is older. Shared queries
+use that boundary for rows, whole-filter totals, backlog and coverage.
 
 Period counts use occurrence time. Pending approval and unresolved
 reconciliation are backlog as of the snapshot and include older work. Recorded
@@ -68,6 +68,47 @@ Count immutable request revisions as attempts and distinct logical operations
 separately. Lifecycle counts overlap: one attempt can be escalated, approved and
 later enter reconciliation. Multiple matching deny rules do not multiply the
 denied-attempt count. Later success or resolution does not erase earlier facts.
+
+## Shared reads
+
+Core `governance_list`, `governance_summary` and `governance_detail` use one
+read model. The authenticated owner supplies scope; public agent/account
+selectors are validated together, including when no records match. Fact-category
+filters select lifecycle stages, rather than a mutable latest operation status.
+Occurrence windows include their start and exclude their end.
+
+A snapshot binds normalized filters to an immutable owned journal boundary.
+Its captured-evidence time comes from that stored boundary, rather than a
+client-supplied clock. An empty journal has no captured-time anchor. Reuse the
+snapshot across summary, list and detail; keyset pages use parsed occurrence
+instants with a stable tie-breaker. Full-filter totals never depend on page size.
+
+Pending approval and open financial reconciliation fold all visible openings
+and closures, including pre-period work. Their scope is the selected identities
+at captured-evidence time; report-window and stage filters do not hide closures
+or remove older unresolved work. Known closure dominates a late opening.
+
+Counts distinguish records, immutable attempts and logical operations. Stage
+counts overlap. Automatic denial reasons count the attempt once; human declines
+remain separate. Requested amounts use checked wide sums per currency, including
+sub-cent values. A blocked request total is not provider cost, budget consumption
+or savings; unknown request amounts are reported separately.
+
+Record coverage and explanation coverage remain separate. Enabled sources do
+not imply support for every category or complete earlier history. The independent
+observer stores grouped legacy-gap presence in the same append-only journal;
+these observations never become enumerable lifecycle events or main totals.
+Queries use the latest observation within their watermark. Absent observations
+remain unknown, and broader/unattributed gaps cannot establish a narrower
+account's activity. Inventory describes identity-scoped history, not a filtered
+report period; its stored observation time is not a polling heartbeat.
+Financial observation errors do not suppress inventory collection. Each failed
+owner inventory rolls back independently while other owners continue; a failed
+refresh leaves that owner's prior observation unchanged.
+
+Reads neither collect evidence nor mutate financial state or contact providers.
+Public projections allowlist safe fields and leave money formatting to the
+transport. HTTP and unified MCP expose this model in subsequent tasks.
 
 ## Automatic capture
 
@@ -145,7 +186,8 @@ A late open cannot undo a known closure.
 An independent collector observes expired claims on server startup and normally
 every 30 seconds. It records evidence without changing financial state, and reads
 do not trigger collection. Downtime, contention or write failures can delay
-capture. A provable existing expired claim may be observed after activation with
+capture. Collection cost also grows with stored history and unresolved backlog;
+the interval is not a latency guarantee. A provable existing expired claim may be observed after activation with
 an older occurrence time; this does not establish complete earlier history or
 invent its uncaptured original transitions.
 
@@ -176,3 +218,7 @@ Existing public reads remain described by the
 [ledger and authorization history contract](ledger-history.md).
 
 Financial writers live in [claim and reconciliation capture](../crates/hubu-core/src/persistence/financial_lifecycle.rs); the API owns the [independent observer](../crates/hubu-api/src/financial_observer.rs).
+
+Shared reads: [query types](../crates/hubu-core/src/spend/governance_query.rs),
+[query evaluator](../crates/hubu-core/src/persistence/governance_query.rs), and
+[legacy coverage observation](../crates/hubu-core/src/persistence/lifecycle_coverage.rs).
