@@ -208,7 +208,7 @@ fn configured_catalog_matches_the_owned_hubu_contract() {
         .unwrap();
     assert_eq!(
         update["inputSchema"]["required"],
-        json!(["budget_id", "expected_revision", "amount_limit_cents"])
+        json!(["budget_id", "expected_revision"])
     );
     assert_eq!(
         update["inputSchema"]["properties"]["expected_revision"]["minimum"],
@@ -744,6 +744,16 @@ fn budget_version_arguments_and_transport_paths_fail_closed() {
             "hubu_update_budget",
             json!({"budget_id":"bgt_0123456789ab","expected_revision":1,"amount_limit_cents":1,"extra":true}),
             "accepts only",
+        ),
+        (
+            "hubu_update_budget",
+            json!({"budget_id":"bgt_0123456789ab","expected_revision":1,"amount_limit":"1","amount_limit_cents":100}),
+            "not both",
+        ),
+        (
+            "hubu_update_budget",
+            json!({"budget_id":"bgt_0123456789ab","expected_revision":1,"reason":"no amount"}),
+            "requires amount_limit",
         ),
         (
             "hubu_budget_history",

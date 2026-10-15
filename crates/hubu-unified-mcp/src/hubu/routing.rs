@@ -647,11 +647,15 @@ fn budget_update_request(arguments: Value) -> Result<(String, Value)> {
         || arguments.keys().any(|key| {
             !matches!(
                 key.as_str(),
-                "budget_id" | "expected_revision" | "amount_limit_cents" | "reason"
+                "budget_id"
+                    | "expected_revision"
+                    | "amount_limit"
+                    | "amount_limit_cents"
+                    | "reason"
             )
         })
     {
-        bail!("hubu_update_budget accepts only budget_id, expected_revision, amount_limit_cents, and optional reason");
+        bail!("hubu_update_budget accepts only budget_id, expected_revision, amount_limit (or the deprecated amount_limit_cents), and optional reason");
     }
     let budget_id = public_budget_id_argument(arguments, "hubu_update_budget")?;
     let expected_revision = arguments
@@ -659,11 +663,28 @@ fn budget_update_request(arguments: Value) -> Result<(String, Value)> {
         .and_then(Value::as_u64)
         .filter(|revision| *revision >= 1)
         .ok_or_else(|| anyhow!("hubu_update_budget requires expected_revision >= 1"))?;
-    let amount_limit_cents = arguments
-        .get("amount_limit_cents")
-        .and_then(Value::as_i64)
-        .filter(|amount| *amount >= 1)
-        .ok_or_else(|| anyhow!("hubu_update_budget requires amount_limit_cents >= 1"))?;
+    let amount_field = match (
+        arguments.get("amount_limit"),
+        arguments.get("amount_limit_cents"),
+    ) {
+        (Some(_), Some(_)) => bail!(
+            "hubu_update_budget accepts amount_limit or the deprecated amount_limit_cents, not both"
+        ),
+        (Some(decimal), None) => {
+            let decimal = decimal.as_str().ok_or_else(|| {
+                anyhow!("hubu_update_budget amount_limit must be a decimal string")
+            })?;
+            ("amount_limit", json!(decimal))
+        }
+        (None, Some(cents)) => {
+            let cents = cents
+                .as_i64()
+                .filter(|amount| *amount >= 1)
+                .ok_or_else(|| anyhow!("hubu_update_budget requires amount_limit_cents >= 1"))?;
+            ("amount_limit_cents", json!(cents))
+        }
+        (None, None) => bail!("hubu_update_budget requires amount_limit"),
+    };
     let reason = arguments
         .get("reason")
         .map(|reason| {
@@ -673,10 +694,8 @@ fn budget_update_request(arguments: Value) -> Result<(String, Value)> {
                 .ok_or_else(|| anyhow!("hubu_update_budget reason must be a string"))
         })
         .transpose()?;
-    let mut body = json!({
-        "amount_limit_cents": amount_limit_cents,
-        "expected_revision": expected_revision,
-    });
+    let mut body = json!({ "expected_revision": expected_revision });
+    body[amount_field.0] = amount_field.1;
     if let Some(reason) = reason {
         body["reason"] = json!(reason);
     }

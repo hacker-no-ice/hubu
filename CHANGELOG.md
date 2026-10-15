@@ -52,15 +52,12 @@ Future release template
   revisions are never rewritten. `POST /policies` accepts
   `daily_limit: "5.00"` for the starter policy (`daily_limit_cents` is
   deprecated), and policy explanations show `USD 0.005` instead of minor
-  units. Until budgets move to sub-cent accounting, spend requests are still
-  whole cents.
+  units.
 - Budgets are accounted in micro-units (`10⁻⁶` USD). Each exact provider cost
   is rounded up once, to the nearest micro-unit, when it settles, so a
   USD 0.001 executor call now consumes USD 0.001 of budget instead of a full
   cent, and 1,000 such calls fit a USD 1.00 budget. Wallet payments consume
-  what the rail actually charged and release the rest of the hold. HTTP, MCP,
-  and CLI amounts are still whole cents for now: consumed and frozen amounts
-  are rounded up and limits and remaining amounts rounded down.
+  what the rail actually charged and release the rest of the hold.
 - New ledger postings record the budget charge in micro-units
   (`budget_charge_delta` with `budget_charge_scale: 6`), and the rounding
   delta is measured against that charge. Existing postings keep their cent
@@ -69,7 +66,25 @@ Future release template
   budget consumption matches recorded charges exactly and differs from the
   exact provider total by less than one micro-unit per settlement.
 
+- The HTTP API speaks exact amounts. Budgets (`amount`), budget versions
+  (`amount_limit`), spending targets (`amount`), spend (`amount`) and the
+  starter policy (`daily_limit`) accept decimal strings with up to 6
+  decimal places, and the matching MCP tools expose the same fields.
+  Responses add exact money objects
+  (`{"units": "5000", "scale": 6, "currency": "usd", "display": "0.005"}`)
+  beside every legacy `*_cents` field for budgets, versions, holds,
+  spending targets, approval reviews, settlement receipts, authorization
+  records, ledger coverage and the watch projection. See
+  [docs/api-amounts.md](docs/api-amounts.md).
+
 ### Breaking or operational changes
+
+- Whole-cent amount fields (`amount_cents`, `amount_limit_cents`,
+  `daily_limit_cents`) are deprecated. Requests that use only them still work
+  for this release, and their responses carry `Deprecation: true` with a
+  `Link` to the replacement fields. `*_cents` response fields are now
+  conservative projections: amounts that use budget round up, and amounts
+  that permit spend round down.
 
 - **One-way storage migration.** On first start, Hubu adds micro-unit
   (`10⁻⁶` USD) amount columns to budget versions, balances, holds, spending

@@ -1051,7 +1051,11 @@ struct AgentHttpResponse {
 
 #[derive(Debug, Deserialize)]
 struct CreateBudgetHttpRequest {
-    amount_cents: i64,
+    /// Deprecated whole-cent limit; `amount` is the exact decimal form.
+    #[serde(default)]
+    amount_cents: Option<i64>,
+    #[serde(default)]
+    amount: Option<String>,
     /// Budget currency (`usd` when omitted). Budgets are per currency.
     currency: Option<String>,
     agent_id: Option<String>,
@@ -1067,14 +1071,22 @@ struct BudgetIdHttpRequest {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UpdateBudgetLimitHttpRequest {
-    amount_limit_cents: i64,
+    /// Deprecated whole-cent limit; `amount_limit` is the exact decimal form.
+    #[serde(default)]
+    amount_limit_cents: Option<i64>,
+    #[serde(default)]
+    amount_limit: Option<String>,
     expected_revision: i64,
     reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct SetSpendingTargetHttpRequest {
-    amount_cents: i64,
+    /// Deprecated whole-cent amount; `amount` is the exact decimal form.
+    #[serde(default)]
+    amount_cents: Option<i64>,
+    #[serde(default)]
+    amount: Option<String>,
     starting_at: Option<String>,
     ending_before: Option<String>,
 }
@@ -1129,17 +1141,43 @@ struct RevokeSpendingTargetHttpResponse {
     target: SpendingTargetHttpResponse,
 }
 
+/// An exact amount: `units` of 10^-`scale` of `currency`, as an integer
+/// string, plus an adaptive human-readable `display`. Legacy `*_cents`
+/// fields beside it are conservative projections.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct MoneyHttpResponse {
+    units: String,
+    scale: u32,
+    currency: String,
+    display: String,
+}
+
+impl MoneyHttpResponse {
+    fn new(amount: Amount, currency: Currency) -> Self {
+        Self {
+            units: amount.units().to_string(),
+            scale: hubu_common::money::ACCOUNTING_SCALE,
+            currency: currency.to_string(),
+            display: amount.display(),
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct BudgetHttpResponse {
     budget_id: String,
     agent_id: String,
     current_version_id: String,
     current_revision: u64,
+    amount_limit: MoneyHttpResponse,
     amount_limit_cents: i64,
     currency: String,
     starting_at: String,
     ending_before: Option<String>,
     status: String,
+    consumed_amount: MoneyHttpResponse,
+    frozen_amount: MoneyHttpResponse,
+    remaining_amount: MoneyHttpResponse,
     consumed_amount_cents: i64,
     frozen_amount_cents: i64,
     remaining_amount_cents: i64,
@@ -1151,6 +1189,7 @@ struct BudgetVersionHttpResponse {
     revision: u64,
     predecessor_version_id: Option<String>,
     predecessor_revision: Option<u64>,
+    amount_limit: MoneyHttpResponse,
     amount_limit_cents: i64,
     effective_at: String,
     actor: String,
@@ -1179,6 +1218,9 @@ enum BudgetVersionHttpError {
 #[derive(Debug, Serialize)]
 struct SpendingTargetHttpResponse {
     target_id: String,
+    target_amount: MoneyHttpResponse,
+    allocated_amount: MoneyHttpResponse,
+    exceeded_by: MoneyHttpResponse,
     target_amount_cents: i64,
     allocated_amount_cents: i64,
     exceeded_by_cents: i64,
@@ -1192,6 +1234,9 @@ struct SpendingTargetHttpResponse {
 #[derive(Debug, Serialize)]
 struct SpendingTargetWarningHttpResponse {
     target_id: String,
+    target_amount: MoneyHttpResponse,
+    allocated_amount: MoneyHttpResponse,
+    exceeded_by: MoneyHttpResponse,
     target_amount_cents: i64,
     allocated_amount_cents: i64,
     exceeded_by_cents: i64,
@@ -1280,6 +1325,7 @@ struct SpendApprovalReviewHttpResponse {
     operation_key: String,
     account_id: String,
     agent_id: String,
+    amount: MoneyHttpResponse,
     amount_cents: i64,
     currency: String,
     merchant: Option<String>,
@@ -1506,6 +1552,10 @@ struct ExecutorSpendSettlementHttpResponse {
 
 #[derive(Debug, Serialize)]
 struct ExecutorSpendSettlementReceiptHttpResponse {
+    authorized_max: MoneyHttpResponse,
+    budget_charge: MoneyHttpResponse,
+    released_amount: MoneyHttpResponse,
+    overrun_amount: MoneyHttpResponse,
     authorized_max_cents: i64,
     actual_vendor_cost: SpendExecutorVendorCost,
     /// v4.3 compatibility projection of the conservative budget charge.
@@ -1525,6 +1575,10 @@ struct BudgetHoldHttpResponse {
     hold_id: String,
     budget_id: String,
     status: String,
+    amount: MoneyHttpResponse,
+    consumed_amount: MoneyHttpResponse,
+    frozen_amount: MoneyHttpResponse,
+    remaining_amount: MoneyHttpResponse,
     amount_cents: i64,
     consumed_amount_cents: i64,
     frozen_amount_cents: i64,
@@ -1601,9 +1655,10 @@ fn handle_connection(mut stream: TcpStream, state: &ServerState) -> Result<()> {
     }
     let method = request.method.clone();
     let path = request.path.clone();
+    let deprecated_amounts = uses_only_legacy_amount_fields(&request);
     let response = route(request, state);
     let status = response.status;
-    write_response(&mut stream, response)
+    write_response(&mut stream, response, deprecated_amounts)
         .with_context(|| format!("write response for request {request_id}"))?;
     if operational_probe {
         if !(200..300).contains(&status) {
@@ -3025,18 +3080,31 @@ fn hex_encode(bytes: &[u8]) -> String {
 /// The requested spend amount: the exact decimal `amount`, or the deprecated
 /// whole-cent `amount_cents`. Exactly one must be sent, and it must be positive.
 fn requested_spend_amount(amount: Option<&str>, amount_cents: Option<i64>) -> Result<Amount> {
-    let requested = match (amount, amount_cents) {
+    decimal_or_legacy_cents(amount, amount_cents, "amount", "amount_cents", "spend")
+}
+
+/// Reads an amount sent either as an exact decimal string (`field`) or as
+/// deprecated whole cents (`legacy_field`). Exactly one must be sent, it must
+/// be positive, and decimals allow at most 6 fractional digits.
+fn decimal_or_legacy_cents(
+    decimal: Option<&str>,
+    cents: Option<i64>,
+    field: &str,
+    legacy_field: &str,
+    subject: &str,
+) -> Result<Amount> {
+    let requested = match (decimal, cents) {
         (Some(_), Some(_)) => {
             return Err(anyhow!(
-                "send either `amount` or the deprecated `amount_cents`, not both"
+                "send either `{field}` or the deprecated `{legacy_field}`, not both"
             ))
         }
-        (Some(amount), None) => amount.parse::<Amount>()?,
+        (Some(decimal), None) => decimal.parse::<Amount>()?,
         (None, Some(cents)) => legacy_cents_amount(cents)?,
-        (None, None) => return Err(anyhow!("spend requires `amount`")),
+        (None, None) => return Err(anyhow!("{subject} requires `{field}`")),
     };
     if requested <= Amount::ZERO {
-        return Err(anyhow!("spend amount must be positive"));
+        return Err(anyhow!("{subject} amount must be positive"));
     }
     Ok(requested)
 }
@@ -3546,9 +3614,13 @@ fn create_budget_at(
     now: DateTime<Utc>,
 ) -> Result<CreateBudgetHttpResponse> {
     let request: CreateBudgetHttpRequest = serde_json::from_str(&body)?;
-    if request.amount_cents <= 0 {
-        return Err(anyhow!("budget amount must be positive"));
-    }
+    let amount_limit = decimal_or_legacy_cents(
+        request.amount.as_deref(),
+        request.amount_cents,
+        "amount",
+        "amount_cents",
+        "budget",
+    )?;
     let budget_currency = normalize_spend_currency(request.currency.as_deref())?;
 
     let authenticated_user = authenticated_user(state)?;
@@ -3566,7 +3638,7 @@ fn create_budget_at(
         .create_single_budget_with_provenance(
             CreateSingleBudgetRequest {
                 agent_id: agent_id.clone(),
-                amount_limit: legacy_cents_amount(request.amount_cents)?,
+                amount_limit,
                 currency: budget_currency,
                 period,
             },
@@ -3605,9 +3677,13 @@ fn create_budget_at(
 
 fn set_spending_target(body: String, state: &ServerState) -> Result<SetSpendingTargetHttpResponse> {
     let request: SetSpendingTargetHttpRequest = serde_json::from_str(&body)?;
-    if request.amount_cents <= 0 {
-        return Err(anyhow!("spending target amount must be positive"));
-    }
+    let target_amount = decimal_or_legacy_cents(
+        request.amount.as_deref(),
+        request.amount_cents,
+        "amount",
+        "amount_cents",
+        "spending target",
+    )?;
 
     let user = authenticated_user_context(state)?;
     let period = TimePeriod::new(
@@ -3621,7 +3697,7 @@ fn set_spending_target(body: String, state: &ServerState) -> Result<SetSpendingT
         .map_err(|_| anyhow!("spending target manager lock poisoned"))?
         .create_target(CreateSpendingTargetRequest {
             owner_user_id: user.user_id.clone(),
-            target_amount: legacy_cents_amount(request.amount_cents)?,
+            target_amount,
             currency: Currency::Usd,
             period,
         })?;
@@ -3801,9 +3877,14 @@ fn update_budget_limit_at(
         return Err(BudgetVersionHttpError::NotFound);
     }
     let request = parse_update_budget_limit_request(&body)?;
-    if request.amount_limit_cents <= 0 {
-        return Err(BudgetVersionHttpError::InvalidAmount);
-    }
+    let amount_limit = decimal_or_legacy_cents(
+        request.amount_limit.as_deref(),
+        request.amount_limit_cents,
+        "amount_limit",
+        "amount_limit_cents",
+        "budget update",
+    )
+    .map_err(|_| BudgetVersionHttpError::InvalidAmount)?;
     let expected_revision = u64::try_from(request.expected_revision)
         .ok()
         .filter(|revision| *revision > 0)
@@ -3826,8 +3907,7 @@ fn update_budget_limit_at(
             UpdateBudgetLimitRequest {
                 budget_id,
                 expected_revision,
-                amount_limit: Amount::from_legacy_cents(request.amount_limit_cents)
-                    .map_err(|_| BudgetVersionHttpError::InvalidAmount)?,
+                amount_limit,
                 actor: authenticated_user.pub_id,
                 source: Some(BUDGET_UPDATE_SOURCE.to_string()),
                 reason: request.reason,
@@ -3843,8 +3923,11 @@ fn update_budget_limit_at(
         state,
     )
     .map_err(BudgetVersionHttpError::UpdateInternal)?;
-    let applied_version =
-        budget_version_http_response(result.applied_version, Some(result.predecessor_revision));
+    let applied_version = budget_version_http_response(
+        result.applied_version,
+        Some(result.predecessor_revision),
+        result.current.budget.currency,
+    );
     let current_budget = budget_response_at(result.current, state, now)
         .map_err(BudgetVersionHttpError::UpdateInternal)?;
     Ok(UpdateBudgetLimitHttpResponse {
@@ -3880,6 +3963,7 @@ fn budget_version_history_at(
         (current, versions)
     };
 
+    let currency = current.budget.currency;
     Ok(BudgetVersionHistoryHttpResponse {
         current_budget: budget_response_at(current, state, now)
             .map_err(BudgetVersionHttpError::ReadInternal)?,
@@ -3890,7 +3974,7 @@ fn budget_version_history_at(
                     .predecessor_version_id
                     .as_ref()
                     .and_then(|_| version.revision.checked_sub(1));
-                budget_version_http_response(version, predecessor_revision)
+                budget_version_http_response(version, predecessor_revision, currency)
             })
             .collect(),
     })
@@ -3907,7 +3991,14 @@ fn parse_update_budget_limit_request(
     if !object.get("expected_revision").is_some_and(Value::is_i64) {
         return Err(BudgetVersionHttpError::InvalidRevision);
     }
-    if !object.get("amount_limit_cents").is_some_and(Value::is_i64) {
+    let legacy = object.get("amount_limit_cents");
+    let decimal = object.get("amount_limit");
+    let valid_amount = match (decimal, legacy) {
+        (Some(decimal), None) => decimal.is_string(),
+        (None, Some(legacy)) => legacy.is_i64(),
+        _ => false,
+    };
+    if !valid_amount {
         return Err(BudgetVersionHttpError::InvalidAmount);
     }
     serde_json::from_value(value).map_err(|_| BudgetVersionHttpError::InvalidAmount)
@@ -4203,6 +4294,7 @@ fn approval_review_response(
             operation_key,
             account_id,
             agent_id,
+            amount: MoneyHttpResponse::new(request.amount, request.currency),
             amount_cents: request.amount.legacy_cents_ceil(),
             currency: request.currency.to_string(),
             merchant: request.merchant.clone(),
@@ -4841,6 +4933,10 @@ fn settle_executor_spend_request(
         claim_id: claim_state.claim.id.to_string(),
         status: executor_claim_status_name(&claim_state.claim.status).to_string(),
         receipt: ExecutorSpendSettlementReceiptHttpResponse {
+            authorized_max: MoneyHttpResponse::new(receipt.authorized_max, receipt.currency),
+            budget_charge: MoneyHttpResponse::new(receipt.budget_charge, receipt.currency),
+            released_amount: MoneyHttpResponse::new(receipt.released_amount, receipt.currency),
+            overrun_amount: MoneyHttpResponse::new(receipt.overrun_amount, receipt.currency),
             authorized_max_cents: receipt.authorized_max.legacy_cents_ceil(),
             actual_vendor_cost: receipt.receipt.actual_vendor_cost.clone(),
             actual_vendor_cost_cents: receipt.budget_charge.legacy_cents_ceil(),
@@ -5816,6 +5912,19 @@ fn budget_hold_response(update: BudgetHoldUpdate) -> BudgetHoldHttpResponse {
             hold_id: response.hold.id.to_string(),
             budget_id: public_budget_id(&response.hold.budget_id),
             status: "settled".to_string(),
+            amount: MoneyHttpResponse::new(response.hold.amount, response.hold.currency),
+            consumed_amount: MoneyHttpResponse::new(
+                response.balance.consumed_amount,
+                response.hold.currency,
+            ),
+            frozen_amount: MoneyHttpResponse::new(
+                response.balance.frozen_amount,
+                response.hold.currency,
+            ),
+            remaining_amount: MoneyHttpResponse::new(
+                response.balance.remaining_amount,
+                response.hold.currency,
+            ),
             amount_cents: response.hold.amount.legacy_cents_ceil(),
             consumed_amount_cents: response.balance.consumed_amount.legacy_cents_ceil(),
             frozen_amount_cents: response.balance.frozen_amount.legacy_cents_ceil(),
@@ -5825,6 +5934,19 @@ fn budget_hold_response(update: BudgetHoldUpdate) -> BudgetHoldHttpResponse {
             hold_id: response.hold.id.to_string(),
             budget_id: public_budget_id(&response.hold.budget_id),
             status: "released".to_string(),
+            amount: MoneyHttpResponse::new(response.hold.amount, response.hold.currency),
+            consumed_amount: MoneyHttpResponse::new(
+                response.balance.consumed_amount,
+                response.hold.currency,
+            ),
+            frozen_amount: MoneyHttpResponse::new(
+                response.balance.frozen_amount,
+                response.hold.currency,
+            ),
+            remaining_amount: MoneyHttpResponse::new(
+                response.balance.remaining_amount,
+                response.hold.currency,
+            ),
             amount_cents: response.hold.amount.legacy_cents_ceil(),
             consumed_amount_cents: response.balance.consumed_amount.legacy_cents_ceil(),
             frozen_amount_cents: response.balance.frozen_amount.legacy_cents_ceil(),
@@ -5839,6 +5961,19 @@ fn frozen_budget_hold_response(response: ReserveBudgetResponse) -> BudgetHoldHtt
         hold_id: response.hold.id.to_string(),
         budget_id: public_budget_id(&response.hold.budget_id),
         status: "frozen".to_string(),
+        amount: MoneyHttpResponse::new(response.hold.amount, response.hold.currency),
+        consumed_amount: MoneyHttpResponse::new(
+            response.balance.consumed_amount,
+            response.hold.currency,
+        ),
+        frozen_amount: MoneyHttpResponse::new(
+            response.balance.frozen_amount,
+            response.hold.currency,
+        ),
+        remaining_amount: MoneyHttpResponse::new(
+            response.balance.remaining_amount,
+            response.hold.currency,
+        ),
         amount_cents: response.hold.amount.legacy_cents_ceil(),
         consumed_amount_cents: response.balance.consumed_amount.legacy_cents_ceil(),
         frozen_amount_cents: response.balance.frozen_amount.legacy_cents_ceil(),
@@ -5854,6 +5989,10 @@ fn budget_hold_state_response(
         hold_id: hold.id.to_string(),
         budget_id: public_budget_id(&hold.budget_id),
         status: budget_hold_status_name(&hold.status).to_string(),
+        amount: MoneyHttpResponse::new(hold.amount, hold.currency),
+        consumed_amount: MoneyHttpResponse::new(balance.consumed_amount, hold.currency),
+        frozen_amount: MoneyHttpResponse::new(balance.frozen_amount, hold.currency),
+        remaining_amount: MoneyHttpResponse::new(balance.remaining_amount, hold.currency),
         amount_cents: hold.amount.legacy_cents_ceil(),
         consumed_amount_cents: balance.consumed_amount.legacy_cents_ceil(),
         frozen_amount_cents: balance.frozen_amount.legacy_cents_ceil(),
@@ -5883,6 +6022,7 @@ fn evaluated_budget_response(
         agent_id: registration_agent_pub_id(&current.budget.agent_id, state)?,
         current_version_id: public_budget_version_id(&current.version.id),
         current_revision: current.version.revision,
+        amount_limit: MoneyHttpResponse::new(current.version.amount_limit, current.budget.currency),
         amount_limit_cents: current.version.amount_limit.legacy_cents_floor(),
         currency: current.budget.currency.to_string(),
         starting_at: current.budget.period.starting_at.to_rfc3339(),
@@ -5892,6 +6032,18 @@ fn evaluated_budget_response(
             .ending_before
             .map(|ending_before| ending_before.to_rfc3339()),
         status: budget.availability.as_str().to_string(),
+        consumed_amount: MoneyHttpResponse::new(
+            current.balance.consumed_amount,
+            current.budget.currency,
+        ),
+        frozen_amount: MoneyHttpResponse::new(
+            current.balance.frozen_amount,
+            current.budget.currency,
+        ),
+        remaining_amount: MoneyHttpResponse::new(
+            current.balance.remaining_amount,
+            current.budget.currency,
+        ),
         consumed_amount_cents: current.balance.consumed_amount.legacy_cents_ceil(),
         frozen_amount_cents: current.balance.frozen_amount.legacy_cents_ceil(),
         remaining_amount_cents: current.balance.remaining_amount.legacy_cents_floor(),
@@ -5901,6 +6053,7 @@ fn evaluated_budget_response(
 fn budget_version_http_response(
     version: BudgetVersion,
     predecessor_revision: Option<u64>,
+    currency: Currency,
 ) -> BudgetVersionHttpResponse {
     debug_assert_eq!(
         version.predecessor_version_id.is_some(),
@@ -5914,6 +6067,7 @@ fn budget_version_http_response(
             .as_ref()
             .map(public_budget_version_id),
         predecessor_revision,
+        amount_limit: MoneyHttpResponse::new(version.amount_limit, currency),
         amount_limit_cents: version.amount_limit.legacy_cents_floor(),
         effective_at: version.effective_at.to_rfc3339(),
         actor: public_budget_version_actor(version.actor),
@@ -5935,18 +6089,20 @@ fn spending_target_response(
     target: SpendingTarget,
     state: &ServerState,
 ) -> Result<SpendingTargetHttpResponse> {
-    let allocated_amount_cents = max_concurrent_allocated_amount(
+    let allocated = max_concurrent_allocated_amount(
         &budgets_for_user_id(&target.owner_user_id, state)?,
         &target,
     );
-    let exceeded_by_cents =
-        (allocated_amount_cents - target.target_amount.legacy_cents_floor()).max(0);
+    let exceeded_by = spending_target_excess(allocated, target.target_amount);
     Ok(SpendingTargetHttpResponse {
         target_id: public_spending_target_id(&target.id),
+        target_amount: MoneyHttpResponse::new(target.target_amount, target.currency),
+        allocated_amount: MoneyHttpResponse::new(allocated, target.currency),
+        exceeded_by: MoneyHttpResponse::new(exceeded_by, target.currency),
         target_amount_cents: target.target_amount.legacy_cents_floor(),
-        allocated_amount_cents,
-        exceeded_by_cents,
-        is_exceeded: exceeded_by_cents > 0,
+        allocated_amount_cents: allocated.legacy_cents_ceil(),
+        exceeded_by_cents: exceeded_by.legacy_cents_ceil(),
+        is_exceeded: exceeded_by > Amount::ZERO,
         currency: target.currency.to_string(),
         starting_at: target.period.starting_at.to_rfc3339(),
         ending_before: target
@@ -5981,16 +6137,20 @@ fn spending_target_warnings_for_periods(
                     .any(|period| periods_overlap(&target.period, period))
         })
         .filter_map(|target| {
-            let allocated_amount_cents = max_concurrent_allocated_amount(&budgets, &target);
-            let exceeded_by_cents =
-                (allocated_amount_cents - target.target_amount.legacy_cents_floor()).max(0);
-            (exceeded_by_cents > 0).then(|| SpendingTargetWarningHttpResponse {
+            let allocated = max_concurrent_allocated_amount(&budgets, &target);
+            let exceeded_by = spending_target_excess(allocated, target.target_amount);
+            (exceeded_by > Amount::ZERO).then(|| SpendingTargetWarningHttpResponse {
                 target_id: public_spending_target_id(&target.id),
+                target_amount: MoneyHttpResponse::new(target.target_amount, target.currency),
+                allocated_amount: MoneyHttpResponse::new(allocated, target.currency),
+                exceeded_by: MoneyHttpResponse::new(exceeded_by, target.currency),
                 target_amount_cents: target.target_amount.legacy_cents_floor(),
-                allocated_amount_cents,
-                exceeded_by_cents,
+                allocated_amount_cents: allocated.legacy_cents_ceil(),
+                exceeded_by_cents: exceeded_by.legacy_cents_ceil(),
                 message: format!(
-                    "agent budget allocations exceed the advisory spending target by {exceeded_by_cents} cents; the budget change was not blocked"
+                    "agent budget allocations exceed the advisory spending target by {} {}; the budget change was not blocked",
+                    target.currency.to_string().to_ascii_uppercase(),
+                    exceeded_by.display()
                 ),
             })
         })
@@ -6001,8 +6161,11 @@ fn budgets_for_user_id(user_id: &UserId, state: &ServerState) -> Result<Vec<Budg
     budgets_for_user(&UserContext::new(user_id.clone()), state)
 }
 
-fn max_concurrent_allocated_amount(budgets: &[BudgetWithBalance], target: &SpendingTarget) -> i64 {
-    let mut changes = BTreeMap::<DateTime<Utc>, i64>::new();
+fn max_concurrent_allocated_amount(
+    budgets: &[BudgetWithBalance],
+    target: &SpendingTarget,
+) -> Amount {
+    let mut changes = BTreeMap::<DateTime<Utc>, i128>::new();
     for budget in budgets.iter().filter(|budget| {
         budget.budget.currency == target.currency
             && budget.budget.administrative_state != BudgetAdministrativeState::Revoked
@@ -6025,21 +6188,28 @@ fn max_concurrent_allocated_amount(budgets: &[BudgetWithBalance], target: &Spend
         if ending_before.is_some_and(|ending_before| ending_before <= starting_at) {
             continue;
         }
-        *changes.entry(starting_at).or_default() +=
-            budget.version.amount_limit.legacy_cents_floor();
+        let limit = i128::from(budget.version.amount_limit.units());
+        *changes.entry(starting_at).or_default() += limit;
         if let Some(ending_before) = ending_before {
-            *changes.entry(ending_before).or_default() -=
-                budget.version.amount_limit.legacy_cents_floor();
+            *changes.entry(ending_before).or_default() -= limit;
         }
     }
 
-    let mut allocated = 0_i64;
-    let mut maximum = 0_i64;
+    let mut allocated = 0_i128;
+    let mut maximum = 0_i128;
     for change in changes.values() {
         allocated += change;
         maximum = maximum.max(allocated);
     }
-    maximum
+    Amount::from_units(i64::try_from(maximum).unwrap_or(i64::MAX))
+}
+
+/// How far concurrent allocations exceed an advisory target (never negative).
+fn spending_target_excess(allocated: Amount, target: Amount) -> Amount {
+    allocated
+        .checked_sub(target)
+        .unwrap_or(Amount::from_units(i64::MAX))
+        .max(Amount::ZERO)
 }
 
 fn spending_target_status_name(target: &SpendingTarget) -> &'static str {
@@ -6335,7 +6505,30 @@ fn query_flag(request: &HttpRequest, name: &str) -> bool {
         .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes"))
 }
 
-fn write_response(stream: &mut TcpStream, response: HttpResponse) -> Result<()> {
+/// Whether a POST sends an amount only through a deprecated whole-cent field
+/// (for example `amount_cents` without `amount`). Such responses carry a
+/// `Deprecation` header; the request itself still works for one release.
+fn uses_only_legacy_amount_fields(request: &HttpRequest) -> bool {
+    if request.method != "POST" {
+        return false;
+    }
+    let (legacy, current) = match request.path.as_str() {
+        "/budgets" | "/user/spending-target" | "/spend" | "/spend/authorize" => {
+            ("amount_cents", "amount")
+        }
+        "/policies" => ("daily_limit_cents", "daily_limit"),
+        path if budget_versions_public_id(path).is_some() => ("amount_limit_cents", "amount_limit"),
+        _ => return false,
+    };
+    serde_json::from_str::<Value>(&request.body)
+        .is_ok_and(|body| body.get(legacy).is_some() && body.get(current).is_none())
+}
+
+fn write_response(
+    stream: &mut impl Write,
+    response: HttpResponse,
+    deprecated_amounts: bool,
+) -> Result<()> {
     let body = response.body.to_string();
     let status_text = match response.status {
         200 => "OK",
@@ -6346,12 +6539,20 @@ fn write_response(stream: &mut TcpStream, response: HttpResponse) -> Result<()> 
         500 => "Internal Server Error",
         _ => "Bad Request",
     };
+    // `Deprecation: true` marks requests that used whole-cent amount fields;
+    // `Link` points at the replacement fields' documentation.
+    let deprecation = if deprecated_amounts {
+        "Deprecation: true\r\nLink: <https://github.com/hacker-no-ice/hubu/blob/main/docs/api-amounts.md>; rel=\"deprecation\"\r\n"
+    } else {
+        ""
+    };
     write!(
         stream,
-        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{}Connection: close\r\n\r\n{}",
         response.status,
         status_text,
         body.len(),
+        deprecation,
         body
     )?;
     Ok(())
@@ -9317,6 +9518,150 @@ lease_profiles:
         )
         .expect("read-only resolution must leave the token claimable");
         assert_eq!(claim.status, "claimed");
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn legacy_only_amount_requests_get_a_deprecation_header() {
+        let request = |path: &str, body: Value| {
+            let mut request = authenticated_json_request(path, body);
+            request.method = "POST".to_string();
+            request
+        };
+        for (path, body, deprecated) in [
+            ("/budgets", json!({"amount_cents": 500}), true),
+            ("/budgets", json!({"amount": "5.00"}), false),
+            ("/spend/authorize", json!({"amount_cents": 1}), true),
+            ("/spend/authorize", json!({"amount": "0.005"}), false),
+            ("/user/spending-target", json!({"amount_cents": 1}), true),
+            ("/policies", json!({"daily_limit_cents": 500}), true),
+            ("/policies", json!({"daily_limit": "5.00"}), false),
+            (
+                "/budgets/bgt_abc/versions",
+                json!({"amount_limit_cents": 1}),
+                true,
+            ),
+            (
+                "/budgets/bgt_abc/versions",
+                json!({"amount_limit": "0.01"}),
+                false,
+            ),
+            ("/budgets/revoke", json!({"amount_cents": 1}), false),
+        ] {
+            assert_eq!(
+                uses_only_legacy_amount_fields(&request(path, body.clone())),
+                deprecated,
+                "{path} {body}"
+            );
+        }
+        let mut written = Vec::new();
+        write_response(
+            &mut written,
+            HttpResponse {
+                status: 200,
+                body: json!({}),
+            },
+            true,
+        )
+        .unwrap();
+        let written = String::from_utf8(written).unwrap();
+        assert!(written.contains("\r\nDeprecation: true\r\n"), "{written}");
+        assert!(written.contains("rel=\"deprecation\""), "{written}");
+        let mut plain = Vec::new();
+        write_response(
+            &mut plain,
+            HttpResponse {
+                status: 200,
+                body: json!({}),
+            },
+            false,
+        )
+        .unwrap();
+        assert!(!String::from_utf8(plain).unwrap().contains("Deprecation"));
+    }
+
+    #[test]
+    fn exact_decimal_amounts_round_trip_with_conservative_cent_projections() {
+        let path =
+            std::env::temp_dir().join(format!("hubu-api-exact-amounts-{}.sqlite", UserId::new()));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        init(
+            json!({"display_name": "Alice Example", "email": "alice@example.com"}).to_string(),
+            &state,
+        )
+        .unwrap();
+        let agent = register_agent(
+            json!({"name": "exact-amounts-agent", "version": "v1"}).to_string(),
+            &state,
+        )
+        .unwrap();
+        add_policy(
+            json!({"agent_id": agent.agent_id, "daily_limit": "5.00"}).to_string(),
+            &state,
+        )
+        .unwrap();
+
+        let created = create_budget(
+            json!({"agent_id": agent.agent_id, "amount": "0.015"}).to_string(),
+            &state,
+        )
+        .unwrap();
+        let budget = serde_json::to_value(&created).unwrap()["budget"].clone();
+        assert_eq!(
+            budget["amount_limit"],
+            json!({"units": "15000", "scale": 6, "currency": "usd", "display": "0.015"})
+        );
+        assert_eq!(budget["amount_limit_cents"], 1, "limits project down");
+
+        let authorization = authorize_spend(
+            json!({
+                "operation_key": "exact-amounts",
+                "account_id": agent.account_id,
+                "amount": "0.005",
+                "reason": "sub-cent call",
+                "merchant": "gongbu.image",
+            })
+            .to_string(),
+            &state,
+        )
+        .unwrap();
+        assert_eq!(authorization.decision, "allow");
+        let hold = serde_json::to_value(&authorization).unwrap()["budget_hold"].clone();
+        assert_eq!(hold["amount"]["units"], "5000");
+        assert_eq!(hold["amount"]["display"], "0.005");
+        assert_eq!(hold["amount_cents"], 1, "holds project up");
+        assert_eq!(hold["frozen_amount_cents"], 1, "frozen projects up");
+        assert_eq!(hold["remaining_amount"]["units"], "10000");
+        assert_eq!(hold["remaining_amount_cents"], 1, "remaining projects down");
+
+        let budget_id = budget["budget_id"].as_str().unwrap().to_string();
+        let updated = update_budget_limit_at(
+            &budget_id,
+            json!({"amount_limit": "0.0051", "expected_revision": 1}).to_string(),
+            &state,
+            Utc::now(),
+        )
+        .unwrap();
+        let updated = serde_json::to_value(&updated).unwrap();
+        assert_eq!(updated["applied_version"]["amount_limit"]["units"], "5100");
+        assert!(update_budget_limit_at(
+            &budget_id,
+            json!({"amount_limit": "1", "amount_limit_cents": 100, "expected_revision": 2})
+                .to_string(),
+            &state,
+            Utc::now(),
+        )
+        .is_err());
+
+        let error = create_budget(
+            json!({"agent_id": agent.agent_id, "amount": "1", "amount_cents": 100}).to_string(),
+            &state,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("not both"), "{error}");
+        let target = set_spending_target(json!({"amount": "0.25"}).to_string(), &state).unwrap();
+        let target = serde_json::to_value(&target).unwrap();
+        assert_eq!(target["target"]["target_amount"]["display"], "0.25");
         std::fs::remove_file(path).ok();
     }
 

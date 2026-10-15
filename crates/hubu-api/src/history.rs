@@ -408,6 +408,9 @@ pub(super) fn ledger(request: &HttpRequest, state: &ServerState) -> Result<Value
         json!({"budget_id":public_budget_id(id),
         "agent_id":query.get("agent_id"),
         "currency":budget.currency.to_string(),
+        "consumed_amount":money(balance.consumed_amount,budget.currency),
+        "recorded_budget_charges":money(total,budget.currency),
+        "unaccounted_consumption":money(unaccounted,budget.currency),
         "consumed_amount_cents":balance.consumed_amount.legacy_cents_ceil(),
         "recorded_budget_charges_cents":total.legacy_cents_ceil(),
         "unaccounted_consumption_cents":unaccounted.legacy_cents_ceil(),
@@ -509,6 +512,10 @@ fn authorization_record(
     let receipt = receipt.map(|r| {
         json!({"settlement_id":r.settlement_id,
         "created_at":r.created_at.to_rfc3339(),
+        "authorized_max":money(r.authorized_max,r.currency),
+        "budget_charge":money(r.budget_charge,r.currency),
+        "released_amount":money(r.released_amount,r.currency),
+        "overrun_amount":money(r.overrun_amount,r.currency),
         "authorized_max_cents":r.authorized_max.legacy_cents_ceil(),
         "actual_vendor_cost":{"amount":r.receipt.actual_vendor_cost.amount.to_string(),
         "scale":r.receipt.actual_vendor_cost.scale,
@@ -532,6 +539,7 @@ fn authorization_record(
         "policy_decision":effect_name(decision.evaluation.decision),
         "status":status,
         "release_reason":data.void_reasons.get(&decision.id),
+        "authorized_max":money(decision.request.amount,decision.request.currency),
         "authorized_max_cents":decision.request.amount.legacy_cents_ceil(),
         "currency":decision.request.currency.to_string(),
         "provider":provider.as_ref().map(|p|&p["provider"]),
@@ -539,6 +547,7 @@ fn authorization_record(
         "budget_hold":hold.map(|h|json!({"id":h.id,
         "budget_id":public_budget_id(&h.budget_id),
         "budget_version_id":public_budget_version_id(&h.budget_version_id),
+        "amount":money(h.amount,h.currency),
         "amount_cents":h.amount.legacy_cents_ceil(),
         "currency":h.currency.to_string(),
         "status":effective_hold_status(h,now),
@@ -612,6 +621,11 @@ fn chain_charge_totals(data: &HistorySnapshot) -> Result<ChainChargeTotals> {
 /// charge. Summing the rows of a chain therefore always equals the cent
 /// projection of its total, whether the chain mixes legacy cent postings and
 /// µ corrections or reverses a sub-cent charge.
+/// An exact money object for history responses (see `MoneyHttpResponse`).
+fn money(amount: Amount, currency: Currency) -> Value {
+    to_json(MoneyHttpResponse::new(amount, currency))
+}
+
 fn legacy_budget_charge_delta_cents(
     record: &TransactionRecord,
     chain_totals: &ChainChargeTotals,
@@ -846,6 +860,10 @@ pub(super) fn watch(request: &HttpRequest, state: &ServerState) -> Result<Value>
         rows.push(json!({"agent_id":agent.agent_id, "name":agent.display_name,
             "currency":currency, "budget_id":selected.map(|(b,_)|public_budget_id(&b.id)),
             "budget_count":budgets.len(), "budget_selection":if operation_budget.is_some() {"operation"} else {"tightest"},
+            "limit":selected.and_then(|(b,_)|data.current_budget_versions.iter().find(|v|v.id==b.current_version_id).map(|v|money(v.amount_limit,b.currency))),
+            "available":selected.map(|(b,v)|money(v.remaining_amount,b.currency)),
+            "frozen":selected.map(|(b,v)|money(v.frozen_amount,b.currency)),
+            "consumed":selected.map(|(b,v)|money(v.consumed_amount,b.currency)),
             "limit_cents":selected.and_then(|(b,_)|data.current_budget_versions.iter().find(|v|v.id==b.current_version_id).map(|v|v.amount_limit.legacy_cents_floor())),
             "available_cents":selected.map(|(_,v)|v.remaining_amount.legacy_cents_floor()),
             "frozen_cents":selected.map(|(_,v)|v.frozen_amount.legacy_cents_ceil()),
@@ -876,6 +894,9 @@ pub(super) fn watch(request: &HttpRequest, state: &ServerState) -> Result<Value>
             "provider":record["provider"], "rule_ids":rules,
             "status":record["status"], "currency":record["currency"],
             "release_reason":record["release_reason"],
+            "reserved":record["budget_hold"]["amount"],
+            "requested":money(d.request.amount,d.request.currency),
+            "budget_charge":record["receipt"]["budget_charge"],
             "reserved_cents":record["budget_hold"]["amount_cents"],
             "requested_cents":d.request.amount.legacy_cents_ceil(),
             "settled_cost":record["receipt"]["actual_vendor_cost"],
