@@ -903,15 +903,37 @@ impl SpendApprovalService {
     {
         // Wallet rails move whole US-dollar cents. Other currencies settle
         // through executors, and a sub-cent authorization can never be
-        // charged exactly, so refuse both before any money moves.
-        if authorization.currency != Currency::Usd {
-            return Err(SpendApprovalError::UnsupportedPaymentCurrency(
-                authorization.currency,
-            ));
-        }
+        // charged exactly, so refuse both before any money moves and return
+        // the reservation, as a failed payment does.
         let amount_cents = authorization.amount.legacy_cents_ceil();
-        if authorization.amount.legacy_cents_floor() != amount_cents {
-            return Err(SpendApprovalError::SubCentPaymentRail(authorization.amount));
+        let refusal = if authorization.currency != Currency::Usd {
+            Some(SpendApprovalError::UnsupportedPaymentCurrency(
+                authorization.currency,
+            ))
+        } else if authorization.amount.legacy_cents_floor() != amount_cents {
+            Some(SpendApprovalError::SubCentPaymentRail(authorization.amount))
+        } else {
+            None
+        };
+        if let Some(refusal) = refusal {
+            if matches!(
+                authorization.budget_reservation.hold.status,
+                crate::budget::BudgetHoldStatus::Frozen
+            ) {
+                let budget_release =
+                    release_authorized_hold(budget_manager, &authorization.budget_reservation)?;
+                governance.update_budget_hold(&budget_release.hold, &budget_release.balance)?;
+                log_event(
+                    "warn",
+                    "payment_refused_budget_released",
+                    json!({
+                        "decision_id": authorization.evaluation.decision_id.to_string(),
+                        "hold_id": budget_release.hold.id.to_string(),
+                        "error": refusal.to_string(),
+                    }),
+                );
+            }
+            return Err(refusal);
         }
         let payment_request = PaymentRequest {
             idempotency_key: payment_spec.idempotency_key,

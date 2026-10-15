@@ -9666,6 +9666,83 @@ lease_profiles:
     }
 
     #[test]
+    fn refused_wallet_payments_return_their_reservation() {
+        let path =
+            std::env::temp_dir().join(format!("hubu-api-wallet-refusal-{}.sqlite", UserId::new()));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        init(
+            json!({"display_name": "Alice Example", "email": "alice@example.com"}).to_string(),
+            &state,
+        )
+        .unwrap();
+        let agent = register_agent(
+            json!({"name": "wallet-refusal-agent", "version": "v1"}).to_string(),
+            &state,
+        )
+        .unwrap();
+        add_policy(
+            json!({"agent_id": agent.agent_id, "daily_limit_cents": 500}).to_string(),
+            &state,
+        )
+        .unwrap();
+        create_test_agent_budget(&state, &agent.agent_id, 500);
+        create_budget(
+            json!({"agent_id": agent.agent_id, "amount": "5", "currency": "usdc"}).to_string(),
+            &state,
+        )
+        .unwrap();
+        let frozen = |currency: Currency| {
+            let agent_id = resolve_agent_id_for_user(
+                &agent.agent_id,
+                &authenticated_user_context(&state).unwrap(),
+                &state,
+            )
+            .unwrap();
+            state
+                .budgets
+                .lock()
+                .unwrap()
+                .get_budgets_by_agent_id(&agent_id)
+                .into_iter()
+                .find(|budget| budget.budget.currency == currency)
+                .unwrap()
+                .balance
+                .frozen_amount
+        };
+        for (operation_key, amount, currency, expected) in [
+            (
+                "sub-cent-wallet",
+                "0.005",
+                "usd",
+                "cannot pay a sub-cent authorization",
+            ),
+            ("usdc-wallet", "1", "usdc", "usdc"),
+        ] {
+            let error = spend(
+                json!({
+                    "operation_key": operation_key,
+                    "account_id": agent.account_id,
+                    "amount": amount,
+                    "currency": currency,
+                    "reason": "wallet refusal",
+                    "merchant": "gongbu.image",
+                })
+                .to_string(),
+                &state,
+            )
+            .unwrap_err();
+            assert!(
+                error.to_string().to_ascii_lowercase().contains(expected),
+                "{operation_key}: {error}"
+            );
+        }
+        // No money moved, and neither reservation stays frozen until expiry.
+        assert_eq!(frozen(Currency::Usd), Amount::ZERO);
+        assert_eq!(frozen(Currency::Usdc), Amount::ZERO);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
     fn usdc_budgets_authorize_claim_and_settle_through_the_executor_flow() {
         let path =
             std::env::temp_dir().join(format!("hubu-api-usdc-executor-{}.sqlite", UserId::new()));
