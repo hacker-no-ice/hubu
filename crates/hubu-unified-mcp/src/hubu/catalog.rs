@@ -88,7 +88,11 @@ fn all_tool_definitions() -> Vec<Value> {
             "hubu_create_budget",
             "Create a budget owned by one agent. Budgets are per currency: spend only counts against a budget in its own currency. Requires a human click.",
             json_schema(json!({
-                "amount_cents": { "type": "integer" },
+                "amount": spend_amount_input_schema(),
+                "amount_cents": {
+                    "type": "integer",
+                    "description": "Deprecated whole-cent limit; send `amount` instead, never both."
+                },
                 "currency": { "type": "string", "enum": ["usd", "usdc"] },
                 "agent_id": { "type": "string" },
                 "starting_at": { "type": "string" },
@@ -108,9 +112,14 @@ fn all_tool_definitions() -> Vec<Value> {
             json_schema_required(json!({
                 "budget_id": { "type": "string", "minLength": 1 },
                 "expected_revision": { "type": "integer", "minimum": 1 },
-                "amount_limit_cents": { "type": "integer", "minimum": 1 },
+                "amount_limit": spend_amount_input_schema(),
+                "amount_limit_cents": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Deprecated whole-cent cap; send `amount_limit` instead, never both."
+                },
                 "reason": { "type": "string" }
-            }), &["budget_id", "expected_revision", "amount_limit_cents"]),
+            }), &["budget_id", "expected_revision"]),
         ),
         read_tool(
             "hubu_budget_history",
@@ -123,7 +132,11 @@ fn all_tool_definitions() -> Vec<Value> {
             "hubu_set_spending_target",
             "Set an advisory spending target for the active Hubu user. Requires a human click.",
             json_schema(json!({
-                "amount_cents": { "type": "integer" },
+                "amount": spend_amount_input_schema(),
+                "amount_cents": {
+                    "type": "integer",
+                    "description": "Deprecated whole-cent amount; send `amount` instead, never both."
+                },
                 "starting_at": { "type": "string" },
                 "ending_before": { "type": "string" }
             })),
