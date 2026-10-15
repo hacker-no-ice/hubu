@@ -864,3 +864,13 @@ discovers owner-scoped authorization records; `hubu_get_authorization_record` ac
 only a public `authorization_id`, never a private operation key. Exact values,
 full-budget coverage and safe evidence references follow the
 [history contract](ledger-history.md).
+
+## Governance observability
+
+`hubu_governance_summary`, `hubu_list_governance_records` and
+`hubu_get_governance_record` expose the shared owner-scoped HTTP read model.
+They preserve its exact money, immutable snapshots, full-filter totals and
+coverage in both text and structured results. These Hubu-only reads work during
+Gongbu or operation-store outages and never change spend state. Filter, paging
+and weekly-answer guidance lives in the
+[governance query contract](governance-observability.md#agent-queries-through-unified-mcp).
