@@ -167,8 +167,8 @@ pub enum SpendApprovalError {
     #[error("used spend auth token was not recorded")]
     UsedSpendAuthTokenMissing,
 
-    #[error("no active USD budget found for agent")]
-    MissingActiveBudget,
+    #[error("no active {} budget found for agent", currency.to_string().to_ascii_uppercase())]
+    MissingActiveBudget { currency: Currency },
 
     #[error("changed scope retry is unsafe for operation key `{operation_key}`")]
     ChangedScopeRetryRejected { operation_key: String },
@@ -321,14 +321,18 @@ impl SpendApprovalService {
                     Some((SpendAuthorizationDecision::Allowed, _)) => {
                         let existing_hold = budget_manager
                             .get_budget_hold_by_spend_decision(&evaluation.decision_id)
-                            .ok_or(SpendApprovalError::MissingActiveBudget)?;
+                            .ok_or(SpendApprovalError::MissingActiveBudget {
+                                currency: request.currency,
+                            })?;
                         let token = evaluation
                             .auth_token
                             .clone()
                             .ok_or(SpendApprovalError::MissingSpendAuthToken)?;
                         let balance = budget_manager
                             .get_budget_balance(&existing_hold.budget_id)
-                            .ok_or(SpendApprovalError::MissingActiveBudget)?;
+                            .ok_or(SpendApprovalError::MissingActiveBudget {
+                                currency: request.currency,
+                            })?;
                         return Ok(SpendAuthorizationOutcome::Approved(
                             ApprovedSpendAuthorization {
                                 operation_key: evaluation.operation_key.clone(),
@@ -440,9 +444,11 @@ impl SpendApprovalService {
                     SpendRetryAction::ReplayExactly,
                     "replay this exact immutable scope to recover the original authorization",
                 )?;
-                let balance = budget_manager
-                    .get_budget_balance(&hold.budget_id)
-                    .ok_or(SpendApprovalError::MissingActiveBudget)?;
+                let balance = budget_manager.get_budget_balance(&hold.budget_id).ok_or(
+                    SpendApprovalError::MissingActiveBudget {
+                        currency: request.currency,
+                    },
+                )?;
                 return Ok(SpendAuthorizationOutcome::Approved(
                     ApprovedSpendAuthorization {
                         operation_key: evaluation.operation_key.clone(),
@@ -530,11 +536,17 @@ impl SpendApprovalService {
             .auth_token
             .clone()
             .ok_or(SpendApprovalError::MissingSpendAuthToken)?;
-        let budget_id = match active_budget_id_for_spend(budget_manager, &request.agent_id, now) {
+        let budget_id = match active_budget_id_for_spend(
+            budget_manager,
+            &request.agent_id,
+            request.currency,
+            now,
+        ) {
             Ok(budget_id) => budget_id,
-            Err(SpendApprovalError::MissingActiveBudget) => {
+            Err(SpendApprovalError::MissingActiveBudget { currency }) => {
                 spend_manager.discard_auth_token_for_decision(&evaluation.decision_id);
-                let reasons = vec!["no active USD budget found for agent".to_string()];
+                let reasons =
+                    vec![SpendApprovalError::MissingActiveBudget { currency }.to_string()];
                 governance.record_spend_attempt_outcome(
                     &decision_record,
                     SpendAuthorizationDecision::Denied,
@@ -549,10 +561,9 @@ impl SpendApprovalService {
                     SpendRetryAction::ReuseOperationKey,
                     "this attempt was denied; reuse this operation key with corrected scope",
                 )?;
+                let reason = reasons[0].clone();
                 return Ok(SpendAuthorizationOutcome::Rejected(budget_rejection(
-                    request,
-                    evaluation,
-                    "no active USD budget found for agent",
+                    request, evaluation, &reason,
                 )));
             }
             Err(error) => return Err(error),
@@ -799,6 +810,7 @@ impl SpendApprovalService {
                 let budget_id = active_budget_id_for_spend(
                     budget_manager,
                     &decision_record.request.agent_id,
+                    decision_record.request.currency,
                     now,
                 )?;
                 let budget_reservation = match budget_manager.reserve_budget_at(
@@ -1157,14 +1169,17 @@ fn release_authorized_hold(
     budget_manager.release_budget(&budget_reservation.hold.id)
 }
 
+/// The agent's active budget in the spend's own currency. Budgets are per
+/// currency, so a spend never falls back to a budget in another currency.
 fn active_budget_id_for_spend(
     budget_manager: &BudgetManager,
     agent_id: &AgentId,
+    currency: Currency,
     now: DateTime<Utc>,
 ) -> Result<BudgetId, SpendApprovalError> {
     budget_manager
-        .available_budget_id_for_agent_at(agent_id, Currency::Usd, now)?
-        .ok_or(SpendApprovalError::MissingActiveBudget)
+        .available_budget_id_for_agent_at(agent_id, currency, now)?
+        .ok_or(SpendApprovalError::MissingActiveBudget { currency })
 }
 
 fn payment_status_name(status: PaymentStatus) -> &'static str {

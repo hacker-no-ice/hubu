@@ -86,9 +86,10 @@ fn all_tool_definitions() -> Vec<Value> {
         ),
         approval_tool(
             "hubu_create_budget",
-            "Create a budget owned by one agent. Requires a human click.",
+            "Create a budget owned by one agent. Budgets are per currency: spend only counts against a budget in its own currency. Requires a human click.",
             json_schema(json!({
                 "amount_cents": { "type": "integer" },
+                "currency": { "type": "string", "enum": ["usd", "usdc"] },
                 "agent_id": { "type": "string" },
                 "starting_at": { "type": "string" },
                 "ending_before": { "type": "string" }
