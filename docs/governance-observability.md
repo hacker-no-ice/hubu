@@ -9,7 +9,7 @@ HUB-291 supplies the storage foundation. HUB-292 captures new policy evaluations
 and automatic admission/authorization outcomes. HUB-293 captures genuine human
 escalation and confirmed resolution. HUB-294 captures authoritative Hubu claim
 and financial-resolution facts. HUB-295 provides shared owner-scoped queries,
-and HUB-296 exposes them through HTTP. Unified MCP reads follow separately.
+HUB-296 exposes them through HTTP, and HUB-297 adds basic unified MCP reads.
 Installing the schema alone does **not** establish complete capture or make an
 empty event table evidence that no requests were denied.
 
@@ -158,6 +158,34 @@ A successful empty response still includes coverage: unsupported or unassessed
 history must not be presented as a proven zero. GET requests never collect facts,
 change governance state or contact providers.
 
+## Agent queries through unified MCP
+
+| Tool | Use |
+| --- | --- |
+| `hubu_governance_summary` | Counts, requested totals, backlog and coverage |
+| `hubu_list_governance_records` | Paged supporting lifecycle records |
+| `hubu_get_governance_record` | Inspect one public `record_id` |
+
+These read-only tools require Hubu and use the HTTP contract above. They need no
+operation store, Gongbu connection or human approval capability. Categories and
+outcomes are arrays of typed names; other common filters match HTTP. `cursor`
+and `limit` are list-only; `record_id` is required only for detail. Text and
+structured outputs preserve the same response, exact amount strings and coverage.
+
+For “how many denials in the past week,” use the preceding seven days, compute
+explicit UTC `occurred_from` and `occurred_before`, and state that interval in
+the answer. Query `automatic_deny` separately from `human_declined`; use
+`distinct_attempts` for denied attempts rather than adding overlapping stage
+counts. Reuse the returned snapshot and filters to inspect supporting records.
+A returned count describes captured evidence; qualify missing history and
+unsupported signals instead of claiming a proven zero.
+
+Human escalation, confirmed approval and confirmed decline are separate
+outcomes. Pending human approvals and unresolved reconciliation are backlog at
+the captured-evidence time, including work opened before the requested week.
+Requested totals are not provider expense. These tools never retry, approve,
+release or reconcile work.
+
 ## Automatic capture
 
 The API carries the selected policy payload and its public resource, revision
@@ -272,3 +300,5 @@ Shared reads: [query types](../crates/hubu-core/src/spend/governance_query.rs),
 [legacy coverage observation](../crates/hubu-core/src/persistence/lifecycle_coverage.rs).
 
 HTTP adapter: [governance routes and projections](../crates/hubu-api/src/governance.rs).
+
+Unified MCP: [governance read validation and routing](../crates/hubu-unified-mcp/src/hubu/governance.rs).

@@ -109,6 +109,18 @@ they remain available through authenticated Gongbu operator endpoints.
 
 Resuming a stored governed-execution intent also requires ready Gongbu.
 
+### Governance observability
+
+| Tool | Prerequisites | Purpose |
+| --- | --- | --- |
+| `hubu_governance_summary` | Hubu | Captured lifecycle counts, exact requested totals, backlog and coverage |
+| `hubu_list_governance_records` | Hubu | Snapshot-bound supporting records with public identity filters |
+| `hubu_get_governance_record` | Hubu | Inspect one public lifecycle record within the same snapshot |
+
+These reads work without Gongbu or an operation store. See the
+[governance query contract](governance-observability.md#agent-queries-through-unified-mcp)
+for weekly questions, overlapping stages, incomplete history and snapshot reuse.
+
 ### Ledger, authorization records and reconciliation
 
 | Tool | Prerequisites | Purpose |

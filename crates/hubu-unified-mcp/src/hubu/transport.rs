@@ -182,7 +182,8 @@ pub(super) fn is_approved_http_route(method: &str, path: &str) -> bool {
     let (path, has_query) = path
         .split_once('?')
         .map_or((path, false), |(path, _)| (path, true));
-    !has_query && matches!(method, "GET" | "POST") && is_budget_versions_route(path)
+    (method == "GET" && super::governance::is_read_path(path))
+        || !has_query && matches!(method, "GET" | "POST") && is_budget_versions_route(path)
         || matches!(
             (method, path),
             ("GET", "/health")
