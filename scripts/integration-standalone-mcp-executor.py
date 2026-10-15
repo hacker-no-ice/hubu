@@ -4,7 +4,7 @@
 Starts a real ``hubu-server`` and the ``hubu-unified-mcp`` stdio router with
 Gongbu deliberately unconfigured. An agent authorizes through MCP; a minimal
 external executor then consumes only the authorization continuation through
-Hubu's ``hubu-spend-executor-v4.4`` HTTP API, never the private operation key
+Hubu's ``hubu-spend-executor-v4.5`` HTTP API, never the private operation key
 or agent. The script asserts that ``hubu_operation_status`` follows Hubu's
 authoritative authorization record at every stage and fails closed when Hubu is
 unreachable.

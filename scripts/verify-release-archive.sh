@@ -77,7 +77,7 @@ jq -e \
    .product == "hubu" and
    .product_version == $product_version and
    .source_commit == $source_commit and
-   .executor_contract == "hubu-spend-executor-v4.4" and
+   .executor_contract == "hubu-spend-executor-v4.5" and
    .target == $target and
    .binaries == ["hubu", "hubu-server", "hubu-unified-mcp", "gongbu-server"] and
    .supported_agent_surfaces == ["hubu-unified-mcp"] and
@@ -93,7 +93,7 @@ jq -e \
    .product == "hubu" and
    .product_version == $product_version and
    .source_commit == $source_commit and
-   .executor_contract == "hubu-spend-executor-v4.4" and
+   .executor_contract == "hubu-spend-executor-v4.5" and
    .target == $target and
    .binaries == ["hubu", "hubu-server", "hubu-unified-mcp", "gongbu-server"] and
    .supported_agent_surfaces == ["hubu-unified-mcp"] and
@@ -110,7 +110,7 @@ for binary in "${expected_binaries[@]}"; do
     --arg source_commit "${source_commit}" \
     '.product_version == $product_version and
      .source_commit == $source_commit and
-     ((.executor_contract // .hubu_executor_contract) == "hubu-spend-executor-v4.4")' \
+     ((.executor_contract // .hubu_executor_contract) == "hubu-spend-executor-v4.5")' \
     <<<"${version_output}" >/dev/null
 done
 
@@ -148,7 +148,7 @@ jq -e \
   --arg source_commit "${source_commit}" \
   '.product_version == $product_version and
    .source_commit == $source_commit and
-   .executor_contract == "hubu-spend-executor-v4.4"' \
+   .executor_contract == "hubu-spend-executor-v4.5"' \
   <<<"${reported_version}" >/dev/null
 
 printf '%s\n' 'archive-smoke-distinct-gongbu-capability' >"${smoke_dir}/gongbu.mcp-token"

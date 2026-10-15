@@ -1315,6 +1315,7 @@ impl SpendAuthorizationResolver for MockHubu {
                 .clone()
                 .unwrap_or_else(|| "sandbox-account".into()),
             agent_id: self.config.agent_id.clone(),
+            amount: None,
             amount_cents: 1,
             currency: self.config.currency.clone(),
             merchant: None,
