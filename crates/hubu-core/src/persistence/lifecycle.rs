@@ -40,6 +40,9 @@ impl SqliteGovernanceRepository {
              );
              CREATE INDEX IF NOT EXISTS spend_lifecycle_owner_sequence
                 ON spend_lifecycle_records(owner_user_id, sequence);
+             CREATE INDEX IF NOT EXISTS spend_lifecycle_capture_source
+                ON spend_lifecycle_records(owner_user_id, json_extract(payload_json, '$.source'), sequence)
+                WHERE json_extract(payload_json, '$.record_type') = 'capture';
              CREATE TRIGGER IF NOT EXISTS spend_lifecycle_records_no_update
                 BEFORE UPDATE ON spend_lifecycle_records BEGIN
                 SELECT RAISE(ABORT, 'lifecycle evidence is immutable'); END;
@@ -60,7 +63,8 @@ impl SqliteGovernanceRepository {
 
     /// Convenience transaction for isolated writers. Stateful transitions should
     /// use append_lifecycle_event_in_transaction inside their existing write.
-    pub fn append_lifecycle_event(
+    #[cfg(test)]
+    pub(crate) fn append_lifecycle_event(
         &mut self,
         input: &LifecycleEventInput,
     ) -> Result<AppendLifecycleResult, StorageError> {
@@ -205,7 +209,7 @@ impl SqliteGovernanceRepository {
 /// transaction. The caller must roll back its complete write on any error.
 /// Public event identity is random; semantic identity is private and independent
 /// of arrival/recording time. Conflicting retries fail without exposing payload.
-pub fn append_lifecycle_event_in_transaction(
+pub(crate) fn append_lifecycle_event_in_transaction(
     conn: &Connection,
     input: &LifecycleEventInput,
 ) -> Result<AppendLifecycleResult, StorageError> {
@@ -795,7 +799,7 @@ fn constraint_in_positive_all(
     };
     comparison == constraint.comparison && value.money() == Some(constraint.configured.amount)
 }
-fn stable_identifier(value: &str) -> bool {
+pub(super) fn stable_identifier(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
         && value
@@ -813,3 +817,45 @@ fn valid_hash(value: &str) -> bool {
 #[cfg(test)]
 #[path = "lifecycle_tests.rs"]
 mod tests;
+
+/// Idempotent activation joins the producer's canonical transaction. Replay and
+/// initialization never move the coverage start forward or backfill history.
+pub(super) fn ensure_lifecycle_capture_enabled_in_transaction(
+    conn: &Connection,
+    owner: &UserId,
+    source: LifecycleSource,
+    effective_at: DateTime<Utc>,
+) -> Result<(), StorageError> {
+    if conn.is_autocommit() {
+        return Err(invalid("capture activation requires transaction"));
+    }
+    let source_name = serde_json::to_value(source)?;
+    let latest: Option<String> = conn.query_row("SELECT payload_json FROM spend_lifecycle_records WHERE owner_user_id=?1 AND json_extract(payload_json,'$.record_type')='capture' AND json_extract(payload_json,'$.source')=?2 ORDER BY sequence DESC LIMIT 1",params![owner.to_string(),source_name.as_str().ok_or_else(||invalid("invalid lifecycle source"))?],|row|row.get(0)).optional()?;
+    if let Some(latest) = latest {
+        if matches!(
+            serde_json::from_str::<StoredLifecyclePayload>(&latest)?,
+            StoredLifecyclePayload::Capture {
+                schema_version: LIFECYCLE_SCHEMA_VERSION,
+                state: LifecycleCaptureState::Enabled,
+                ..
+            }
+        ) {
+            return Ok(());
+        }
+    }
+    let payload = StoredLifecyclePayload::Capture {
+        schema_version: LIFECYCLE_SCHEMA_VERSION,
+        source,
+        state: LifecycleCaptureState::Enabled,
+        effective_at,
+    };
+    let identity = identity_hash(&(
+        owner,
+        "capture",
+        LIFECYCLE_SCHEMA_VERSION,
+        source,
+        effective_at,
+    ))?;
+    append_payload(conn, owner, &identity, &payload)?;
+    Ok(())
+}

@@ -614,6 +614,12 @@ mod tests {
             let user = UserContext::new(UserId::new());
             let agent_id = AgentId::new();
             let account_id = AgentAccountId::new();
+            crate::persistence::seed_lifecycle_test_identity(
+                &mut repository,
+                &user.user_id,
+                &agent_id,
+                &account_id,
+            );
             let period = TimePeriod::new(
                 Utc::now() - Duration::minutes(1),
                 Some(Utc::now() + Duration::hours(2)),

@@ -441,6 +441,19 @@ impl SpendManager {
         })
     }
 
+    pub(crate) fn discard_unpersisted_decision(&mut self, decision_id: &SpendDecisionId) {
+        self.discard_auth_token_for_decision(decision_id);
+        if let Some(decision) = self.decisions.remove(decision_id) {
+            let key = (decision.request.agent_id, decision.operation_key);
+            if let Some(ids) = self.decision_ids_by_operation.get_mut(&key) {
+                ids.retain(|id| id != decision_id);
+                if ids.is_empty() {
+                    self.decision_ids_by_operation.remove(&key);
+                }
+            }
+        }
+    }
+
     pub fn discard_auth_token_for_decision(&mut self, decision_id: &SpendDecisionId) {
         if let Some(token_id) = self.token_id_by_decision.remove(decision_id) {
             self.tokens.remove(&token_id);

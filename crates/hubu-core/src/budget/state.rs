@@ -348,6 +348,19 @@ impl BudgetState {
         self.reserve_budget_at(request, Utc::now())
     }
 
+    /// Restore a provisional reservation whose complete durable transaction failed.
+    pub(super) fn rollback_unpersisted_reservation(
+        &mut self,
+        hold: &BudgetHold,
+        before: &BudgetBalance,
+    ) {
+        self.budget_holds.remove(&hold.id);
+        self.hold_id_by_spend_decision
+            .remove(&hold.spend_decision_id);
+        self.budget_balances
+            .insert(before.budget_id.clone(), before.clone());
+    }
+
     /// Reserve from a budget that is effectively active at `now`.
     pub(super) fn reserve_budget_at(
         &mut self,
