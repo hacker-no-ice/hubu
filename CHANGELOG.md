@@ -101,6 +101,12 @@ Future release template
 
 ### Breaking or operational changes
 
+- Read [Upgrading to v0.2.4: exact amounts](docs/operations/upgrading-to-v0.2.4.md)
+  before upgrading a stack with budget data. Historical consumption is not
+  recomputed: a pre-upgrade sub-cent call that consumed a whole cent still
+  shows that cent. Do not downgrade in place; restore the pre-upgrade backups
+  instead.
+
 - All binaries now report and require executor contract
   `hubu-spend-executor-v4.5`. Managed stacks regenerate Gongbu's
   `expected_executor_contract`; hand-written Gongbu configurations must

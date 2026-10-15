@@ -2,6 +2,10 @@
 
 > Maintainers publishing a release: see [Publishing releases (maintainers)](publishing-releases.md).
 
+> Upgrading a stack with budget data to v0.2.4: read
+> [Upgrading to v0.2.4: exact amounts](upgrading-to-v0.2.4.md) first. It
+> carries a one-way storage migration and executor contract v4.5.
+
 Hubu publishes immutable unified Hubu/Gongbu releases through
 `.github/workflows/release.yml`. Consumers pin an exact tag and its published
 full source commit; a moving checkout of `main` is not a supported installation

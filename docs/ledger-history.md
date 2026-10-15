@@ -45,8 +45,9 @@ charge: the change in the rounded-up cent total of the row's correction chain.
 The rows of a chain always sum to the coverage report's cent projection, but
 the rounding invariant applies to `budget_charge_delta`, not to this field.
 
-For a selected budget, `coverage` reports full-budget consumed cents, recorded
-signed charges, their difference (`unaccounted_consumption_cents`), pending-hold
+For a selected budget, `coverage` reports the full-budget consumed amount,
+recorded signed charges and their difference (`unaccounted_consumption`), as
+exact money objects with `*_cents` projections, plus the pending-hold
 count, currency, and an owner-wide count of transactions lacking trustworthy
 budget context. These totals come from the **whole budget**, not the current
 page. Budget attribution requires the decision’s actual hold to match both the
