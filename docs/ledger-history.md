@@ -31,10 +31,19 @@ scale and currency: `{"amount":"1","scale":3,"currency":"USD"}` means USD
 `effective_cost` is the original total on an original posting and the **corrected
 total** on an adjustment (`cost_semantics` identifies which). Do not sum original
 and corrected totals. Entries express the actual signed expense change through
-account and debit/credit direction. `budget_charge_delta_cents` is a separate
-signed control charge; `rounding_delta_amount` is its difference from the signed
-expense at scale 18. A USD 0.001 provider expense consumes one budget cent and
-has a rounding difference of USD 0.009.
+account and debit/credit direction. `budget_charge_delta` is the separate
+signed control charge exactly as recorded, as `{"units":"1000","scale":6}`:
+postings since accounting units use scale 6, and older postings report their
+whole cents at scale 2. `rounding_delta_amount` is that charge's difference
+from the signed expense at scale 18:
+`units × 10^(18 − scale) = expense delta + rounding_delta_amount`. A USD 0.001
+provider expense now consumes exactly 1,000 units with no rounding, while a
+USD 0.0000001 expense rounds up to one unit.
+
+`budget_charge_delta_cents` is a compatibility projection, not the recorded
+charge: the change in the rounded-up cent total of the row's correction chain.
+The rows of a chain always sum to the coverage report's cent projection, but
+the rounding invariant applies to `budget_charge_delta`, not to this field.
 
 For a selected budget, `coverage` reports full-budget consumed cents, recorded
 signed charges, their difference (`unaccounted_consumption_cents`), pending-hold

@@ -177,6 +177,61 @@ fn reversing_a_sub_cent_charge_reverses_its_cent_projection() {
 }
 
 #[test]
+fn long_correction_chains_reconcile_row_by_row_with_coverage() {
+    let (path, state, agent, auth) = setup_executor_authorization("history-long-chain");
+    settle(&state, &agent, &auth, 1);
+    let owner = authenticated_user_context(&state).unwrap().user_id;
+    let original: hubu_common::ids::LedgerTransactionId = read(&state, "/ledger/transactions")
+        ["transactions"][0]["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let mut previous = original.clone();
+    for step in 0..40 {
+        // Alternate between sub-cent and whole-cent corrected totals.
+        let amount = if step % 2 == 0 { "7" } else { "15" };
+        let corrected = hubu_core::ledger::LedgerService::adjust(
+            &mut state.budgets.lock().unwrap(),
+            hubu_core::ledger::AccountingAdjustment {
+                owner_user_id: owner.clone(),
+                original_transaction_id: original.clone(),
+                expected_previous_transaction_id: previous.clone(),
+                operation_key: format!("correction-{step}"),
+                corrected_cost: hubu_core::ledger::ExactMoney {
+                    amount: amount.into(),
+                    scale: 3,
+                    currency: Currency::Usd,
+                },
+                reason: "corrected invoice".into(),
+                evidence: format!("invoice://{step}"),
+            },
+        )
+        .unwrap();
+        previous = corrected.id;
+    }
+    let history = read(
+        &state,
+        &format!(
+            "/ledger/transactions?agent_id={}&budget_id={}&limit=100",
+            agent.agent_id,
+            auth.budget_hold.as_ref().unwrap().budget_id
+        ),
+    );
+    let rows = history["transactions"].as_array().unwrap();
+    assert_eq!(rows.len(), 41);
+    let cents: i64 = rows
+        .iter()
+        .map(|row| row["budget_charge_delta_cents"].as_i64().unwrap())
+        .sum();
+    // The final corrected total is USD 0.015, which projects to 2 cents.
+    assert_eq!(cents, 2);
+    assert_eq!(history["coverage"]["recorded_budget_charges_cents"], 2);
+    assert_eq!(history["coverage"]["unaccounted_consumption_cents"], 0);
+    std::fs::remove_file(path).ok();
+}
+
+#[test]
 fn legacy_cent_chain_rows_reconcile_with_coverage_after_a_micro_correction() {
     let (path, state, agent, auth) = setup_executor_authorization("history-legacy-chain");
     settle_precise(&state, &agent, &auth, 31, 4); // USD 0.0031

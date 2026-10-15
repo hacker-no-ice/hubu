@@ -235,6 +235,17 @@ where
         let created_at = Utc::now();
 
         self.authorizer.validate_payment_request(&request)?;
+        // A governed payment records its budget charge in accounting units.
+        // Check that conversion before the rail moves any money, so a payment
+        // can never succeed at the rail and then fail to be recorded.
+        let budget_charge_units = context
+            .as_ref()
+            .map(|_| {
+                request.amount_cents.checked_mul(10_000).ok_or_else(|| {
+                    LedgerError::InvalidData("payment amount exceeds the budget unit range".into())
+                })
+            })
+            .transpose()?;
         let rail_result = self.rail.execute(&request)?;
 
         let response = if rail_result.status == PaymentStatus::Succeeded {
@@ -243,10 +254,6 @@ where
                 &mut self.ledger_accounts_by_user,
                 &request.owner_user_id,
             )?;
-            let budget_charge_units =
-                request.amount_cents.checked_mul(10_000).ok_or_else(|| {
-                    LedgerError::InvalidData("payment amount exceeds the budget unit range".into())
-                })?;
             let ledger_transaction = self.ledger.record_transaction_with_metadata(
                 request.owner_user_id.clone(),
                 Some(payment_id.to_string()),
@@ -273,7 +280,7 @@ where
                     agent_id: Some(request.agent_id.clone()), agent_account_id: Some(request.agent_account_id.clone()),
                     effective_cost: hubu_ledger::ExactMoney { amount: request.amount_cents.to_string(), scale: 2, currency: request.currency },
                     budget_charge_delta_cents: None,
-                    budget_charge_delta: context.as_ref().map(|_|budget_charge_units),
+                    budget_charge_delta: budget_charge_units,
                     budget_charge_scale: context.as_ref().map(|_|hubu_ledger::BUDGET_CHARGE_SCALE),
                     rounding_delta_amount: context.as_ref().map(|_|"0".to_string()), context,
                     original_transaction_id: None, previous_transaction_id: None,
@@ -522,6 +529,47 @@ mod tests {
             SqliteLedger::in_memory().expect("ledger should initialize"),
         )
         .expect("payment manager should initialize")
+    }
+
+    #[derive(Default)]
+    struct CountingRail {
+        executions: std::cell::Cell<usize>,
+    }
+
+    impl crate::rail::PaymentRail for CountingRail {
+        fn execute(
+            &self,
+            request: &PaymentRequest,
+        ) -> Result<crate::rail::RailPaymentResult, crate::rail::PaymentRailError> {
+            self.executions.set(self.executions.get() + 1);
+            MockPaymentRail.execute(request)
+        }
+    }
+
+    #[test]
+    fn governed_charge_conversion_is_checked_before_the_rail_moves_money() {
+        let mut request = payment_request(PaymentRailKind::FiatMock);
+        request.amount_cents = i64::MAX;
+        let mut manager = PaymentManager::new(
+            request.owner_user_id.clone(),
+            CountingRail::default(),
+            TestAuthorizer::for_request(&request),
+            SqliteLedger::in_memory().expect("ledger should initialize"),
+        )
+        .unwrap();
+        let context = hubu_ledger::GovernedSpendContext {
+            agent_id: request.agent_id.clone(),
+            agent_account_id: request.agent_account_id.clone(),
+            budget_id: hubu_common::ids::BudgetId::new(),
+            budget_version_id: hubu_common::ids::BudgetVersionId::new(),
+            spend_decision_id: hubu_common::ids::SpendDecisionId::new(),
+            operation_key: "op".into(),
+        };
+        let error = manager
+            .submit_payment_with_context(request, Some(context), None)
+            .unwrap_err();
+        assert!(error.to_string().contains("ledger"), "{error}");
+        assert_eq!(manager.rail.executions.get(), 0, "the rail never ran");
     }
 
     #[test]
