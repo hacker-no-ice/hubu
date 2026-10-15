@@ -318,7 +318,7 @@ fn watch_once_uses_selected_profile_without_human_capabilities() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("FLUX"));
     assert!(stdout.contains("draft_images"));
-    assert!(stdout.contains("reserved 8¢"));
+    assert!(stdout.contains("reserved $0.08"));
     assert!(stdout.contains("free $1.92"));
     assert!(!stdout.contains('\u{001b}'));
     assert!(stdout.lines().all(|line| line.chars().count() <= 70));

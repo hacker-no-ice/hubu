@@ -77,6 +77,17 @@ Future release template
   records, ledger coverage and the watch projection. See
   [docs/api-amounts.md](docs/api-amounts.md).
 
+- The CLI takes and shows exact amounts. `--amount` on `budget create`,
+  `budget update`, `spend`, `spend authorize` and `user spending-target set`
+  accepts decimals with up to 6 places (`0.005`), and `budget create` takes
+  `--currency usd|usdc`. Amounts print exactly (`$0.035`, `$10.00`,
+  `$0.000001`, `-$0.0031`), `hubu watch` aligns them on the decimal point and
+  shows exact sub-cent settlements, and older servers fall back to `*_cents`.
+  The global `--round cents` option shows conservatively rounded cents marked
+  `≈`. `spend reconcile billed` takes `--actual-vendor-cost 0.0031` (the cent
+  flags remain as deprecated aliases), and `policy apply` prints the server's
+  policy warnings. See [docs/cli.md](docs/cli.md#amounts).
+
 ### Breaking or operational changes
 
 - Whole-cent amount fields (`amount_cents`, `amount_limit_cents`,
