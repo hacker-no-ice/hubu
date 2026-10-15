@@ -521,6 +521,7 @@ test("publishes one live-provider operations entry point", async () => {
 // in sync with unpublishedSources in scripts/generate-content.mjs.
 const unpublishedDocs = [
   ["docs/budget-architecture.md", "budget-architecture"],
+  ["docs/governance-observability.md", "governance-observability"],
   ["docs/ledger-accounting.md", "ledger-accounting"],
   ["docs/operations/repository-security.md", "operations/repository-security"],
   ["docs/operations/benchmarking.md", "operations/benchmarking"],
@@ -571,6 +572,8 @@ test("links from published pages to unpublished documents use GitHub blob URLs",
   const html = await response.text();
   assert.match(html, /href="https:\/\/github\.com\/hacker-no-ice\/hubu\/blob\/main\/docs\/ledger-accounting\.md"/);
   assert.doesNotMatch(html, /href="\/docs\/ledger-accounting"/);
+  assert.match(html, /href="https:\/\/github\.com\/hacker-no-ice\/hubu\/blob\/main\/docs\/governance-observability\.md"/);
+  assert.doesNotMatch(html, /href="\/docs\/governance-observability"/);
   const lifecycle = await (await render("/docs/spend-lifecycle")).text();
   assert.match(lifecycle, /href="https:\/\/github\.com\/hacker-no-ice\/hubu\/blob\/main\/docs\/budget-architecture\.md"/);
 });
