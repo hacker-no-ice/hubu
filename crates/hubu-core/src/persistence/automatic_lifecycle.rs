@@ -29,7 +29,7 @@ impl SelectedSpendPolicy {
     }
 }
 
-fn unavailable<T>(reason: EvidenceUnavailableReason) -> LifecycleEvidence<T> {
+pub(super) fn unavailable<T>(reason: EvidenceUnavailableReason) -> LifecycleEvidence<T> {
     LifecycleEvidence::Unavailable { reason }
 }
 fn known<T>(value: T) -> LifecycleEvidence<T> {
@@ -137,7 +137,7 @@ fn constraints(
         evaluated: known(money(request.amount, request.currency)),
     });
 }
-fn budget_evidence(
+pub(super) fn budget_evidence(
     before: Option<&BudgetWithBalance>,
     request: &SpendRequest,
 ) -> LifecycleEvidence<LifecycleBudgetEvidence> {
@@ -154,7 +154,7 @@ fn budget_evidence(
         }),
     }
 }
-fn event(
+pub(super) fn event(
     decision: &SpendDecisionRecord,
     fact: LifecycleFact,
     source: LifecycleSource,
@@ -225,14 +225,17 @@ pub(super) fn save_policy(
             LifecycleFact::InitialPolicy { decision: initial },
             LifecycleSource::PolicyEngine,
             decision.created_at,
-            policy,
+            policy.clone(),
             unavailable(EvidenceUnavailableReason::NotApplicable),
         ),
     )?;
+    if initial == InitialPolicyDecision::NeedsApproval {
+        super::human_lifecycle::save_escalation(&tx, decision, policy)?;
+    }
     tx.commit()?;
     Ok(())
 }
-fn validate_before(
+pub(super) fn validate_before(
     conn: &Connection,
     before: &BudgetWithBalance,
     at: DateTime<Utc>,

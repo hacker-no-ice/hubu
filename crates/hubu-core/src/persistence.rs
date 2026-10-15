@@ -2,6 +2,7 @@ mod accounting;
 mod authorization_void;
 mod automatic_lifecycle;
 mod history;
+mod human_lifecycle;
 mod lifecycle;
 pub use authorization_void::{AuthorizationVoidError, AuthorizationVoidResult};
 pub use automatic_lifecycle::SelectedSpendPolicy;
@@ -164,6 +165,26 @@ pub trait SpendRepository {
         record: &SpendDecisionRecord,
         observation: &crate::spend::LifecycleObservationId,
         occurred_at: DateTime<Utc>,
+    ) -> Result<(), StorageError>;
+    fn save_human_declined_transition(
+        &mut self,
+        record: &SpendDecisionRecord,
+        confirmed_by: &UserId,
+        reasons: &[String],
+        decided_at: DateTime<Utc>,
+    ) -> Result<(), StorageError>;
+    #[allow(clippy::too_many_arguments)]
+    fn save_human_approved_transition(
+        &mut self,
+        record: &SpendDecisionRecord,
+        confirmed_by: &UserId,
+        token: &SpendAuthTokenRecord,
+        hold: &BudgetHold,
+        balance: &BudgetBalance,
+        before: &BudgetWithBalance,
+        reasons: &[String],
+        decided_at: DateTime<Utc>,
+        budget_checked_at: DateTime<Utc>,
     ) -> Result<(), StorageError>;
     fn save_spend_decision(&mut self, record: &SpendDecisionRecord) -> Result<(), StorageError>;
     fn save_spend_auth_token(&mut self, record: &SpendAuthTokenRecord) -> Result<(), StorageError>;
@@ -3824,6 +3845,40 @@ impl SpendRepository for SqliteGovernanceRepository {
         occurred_at: DateTime<Utc>,
     ) -> Result<(), StorageError> {
         automatic_lifecycle::save_failure(self, record, observation, occurred_at)
+    }
+    fn save_human_declined_transition(
+        &mut self,
+        record: &SpendDecisionRecord,
+        confirmed_by: &UserId,
+        reasons: &[String],
+        decided_at: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        human_lifecycle::save_declined(self, record, confirmed_by, reasons, decided_at)
+    }
+    fn save_human_approved_transition(
+        &mut self,
+        record: &SpendDecisionRecord,
+        confirmed_by: &UserId,
+        token: &SpendAuthTokenRecord,
+        hold: &BudgetHold,
+        balance: &BudgetBalance,
+        before: &BudgetWithBalance,
+        reasons: &[String],
+        decided_at: DateTime<Utc>,
+        budget_checked_at: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        human_lifecycle::save_approved(
+            self,
+            record,
+            confirmed_by,
+            token,
+            hold,
+            balance,
+            before,
+            reasons,
+            decided_at,
+            budget_checked_at,
+        )
     }
     fn save_spend_decision(&mut self, record: &SpendDecisionRecord) -> Result<(), StorageError> {
         self.conn.execute(

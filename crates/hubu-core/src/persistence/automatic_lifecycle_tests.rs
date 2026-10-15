@@ -249,7 +249,7 @@ fn automatic_denial_causes_and_genuine_initial_needs_approval_are_distinct() {
         let mut h = Harness::new(limit, effect);
         h.authorize().unwrap();
         let s = h.snapshot();
-        assert_eq!(s.events.len(), if cause.is_some() { 2 } else { 1 });
+        assert_eq!(s.events.len(), 2);
         assert!(h.repo.load_spend_auth_tokens().unwrap().is_empty());
         assert!(h.repo.load_budget_holds().unwrap().is_empty());
         if let Some(cause) = cause {
