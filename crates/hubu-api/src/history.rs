@@ -269,10 +269,20 @@ fn transaction(
     if let Some(metadata) = meta {
         metadata.effective_cost.scaled()?;
     }
-    let charge_delta_cents = meta
-        .map(legacy_budget_charge_delta_cents)
-        .transpose()?
-        .flatten();
+    let charge_delta_cents = legacy_budget_charge_delta_cents(record, data)?;
+    // The charge exactly as recorded: µ units for new postings, whole cents
+    // for legacy ones. `rounding_delta_amount` is measured against this.
+    let recorded_charge = meta.and_then(|m| {
+        match (
+            m.budget_charge_delta,
+            m.budget_charge_scale,
+            m.budget_charge_delta_cents,
+        ) {
+            (Some(units), Some(scale), _) => Some(json!({"units":units.to_string(),"scale":scale})),
+            (None, None, Some(cents)) => Some(json!({"units":cents.to_string(),"scale":2})),
+            _ => None,
+        }
+    });
     let rounding = meta
         .and_then(|m| m.rounding_delta_amount.as_deref())
         .map(|v| v.parse::<i128>())
@@ -320,6 +330,7 @@ fn transaction(
         "effective_cost":meta.map(|m|&m.effective_cost),
         "cost_semantics":meta.map(|m|if m.kind==hubu_core::ledger::TransactionKind::Adjustment {"corrected_total"} else {"original_total"}),
         "purpose_reference":reference(meta.and_then(|m|m.purpose.as_deref())),
+        "budget_charge_delta":recorded_charge,
         "budget_charge_delta_cents":charge_delta_cents,
         "rounding_delta_amount":rounding,
         "original_transaction_id":meta.and_then(|m|m.original_transaction_id.as_ref()).filter(owned_transaction),
@@ -548,31 +559,50 @@ fn authorization_record(
         "raw_evidence_redacted":true}))
 }
 
-/// Cent projection of one posting's budget charge, kept consistent with the
-/// cent projection of the running total. Legacy postings report their stored
-/// cents. For a µ correction, the delta is the difference of the corrected and
-/// previous totals' cent projections, so reversing a sub-cent charge still
-/// reverses the cent it projected to.
+/// Cent projection of one posting's budget charge: the change in the
+/// rounded-up cent projection of its correction chain's cumulative recorded
+/// charge. Summing the rows of a chain therefore always equals the cent
+/// projection of its total, whether the chain mixes legacy cent postings and
+/// µ corrections or reverses a sub-cent charge.
 fn legacy_budget_charge_delta_cents(
-    meta: &hubu_core::ledger::TransactionMetadata,
+    record: &TransactionRecord,
+    data: &HistorySnapshot,
 ) -> Result<Option<i64>> {
-    if meta.budget_charge_scale.is_none() {
-        return Ok(meta.budget_charge_delta_cents);
-    }
-    let Some(delta) = meta.budget_charge_delta else {
+    let Some(own) = record
+        .metadata
+        .as_ref()
+        .map(|m| m.budget_charge_units())
+        .transpose()?
+        .flatten()
+    else {
         return Ok(None);
     };
-    if meta.kind != hubu_core::ledger::TransactionKind::Adjustment {
-        return Ok(Some(Amount::from_units(delta).legacy_cents_ceil()));
+    let mut cumulative = 0_i64;
+    let mut current = Some(record);
+    let mut steps = 0_usize;
+    while let Some(posting) = current {
+        let Some(meta) = posting.metadata.as_ref() else {
+            break;
+        };
+        if let Some(units) = meta.budget_charge_units()? {
+            cumulative = cumulative
+                .checked_add(units)
+                .ok_or_else(|| anyhow!("budget charge total overflow"))?;
+        }
+        steps += 1;
+        if steps > data.transactions.len() + 1 {
+            return Err(anyhow!("ledger correction chain does not terminate"));
+        }
+        current = meta
+            .previous_transaction_id
+            .as_ref()
+            .and_then(|id| data.transactions.iter().find(|t| &t.id == id));
     }
-    let corrected = meta
-        .effective_cost
-        .budget_units(hubu_common::money::ACCOUNTING_SCALE)?;
-    let previous = corrected
-        .checked_sub(delta)
-        .ok_or_else(|| anyhow!("budget charge delta overflow"))?;
+    let previous = cumulative
+        .checked_sub(own)
+        .ok_or_else(|| anyhow!("budget charge total overflow"))?;
     Ok(Some(
-        Amount::from_units(corrected).legacy_cents_ceil()
+        Amount::from_units(cumulative).legacy_cents_ceil()
             - Amount::from_units(previous).legacy_cents_ceil(),
     ))
 }
