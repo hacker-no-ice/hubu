@@ -1,8 +1,10 @@
 mod accounting;
 mod authorization_void;
 mod history;
+mod lifecycle;
 pub use authorization_void::{AuthorizationVoidError, AuthorizationVoidResult};
 pub use history::HistorySnapshot;
+pub use lifecycle::{append_lifecycle_event_in_transaction, AppendLifecycleResult};
 
 use std::path::Path;
 use std::str::FromStr;
@@ -1060,6 +1062,7 @@ impl SqliteGovernanceRepository {
         // and owns its immediate transaction.
         self.migrate_accounting_scale()?;
         self.initialize_provider_accounting()?;
+        self.in_init_transaction(Self::init_lifecycle_schema)?;
         Ok(())
     }
 
