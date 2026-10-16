@@ -35,8 +35,10 @@ defined in
 model-visible audit context. Neither field owns a budget or replaces the
 operation key.
 
-Amounts use integer minor units and a currency. The current local spend path is
-USD-only.
+Amounts are exact decimals in a currency (`usd` or `usdc`), accounted in
+micro-units (10⁻⁶ of the currency). Budgets are per currency: spend only counts
+against a budget in its own currency. See
+[Amounts in the Hubu HTTP API](api-amounts.md).
 
 ## Trusted execution scope
 
@@ -168,10 +170,10 @@ frozen -> settled
        -> released
 ```
 
-Settlement preserves exact external cost and converts it to budget cents with
-one checked ceiling operation, so any positive sub-cent charge consumes at
-least one cent. A normal settlement consumes that conservative
-`budget_charge_cents` and releases any unused maximum. Failure, unused
+Settlement preserves exact external cost and converts it to budget micro-units
+with one checked ceiling operation, so a USD 0.001 charge consumes exactly
+0.001 and only digits beyond the sixth decimal place round up. A normal
+settlement consumes that `budget_charge` and releases any unused maximum. Failure, unused
 authorization, expiry, or a confirmed non-billable outcome releases the hold.
 Ambiguous provider outcomes and confirmed costs above the authorized maximum
 enter reconciliation instead of being released optimistically. The exact

@@ -372,10 +372,10 @@ components = [
 ]
 ```
 
-Gongbu computes an exact rational estimate and rounds conservatively when
-producing an integer authorization amount. Settlement preserves the final exact
-provider cost with this complete frozen pricing snapshot and converts it to
-budget cents once, as defined in
+Gongbu computes an exact rational estimate and rounds it up once to
+micro-units (10⁻⁶ of the currency) for the authorization amount. Settlement
+preserves the final exact provider cost with this complete frozen pricing
+snapshot and converts it to budget micro-units once, as defined in
 [precise external cost and budget conversion](../../../spend-executor-contract.md#precise-external-cost-and-budget-conversion).
 Verify both the provider's unit and whether quoted prices include every
 billable component.

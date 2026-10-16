@@ -66,7 +66,7 @@ policy bypassed validation.
 
 ```rust
 SpendRequest {
-    amount_cents: 4_500,
+    amount: "45.00".parse()?, // exact, in the request currency
     currency: Currency::Usd,
     agent_id: AgentId::new(),
     execution_scope: Some(canonical_execution_scope),
@@ -141,7 +141,7 @@ Rule {
             },
             Condition::Lte {
                 field: Field::Amount,
-                value: PolicyValue::MoneyCents(5_000),
+                value: PolicyValue::Money("50.00".parse()?),
             },
         ],
     },
@@ -173,7 +173,7 @@ exists
 Supported fields:
 
 ```txt
-amount      -> money_cents
+amount      -> money (exact decimal, request currency)
 currency    -> currency
 agent_id    -> agent_id
 merchant    -> string
@@ -205,7 +205,7 @@ Ordered comparisons are currently only valid for `amount`.
 Examples of invalid policy conditions:
 
 ```rust
-// Invalid: amount expects MoneyCents, not String.
+// Invalid: amount expects Money, not String.
 Condition::Gt {
     field: Field::Amount,
     value: PolicyValue::String("50000".to_string()),
@@ -227,7 +227,7 @@ use hubu_core::policy::{
 };
 
 let request = SpendRequest {
-    amount_cents: 4_500,
+    amount: "45.00".parse()?,
     currency: Currency::Usd,
     agent_id: AgentId::new(),
     merchant: Some("Acme Cafe".to_string()),
@@ -250,7 +250,7 @@ let policy = Policy {
                 },
                 Condition::Lte {
                     field: Field::Amount,
-                    value: PolicyValue::MoneyCents(5_000),
+                    value: PolicyValue::Money("50.00".parse()?),
                 },
             ],
         },
@@ -279,7 +279,7 @@ rules:
       op: gt
       field: amount
       value:
-        money_cents: 50000
+        money: "500.00"
 
   - id: allow_small_meals
     effect: allow
@@ -294,8 +294,26 @@ rules:
         - op: lte
           field: amount
           value:
-            money_cents: 5000
+            money: "50.00"
 ```
+
+### Money values
+
+- Write amounts as quoted decimal strings with at most 6 decimal places, such
+  as `money: "50.00"` or `money: "0.005"`. Unquoted numbers (`money: 0.005`),
+  more decimal places, signs and exponents are rejected when the policy is
+  written, so a YAML float can never round a limit.
+- An amount value compares with the request amount in the request's own
+  currency (`usd` or `usdc`); budgets are per currency. Scope a cap to one
+  currency with a `currency` condition.
+- `POST /policies` returns `warnings`, without rejecting the policy, when an
+  amount value is finer than one cent, because USD wallet payments move whole
+  cents and can never match it.
+- The legacy `money_cents: 5000` form still loads and means the same as
+  `money: "50.00"`; both compare in the same policy. Stored policy revisions are
+  never rewritten.
+
+See [policies/README.md](../policies/README.md) for the full YAML rules.
 
 Policies can be loaded directly from YAML:
 
