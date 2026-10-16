@@ -3233,6 +3233,30 @@ fn hex_encode(bytes: &[u8]) -> String {
 
 /// The requested spend amount: the exact decimal `amount`, or the deprecated
 /// whole-cent `amount_cents`. Exactly one must be sent, and it must be positive.
+/// The wallet moves whole US-dollar cents. Refuse a wallet spend it can never
+/// pay before any decision or budget hold exists, so nothing is left to release
+/// (or to race with an executor claim).
+fn refuse_unpayable_wallet_spend(request: &SpendHttpRequest) -> Result<()> {
+    let currency = match request.currency.as_deref() {
+        Some(currency) => currency
+            .trim()
+            .to_ascii_lowercase()
+            .parse::<Currency>()
+            .map_err(|error| anyhow!(error))?,
+        None => Currency::Usd,
+    };
+    if currency != Currency::Usd {
+        return Err(
+            hubu_core::app::SpendApprovalError::UnsupportedPaymentCurrency(currency).into(),
+        );
+    }
+    let amount = requested_spend_amount(request.amount.as_deref(), request.amount_cents)?;
+    if amount.legacy_cents_floor() != amount.legacy_cents_ceil() {
+        return Err(hubu_core::app::SpendApprovalError::SubCentPaymentRail(amount).into());
+    }
+    Ok(())
+}
+
 fn requested_spend_amount(amount: Option<&str>, amount_cents: Option<i64>) -> Result<Amount> {
     decimal_or_legacy_cents(amount, amount_cents, "amount", "amount_cents", "spend")
 }
@@ -4585,6 +4609,7 @@ fn spend(body: String, state: &ServerState) -> Result<SpendHttpResponse> {
 
 fn spend_at(body: String, state: &ServerState, now: DateTime<Utc>) -> Result<SpendHttpResponse> {
     let request: SpendHttpRequest = serde_json::from_str(&body)?;
+    refuse_unpayable_wallet_spend(&request)?;
     let authorization = match evaluate_and_reserve_spend_at(request, state, now)? {
         SpendAuthorization::Authorized(authorization) => *authorization,
         SpendAuthorization::Response(response) => return Ok(*response),
@@ -9837,6 +9862,83 @@ lease_profiles:
         let target = set_spending_target(json!({"amount": "0.25"}).to_string(), &state).unwrap();
         let target = serde_json::to_value(&target).unwrap();
         assert_eq!(target["target"]["target_amount"]["display"], "0.25");
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn refused_wallet_payments_return_their_reservation() {
+        let path =
+            std::env::temp_dir().join(format!("hubu-api-wallet-refusal-{}.sqlite", UserId::new()));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        init(
+            json!({"display_name": "Alice Example", "email": "alice@example.com"}).to_string(),
+            &state,
+        )
+        .unwrap();
+        let agent = register_agent(
+            json!({"name": "wallet-refusal-agent", "version": "v1"}).to_string(),
+            &state,
+        )
+        .unwrap();
+        add_policy(
+            json!({"agent_id": agent.agent_id, "daily_limit_cents": 500}).to_string(),
+            &state,
+        )
+        .unwrap();
+        create_test_agent_budget(&state, &agent.agent_id, 500);
+        create_budget(
+            json!({"agent_id": agent.agent_id, "amount": "5", "currency": "usdc"}).to_string(),
+            &state,
+        )
+        .unwrap();
+        let frozen = |currency: Currency| {
+            let agent_id = resolve_agent_id_for_user(
+                &agent.agent_id,
+                &authenticated_user_context(&state).unwrap(),
+                &state,
+            )
+            .unwrap();
+            state
+                .budgets
+                .lock()
+                .unwrap()
+                .get_budgets_by_agent_id(&agent_id)
+                .into_iter()
+                .find(|budget| budget.budget.currency == currency)
+                .unwrap()
+                .balance
+                .frozen_amount
+        };
+        for (operation_key, amount, currency, expected) in [
+            (
+                "sub-cent-wallet",
+                "0.005",
+                "usd",
+                "cannot pay a sub-cent authorization",
+            ),
+            ("usdc-wallet", "1", "usdc", "usdc"),
+        ] {
+            let error = spend(
+                json!({
+                    "operation_key": operation_key,
+                    "account_id": agent.account_id,
+                    "amount": amount,
+                    "currency": currency,
+                    "reason": "wallet refusal",
+                    "merchant": "gongbu.image",
+                })
+                .to_string(),
+                &state,
+            )
+            .unwrap_err();
+            assert!(
+                error.to_string().to_ascii_lowercase().contains(expected),
+                "{operation_key}: {error}"
+            );
+        }
+        // No money moved, and neither reservation stays frozen until expiry.
+        assert_eq!(frozen(Currency::Usd), Amount::ZERO);
+        assert_eq!(frozen(Currency::Usdc), Amount::ZERO);
         std::fs::remove_file(path).ok();
     }
 
