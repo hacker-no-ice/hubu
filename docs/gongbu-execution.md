@@ -29,7 +29,7 @@ Gongbu owns:
 - execution recovery.
 
 The components communicate over
-[`hubu-spend-executor-v4.4`](spend-executor-contract.md).
+[`hubu-spend-executor-v4.5`](spend-executor-contract.md).
 
 ## Admission and execution flow
 
@@ -199,9 +199,20 @@ or the live-spend gate is incomplete.
 
 Pricing and provider amounts never pass through floating point. Gongbu keeps
 the exact rational catalog calculation and any exact provider-reported decimal
-as checked integers. Hubu's single per-operation ceiling conversion to budget
-cents is defined in
+as checked integers. It quotes, authorizes and settles in micro-units (10⁻⁶ of
+the currency), the same units Hubu charges: a catalog rate of 4.5 cents freezes
+an estimate of exactly 0.045 (`estimated_units: 45000` in a schema 3 pricing
+snapshot), never a rounded 5 cents. Only a price finer than a micro-unit
+rounds up, once, at the aggregate. Hubu's per-operation conversion of the
+exact provider cost to budget micro-units is defined in
 [precise external cost and budget conversion](spend-executor-contract.md#precise-external-cost-and-budget-conversion).
+
+Admission requires Hubu's exact authorization to be the frozen estimate, or,
+for callers that still authorize whole cents, that estimate rounded up to a
+cent (0.045 or 0.05 for a 4.5-cent image). Any other amount is refused before a
+claim. Gongbu claims with contract `hubu-spend-executor-v4.5` and the exact
+amount, and settlement never exceeds the exact estimate or the authorization,
+so a whole-cent authorization releases its remainder.
 
 Provider credentials belong to Gongbu's runtime identity. They are never
 accepted in execution requests, stored in repository records, included in
@@ -274,8 +285,15 @@ use the shared [live provider operations](operations/live-providers.md) guide.
 
 The implementation lives in [`crates/gongbu-api`](../crates/gongbu-api).
 
-On repository open, Gongbu independently migrates legacy v4.3 minor-unit
-attempt and receipt amounts to exact amounts with scale 2, keeping a
+On repository open, Gongbu adds micro-unit columns (`authorized_units`,
+`amount_units`, `settlement_units`, `units_scale` 6) next to the whole-cent
+`*_minor` columns and backfills them exactly (×10⁴) in one verified
+transaction ([`0002_accounting_units.sql`](../crates/gongbu-api/migrations/0002_accounting_units.sql)).
+It refuses to migrate an amount too large to convert, and reopening is
+idempotent. The `*_minor` columns remain as whole-cent projections rounded
+up. Pricing snapshots frozen before the upgrade keep schema 2 and their
+whole-cent estimate byte for byte. Gongbu also migrates legacy v4.3
+minor-unit attempt and receipt amounts to exact amounts with scale 2, keeping a
 lost-response retry immutable and idempotent; neither Hubu nor Gongbu opens or
 migrates the other's state. The exact mapping is defined in
 [persistence migration and v4 compatibility](spend-executor-contract.md#persistence-migration-and-v4-compatibility).

@@ -198,10 +198,14 @@ impl ProductionHubuActivities {
             None => (Some("gongbu.execution".into()), None),
         };
         ExecutorSpendRequest {
+            contract_version: gongbu_build_info::HUBU_EXECUTOR_CONTRACT.into(),
             spend_auth_token_id: execution.hubu_token_reference.as_str().into(),
             agent_id: None,
             account_id: Some(execution.account_id.clone()),
-            amount_cents: execution.authorized_minor,
+            amount: ExactAmount::from_units(
+                execution.authorized_units,
+                &execution.authorization_currency,
+            ),
             merchant,
             execution_scope,
             // Hubu owns task correlation in the authorization snapshot. Gongbu
@@ -264,13 +268,13 @@ impl HubuActivities for ProductionHubuActivities {
         &self,
         execution: &Execution,
         receipt_id: &str,
-        amount_minor: i64,
+        amount_units: i64,
     ) -> Result<String, ActivityError> {
         let receipt = self
             .repository
             .get_receipt_for_execution(&execution.execution_id)
             .map_err(|_| ActivityError::Proven("gongbu_receipt_missing".into()))?;
-        if receipt.receipt_id != receipt_id || receipt.settlement_minor != amount_minor {
+        if receipt.receipt_id != receipt_id || receipt.settlement_units != amount_units {
             return Err(ActivityError::Proven("gongbu_receipt_mismatch".into()));
         }
         self.client
@@ -405,12 +409,15 @@ fn trim_trailing_slash(mut value: String) -> String {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExecutorSpendRequest {
+    /// Always `hubu-spend-executor-v4.5`: the request carries the exact
+    /// authorization in micro-units.
+    pub contract_version: String,
     pub spend_auth_token_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account_id: Option<String>,
-    pub amount_cents: i64,
+    pub amount: ExactAmount,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub merchant: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -440,6 +447,10 @@ pub struct ExecutorSpendResponse {
     pub decision_id: String,
     pub account_id: String,
     pub agent_id: String,
+    /// The exact authorization from a `hubu-spend-executor-v4.5` Hubu; older
+    /// Hubu releases send only `amount_cents`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amount: Option<ExactAmount>,
     pub amount_cents: i64,
     pub currency: String,
     pub merchant: Option<String>,
@@ -449,6 +460,48 @@ pub struct ExecutorSpendResponse {
     pub status: String,
     pub expires_at: String,
     pub budget_hold: BudgetHold,
+}
+
+/// A Hubu money object: `units` of 10^-`scale` of `currency`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExactAmount {
+    pub units: String,
+    pub scale: u32,
+    pub currency: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<String>,
+}
+
+impl ExactAmount {
+    pub fn from_units(units: i64, currency: &str) -> Self {
+        Self {
+            units: units.to_string(),
+            scale: crate::provider_contract::UNITS_SCALE,
+            currency: currency.to_ascii_lowercase(),
+            display: None,
+        }
+    }
+}
+
+impl ExecutorSpendResponse {
+    /// The exact authorization in micro-units. Gongbu requires a v4.5 Hubu,
+    /// which always reports it; an authorization without one, at another
+    /// scale, in another currency, or inconsistent with its own cent
+    /// projection is refused.
+    pub fn authorized_units(&self) -> Option<i64> {
+        let amount = self.amount.as_ref()?;
+        if amount.scale != crate::provider_contract::UNITS_SCALE
+            || !amount.currency.eq_ignore_ascii_case(&self.currency)
+        {
+            return None;
+        }
+        let units = amount
+            .units
+            .parse::<i64>()
+            .ok()
+            .filter(|units| *units >= 0)?;
+        (crate::provider_contract::units_to_minor_ceil(units) == self.amount_cents).then_some(units)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -521,7 +574,7 @@ mod tests {
             hubu_authorization_id: "token-1".into(),
             hubu_claim_id: None,
             hubu_token_reference: crate::execution::HubuTokenReference::new("token-1").unwrap(),
-            authorized_minor: 100,
+            authorized_units: 100_0000,
             authorization_currency: "USD".into(),
             normalized_input: json!({"prompt":"cat","image_count":1}),
             input_hash: "sha256:input".into(),
@@ -667,7 +720,8 @@ mod tests {
         let activities =
             ProductionHubuActivities::new(HubuClient::new(format!("http://{address}")), repository);
         activities
-            .settle(&execution, "legacy-receipt", 7)
+            // The 7-cent legacy receipt was backfilled to 70,000 micro-units.
+            .settle(&execution, "legacy-receipt", 70_000)
             .expect_err("the fixture drops the retried settlement response");
         let wire = server.join().unwrap();
         // The pre-snapshot execution finalizes by its persisted token: no
@@ -718,10 +772,11 @@ mod tests {
     fn claim_request() -> ExecutorSpendClaimRequest {
         ExecutorSpendClaimRequest {
             spend: ExecutorSpendRequest {
+                contract_version: "hubu-spend-executor-v4.5".to_string(),
                 spend_auth_token_id: "token-1".to_string(),
                 agent_id: Some("agt_example".to_string()),
                 account_id: None,
-                amount_cents: 500,
+                amount: ExactAmount::from_units(5_000_000, "USD"),
                 merchant: Some("gongbu.image".to_string()),
                 execution_scope: None,
                 task_id: None,
