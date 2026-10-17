@@ -174,7 +174,7 @@ and [live provider operations](../../../operations/live-providers.md).
 Decisions-only is a future advanced concept and is not currently supported.
 Both supported modes use Gongbu and the existing reservation-and-settlement
 accounting lifecycle. There is no supported `executor = "none"` configuration.
-[Custom executors](../../../external-executor.md) on the v4.4 contract remain an
+[Custom executors](../../../external-executor.md) on the v4.5 contract remain an
 advanced integration point rather than a starting stack mode.
 
 Legacy `local-stack` is accepted as a deprecated alias for `live`. Change

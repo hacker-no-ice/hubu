@@ -341,7 +341,7 @@ mod tests {
                 hubu_authorization_id: "secret-ref".into(),
                 hubu_claim_id: Some("claim".into()),
                 hubu_token_reference: HubuTokenReference::new("secret-ref").unwrap(),
-                authorized_minor: 100,
+                authorized_units: 100_0000,
                 authorization_currency: "USD".into(),
                 normalized_input: json!({}),
                 input_hash: "hash".into(),

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Black-box Hubu spend-executor conformance runner.
 
-The runner replays the versioned fixture corpus in
-``fixtures/hubu-executor-conformance-v4.4.json`` against the public HTTP
-contract of a real ``hubu-server`` process. It never imports Hubu code or
+The runner replays a versioned fixture corpus (by default
+``fixtures/hubu-executor-conformance-v4.5.json``; ``--corpus`` selects the
+legacy v4.4 corpus) against the public HTTP contract of a real
+``hubu-server`` process. It never imports Hubu code or
 opens Hubu storage.
 
 Two target modes are supported:
@@ -48,7 +49,7 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_CORPUS = ROOT / "fixtures" / "hubu-executor-conformance-v4.4.json"
+DEFAULT_CORPUS = ROOT / "fixtures" / "hubu-executor-conformance-v4.5.json"
 CORPUS_SCHEMA = "hubu-executor-conformance-v1"
 PLUGIN_PROTOCOL = "hubu-executor-conformance-plugin-v1"
 RECONCILIATION_HEADER = "X-Hubu-Reconciliation-Capability"
@@ -534,8 +535,11 @@ class Runner:
         version = self.corpus["protocol_version"]
         for path in ("/spend/executor/guidance", "/.well-known/hubu-spend-executor.json"):
             status, guidance = http_request(self.target.base_url, "GET", path, bearer=None)
-            if status != 200 or guidance.get("protocol_version") != version:
-                raise ConformanceFailure(f"{path} does not publish {version}: {status} {guidance}")
+            # A target speaks its current protocol_version and every older
+            # version it still lists as supported.
+            supported = guidance.get("supported_protocol_versions") or [guidance.get("protocol_version")]
+            if status != 200 or version not in supported:
+                raise ConformanceFailure(f"{path} does not support {version}: {status} {guidance}")
         required = self.corpus["server_profile"]["required_lease_profiles"]
         published = guidance["lease"]["lease_profiles"]
         for profile, claim_ttl in required.items():

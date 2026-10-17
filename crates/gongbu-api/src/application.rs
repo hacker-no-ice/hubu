@@ -131,7 +131,7 @@ impl GenericProviderActivities {
         }
         enforce_cost(
             &snapshot,
-            execution.authorized_minor,
+            execution.authorized_units,
             &execution.authorization_currency,
         )
         .map_err(|_| WorkflowActivityError::Proven("authorization_invalid".into()))?;
@@ -1511,7 +1511,7 @@ mod tests {
                 _: &str,
                 amount_minor: i64,
             ) -> Result<String, WorkflowActivityError> {
-                assert_eq!(amount_minor, 25);
+                assert_eq!(amount_minor, 25_0000);
                 self.settlements.fetch_add(1, Ordering::SeqCst);
                 Ok("hubu-settlement-1".into())
             }
@@ -1537,7 +1537,7 @@ mod tests {
             hubu_authorization_id: "token-ref".into(),
             hubu_claim_id: None,
             hubu_token_reference: HubuTokenReference::new("token-ref").unwrap(),
-            authorized_minor: 25,
+            authorized_units: 25_0000,
             authorization_currency: "USD".into(),
             normalized_input: json!({"prompt":"draw a cat","image_count":1}),
             input_hash: "hash".into(),
@@ -1644,8 +1644,8 @@ mod tests {
             repository
                 .get_receipt_for_execution(&execution.execution_id)
                 .unwrap()
-                .settlement_minor,
-            25
+                .settlement_units,
+            25_0000
         );
         assert_eq!(
             runner.run_execution(&mismatched.execution_id).unwrap(),
@@ -1734,7 +1734,7 @@ mod tests {
                 _: &str,
                 amount_minor: i64,
             ) -> Result<String, WorkflowActivityError> {
-                assert_eq!(amount_minor, 30);
+                assert_eq!(amount_minor, 30_0000);
                 self.0.fetch_add(1, Ordering::SeqCst);
                 Ok("settlement-1".into())
             }
@@ -1754,7 +1754,7 @@ mod tests {
         targets.validate().unwrap();
         let repository = Repository::in_memory().unwrap();
         let execution = repository.create_execution(&CreateExecutionParams {
-            account_id:"account".into(), operation_key:"ideogram-workflow".into(), hubu_authorization_id:"token-ref".into(), hubu_claim_id:Some("claim".into()), hubu_token_reference:HubuTokenReference::new("token-ref").unwrap(), authorized_minor:30, authorization_currency:"USD".into(), normalized_input:json!({"prompt":"draw a cat","image_count":1}), input_hash:"hash".into(), input_schema_version:1, target:"image_generation/ideogram/ideogram_image/ideogram-v3".into(), config_version:"ideogram-pcv-1".into(), workload_type:"image_generation".into(), provider:"ideogram".into(), adapter:"ideogram_image".into(), model:"ideogram-v3".into(), provider_config_version:"ideogram-pcv-1".into(), provider_config_digest:targets.resolve("image_generation","ideogram","ideogram_image","ideogram-v3").unwrap().digest().to_owned(), pricing_snapshot:json!({"schema_version":2,"provider":"ideogram","model":"ideogram-v3","catalog_version":"prices-v2","catalog_digest":format!("sha256:{}", "a".repeat(64)),"pricing_rule_id":"ideogram-image","components":[{"unit":"image","rate_numerator_minor":30,"rate_denominator":1,"quantity":1}],"exact_estimate_numerator":"30","exact_estimate_denominator":"1","estimated_amount_minor":30,"currency":"USD"}), pricing_schema_version:2, execution_scope:None, created_at:"now".into()
+            account_id:"account".into(), operation_key:"ideogram-workflow".into(), hubu_authorization_id:"token-ref".into(), hubu_claim_id:Some("claim".into()), hubu_token_reference:HubuTokenReference::new("token-ref").unwrap(), authorized_units:30_0000, authorization_currency:"USD".into(), normalized_input:json!({"prompt":"draw a cat","image_count":1}), input_hash:"hash".into(), input_schema_version:1, target:"image_generation/ideogram/ideogram_image/ideogram-v3".into(), config_version:"ideogram-pcv-1".into(), workload_type:"image_generation".into(), provider:"ideogram".into(), adapter:"ideogram_image".into(), model:"ideogram-v3".into(), provider_config_version:"ideogram-pcv-1".into(), provider_config_digest:targets.resolve("image_generation","ideogram","ideogram_image","ideogram-v3").unwrap().digest().to_owned(), pricing_snapshot:json!({"schema_version":2,"provider":"ideogram","model":"ideogram-v3","catalog_version":"prices-v2","catalog_digest":format!("sha256:{}", "a".repeat(64)),"pricing_rule_id":"ideogram-image","components":[{"unit":"image","rate_numerator_minor":30,"rate_denominator":1,"quantity":1}],"exact_estimate_numerator":"30","exact_estimate_denominator":"1","estimated_amount_minor":30,"currency":"USD"}), pricing_schema_version:2, execution_scope:None, created_at:"now".into()
         }).unwrap();
         let root = tempdir().unwrap();
         let artifacts = ArtifactService::new(
@@ -1819,8 +1819,8 @@ mod tests {
             repository
                 .get_receipt_for_execution(&execution.execution_id)
                 .unwrap()
-                .settlement_minor,
-            30
+                .settlement_units,
+            30_0000
         );
     }
 
@@ -1962,7 +1962,7 @@ mod tests {
             hubu_claim_id: None,
             hubu_token_reference: HubuTokenReference::new(format!("token-{operation_key}"))
                 .unwrap(),
-            authorized_minor: 45,
+            authorized_units: 45_0000,
             authorization_currency: "USD".into(),
             normalized_input: input,
             input_hash: format!("hash-{operation_key}"),
@@ -1976,7 +1976,7 @@ mod tests {
             provider_config_version: "flux-v1".into(),
             provider_config_digest: target.digest().into(),
             pricing_snapshot: snapshot,
-            pricing_schema_version: 2,
+            pricing_schema_version: 3,
             execution_scope: None,
             created_at: "now".into(),
         };
@@ -2275,7 +2275,7 @@ mod tests {
         assert_eq!(target_version, "hubu-flux-2-pro-t2i-2026-08-28-v1");
         assert_eq!(snapshot.catalog_version, "bfl-flux-2-pro-usd-2026-08-28-v1");
         assert_eq!(snapshot.pricing_rule_id, "bfl-flux-2-pro-1k-2026-08-28-v1");
-        assert_eq!(snapshot.estimated_amount_minor, 3);
+        assert_eq!(snapshot.estimated_units, 3_0000);
 
         let transport_calls = Arc::new(AtomicUsize::new(0));
         let mut registry = ProviderRegistry::new();
@@ -2298,7 +2298,7 @@ mod tests {
                     hubu_claim_id: None,
                     hubu_token_reference: HubuTokenReference::new(format!("token-{suffix}"))
                         .unwrap(),
-                    authorized_minor: 3,
+                    authorized_units: 3_0000,
                     authorization_currency: "USD".into(),
                     normalized_input: json!({
                         "prompt":"small blue circle","image_count":1,"image_size":"1k",
@@ -2631,7 +2631,7 @@ mod tests {
                     hubu_claim_id: Some(format!("claim-{provider}")),
                     hubu_token_reference: HubuTokenReference::new(format!("token-{provider}"))
                         .unwrap(),
-                    authorized_minor: amount,
+                    authorized_units: amount * 10_000,
                     authorization_currency: "USD".into(),
                     normalized_input: if is_flux {
                         json!({"prompt":"draw a cat","image_count":1,"image_size":"1k"})
@@ -2784,15 +2784,15 @@ mod tests {
             repository
                 .get_receipt_for_execution(&gemini.execution_id)
                 .unwrap()
-                .settlement_minor,
-            25
+                .settlement_units,
+            25_0000
         );
         assert_eq!(
             repository
                 .get_receipt_for_execution(&flux.execution_id)
                 .unwrap()
-                .settlement_minor,
-            45
+                .settlement_units,
+            45_0000
         );
         let recovered_legacy_flux = repository.get_execution(&flux.execution_id).unwrap();
         assert!(recovered_legacy_flux

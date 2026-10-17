@@ -529,6 +529,9 @@ fn scrub_private_projection(value: &mut Value) {
 struct Money {
     amount_minor: i64,
     currency: String,
+    /// The exact authorization in micro-units, from Gongbu v0.2.4 onward.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    amount_units: Option<i64>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -862,6 +865,7 @@ mod tests {
             outcome: None,
             failure: None,
             authorization: Money {
+                amount_units: None,
                 amount_minor: 25,
                 currency: "USD".into(),
             },

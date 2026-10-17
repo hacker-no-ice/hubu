@@ -192,3 +192,115 @@ fn captured_errors_are_plain_unless_color_is_forced() {
         .windows(2)
         .any(|window| window == b"\x1b["));
 }
+
+fn money(units: &str, display: &str) -> Value {
+    serde_json::json!({"units": units, "scale": 6, "currency": "usd", "display": display})
+}
+
+fn budget_list_body() -> String {
+    let budget = |id: &str,
+                  limit: (&str, &str),
+                  consumed: (&str, &str),
+                  frozen: (&str, &str),
+                  remaining: (&str, &str),
+                  cents: [i64; 4]| {
+        serde_json::json!({
+            "budget_id": id, "agent_id": "agt_0123456789ab", "status": "active",
+            "currency": "usd",
+            "amount_limit": money(limit.0, limit.1),
+            "consumed_amount": money(consumed.0, consumed.1),
+            "frozen_amount": money(frozen.0, frozen.1),
+            "remaining_amount": money(remaining.0, remaining.1),
+            "amount_limit_cents": cents[0], "consumed_amount_cents": cents[1],
+            "frozen_amount_cents": cents[2], "remaining_amount_cents": cents[3],
+            "current_version_id": "bgv_000000000001", "current_revision": 1,
+            "starting_at": "2026-10-01T00:00:00+00:00", "ending_before": null
+        })
+    };
+    serde_json::json!({"budgets": [
+        budget(
+            "bgt_000000000001",
+            ("10000000", "10.00"),
+            ("35000", "0.035"),
+            ("1", "0.000001"),
+            ("9964999", "9.964999"),
+            [1000, 4, 1, 996],
+        ),
+        // A reconciled overrun leaves a negative remainder.
+        budget(
+            "bgt_000000000002",
+            ("10000", "0.01"),
+            ("13100", "0.0131"),
+            ("0", "0.00"),
+            ("-3100", "-0.0031"),
+            [1, 2, 0, -1],
+        ),
+    ]})
+    .to_string()
+}
+
+#[test]
+fn budget_amounts_show_exact_adaptive_money() {
+    let home = tempdir().unwrap();
+    let (url, server) = serve_json_once(&budget_list_body());
+    let output = run(home.path(), &["--url", &url, "budget", "list"]);
+    assert_success(&output);
+    assert_eq!(server.join().unwrap(), "GET /budgets HTTP/1.1");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let amounts: Vec<&str> = stdout
+        .lines()
+        .filter(|line| line.trim_start().starts_with("limit:"))
+        .collect();
+    assert_eq!(
+        amounts,
+        [
+            "    limit: $10.00  consumed: $0.035  frozen: $0.000001  remaining: $9.964999",
+            "    limit: $0.01  consumed: $0.0131  frozen: $0.00  remaining: -$0.0031",
+        ]
+    );
+}
+
+#[test]
+fn round_cents_marks_and_conservatively_rounds_amounts() {
+    let home = tempdir().unwrap();
+    let (url, server) = serve_json_once(&budget_list_body());
+    let output = run(
+        home.path(),
+        &["--url", &url, "--round", "cents", "budget", "list"],
+    );
+    assert_success(&output);
+    server.join().unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let amounts: Vec<&str> = stdout
+        .lines()
+        .filter(|line| line.trim_start().starts_with("limit:"))
+        .collect();
+    // Usage rounds up; limits and remaining round down.
+    assert_eq!(
+        amounts,
+        [
+            "    limit: $10.00  consumed: ≈$0.04  frozen: ≈$0.01  remaining: ≈$9.96",
+            "    limit: $0.01  consumed: ≈$0.02  frozen: $0.00  remaining: ≈-$0.01",
+        ]
+    );
+}
+
+#[test]
+fn older_servers_without_money_objects_fall_back_to_cents() {
+    let home = tempdir().unwrap();
+    let body = serde_json::json!({"budgets": [{
+        "budget_id": "bgt_000000000001", "agent_id": "agt_0123456789ab", "status": "active",
+        "amount_limit_cents": 1000, "consumed_amount_cents": 4,
+        "frozen_amount_cents": 1, "remaining_amount_cents": 995,
+        "current_version_id": "bgv_000000000001", "current_revision": 1,
+        "starting_at": "2026-10-01T00:00:00+00:00", "ending_before": null
+    }]})
+    .to_string();
+    let (url, server) = serve_json_once(&body);
+    let output = run(home.path(), &["--url", &url, "budget", "list"]);
+    assert_success(&output);
+    server.join().unwrap();
+    assert!(String::from_utf8(output.stdout)
+        .unwrap()
+        .contains("limit: $10.00  consumed: $0.04  frozen: $0.01  remaining: $9.95"));
+}
