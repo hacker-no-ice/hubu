@@ -321,7 +321,7 @@ runtime options, and copy the returned `execution_scope` into authorization:
 {
   "authorization": {
     "account_id": "agent-account-id",
-    "amount_cents": 12,
+    "amount": "0.12",
     "reason": "Generate one product illustration",
     "execution_scope": {
       "schema_version": 1,
@@ -611,7 +611,7 @@ The version-1 compatibility boundary requires:
 | Unified contract | `hubu-gongbu-mcp-v1` |
 | Routing revision | Reported as `routing_revision` by `hubu_unified_capabilities` |
 | MCP protocol | `2024-11-05` |
-| Hubu and Gongbu executor contract | `hubu-spend-executor-v4.4` |
+| Hubu and Gongbu executor contract | `hubu-spend-executor-v4.5` |
 | Gongbu API schema | `2` |
 | Gongbu MCP schema | `2` |
 | Product versions | Exact match across router and configured backends |

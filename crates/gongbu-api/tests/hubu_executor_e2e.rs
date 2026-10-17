@@ -186,6 +186,12 @@ fn deterministic_hubu_to_gongbu_executor_contract() {
     assert_eq!(budget_a["frozen_amount_cents"], 0);
     assert_eq!(budget_a["remaining_amount_cents"], 1_000 - ACTUAL_MINOR * 2);
     let budget_b = workspace.admin.budget_for(&agent_b.agent_id);
+    // Gongbu settles in the same micro-units Hubu charges.
+    assert_eq!(
+        budget_b["consumed_amount"]["units"],
+        success_b.settlement_units.unwrap().to_string()
+    );
+    assert_eq!(budget_b["consumed_amount"]["scale"], 6);
     assert_eq!(budget_b["consumed_amount_cents"], ACTUAL_MINOR);
     assert_eq!(budget_b["frozen_amount_cents"], 0);
     assert_eq!(budget_b["remaining_amount_cents"], 1_000 - ACTUAL_MINOR);
@@ -285,6 +291,8 @@ struct ScenarioResult {
     hubu_claim_calls: usize,
     hubu_settle_calls: usize,
     hubu_release_calls: usize,
+    /// Gongbu's durable settlement, in micro-units, when one was settled.
+    settlement_units: Option<i64>,
 }
 
 struct AdmissionContext<'a> {
@@ -375,7 +383,7 @@ fn run_success(
         .repository
         .get_receipt_for_execution(&execution.execution_id)
         .expect("durable Gongbu receipt");
-    assert_eq!(receipt.settlement_minor, ACTUAL_MINOR);
+    assert_eq!(receipt.settlement_units, ACTUAL_MINOR * 10_000);
     assert!(receipt.settled_at.is_some());
     let claim_id = completed.hubu_claim_id.expect("persisted Hubu claim");
     assert_eq!(
@@ -394,6 +402,7 @@ fn run_success(
     );
 
     ScenarioResult {
+        settlement_units: Some(receipt.settlement_units),
         execution_id: execution.execution_id,
         operation_key: operation_key.to_string(),
         spend_auth_token_id: string_at(&authorization, "auth_token_id"),
@@ -459,6 +468,7 @@ fn run_provider_failure(
         .is_err());
 
     ScenarioResult {
+        settlement_units: None,
         execution_id: execution.execution_id,
         operation_key: operation_key.to_string(),
         spend_auth_token_id: string_at(&authorization, "auth_token_id"),
@@ -525,6 +535,7 @@ fn run_ambiguous_claim_recovery(
     );
 
     ScenarioResult {
+        settlement_units: None,
         execution_id: execution.execution_id,
         operation_key: operation_key.to_string(),
         spend_auth_token_id: string_at(&authorization, "auth_token_id"),

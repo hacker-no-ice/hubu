@@ -46,7 +46,7 @@ use notification::TransitionState;
 
 pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 pub const UNIFIED_CONTRACT_VERSION: &str = "hubu-gongbu-mcp-v1";
-pub const EXECUTOR_CONTRACT_VERSION: &str = "hubu-spend-executor-v4.4";
+pub const EXECUTOR_CONTRACT_VERSION: &str = "hubu-spend-executor-v4.5";
 pub const HUBU_ROUTING_CONTRACT_VERSION: &str = "hubu-mcp-routing-v1";
 pub const ROUTING_REVISION: u32 = 14;
 
@@ -1670,6 +1670,7 @@ fn standalone_authorization_status_result(
         {
             projection["settlement"] = json!({
                 "actual_vendor_cost": receipt.get("actual_vendor_cost"),
+                "budget_charge": receipt.get("budget_charge"),
                 "budget_charge_cents": receipt.get("budget_charge_cents"),
                 "currency": receipt.get("currency"),
             });
@@ -1952,6 +1953,7 @@ mod tests {
                 "claim": {"reconciliation_outcome": null},
                 "receipt": {
                     "actual_vendor_cost": {"amount": "3500001", "scale": 6, "currency": "usd"},
+                    "budget_charge": {"units": "3500001", "scale": 6, "currency": "usd", "display": "3.500001"},
                     "budget_charge_cents": 351,
                     "currency": "usd",
                     "provider_request_reference": {"digest": "sha256:private", "redacted": true},
@@ -2032,6 +2034,7 @@ mod tests {
             settled["structuredContent"]["settlement"],
             json!({
                 "actual_vendor_cost": {"amount": "3500001", "scale": 6, "currency": "usd"},
+                "budget_charge": {"units": "3500001", "scale": 6, "currency": "usd", "display": "3.500001"},
                 "budget_charge_cents": 351,
                 "currency": "usd"
             })

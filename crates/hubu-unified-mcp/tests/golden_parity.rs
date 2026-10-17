@@ -115,7 +115,7 @@ fn cases() -> Vec<GoldenCase> {
             owner: hubu,
             method: "POST",
             path: "/spend/authorize",
-            arguments: json!({"account_id":"account-107","amount_cents":0,"reason":"no-spend parity fixture"}),
+            arguments: json!({"account_id":"account-107","amount":"0.005","currency":"usdc","reason":"sub-cent parity fixture"}),
             meta: Some(platform_meta("authorize-107")),
         },
         GoldenCase {

@@ -339,7 +339,7 @@ pub(crate) fn execution_scope_input_schema() -> Value {
 }
 
 /// Exact decimal spend amount in the spend currency.
-fn spend_amount_input_schema() -> Value {
+pub(crate) fn spend_amount_input_schema() -> Value {
     json!({
         "type": "string",
         "pattern": "^\\d+(\\.\\d{1,6})?$",
@@ -349,7 +349,7 @@ fn spend_amount_input_schema() -> Value {
 
 /// Budgets are per currency: spend only counts against a budget in its own
 /// currency.
-fn spend_currency_input_schema() -> Value {
+pub(crate) fn spend_currency_input_schema() -> Value {
     json!({
         "type": "string",
         "enum": ["usd", "usdc"],

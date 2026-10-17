@@ -3,7 +3,7 @@
 Hubu controls spend; executors do the work. Gongbu is the first-party executor,
 but it can't cover every provider or workload. Any service can act as the
 executor for Hubu-authorized work. It needs only the normal Hubu bearer and the
-[`hubu-spend-executor-v4.4`](spend-executor-contract.md) HTTP contract. This
+[`hubu-spend-executor-v4.5`](spend-executor-contract.md) HTTP contract. This
 guide follows one operation from the agent's MCP call to settlement.
 
 The supported stack modes are sandbox and live, both starting Gongbu by default.
@@ -14,7 +14,7 @@ currently supported. The reservation-and-settlement lifecycle remains required.
 ```text
 agent ──hubu_authorize_spend──▶ unified MCP ──▶ Hubu   (reserve the budget)
 agent ──continuation token────▶ your executor
-your executor ──resolve / claim / settle or release──▶ Hubu (HTTP, v4.4)
+your executor ──resolve / claim / settle or release──▶ Hubu (HTTP, v4.5)
 agent ──hubu_operation_status─▶ unified MCP ──reads──▶ Hubu authorization record
 ```
 
@@ -42,7 +42,10 @@ Hubu credentials or operation keys.
 Your executor authenticates with its own normal Hubu bearer. It claims by the
 token and finalizes by the `claim_id` that the claim returns. The accepted and
 rejected fields on each route are defined in the v4.4 executor request
-identity table of the [spend executor contract](spend-executor-contract.md):
+identity table of the [spend executor contract](spend-executor-contract.md).
+Send `contract_version: "hubu-spend-executor-v4.5"` and the exact `amount`
+object that resolve returned on validate and claim; see
+[v4.5 exact amounts](spend-executor-contract.md#v45-exact-amounts):
 
 1. Persist the token durably before doing anything else.
 2. `POST /spend/executor/resolve` with `{"spend_auth_token_id": …}` reads the
@@ -100,7 +103,7 @@ semantics are in [MCP tool consolidation](mcp-tool-consolidation.md#authority-ap
 ## 6. Check your executor against the conformance suite
 
 The [executor conformance suite](executor-conformance.md) replays the
-versioned v4.4 corpus against a real `hubu-server`. Plug your executor in
+versioned v4.5 corpus against a real `hubu-server`. Plug your executor in
 through the JSON-lines plugin protocol:
 
 ```bash

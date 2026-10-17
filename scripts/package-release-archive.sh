@@ -57,14 +57,14 @@ cp "${root_dir}/Cargo.lock" "${package_dir}/Cargo.lock"
 jq -n \
   --arg product_version "${release_version}" \
   --arg source_commit "${source_commit}" \
-  --arg executor_contract "hubu-spend-executor-v4.4" \
+  --arg executor_contract "hubu-spend-executor-v4.5" \
   --arg target "${target}" \
   '{schema_version: 2, product: "hubu", product_version: $product_version, source_commit: $source_commit, executor_contract: $executor_contract, target: $target, binaries: ["hubu", "hubu-server", "hubu-unified-mcp", "gongbu-server"], supported_agent_surfaces: ["hubu-unified-mcp"], development_tools_excluded: ["hubu-bench", "gongbu-sandbox"], files: ["Cargo.lock", "LICENSE-APACHE", "LICENSE-MIT", "LOCAL-STACK.md", "PROVENANCE.json", "SHA256SUMS", "THIRD-PARTY-LICENSES.txt", "THIRD-PARTY-NOTICES.md", "gongbu-server", "hubu", "hubu-server", "hubu-unified-mcp", "mcp-tool-consolidation.md", "unified-mcp.md"]}' \
   > "${package_dir}/MANIFEST.json"
 jq -n \
   --arg product_version "${release_version}" \
   --arg source_commit "${source_commit}" \
-  --arg executor_contract "hubu-spend-executor-v4.4" \
+  --arg executor_contract "hubu-spend-executor-v4.5" \
   --arg target "${target}" \
   --arg repository "${repository}" \
   --arg workflow_run "${workflow_run}" \
