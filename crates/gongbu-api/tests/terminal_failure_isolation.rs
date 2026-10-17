@@ -567,6 +567,7 @@ impl SpendAuthorizationResolver for ScenarioHubu {
             decision_id: format!("decision-{spend_auth_token_id}"),
             account_id: "account".into(),
             agent_id: "agent".into(),
+            amount: None,
             amount_cents: 100,
             currency: "USD".into(),
             merchant: None,

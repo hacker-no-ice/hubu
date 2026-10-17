@@ -2,6 +2,10 @@
 
 > Maintainers publishing a release: see [Publishing releases (maintainers)](publishing-releases.md).
 
+> Upgrading a stack with budget data to v0.2.4: read
+> [Upgrading to v0.2.4: exact amounts](upgrading-to-v0.2.4.md) first. It
+> carries a one-way storage migration and executor contract v4.5.
+
 Hubu publishes immutable unified Hubu/Gongbu releases through
 `.github/workflows/release.yml`. Consumers pin an exact tag and its published
 full source commit; a moving checkout of `main` is not a supported installation
@@ -20,7 +24,7 @@ The distribution exposes two independent versions:
 - `product_version` identifies all four production binaries. Stable releases
   use SemVer tags; `main` builds include the source commit.
 - `executor_contract` identifies the Hubu-to-executor protocol and changes only
-  with that protocol. The current value is `hubu-spend-executor-v4.4`.
+  with that protocol. The current value is `hubu-spend-executor-v4.5`.
 
 Release tags and assets are immutable, and there is no mutable latest-main
 artifact. Maintainers publish releases as described in
@@ -130,7 +134,7 @@ done
 ```
 
 Every binary must report the selected tag as its product version, the same
-non-`unknown` full source commit, and `hubu-spend-executor-v4.4`. The installer
+non-`unknown` full source commit, and `hubu-spend-executor-v4.5`. The installer
 performs this verification before replacing the destination files. These
 release-stamped local builds work with the normal managed-stack lineage checks;
 keep `allow_development_builds = false`.

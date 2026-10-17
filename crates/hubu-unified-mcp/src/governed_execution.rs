@@ -109,10 +109,15 @@ pub(super) fn tool_definition() -> Value {
                 "authorization": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["account_id", "amount_cents", "reason"],
+                    "required": ["account_id", "reason"],
                     "properties": {
                         "account_id": {"type": "string"},
-                        "amount_cents": {"type": "integer"},
+                        "amount": hubu::spend_amount_input_schema(),
+                        "amount_cents": {
+                            "type": "integer",
+                            "description": "Deprecated whole-cent amount; send `amount` instead, never both."
+                        },
+                        "currency": hubu::spend_currency_input_schema(),
                         "reason": {"type": "string"},
                         "merchant": {"type": "string"},
                         "execution_scope": hubu::execution_scope_input_schema(),
