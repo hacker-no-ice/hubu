@@ -4,9 +4,9 @@ use crate::redaction::Redactor;
 use crate::{
     execution_scope::{for_target, ExecutionScope},
     provider_contract::{
-        polling_deadline_allows_reinspect, ActualVendorCost, AsyncProviderOperation,
-        NormalizedUsage, PollingRecoveryContext, PricingSnapshot,
-        POLLING_RECOVERY_MIN_REINSPECT_WINDOW_MS, PRICING_SNAPSHOT_SCHEMA_VERSION,
+        polling_deadline_allows_reinspect, units_to_minor_ceil, ActualVendorCost,
+        AsyncProviderOperation, NormalizedUsage, PollingRecoveryContext, PricingSnapshot,
+        POLLING_RECOVERY_MIN_REINSPECT_WINDOW_MS, PRICING_SNAPSHOT_SCHEMA_VERSION, UNITS_SCALE,
     },
 };
 use chrono::DateTime;
@@ -20,6 +20,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 const MIGRATION: &str = include_str!("../../migrations/0001_execution_core.sql");
+const ACCOUNTING_UNITS_MIGRATION: &str = include_str!("../../migrations/0002_accounting_units.sql");
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("database: {0}")]
@@ -69,7 +70,8 @@ pub struct CreateExecutionParams {
     pub hubu_authorization_id: String,
     pub hubu_claim_id: Option<String>,
     pub hubu_token_reference: HubuTokenReference,
-    pub authorized_minor: i64,
+    /// The Hubu authorization in micro-units.
+    pub authorized_units: i64,
     pub authorization_currency: String,
     pub normalized_input: Value,
     pub input_hash: String,
@@ -94,7 +96,8 @@ pub struct HubuAuthorizationSnapshot {
     pub operation_key: String,
     pub decision_id: String,
     pub spend_auth_token_id: String,
-    pub amount_minor: i64,
+    /// The exact authorized amount in micro-units.
+    pub amount_units: i64,
     pub currency: String,
     pub execution_scope: ExecutionScope,
     pub lease_profile: String,
@@ -111,7 +114,8 @@ pub struct Execution {
     pub hubu_authorization_id: String,
     pub hubu_claim_id: Option<String>,
     pub hubu_token_reference: HubuTokenReference,
-    pub authorized_minor: i64,
+    /// The Hubu authorization in micro-units.
+    pub authorized_units: i64,
     pub authorization_currency: String,
     pub normalized_input: Value,
     pub input_hash: String,
@@ -288,7 +292,8 @@ pub struct CreateReceiptParams {
     pub receipt_id: String,
     pub execution_id: String,
     pub provider_attempt_id: String,
-    pub settlement_minor: i64,
+    /// The budget charge in micro-units.
+    pub settlement_units: i64,
     pub currency: String,
     pub pricing_catalog_version: String,
     pub actual_vendor_cost: ActualVendorCost,
@@ -301,7 +306,8 @@ pub struct Receipt {
     pub receipt_id: String,
     pub execution_id: String,
     pub provider_attempt_id: String,
-    pub settlement_minor: i64,
+    /// The budget charge in micro-units.
+    pub settlement_units: i64,
     pub currency: String,
     pub pricing_catalog_version: String,
     pub actual_vendor_cost: ActualVendorCost,
@@ -354,6 +360,7 @@ impl Repository {
         migrate_precise_vendor_cost_columns(&c)?;
         migrate_provider_operation_checkpoint_columns(&c)?;
         migrate_provider_transport_counter_columns(&c)?;
+        migrate_accounting_units(&c)?;
         Ok(Self(Arc::new(Mutex::new(c)), redactor))
     }
     pub fn create_execution(&self, n: &CreateExecutionParams) -> Result<Execution> {
@@ -379,7 +386,7 @@ impl Repository {
                 || authorization.operation_key != n.operation_key
                 || authorization.spend_auth_token_id != n.hubu_authorization_id
                 || authorization.spend_auth_token_id != n.hubu_token_reference.as_str()
-                || authorization.amount_minor != n.authorized_minor
+                || authorization.amount_units != n.authorized_units
                 || !authorization
                     .currency
                     .eq_ignore_ascii_case(&n.authorization_currency)
@@ -413,7 +420,7 @@ impl Repository {
             "pending",
         ])?;
         self.reject_registered_numbers([
-            n.authorized_minor,
+            n.authorized_units,
             n.input_schema_version,
             n.pricing_schema_version,
             0,
@@ -435,7 +442,7 @@ impl Repository {
                 Err(error) => return Err(error),
             }
         }
-        let inserted = tx.execute("INSERT OR IGNORE INTO executions(execution_id,account_id,operation_key,hubu_authorization_id,hubu_claim_id,hubu_token_reference,authorized_minor,authorization_currency,normalized_input_json,input_hash,input_schema_version,target,config_version,workload_type,provider,adapter,model,provider_config_version,provider_config_digest,pricing_snapshot_json,pricing_schema_version,execution_scope_json,status,created_at,updated_at,version) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,'pending',?23,?23,0)",params![id,n.account_id,n.operation_key,n.hubu_authorization_id,n.hubu_claim_id,n.hubu_token_reference.0,n.authorized_minor,n.authorization_currency,j(&n.normalized_input),n.input_hash,n.input_schema_version,n.target,n.config_version,n.workload_type,n.provider,n.adapter,n.model,n.provider_config_version,n.provider_config_digest,j(&n.pricing_snapshot),n.pricing_schema_version,execution_scope,n.created_at])?;
+        let inserted = tx.execute("INSERT OR IGNORE INTO executions(execution_id,account_id,operation_key,hubu_authorization_id,hubu_claim_id,hubu_token_reference,authorized_minor,authorization_currency,normalized_input_json,input_hash,input_schema_version,target,config_version,workload_type,provider,adapter,model,provider_config_version,provider_config_digest,pricing_snapshot_json,pricing_schema_version,execution_scope_json,status,created_at,updated_at,version,authorized_units,units_scale) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,'pending',?23,?23,0,?24,6)",params![id,n.account_id,n.operation_key,n.hubu_authorization_id,n.hubu_claim_id,n.hubu_token_reference.0,units_to_minor_ceil(n.authorized_units),n.authorization_currency,j(&n.normalized_input),n.input_hash,n.input_schema_version,n.target,n.config_version,n.workload_type,n.provider,n.adapter,n.model,n.provider_config_version,n.provider_config_digest,j(&n.pricing_snapshot),n.pricing_schema_version,execution_scope,n.created_at,n.authorized_units])?;
         let e = if inserted == 1 {
             query_id(&tx, &id)?
         } else {
@@ -444,8 +451,8 @@ impl Repository {
         if let Some(authorization) = authorization {
             if e.execution_id == id {
                 tx.execute(
-                    "INSERT INTO hubu_authorization_snapshots(execution_id,account_id,agent_id,operation_key,decision_id,spend_auth_token_id,amount_minor,currency,execution_scope_json,lease_profile,expires_at,authorization_status,task_id,reason) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
-                    params![e.execution_id,authorization.account_id,authorization.agent_id,authorization.operation_key,authorization.decision_id,authorization.spend_auth_token_id,authorization.amount_minor,authorization.currency,serde_json::to_string(&authorization.execution_scope).expect("execution scope serializes"),authorization.lease_profile,authorization.expires_at,authorization.authorization_status,authorization.task_id,authorization.reason],
+                    "INSERT INTO hubu_authorization_snapshots(execution_id,account_id,agent_id,operation_key,decision_id,spend_auth_token_id,amount_minor,currency,execution_scope_json,lease_profile,expires_at,authorization_status,task_id,reason,amount_units,units_scale) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,6)",
+                    params![e.execution_id,authorization.account_id,authorization.agent_id,authorization.operation_key,authorization.decision_id,authorization.spend_auth_token_id,units_to_minor_ceil(authorization.amount_units),authorization.currency,serde_json::to_string(&authorization.execution_scope).expect("execution scope serializes"),authorization.lease_profile,authorization.expires_at,authorization.authorization_status,authorization.task_id,authorization.reason,authorization.amount_units],
                 )?;
             }
         }
@@ -515,7 +522,7 @@ impl Repository {
             .lock()
             .unwrap()
             .query_row(
-                "SELECT account_id,agent_id,operation_key,decision_id,spend_auth_token_id,amount_minor,currency,execution_scope_json,lease_profile,expires_at,authorization_status,task_id,reason FROM hubu_authorization_snapshots WHERE execution_id=?1",
+                "SELECT account_id,agent_id,operation_key,decision_id,spend_auth_token_id,amount_units,currency,execution_scope_json,lease_profile,expires_at,authorization_status,task_id,reason FROM hubu_authorization_snapshots WHERE execution_id=?1",
                 [execution_id],
                 |row| {
                     let scope: String = row.get(7)?;
@@ -525,7 +532,7 @@ impl Repository {
                         operation_key: row.get(2)?,
                         decision_id: row.get(3)?,
                         spend_auth_token_id: row.get(4)?,
-                        amount_minor: row.get(5)?,
+                        amount_units: row.get(5)?,
                         currency: row.get(6)?,
                         execution_scope: serde_json::from_str(&scope).map_err(|error| {
                             rusqlite::Error::FromSqlConversionFailure(
@@ -969,7 +976,10 @@ impl Repository {
         let compatibility_minor = r
             .actual_vendor_cost
             .as_ref()
-            .map(|cost| cost.to_budget_minor_units(&cost.currency))
+            .map(|cost| {
+                cost.to_budget_units(&cost.currency)
+                    .map(units_to_minor_ceil)
+            })
             .transpose()
             .map_err(|_| Error::Invalid("attempt result"))?;
         let n=self.0.lock().unwrap().execute("UPDATE provider_attempts SET outcome=?1,completed_at=?2,usage_json=?3,usage_schema_version=?4,provider_amount_minor=?5,provider_currency=?6,actual_vendor_cost_amount=?7,actual_vendor_cost_scale=?8,actual_vendor_cost_currency=?9,failure_code=?10,failure_message_redacted=?11,provider_request_id=?12,provider_operation_id=?13 WHERE provider_attempt_id=?14 AND completed_at IS NULL AND transmission_started_at IS NOT NULL",params![r.outcome,r.completed_at,j(&r.usage),r.usage_schema_version,compatibility_minor,r.actual_vendor_cost.as_ref().map(|cost| &cost.currency),r.actual_vendor_cost.as_ref().map(|cost| cost.amount),r.actual_vendor_cost.as_ref().map(|cost| cost.scale),r.actual_vendor_cost.as_ref().map(|cost| &cost.currency),r.failure_code,failure,r.provider_request_id,r.provider_operation_id,id])?;
@@ -1030,7 +1040,10 @@ impl Repository {
         let compatibility_minor = r
             .actual_vendor_cost
             .as_ref()
-            .map(|cost| cost.to_budget_minor_units(&cost.currency))
+            .map(|cost| {
+                cost.to_budget_units(&cost.currency)
+                    .map(units_to_minor_ceil)
+            })
             .transpose()
             .map_err(|_| Error::Invalid("attempt result"))?;
         let changed = transaction.execute(
@@ -1310,11 +1323,11 @@ impl Repository {
             n.hubu_settlement_id.as_deref().unwrap_or(""),
         ])?;
         self.reject_registered_numbers([
-            n.settlement_minor,
+            n.settlement_units,
             n.actual_vendor_cost.amount,
             i64::from(n.actual_vendor_cost.scale),
         ])?;
-        if n.settlement_minor < 0 {
+        if n.settlement_units < 0 {
             return Err(Error::Invalid("settlement"));
         }
         let attempt = self.get_provider_attempt(&n.provider_attempt_id)?;
@@ -1330,7 +1343,7 @@ impl Repository {
         let c = self.0.lock().unwrap();
         let auth: (i64, String, String) = c
             .query_row(
-                "SELECT authorized_minor,authorization_currency,pricing_snapshot_json FROM executions WHERE execution_id=?1",
+                "SELECT authorized_units,authorization_currency,pricing_snapshot_json FROM executions WHERE execution_id=?1",
                 [&n.execution_id],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
@@ -1361,7 +1374,7 @@ impl Repository {
                 }
                 _ => Error::Invalid("precise settlement"),
             })?;
-        if expected.budget_amount_minor != n.settlement_minor
+        if expected.budget_units != n.settlement_units
             || expected.actual_vendor_cost != n.actual_vendor_cost
             || !n.currency.eq_ignore_ascii_case(&auth.1)
             || !n.currency.eq_ignore_ascii_case(&snapshot.currency)
@@ -1375,12 +1388,12 @@ impl Repository {
             .ok_or(Error::Invalid("receipt requires provider evidence"))?;
         let pricing_snapshot_json = auth.2;
         c.execute(
-            "INSERT INTO receipts(receipt_id,execution_id,provider_attempt_id,settlement_minor,currency,pricing_catalog_version,actual_vendor_cost_amount,actual_vendor_cost_scale,actual_vendor_cost_currency,provider_request_id,pricing_snapshot_json,created_at,settled_at,hubu_settlement_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+            "INSERT INTO receipts(receipt_id,execution_id,provider_attempt_id,settlement_minor,currency,pricing_catalog_version,actual_vendor_cost_amount,actual_vendor_cost_scale,actual_vendor_cost_currency,provider_request_id,pricing_snapshot_json,created_at,settled_at,hubu_settlement_id,settlement_units,units_scale) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,6)",
             params![
                 n.receipt_id,
                 n.execution_id,
                 n.provider_attempt_id,
-                n.settlement_minor,
+                units_to_minor_ceil(n.settlement_units),
                 n.currency,
                 n.pricing_catalog_version,
                 n.actual_vendor_cost.amount,
@@ -1390,14 +1403,15 @@ impl Repository {
                 pricing_snapshot_json,
                 n.created_at,
                 n.settled_at,
-                n.hubu_settlement_id
+                n.hubu_settlement_id,
+                n.settlement_units
             ],
         )?;
         Ok(Receipt {
             receipt_id: n.receipt_id.clone(),
             execution_id: n.execution_id.clone(),
             provider_attempt_id: n.provider_attempt_id.clone(),
-            settlement_minor: n.settlement_minor,
+            settlement_units: n.settlement_units,
             currency: n.currency.clone(),
             pricing_catalog_version: n.pricing_catalog_version.clone(),
             actual_vendor_cost: n.actual_vendor_cost.clone(),
@@ -1410,10 +1424,10 @@ impl Repository {
         })
     }
     pub fn get_receipt_for_execution(&self, execution_id: &str) -> Result<Receipt> {
-        self.0.lock().unwrap().query_row("SELECT receipt_id,execution_id,provider_attempt_id,settlement_minor,currency,pricing_catalog_version,actual_vendor_cost_amount,actual_vendor_cost_scale,actual_vendor_cost_currency,provider_request_id,pricing_snapshot_json,created_at,transmission_started_at,settled_at,hubu_settlement_id FROM receipts WHERE execution_id=?1",[execution_id],|r| {
+        self.0.lock().unwrap().query_row("SELECT receipt_id,execution_id,provider_attempt_id,settlement_units,currency,pricing_catalog_version,actual_vendor_cost_amount,actual_vendor_cost_scale,actual_vendor_cost_currency,provider_request_id,pricing_snapshot_json,created_at,transmission_started_at,settled_at,hubu_settlement_id FROM receipts WHERE execution_id=?1",[execution_id],|r| {
             let pricing_snapshot_json:String=r.get(10)?;
             let price_model_snapshot=serde_json::from_str(&pricing_snapshot_json).map_err(|error| rusqlite::Error::FromSqlConversionFailure(pricing_snapshot_json.len(),rusqlite::types::Type::Text,Box::new(error)))?;
-            Ok(Receipt { receipt_id:r.get(0)?,execution_id:r.get(1)?,provider_attempt_id:r.get(2)?,settlement_minor:r.get(3)?,currency:r.get(4)?,pricing_catalog_version:r.get(5)?,actual_vendor_cost:actual_vendor_cost_from_row(r,6,7,8)?.ok_or_else(|| rusqlite::Error::InvalidColumnType(6,"actual_vendor_cost_amount".into(),rusqlite::types::Type::Null))?,provider_request_id:r.get(9)?,price_model_snapshot,created_at:r.get(11)?,transmission_started_at:r.get(12)?,settled_at:r.get(13)?,hubu_settlement_id:r.get(14)? })
+            Ok(Receipt { receipt_id:r.get(0)?,execution_id:r.get(1)?,provider_attempt_id:r.get(2)?,settlement_units:r.get(3)?,currency:r.get(4)?,pricing_catalog_version:r.get(5)?,actual_vendor_cost:actual_vendor_cost_from_row(r,6,7,8)?.ok_or_else(|| rusqlite::Error::InvalidColumnType(6,"actual_vendor_cost_amount".into(),rusqlite::types::Type::Null))?,provider_request_id:r.get(9)?,price_model_snapshot,created_at:r.get(11)?,transmission_started_at:r.get(12)?,settled_at:r.get(13)?,hubu_settlement_id:r.get(14)? })
         }).optional()?.ok_or(Error::NotFound)
     }
     pub fn begin_settlement_transmission(&self, receipt_id: &str, at: &str) -> Result<()> {
@@ -1489,12 +1503,12 @@ impl Repository {
             "last_confirmed_step": last_confirmed_step,
             "redacted_error": redacted_error.map(|v| self.1.redact(v)),
             "pricing_snapshot": execution.pricing_snapshot,
-            "authorization": {"account_id": execution.account_id, "operation_key": execution.operation_key, "spend_auth_token_id": execution.hubu_token_reference.as_str(), "claim_id": execution.hubu_claim_id, "authorized_minor": execution.authorized_minor, "currency": execution.authorization_currency},
+            "authorization": {"account_id": execution.account_id, "operation_key": execution.operation_key, "spend_auth_token_id": execution.hubu_token_reference.as_str(), "claim_id": execution.hubu_claim_id, "authorized_units": execution.authorized_units, "units_scale": UNITS_SCALE, "currency": execution.authorization_currency},
             "credential_binding": {"provider_config_version": execution.provider_config_version, "provider_config_digest": execution.provider_config_digest},
             "provider_outcome": attempt.as_ref().map(|a| &a.outcome),
             "actual_vendor_cost": attempt.as_ref().and_then(|a| a.actual_vendor_cost.as_ref()),
             "usage": attempt.as_ref().and_then(|a| a.usage.as_ref()),
-            "receipt": receipt.as_ref().map(|r| serde_json::json!({"receipt_id":r.receipt_id,"settlement_minor":r.settlement_minor,"currency":r.currency,"actual_vendor_cost":r.actual_vendor_cost,"provider_request_id":r.provider_request_id,"price_model_snapshot":r.price_model_snapshot,"transmission_started_at":r.transmission_started_at,"settled_at":r.settled_at,"hubu_settlement_id":r.hubu_settlement_id})),
+            "receipt": receipt.as_ref().map(|r| serde_json::json!({"receipt_id":r.receipt_id,"settlement_units":r.settlement_units,"units_scale":UNITS_SCALE,"currency":r.currency,"actual_vendor_cost":r.actual_vendor_cost,"provider_request_id":r.provider_request_id,"price_model_snapshot":r.price_model_snapshot,"transmission_started_at":r.transmission_started_at,"settled_at":r.settled_at,"hubu_settlement_id":r.hubu_settlement_id})),
             "artifact_count": artifacts,
             "recovery_guidance": recovery_guidance
         });
@@ -1757,6 +1771,91 @@ fn migrate_precise_vendor_cost_columns(c: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// Add the micro-unit columns and backfill them exactly from whole cents in
+/// one transaction. Rows already converted are skipped, so this is
+/// idempotent; an amount too large to convert aborts without changes.
+fn migrate_accounting_units(c: &Connection) -> rusqlite::Result<()> {
+    const MAX_CONVERTIBLE_MINOR: i64 = i64::MAX / 10_000;
+    let tables = [
+        ("executions", "authorized_minor", "authorized_units"),
+        (
+            "hubu_authorization_snapshots",
+            "amount_minor",
+            "amount_units",
+        ),
+        ("receipts", "settlement_minor", "settlement_units"),
+    ];
+    for (table, _, units) in tables {
+        let mut statement = c.prepare(&format!("PRAGMA table_info({table})"))?;
+        let existing = statement
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<std::collections::BTreeSet<_>>>()?;
+        if !existing.contains(units) {
+            c.execute(
+                &format!(
+                    "ALTER TABLE {table} ADD COLUMN {units} INTEGER CHECK({units} IS NULL OR {units}>=0)"
+                ),
+                [],
+            )?;
+        }
+        if !existing.contains("units_scale") {
+            c.execute(
+                &format!(
+                    "ALTER TABLE {table} ADD COLUMN units_scale INTEGER CHECK(units_scale IS NULL OR units_scale=6)"
+                ),
+                [],
+            )?;
+        }
+    }
+    c.execute_batch("BEGIN IMMEDIATE")?;
+    let result = (|| {
+        for (table, minor, units) in tables {
+            let overflow: i64 = c.query_row(
+                &format!(
+                    "SELECT count(*) FROM {table} WHERE {units} IS NULL AND {minor}>{MAX_CONVERTIBLE_MINOR}"
+                ),
+                [],
+                |row| row.get(0),
+            )?;
+            if overflow > 0 {
+                return Err(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
+                    Some(format!(
+                        "{table}.{minor} exceeds the micro-unit range; refusing to migrate"
+                    )),
+                ));
+            }
+        }
+        c.execute_batch(ACCOUNTING_UNITS_MIGRATION)?;
+        // Every row's cent column is its micro-unit amount rounded up.
+        for (table, minor, units) in tables {
+            let mismatched: i64 = c.query_row(
+                &format!(
+                    "SELECT count(*) FROM {table} WHERE {units} IS NULL OR units_scale IS NOT 6 OR {units}>{minor}*10000 OR {units}<=({minor}-1)*10000"
+                ),
+                [],
+                |row| row.get(0),
+            )?;
+            if mismatched > 0 {
+                return Err(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
+                    Some(format!(
+                        "{table}.{units} backfill verification failed for {mismatched} rows"
+                    )),
+                ));
+            }
+        }
+        Ok(())
+    })();
+    match result {
+        Ok(()) => c.execute_batch("COMMIT"),
+        Err(error) => {
+            let _ = c.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
+}
+
 fn migrate_provider_operation_checkpoint_columns(c: &Connection) -> rusqlite::Result<()> {
     let mut statement = c.prepare("PRAGMA table_info(provider_attempts)")?;
     let existing: std::collections::BTreeSet<String> = statement
@@ -1911,7 +2010,7 @@ fn query_token(c: &Connection, spend_auth_token_id: &str) -> Result<Execution> {
         _ => Err(Error::AmbiguousLegacyToken),
     }
 }
-const EXECUTION_SELECT: &str = "SELECT execution_id,account_id,operation_key,hubu_authorization_id,hubu_claim_id,hubu_token_reference,authorized_minor,authorization_currency,normalized_input_json,input_hash,input_schema_version,target,config_version,workload_type,provider,adapter,model,provider_config_version,provider_config_digest,pricing_snapshot_json,pricing_schema_version,status,outcome,provider_outcome,artifact_outcome,settlement_outcome,failure_code,failure_message_redacted,created_at,updated_at,started_at,completed_at,release_transmission_started_at,version,execution_scope_json FROM executions";
+const EXECUTION_SELECT: &str = "SELECT execution_id,account_id,operation_key,hubu_authorization_id,hubu_claim_id,hubu_token_reference,authorized_units,authorization_currency,normalized_input_json,input_hash,input_schema_version,target,config_version,workload_type,provider,adapter,model,provider_config_version,provider_config_digest,pricing_snapshot_json,pricing_schema_version,status,outcome,provider_outcome,artifact_outcome,settlement_outcome,failure_code,failure_message_redacted,created_at,updated_at,started_at,completed_at,release_transmission_started_at,version,execution_scope_json FROM executions";
 fn map(r: &rusqlite::Row) -> rusqlite::Result<Execution> {
     let i: String = r.get(8)?;
     let p: String = r.get(19)?;
@@ -1923,7 +2022,7 @@ fn map(r: &rusqlite::Row) -> rusqlite::Result<Execution> {
         hubu_authorization_id: r.get(3)?,
         hubu_claim_id: r.get(4)?,
         hubu_token_reference: HubuTokenReference(r.get(5)?),
-        authorized_minor: r.get(6)?,
+        authorized_units: r.get(6)?,
         authorization_currency: r.get(7)?,
         normalized_input: serde_json::from_str(&i).unwrap(),
         input_hash: r.get(9)?,
@@ -1974,9 +2073,11 @@ fn validate_execution(n: &CreateExecutionParams) -> Result<()> {
     if n.account_id.trim().is_empty()
         || n.operation_key.trim().is_empty()
         || n.hubu_authorization_id != n.hubu_token_reference.as_str()
-        || n.authorized_minor < 0
+        || n.authorized_units < 0
         || n.input_schema_version < 1
-        || n.pricing_schema_version != PRICING_SNAPSHOT_SCHEMA_VERSION
+        // Schema 2 snapshots were frozen before v0.2.4; new admissions use
+        // the current schema.
+        || !(2..=PRICING_SNAPSHOT_SCHEMA_VERSION).contains(&n.pricing_schema_version)
         || [
             &n.workload_type,
             &n.provider,
@@ -2010,7 +2111,7 @@ fn validate_execution(n: &CreateExecutionParams) -> Result<()> {
         return Err(Error::Invalid("pricing schema version"));
     }
     snapshot
-        .check_authorization(n.authorized_minor, &n.authorization_currency)
+        .check_authorization(n.authorized_units, &n.authorization_currency)
         .map_err(|_| Error::Invalid("pricing snapshot authorization"))?;
     if snapshot.provider != n.provider || snapshot.model != n.model {
         return Err(Error::Invalid("pricing snapshot target"));
@@ -2146,7 +2247,7 @@ mod tests {
             hubu_authorization_id: "sha256:abc".into(),
             hubu_claim_id: Some("claim".into()),
             hubu_token_reference: HubuTokenReference::new("sha256:abc").unwrap(),
-            authorized_minor: 500,
+            authorized_units: 500_0000,
             authorization_currency: "USD".into(),
             normalized_input: json!({"prompt":"cat"}),
             input_hash: "sha256:input".into(),
@@ -2287,6 +2388,78 @@ mod tests {
             restarted.list_nonterminal_execution_ids().unwrap(),
             vec![pending.execution_id]
         );
+    }
+
+    fn legacy_cent_rows(path: &Path, authorized_minor: i64) {
+        let connection = Connection::open(path).unwrap();
+        connection.execute_batch(MIGRATION).unwrap();
+        let digest = format!("sha256:{}", "a".repeat(64));
+        connection.execute(
+            "INSERT INTO executions(execution_id,account_id,operation_key,hubu_authorization_id,hubu_token_reference,authorized_minor,authorization_currency,normalized_input_json,input_hash,input_schema_version,target,config_version,provider_config_digest,pricing_snapshot_json,pricing_schema_version,execution_scope_json,status,created_at,updated_at,version) VALUES('units-row','account-a','operation','token-1','token-1',?2,'USD','{}','sha256:input',1,'image_generation/example/fixture/image-v1','provider-v1',?1,'{}',1,NULL,'pending','now','now',0)",
+            params![digest, authorized_minor],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO hubu_authorization_snapshots(execution_id,account_id,agent_id,operation_key,decision_id,spend_auth_token_id,amount_minor,currency,execution_scope_json,lease_profile,expires_at,authorization_status,reason) VALUES('units-row','account-a','agent-a','operation','decision-1','token-1',?1,'USD',?2,'default','2026-08-05T21:00:00Z','available','units fixture')",
+            params![
+                authorized_minor,
+                serde_json::to_string(&for_target("example", "fixture").unwrap()).unwrap()
+            ],
+        ).unwrap();
+    }
+
+    #[test]
+    fn accounting_units_migration_backfills_exactly_and_is_idempotent() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("cents.sqlite3");
+        legacy_cent_rows(&path, 7);
+        for _ in 0..2 {
+            let repository = Repository::open(&path, Redactor::default()).unwrap();
+            assert_eq!(
+                repository
+                    .get_execution("units-row")
+                    .unwrap()
+                    .authorized_units,
+                70_000
+            );
+            assert_eq!(
+                repository
+                    .get_hubu_authorization_snapshot("units-row")
+                    .unwrap()
+                    .amount_units,
+                70_000
+            );
+        }
+        let connection = Connection::open(&path).unwrap();
+        let (minor, units, scale): (i64, i64, i64) = connection
+            .query_row(
+                "SELECT authorized_minor,authorized_units,units_scale FROM executions WHERE execution_id='units-row'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((minor, units, scale), (7, 70_000, 6));
+    }
+
+    #[test]
+    fn accounting_units_migration_refuses_amounts_beyond_the_micro_unit_range() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("overflow.sqlite3");
+        legacy_cent_rows(&path, i64::MAX / 10_000 + 1);
+        let error = Repository::open(&path, Redactor::default())
+            .err()
+            .expect("an unconvertible amount must stop the migration")
+            .to_string();
+        assert!(error.contains("exceeds the micro-unit range"), "{error}");
+        // Nothing was backfilled: the rolled-back rows keep only their cents.
+        let connection = Connection::open(&path).unwrap();
+        let units: Option<i64> = connection
+            .query_row(
+                "SELECT authorized_units FROM executions WHERE execution_id='units-row'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(units, None);
     }
 
     #[test]
@@ -2680,7 +2853,7 @@ mod tests {
             receipt_id: "r".into(),
             execution_id: e.execution_id.clone(),
             provider_attempt_id: a,
-            settlement_minor: 100,
+            settlement_units: 100_0000,
             currency: "USD".into(),
             pricing_catalog_version: "prices-v2".into(),
             actual_vendor_cost: ActualVendorCost::new(100, 2, "USD").unwrap(),
@@ -2772,7 +2945,7 @@ mod tests {
                 receipt_id: "receipt-model".into(),
                 execution_id: execution.execution_id.clone(),
                 provider_attempt_id: attempt.provider_attempt_id,
-                settlement_minor: 100,
+                settlement_units: 100_0000,
                 currency: "USD".into(),
                 pricing_catalog_version: "prices-v2".into(),
                 actual_vendor_cost: ActualVendorCost::new(100, 2, "USD").unwrap(),
@@ -2782,7 +2955,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(receipt.receipt_id, "receipt-model");
-        assert_eq!(receipt.settlement_minor, 100);
+        assert_eq!(receipt.settlement_units, 100_0000);
         assert_eq!(receipt.provider_request_id, "provider-request");
         assert_eq!(receipt.price_model_snapshot, execution.pricing_snapshot);
     }
@@ -2795,7 +2968,7 @@ mod tests {
             receipt_id: format!("receipt-{attempt_id}"),
             execution_id: execution.execution_id.clone(),
             provider_attempt_id: attempt_id,
-            settlement_minor: 100,
+            settlement_units: 100_0000,
             currency: "USD".into(),
             pricing_catalog_version: "prices-v2".into(),
             actual_vendor_cost: ActualVendorCost::new(100, 2, "USD").unwrap(),
@@ -2843,7 +3016,7 @@ mod tests {
             receipt_id: "r".into(),
             execution_id: e.execution_id,
             provider_attempt_id: a,
-            settlement_minor: 101,
+            settlement_units: 101_0000,
             currency: "USD".into(),
             pricing_catalog_version: "prices-v2".into(),
             actual_vendor_cost: ActualVendorCost::new(100, 2, "USD").unwrap(),
@@ -2855,13 +3028,13 @@ mod tests {
             r.create_receipt(&receipt),
             Err(Error::OverAuthorization)
         ));
-        receipt.settlement_minor = 100;
+        receipt.settlement_units = 100_0000;
         receipt.pricing_catalog_version = "stale-version".into();
         assert!(matches!(
             r.create_receipt(&receipt),
             Err(Error::Invalid("pricing catalog version"))
         ));
-        receipt.settlement_minor = 501;
+        receipt.settlement_units = 501_0000;
         receipt.pricing_catalog_version = "prices-v2".into();
         assert!(matches!(
             r.create_receipt(&receipt),
@@ -2890,7 +3063,7 @@ mod tests {
             receipt_id: "cross-aggregate".into(),
             execution_id: other.execution_id.clone(),
             provider_attempt_id: receipt.provider_attempt_id,
-            settlement_minor: 1,
+            settlement_units: 1_0000,
             currency: "USD".into(),
             pricing_catalog_version: "v1".into(),
             actual_vendor_cost: ActualVendorCost::new(1, 2, "USD").unwrap(),
@@ -3416,12 +3589,12 @@ mod tests {
         assert!(!stored.contains(CANARY));
         assert!(stored.contains("[REDACTED]"));
 
-        let numeric_secret = "777777";
+        let numeric_secret = "7777777";
         let numeric_repo =
             Repository::in_memory_with_redactor(Redactor::new([numeric_secret.as_bytes()]))
                 .unwrap();
         let mut numeric = new("a", "numeric");
-        numeric.authorized_minor = 777777;
+        numeric.authorized_units = 7777777;
         assert!(matches!(
             numeric_repo.create_execution(&numeric),
             Err(Error::Invalid("secret-bearing persistence value"))

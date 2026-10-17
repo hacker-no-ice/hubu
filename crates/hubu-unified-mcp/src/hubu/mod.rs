@@ -18,7 +18,10 @@ use routing::{
 };
 pub use transport::RoutingConfig;
 
-pub(crate) use catalog::{execution_scope_input_schema, tool_definitions};
+pub(crate) use catalog::{
+    execution_scope_input_schema, spend_amount_input_schema, spend_currency_input_schema,
+    tool_definitions,
+};
 
 pub(crate) fn void_rejected_authorization(
     server: &Server,

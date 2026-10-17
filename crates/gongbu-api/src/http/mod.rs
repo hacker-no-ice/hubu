@@ -13,8 +13,9 @@ use crate::{
     },
     provider::{
         contract::{
-            polling_deadline_allows_reinspect, ContractError, NormalizedRequest, OutputDimensions,
-            PollingRecoveryContext, PricingSnapshot,
+            polling_deadline_allows_reinspect, units_to_minor_ceil, ContractError,
+            NormalizedRequest, OutputDimensions, PollingRecoveryContext, PricingSnapshot,
+            UNITS_PER_MINOR,
         },
         flux2_api,
         registry::{ExecutionTarget, ValidatedProviderCatalog},
@@ -75,8 +76,28 @@ struct CreateExecutionRequest {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Money {
+    /// Whole cents, rounded up from `amount_units`.
     pub amount_minor: i64,
     pub currency: String,
+    /// The exact amount in micro-units (10^-6 of the currency).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amount_units: Option<i64>,
+}
+
+impl Money {
+    fn from_units(units: i64, currency: String) -> Self {
+        Self {
+            amount_minor: units_to_minor_ceil(units),
+            currency,
+            amount_units: Some(units),
+        }
+    }
+
+    /// Whether this asserted amount is exactly `units`.
+    fn matches_units(&self, units: i64) -> bool {
+        self.amount_minor == units_to_minor_ceil(units)
+            && self.amount_units.is_none_or(|asserted| asserted == units)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -528,7 +549,10 @@ impl Api {
             .pricing()
             .snapshot_for_target(&resolved.target_key(), &pricing_request)
             .map_err(map_pricing_error)?;
-        if pricing_snapshot.estimated_amount_minor > self.maximum_spend_minor {
+        // The operator ceiling is whole cents; a very large ceiling saturates.
+        if pricing_snapshot.estimated_units
+            > self.maximum_spend_minor.saturating_mul(UNITS_PER_MINOR)
+        {
             return Err(ApiError::validation());
         }
         // Tokenization belongs to provider-bound request normalization, which is
@@ -553,6 +577,18 @@ impl Api {
         // Hubu's consumed, frozen, and remaining hold fields are the aggregate
         // balance of the containing budget. Only the individual hold status
         // and amount are valid execution-admission invariants.
+        // The authorization must be the frozen estimate exactly, or, for
+        // callers that still authorize whole cents, the estimate rounded up to
+        // a cent. Settlement never exceeds the exact estimate either way.
+        let authorized_units = authorization
+            .authorized_units()
+            .filter(|units| {
+                *units == pricing_snapshot.estimated_units
+                    || units_to_minor_ceil(pricing_snapshot.estimated_units)
+                        .checked_mul(UNITS_PER_MINOR)
+                        == Some(*units)
+            })
+            .ok_or_else(ApiError::validation)?;
         if authorization.spend_auth_token_id != spend_auth_token_id
             || authorization.status != "available"
             || authorization_expires_at <= admission_time
@@ -560,7 +596,6 @@ impl Api {
             || authorization.budget_hold.amount_cents != authorization.amount_cents
             || authorization.account_id.trim().is_empty()
             || authorization.decision_id.trim().is_empty()
-            || authorization.amount_cents != pricing_snapshot.estimated_amount_minor
             || !authorization
                 .currency
                 .eq_ignore_ascii_case(&pricing_snapshot.currency)
@@ -592,7 +627,7 @@ impl Api {
             operation_key: operation_identity.clone(),
             decision_id: authorization.decision_id.clone(),
             spend_auth_token_id: authorization.spend_auth_token_id.clone(),
-            amount_minor: authorization.amount_cents,
+            amount_units: authorized_units,
             currency: authorization.currency.to_ascii_uppercase(),
             execution_scope: execution_scope.clone(),
             lease_profile: authorization.lease_profile.clone(),
@@ -612,7 +647,7 @@ impl Api {
             hubu_claim_id: None,
             hubu_token_reference: HubuTokenReference::new(spend_auth_token_id)
                 .map_err(|_| ApiError::validation())?,
-            authorized_minor: authorization.amount_cents,
+            authorized_units,
             authorization_currency: authorization.currency.to_ascii_uppercase(),
             normalized_input,
             input_hash: input_hash.clone(),
@@ -856,7 +891,7 @@ fn immutable_request_matches(
         .as_ref()
         .is_none_or(|value| execution.hubu_claim_id.as_deref() == Some(value.trim()))
         && request.authorization.as_ref().is_none_or(|money| {
-            execution.authorized_minor == money.amount_minor
+            money.matches_units(execution.authorized_units)
                 && execution
                     .authorization_currency
                     .eq_ignore_ascii_case(&money.currency)
@@ -877,7 +912,7 @@ fn immutable_params_match(execution: &Execution, params: &CreateExecutionParams)
     execution.hubu_authorization_id == params.hubu_authorization_id
         && execution.hubu_claim_id == params.hubu_claim_id
         && execution.hubu_token_reference == params.hubu_token_reference
-        && execution.authorized_minor == params.authorized_minor
+        && execution.authorized_units == params.authorized_units
         && execution
             .authorization_currency
             .eq_ignore_ascii_case(&params.authorization_currency)
@@ -980,7 +1015,9 @@ fn legacy_authorization_matches(
     request.hubu_claim_id.is_none()
         && request.authorization.as_ref().is_none_or(|money| {
             money.amount_minor == authorization.amount_cents
-                && money.amount_minor == pricing_snapshot.estimated_amount_minor
+                && authorization
+                    .authorized_units()
+                    .is_some_and(|units| money.matches_units(units))
                 && money.currency.eq_ignore_ascii_case(&authorization.currency)
                 && money
                     .currency
@@ -1147,10 +1184,10 @@ fn execution_response(
         status,
         outcome: execution.outcome,
         failure,
-        authorization: Money {
-            amount_minor: execution.authorized_minor,
-            currency: execution.authorization_currency,
-        },
+        authorization: Money::from_units(
+            execution.authorized_units,
+            execution.authorization_currency,
+        ),
         created_at: execution.created_at,
         updated_at: execution.updated_at,
         started_at: execution.started_at,
@@ -1415,6 +1452,7 @@ mod tests {
                 decision_id: format!("decision-{spend_auth_token_id}"),
                 account_id: "account-a".into(),
                 agent_id: "agent-a".into(),
+                amount: None,
                 amount_cents: 100,
                 currency: "USD".into(),
                 merchant: None,
@@ -1433,8 +1471,19 @@ mod tests {
                     remaining_amount_cents: 0,
                 },
             };
+            let exact = |units: &str| crate::hubu::ExactAmount {
+                units: units.into(),
+                scale: 6,
+                currency: "usd".into(),
+                display: Some("ignored".into()),
+            };
             if spend_auth_token_id.starts_with("price-mismatch") {
                 response.amount_cents += 1;
+            } else if spend_auth_token_id.starts_with("sub-cent") {
+                // USD 0.990001 rounds up to the 100-cent price but is less.
+                response.amount = Some(exact("990001"));
+            } else if spend_auth_token_id.starts_with("exact-whole-cents") {
+                response.amount = Some(exact("1000000"));
             } else if spend_auth_token_id.starts_with("identity-mismatch") {
                 response.account_id = "account-b".into();
             } else if spend_auth_token_id.starts_with("scope-mismatch") {
@@ -1468,8 +1517,23 @@ mod tests {
                 response.amount_cents = amount;
                 response.budget_hold.amount_cents = amount;
                 response.budget_hold.frozen_amount_cents = amount;
+                // The exact FLUX prices: 3, 4.5 and 7.5 cents. A caller that
+                // still authorizes whole cents sends the cent ceiling.
+                response.amount = Some(exact(if spend_auth_token_id.contains("below") {
+                    // Rounds up to the 5-cent ceiling but is neither price.
+                    "49999"
+                } else {
+                    match (amount, spend_auth_token_id.contains("cent-ceiling")) {
+                        (8, false) => "75000",
+                        (5, false) => "45000",
+                        (8, true) => "80000",
+                        (5, true) => "50000",
+                        _ => "30000",
+                    }
+                }));
             }
             if spend_auth_token_id.starts_with("flux-managed-") {
+                response.amount = Some(exact("30000"));
                 response.amount_cents = 3;
                 response.budget_hold.amount_cents = 3;
                 response.budget_hold.frozen_amount_cents = 3;
@@ -1480,6 +1544,13 @@ mod tests {
                 response.account_id = "aga_n063sdm0pepd".into();
                 response.agent_id = "agt_wk3q33h3j6w8".into();
                 response.task_id = None;
+            }
+            // A v4.5 Hubu reports the exact authorization beside its cents.
+            if response.amount.is_none() {
+                response.amount = Some(crate::hubu::ExactAmount::from_units(
+                    response.amount_cents * crate::provider_contract::UNITS_PER_MINOR,
+                    &response.currency,
+                ));
             }
             Ok(response)
         }
@@ -1829,7 +1900,7 @@ mod tests {
                 receipt_id: "hub-172-receipt".into(),
                 execution_id: created.execution_id.clone(),
                 provider_attempt_id: attempt.provider_attempt_id,
-                settlement_minor: 3,
+                settlement_units: 3_0000,
                 currency: "USD".into(),
                 pricing_catalog_version: "bfl-flux-2-pro-usd-2026-08-28-v1".into(),
                 actual_vendor_cost: vendor_cost,
@@ -2882,16 +2953,26 @@ mod tests {
         let fixture = fixture();
         for token in [
             "price-mismatch-1",
+            "sub-cent-1",
             "scope-mismatch-1",
             "token-swap-1",
             "expired-1",
         ] {
-            assert_eq!(call_create(&fixture, &request(token)).status, 400);
+            assert_eq!(
+                call_create(&fixture, &request(token)).status,
+                400,
+                "{token}"
+            );
             assert!(fixture
                 .repository
                 .get_execution_by_hubu_token("account-a", token)
                 .is_err());
         }
+        // A v4.5 Hubu's exact amount that is exactly the cent price is admitted.
+        assert_eq!(
+            execution(&call_create(&fixture, &request("exact-whole-cents-1"))).spend_auth_token_id,
+            "exact-whole-cents-1"
+        );
     }
 
     #[test]
@@ -3332,6 +3413,49 @@ mod tests {
         }
         assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), 3);
         assert_eq!(fixture.scheduler.0.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn fractional_cent_prices_admit_the_exact_amount_or_its_cent_ceiling_only() {
+        let fixture = fixture();
+        let api = flux_api(&fixture, "flux-prices-v1");
+        let create = |token: &str| {
+            api.handle(
+                "POST",
+                "/v2/executions",
+                Some(&fixture.caller),
+                &serde_json::to_vec(&flux_request(token, Some("2k"), None)).unwrap(),
+            )
+        };
+        // 4.5 cents: the exact 0.045 and the whole-cent 0.05 are admitted and
+        // persisted as Hubu authorized them; both settle at most 0.045.
+        for (token, units) in [("flux-exact-2k", 45_000), ("flux-cent-ceiling-2k", 50_000)] {
+            assert_eq!(create(token).status, 200, "{token}");
+            let stored = fixture
+                .repository
+                .get_execution_by_spend_auth_token(token)
+                .unwrap();
+            assert_eq!(stored.authorized_units, units, "{token}");
+            let snapshot: PricingSnapshot =
+                serde_json::from_value(stored.pricing_snapshot).unwrap();
+            assert_eq!(snapshot.schema_version, 3);
+            assert_eq!(snapshot.estimated_units, 45_000);
+            assert_eq!(
+                fixture
+                    .repository
+                    .get_hubu_authorization_snapshot(&stored.execution_id)
+                    .unwrap()
+                    .amount_units,
+                units
+            );
+        }
+        // Any other amount, even one whose cent projection matches, is refused.
+        let below = "flux-cent-ceiling-2k-below";
+        assert_eq!(create(below).status, 400);
+        assert!(fixture
+            .repository
+            .get_execution_by_spend_auth_token(below)
+            .is_err());
     }
 
     #[test]

@@ -22,7 +22,7 @@ use crate::{
         registry::{ProviderRegistry, ValidatedProviderCatalog},
         targets::{AdapterSettings, ProviderTargetConfig, TargetKey},
     },
-    provider_contract::NormalizedUsage,
+    provider_contract::{NormalizedUsage, UNITS_PER_MINOR},
     secrets::{MacOsKeychain, ProviderSecret, SecretProvider, SecretReference},
     workflow::{
         ActivityError, ArtifactActivities, HubuActivities, ProviderActivities, ProviderArtifact,
@@ -1006,11 +1006,16 @@ pub struct SafeHubuCall {
 struct MockClaim {
     claim_id: String,
     account_id: String,
-    amount_minor: i64,
+    amount_units: i64,
     currency: String,
     status: ClaimStatus,
     settlement_id: Option<String>,
-    settlement_amount_minor: Option<i64>,
+    settlement_units: Option<i64>,
+}
+
+/// A whole-cent sandbox limit in micro-units; a very large limit saturates.
+fn limit_units(minor: i64) -> i64 {
+    minor.saturating_mul(UNITS_PER_MINOR)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1063,8 +1068,8 @@ impl MockHubu {
     fn validate_execution(&self, execution: &Execution) -> Result<(), ActivityError> {
         if execution.account_id.trim().is_empty()
             || execution.authorization_currency != self.config.currency
-            || execution.authorized_minor <= 0
-            || execution.authorized_minor > self.config.maximum_authorization_minor
+            || execution.authorized_units <= 0
+            || execution.authorized_units > limit_units(self.config.maximum_authorization_minor)
         {
             return Err(ActivityError::Proven(
                 "mock_hubu_authorization_invalid".into(),
@@ -1103,7 +1108,7 @@ impl HubuActivities for MockHubu {
         let mut state = self.state.lock().expect("mock Hubu state");
         if let Some(claim) = state.claims.get(&execution.operation_key) {
             if claim.account_id != execution.account_id
-                || claim.amount_minor != execution.authorized_minor
+                || claim.amount_units != execution.authorized_units
                 || claim.currency != execution.authorization_currency
             {
                 Self::record(
@@ -1135,11 +1140,11 @@ impl HubuActivities for MockHubu {
             MockClaim {
                 claim_id: claim_id.clone(),
                 account_id: execution.account_id.clone(),
-                amount_minor: execution.authorized_minor,
+                amount_units: execution.authorized_units,
                 currency: execution.authorization_currency.clone(),
                 status: ClaimStatus::Active,
                 settlement_id: None,
-                settlement_amount_minor: None,
+                settlement_units: None,
             },
         );
         state.financial_mutations += 1;
@@ -1172,7 +1177,7 @@ impl HubuActivities for MockHubu {
             .ok_or_else(|| ActivityError::Proven("mock_hubu_claim_missing".into()))?;
         if claim.status != ClaimStatus::Active
             || claim.account_id != execution.account_id
-            || claim.amount_minor != execution.authorized_minor
+            || claim.amount_units != execution.authorized_units
             || claim.currency != execution.authorization_currency
             || execution.hubu_claim_id.as_deref() != Some(claim.claim_id.as_str())
         {
@@ -1185,9 +1190,9 @@ impl HubuActivities for MockHubu {
         &self,
         execution: &Execution,
         _receipt_id: &str,
-        amount_minor: i64,
+        amount_units: i64,
     ) -> Result<String, ActivityError> {
-        if amount_minor < 0 || amount_minor > execution.authorized_minor {
+        if amount_units < 0 || amount_units > execution.authorized_units {
             return Err(ActivityError::Proven(
                 "mock_hubu_settlement_out_of_bounds".into(),
             ));
@@ -1209,7 +1214,7 @@ impl HubuActivities for MockHubu {
             .get(&execution.operation_key)
             .ok_or_else(|| ActivityError::Proven("mock_hubu_claim_missing".into()))?;
         if existing.status == ClaimStatus::Settled {
-            if existing.settlement_amount_minor != Some(amount_minor) {
+            if existing.settlement_units != Some(amount_units) {
                 return Err(ActivityError::Proven(
                     "mock_hubu_idempotency_conflict".into(),
                 ));
@@ -1228,7 +1233,7 @@ impl HubuActivities for MockHubu {
             .expect("claim");
         claim.status = ClaimStatus::Settled;
         claim.settlement_id = Some(settlement_id.clone());
-        claim.settlement_amount_minor = Some(amount_minor);
+        claim.settlement_units = Some(amount_units);
         state.financial_mutations += 1;
         let disconnect = self.config.settle_fault == BoundaryFault::CommitThenDisconnect;
         Self::record(
@@ -1315,6 +1320,10 @@ impl SpendAuthorizationResolver for MockHubu {
                 .clone()
                 .unwrap_or_else(|| "sandbox-account".into()),
             agent_id: self.config.agent_id.clone(),
+            amount: Some(crate::hubu::ExactAmount::from_units(
+                UNITS_PER_MINOR,
+                &self.config.currency,
+            )),
             amount_cents: 1,
             currency: self.config.currency.clone(),
             merchant: None,
@@ -1577,9 +1586,10 @@ impl SpendCappedProvider {
         let snapshot: crate::provider_contract::PricingSnapshot =
             serde_json::from_value(execution.pricing_snapshot.clone())
                 .map_err(|_| ActivityError::Proven("pricing_snapshot_invalid".into()))?;
-        if execution.authorized_minor <= 0
-            || execution.authorized_minor > self.maximum_spend_minor
-            || snapshot.estimated_amount_minor > self.maximum_spend_minor
+        let maximum = limit_units(self.maximum_spend_minor);
+        if execution.authorized_units <= 0
+            || execution.authorized_units > maximum
+            || snapshot.estimated_units > maximum
         {
             return Err(ActivityError::Proven(
                 "sandbox_live_spend_ceiling_exceeded".into(),
@@ -1821,7 +1831,7 @@ mod tests {
             account_id: "sandbox-account".into(), operation_key: "sandbox:op-1".into(),
             hubu_authorization_id: "sandbox-token-ref".into(), hubu_claim_id: None,
             hubu_token_reference: HubuTokenReference::new("sandbox-token-ref").unwrap(),
-            authorized_minor: 100, authorization_currency: "USD".into(),
+            authorized_units: 100_0000, authorization_currency: "USD".into(),
             normalized_input: json!({"prompt":"circle"}), input_hash: "hash".into(),
             input_schema_version: 1, target: "image_generation/example/fixture/image-v1".into(),
             config_version: "v1".into(), workload_type: "image_generation".into(),

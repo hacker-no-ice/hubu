@@ -1,6 +1,13 @@
 use serde::Serialize;
 
-pub const EXECUTOR_CONTRACT: &str = "hubu-spend-executor-v4.4";
+/// The executor contract this build speaks: exact amounts with an explicit
+/// `scale`.
+pub const EXECUTOR_CONTRACT: &str = "hubu-spend-executor-v4.5";
+/// The previous contract, still accepted during the transition. Requests
+/// without a `contract_version` use it and carry whole cents.
+pub const LEGACY_EXECUTOR_CONTRACT: &str = "hubu-spend-executor-v4.4";
+/// Every executor contract version Hubu accepts, newest first.
+pub const SUPPORTED_EXECUTOR_CONTRACTS: [&str; 2] = [EXECUTOR_CONTRACT, LEGACY_EXECUTOR_CONTRACT];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct BuildInfo {
@@ -33,6 +40,6 @@ mod tests {
 
         assert!(!info.product_version.is_empty());
         assert!(!info.source_commit.is_empty());
-        assert_eq!(info.executor_contract, "hubu-spend-executor-v4.4");
+        assert_eq!(info.executor_contract, "hubu-spend-executor-v4.5");
     }
 }
