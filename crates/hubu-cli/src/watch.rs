@@ -192,19 +192,19 @@ fn pad(value: &str, width: usize) -> String {
         " ".repeat(width.saturating_sub(display_width(value)))
     )
 }
-fn cents(value: &Value) -> String {
-    value
-        .as_i64()
-        .map(|v| format!("{v}¢"))
+/// One amount from a row or event: its exact money object, or the legacy
+/// `*_cents` field from an older server.
+fn money_of(value: &Value, key: &str) -> Option<money::Money> {
+    money::money_field(value, key).ok()
+}
+fn shown(value: &Value, key: &str) -> String {
+    money_of(value, key)
+        .map(|amount| money::format_money(amount, money::Direction::for_field(key)))
         .unwrap_or_else(|| "—".into())
 }
-fn amount(row: &Value, key: &str) -> i128 {
-    i128::from(row[key].as_i64().unwrap_or(0))
-}
-fn dollars(value: i128) -> String {
-    let sign = if value < 0 { "-" } else { "" };
-    let v = value.abs();
-    format!("{sign}${}.{:02}", v / 100, v % 100)
+/// Exact micro-units, for bar proportions and percentages.
+fn micro_units(row: &Value, key: &str) -> i128 {
+    money_of(row, key).map_or(0, |amount| i128::from(amount.amount.units()))
 }
 fn clock(value: &Value) -> String {
     value
@@ -280,35 +280,28 @@ fn line(
     }
     out.push('\n');
 }
-fn exact_cents(cost: &Value) -> String {
-    let Some(amount) = cost["amount"]
-        .as_str()
-        .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
-    else {
-        return "—".into();
-    };
-    let Some(scale) = cost["scale"].as_u64().filter(|s| *s <= 18) else {
-        return "—".into();
-    };
-    if scale <= 2 {
-        return format!("{}{}¢", amount, "0".repeat((2 - scale) as usize));
-    }
-    let places = (scale - 2) as usize;
-    let padded = format!("{:0>width$}", amount, width = places + 1);
-    let split = padded.len() - places;
-    let fraction = padded[split..].trim_end_matches('0');
-    if fraction.is_empty() {
-        format!("{}¢", &padded[..split])
-    } else {
-        format!("{}.{}¢", &padded[..split], fraction)
+/// The exact provider cost `{amount, scale}` of any scale, never rounded.
+fn exact_cost(cost: &Value, currency: &Value) -> String {
+    let decimal = cost["scale"]
+        .as_u64()
+        .filter(|scale| *scale <= 18)
+        .and_then(|scale| {
+            cost["amount"]
+                .as_str()
+                .and_then(|amount| money::format_exact_decimal(amount, scale as u32))
+        });
+    match decimal {
+        None => "—".into(),
+        Some(decimal) if currency.as_str() == Some("usdc") => format!("{decimal} USDC"),
+        Some(decimal) => format!("${decimal}"),
     }
 }
 
 fn event_status(event: &Value, single: bool) -> (&'static str, String) {
-    let reserved = if event["reserved_cents"].is_null() {
-        cents(&event["requested_cents"])
+    let reserved = if event["reserved_cents"].is_null() && event["reserved"].is_null() {
+        shown(event, "requested_cents")
     } else {
-        cents(&event["reserved_cents"])
+        shown(event, "reserved_cents")
     };
     match event["status"].as_str() {
         Some("authorized" | "claimed") => ("◐", format!("reserved {reserved}")),
@@ -317,14 +310,14 @@ fn event_status(event: &Value, single: bool) -> (&'static str, String) {
             format!(
                 "{reserved} → {}{}",
                 if single { "settled " } else { "" },
-                exact_cents(&event["settled_cost"])
+                exact_cost(&event["settled_cost"], &event["currency"])
             ),
         ),
         Some("needs_approval") => (
             "‖",
             format!(
                 "{} {}",
-                cents(&event["requested_cents"]),
+                shown(event, "requested_cents"),
                 if single {
                     "awaiting approval"
                 } else {
@@ -332,7 +325,7 @@ fn event_status(event: &Value, single: bool) -> (&'static str, String) {
                 }
             ),
         ),
-        Some("denied") => ("✗", format!("{} blocked", cents(&event["requested_cents"]))),
+        Some("denied") => ("✗", format!("{} blocked", shown(event, "requested_cents"))),
         Some("released" | "expired") => ("○", format!("{reserved} released")),
         Some("reconciliation_required") => (
             "!",
@@ -426,6 +419,31 @@ fn render(
     let name_width = longest
         .clamp(MIN_NAME, MAX_NAME)
         .min(content.saturating_sub(48).max(MIN_NAME));
+    // Amounts read as columns: decimal points line up across agent rows.
+    let has_budget =
+        |row: &Value| !row["budget_id"].is_null() && money_of(row, "limit_cents").is_some();
+    let used_of = |row: &Value| {
+        let used = money_of(row, "consumed_cents")
+            .zip(money_of(row, "frozen_cents"))
+            .and_then(|(consumed, frozen)| {
+                consumed
+                    .amount
+                    .checked_add(frozen.amount)
+                    .map(|amount| money::Money::new(amount, consumed.currency))
+            });
+        used.map(|used| money::format_money(used, money::Direction::Up))
+            .unwrap_or_else(|| "—".into())
+    };
+    let budgeted: Vec<&Value> = rows.iter().copied().filter(|row| has_budget(row)).collect();
+    let used_column =
+        money::align_decimals(&budgeted.iter().map(|row| used_of(row)).collect::<Vec<_>>());
+    let limit_column = money::align_decimals(
+        &budgeted
+            .iter()
+            .map(|row| shown(row, "limit_cents"))
+            .collect::<Vec<_>>(),
+    );
+    let mut budgeted_index = 0;
     let mut out = String::new();
     let title = if rows.len() > 1 {
         format!(" HUBU WATCH · {} agents", rows.len())
@@ -472,6 +490,10 @@ fn render(
             .and_then(|rs| rs.iter().find(|r| r["agent_id"] == row["agent_id"]))
             .is_some_and(|old| {
                 [
+                    "consumed",
+                    "frozen",
+                    "available",
+                    "limit",
                     "consumed_cents",
                     "frozen_cents",
                     "available_cents",
@@ -488,7 +510,7 @@ fn render(
         if single {
             line(&mut out, &[(format!(" {name}"), highlight)], style, width);
         }
-        if row["budget_id"].is_null() || row["limit_cents"].is_null() {
+        if !has_budget(row) {
             line(
                 &mut out,
                 &[(
@@ -507,43 +529,43 @@ fn render(
             );
             continue;
         }
-        let consumed = amount(row, "consumed_cents");
-        let frozen = amount(row, "frozen_cents");
-        let available = amount(row, "available_cents");
-        let limit = amount(row, "limit_cents");
+        let consumed = micro_units(row, "consumed_cents");
+        let frozen = micro_units(row, "frozen_cents");
+        let available = micro_units(row, "available_cents");
+        let limit = micro_units(row, "limit_cents");
         let used = consumed + frozen;
         let pct = if limit > 0 {
             (used.max(0) * 100) / limit
         } else {
             0
         };
-        let cells = bar_cells(
-            consumed,
-            frozen,
-            available,
-            limit,
-            if single {
-                content - 29
-            } else {
-                content - 25 - name_width
-            },
-        );
         let label = if single {
             " ".into()
         } else {
             format!(" {} ", pad(&name, name_width))
         };
-        // Multi-agent percentages right-align so rows read as a column.
+        let (used_text, limit_text) = (&used_column[budgeted_index], &limit_column[budgeted_index]);
+        budgeted_index += 1;
+        // Multi-agent amounts and percentages align so rows read as columns.
         let detail = if single {
-            format!("  {} of {} used · {}%", dollars(used), dollars(limit), pct)
-        } else {
             format!(
-                "  {} of {}{:>6}",
-                dollars(used),
-                dollars(limit),
-                format!("{pct}%")
+                "  {} of {} used · {}%",
+                used_text.trim(),
+                limit_text.trim(),
+                pct
             )
+        } else {
+            format!("  {used_text} of {limit_text}{:>6}", format!("{pct}%"))
         };
+        let cells = bar_cells(
+            consumed,
+            frozen,
+            available,
+            limit,
+            content
+                .saturating_sub(1 + display_width(&label) + display_width(&detail))
+                .max(10),
+        );
         line(
             &mut out,
             &[
@@ -563,9 +585,9 @@ fn render(
                 &[(
                     format!(
                         " consumed {}   frozen {}   free {}",
-                        dollars(consumed),
-                        dollars(frozen),
-                        dollars(available)
+                        shown(row, "consumed_cents"),
+                        shown(row, "frozen_cents"),
+                        shown(row, "available_cents")
                     ),
                     highlight,
                 )],
@@ -664,7 +686,7 @@ mod tests {
         let one = output(&s, &o);
         assert!(one.contains("$0.14 of $2.00 used · 7%"));
         assert!(one.contains("consumed $0.06   frozen $0.08   free $1.86"));
-        assert!(one.contains("8¢ → settled 5.8¢"));
+        assert!(one.contains("$0.08 → settled $0.058"));
         assert!(!one.contains("charge"));
         assert!(!one.contains("█ consumed"));
         let mut second = s["rows"][0].clone();
@@ -674,8 +696,8 @@ mod tests {
         let multi = output(&s, &o);
         assert!(multi.contains("HUBU WATCH · 2 agents"));
         assert!(multi.contains("█ consumed  ▓ frozen  ░ free"));
-        assert!(multi.contains("8¢ → 5.8¢"));
-        assert!(!multi.contains("settled 5.8¢"));
+        assert!(multi.contains("$0.08 → $0.058"));
+        assert!(!multi.contains("settled $0.058"));
         let compact = output(&s, &options(vec!["--compact".into()]).unwrap());
         assert!(!compact.contains("RECENT"));
         assert!(!compact.contains("█ consumed"));
@@ -773,6 +795,35 @@ mod tests {
         assert!(output(&s, &options(vec![]).unwrap()).contains("no current budget"));
     }
     #[test]
+    fn exact_sub_cent_rows_align_on_the_decimal_point() {
+        let money = |units: &str, display: &str| json!({"units": units, "scale": 6, "currency": "usd", "display": display});
+        let row = |id: &str, consumed: (&str, &str), limit: (&str, &str)| {
+            json!({"agent_id": id, "name": id, "budget_id": format!("bgt-{id}"),
+                "consumed": money(consumed.0, consumed.1), "frozen": money("0", "0.00"),
+                "available": money("1", "0.000001"), "limit": money(limit.0, limit.1),
+                "consumed_cents": 1, "frozen_cents": 0, "available_cents": 0, "limit_cents": 1})
+        };
+        let mut s = snapshot();
+        s["rows"] = json!([
+            row("x402-agent", ("3100", "0.0031"), ("10000", "0.01")),
+            row(
+                "image-agent",
+                ("12500000", "12.50"),
+                ("100000000", "100.00")
+            ),
+        ]);
+        let out = output(&s, &options(vec!["--compact".into()]).unwrap());
+        let details: Vec<&str> = out
+            .lines()
+            .filter_map(|line| line.split_once("  ").map(|(_, rest)| rest))
+            .filter(|rest| rest.contains(" of "))
+            .collect();
+        assert!(out.contains(" $0.0031 of   $0.01 "), "{out}");
+        assert!(out.contains("$12.50   of $100.00 "), "{out}");
+        assert_eq!(details.len(), 2, "{out}");
+        assert!(out.lines().all(|l| display_width(l) <= 70));
+    }
+    #[test]
     fn width_sanitization_exact_cost_and_stale_header() {
         let mut s = snapshot();
         s["rows"][0]["name"] = json!("evil\u{1b}[2J\nvery-long-name");
@@ -785,10 +836,20 @@ mod tests {
         let result = output(&s, &o);
         assert!(!result.contains('\u{1b}'));
         assert!(result.lines().all(|l| display_width(l) <= 70));
-        assert!(result.contains("922.3372036854775807¢"));
+        assert!(result.contains("$9.223372036854775807"));
         assert!(result.contains("evil?[2J?"));
-        assert_eq!(exact_cents(&json!({"amount":"1","scale":3})), "0.1¢");
-        assert_eq!(exact_cents(&json!({"amount":"1234","scale":4})), "12.34¢");
+        assert_eq!(
+            exact_cost(&json!({"amount":"1","scale":3}), &json!("usd")),
+            "$0.001"
+        );
+        assert_eq!(
+            exact_cost(&json!({"amount":"1234","scale":4}), &json!("usd")),
+            "$0.1234"
+        );
+        assert_eq!(
+            exact_cost(&json!({"amount":"5000","scale":6}), &json!("usdc")),
+            "0.005 USDC"
+        );
         let stale = render(
             &s,
             None,

@@ -1027,7 +1027,9 @@ impl SpendApprovalService {
     {
         // Wallet rails move whole US-dollar cents. Other currencies settle
         // through executors, and a sub-cent authorization can never be
-        // charged exactly, so refuse both before any money moves.
+        // charged exactly, so refuse both before any money moves. Callers
+        // refuse these before reserving budget; this backstop never releases
+        // a hold that an executor may have claimed meanwhile.
         if authorization.currency != Currency::Usd {
             return Err(SpendApprovalError::UnsupportedPaymentCurrency(
                 authorization.currency,

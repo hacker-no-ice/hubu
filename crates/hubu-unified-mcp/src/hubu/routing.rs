@@ -385,6 +385,9 @@ pub(crate) fn validate_model_spend_arguments(arguments: &Value) -> Result<()> {
             );
         }
     }
+    if arguments.contains_key("amount") && arguments.contains_key("amount_cents") {
+        bail!("provide amount or the deprecated amount_cents, not both");
+    }
     Ok(())
 }
 
