@@ -90,12 +90,15 @@ to translate operator intent into reviewable YAML. See the
 
 ## Create and inspect budgets
 
-Budgets are cumulative limits for exact agents. `--amount` is a USD amount;
-Hubu prints the resulting public budget ID and active period.
+Budgets are cumulative limits for exact agents. `--amount` is an exact decimal
+with up to 6 decimal places (`10`, `0.50`, `0.005`), and `--currency` is `usd`
+(default) or `usdc`. Budgets are per currency: spend only counts against a
+budget in its own currency. Hubu prints the resulting public budget ID and
+active period.
 
 ```sh
 hubu budget create --agent-id agt_FIRST_AGENT_ID --amount 10
-hubu budget create --agent-id agt_SECOND_AGENT_ID --amount 10
+hubu budget create --agent-id agt_SECOND_AGENT_ID --amount 1 --currency usdc
 hubu budget list
 ```
 
@@ -113,6 +116,32 @@ hubu budget revoke --budget-id bgt_EXACT_BUDGET_ID
 See [Spend lifecycle](spend-lifecycle.md) for reservation, settlement, and
 ledger behavior. Policies govern individual requests; budgets govern cumulative
 spending over their active period.
+
+## Amounts
+
+Every amount the CLI accepts (`--amount` on `budget create`, `budget update`,
+`spend`, `spend authorize` and `user spending-target set`) is an exact decimal
+with up to 6 decimal places. Signs, exponents and more digits are rejected
+with a message that says how to fix the value.
+
+Amounts print exactly, with 2 to 6 decimal places and never rounded: `$10.00`,
+`$0.035`, `$0.000001`, and `-$0.0031` for the negative remainder a reconciled
+overrun leaves. USDC amounts print as `0.005 USDC`. The CLI reads the exact
+money objects in Hubu responses and falls back to the legacy `*_cents` fields
+from older servers.
+
+The global `--round cents` option shows whole cents instead and marks every
+value it changed with `≈`. It rounds conservatively: consumed, frozen and
+held amounts round up, while limits and remaining amounts round down.
+
+```sh
+hubu --round cents budget list
+```
+
+To record a vendor-billed reconciliation, pass the exact provider cost as a
+decimal: `hubu spend reconcile billed … --actual-vendor-cost 0.0031`. The
+`--actual-vendor-cost-cents` and `--unit-price-cents` flags remain as
+deprecated aliases.
 
 ## Ledger and authorization record history
 
@@ -141,7 +170,9 @@ failed polls keep the last snapshot with `STALE · retrying` in the header.
 The default layout shows all agents and five recent decisions, trimmed to the
 terminal height. `--compact` shows bars only. `--events N` accepts 1–10;
 `--agent NAME|ID` selects exactly one agent and filters the feed locally. A
-single-agent view expands the bar and shows consumed, frozen, and free dollars.
+single-agent view expands the bar and shows consumed, frozen, and free amounts.
+Amounts are exact, and in the multi-agent view they line up on the decimal
+point.
 The layout fits the terminal width, from 70 to 100 columns: wider terminals
 show longer agent names (up to 24 characters), rule names and bars. Output that
 is not a terminal, such as `--once` piped to a file, uses 70 columns.
@@ -166,7 +197,8 @@ included.
 
 The authenticated `GET /watch?currency=usd` endpoint returns `hubu-watch-v1`, an
 owner-scoped consistent budget/version/decision/hold/receipt snapshot. Rows
-include `limit_cents` from the current selected budget version; `recent_events`
+include the exact `limit` money object (and the legacy `limit_cents`) from the
+current selected budget version; `recent_events`
 is newest first and capped at ten across the owner's agents in that currency.
 Denied decisions are included while authorization-history discovery retains
 its existing behavior. Raw reasons, operation keys, authorization tokens,
@@ -190,7 +222,8 @@ hubu gallery export \
 
 This can produce `01-flux-2k-draft-5.8c.png` with a receipt and hidden gallery
 manifest. The cost is the exact settled operation total, not a per-image price;
-Hubu may charge a rounded 6 cents against the budget. Size is the `image_size`
+Hubu charges the budget the same exact amount, rounding up only digits beyond
+the sixth decimal place. Size is the `image_size`
 you submitted (`custom` if none); the receipt also records Gongbu's pixel
 dimensions. The tier is your
 reviewed local label. Re-exporting unchanged evidence reuses the same file.

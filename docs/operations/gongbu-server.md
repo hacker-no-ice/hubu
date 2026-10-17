@@ -46,6 +46,17 @@ must not permit provider traffic. Live mode requires an exact target, complete
 pricing, a credential reference, a positive spend ceiling, and the literal
 live-spend acknowledgement.
 
+## Accounting-units database upgrade
+
+Gongbu v0.2.4 records authorizations, Hubu authorization snapshots and
+receipts in micro-units. When it opens its repository it adds the
+`*_units` and `units_scale` columns and converts every existing whole-cent
+amount exactly (×10⁴) in one transaction. It checks every row before
+committing and refuses to migrate an amount beyond the micro-unit range. The
+whole-cent columns stay as conservative projections. Reopening the database is
+idempotent. Take a cold backup of Gongbu state before upgrading, as for any
+migration.
+
 ## Precise-cost database upgrade
 
 The precise-cost database migration runs when Gongbu opens its SQLite repository. It converts
@@ -67,7 +78,7 @@ binary that knows only the legacy columns must use its matching pre-upgrade
 backup; do not use an upgraded database as a rollback mechanism.
 
 The precise-receipt migration does not change the executor contract version
-by itself. The current contract, v4.4, still accepts the legacy cents receipt
+by itself. The current contract, v4.5, still accepts the legacy cents receipt
 shape, and all four binaries must report the same contract version.
 New precise receipts carry exact amount, scale, currency, and the complete
 frozen pricing snapshot. If an older Hubu rejects that additive shape after a

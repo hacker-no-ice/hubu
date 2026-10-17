@@ -13,7 +13,7 @@ use std::{
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, Local};
 use hubu_common::build::build_info;
-use hubu_common::money::Currency;
+use hubu_common::money::{Amount, Currency};
 use hubu_core::policy::{Effect, Policy};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -22,6 +22,7 @@ use uuid::Uuid;
 mod codex_mcp;
 mod feedback;
 mod gallery;
+mod money;
 mod stack;
 mod terminal;
 mod watch;
@@ -53,6 +54,7 @@ const TEST_APPROVAL_TOKEN: &str = "test-human-approval-token";
 struct GlobalOptions {
     base_url: Option<String>,
     color: terminal::ColorChoice,
+    rounding: money::Rounding,
 }
 
 #[derive(Debug)]
@@ -193,7 +195,9 @@ impl GlobalOptions {
         let mut options = Self {
             base_url: None,
             color,
+            rounding: money::Rounding::default(),
         };
+        let mut rounding = None;
         let mut index = 0;
         while index < args.len() {
             match args[index].as_str() {
@@ -206,9 +210,19 @@ impl GlobalOptions {
                 "--color" => {
                     take_global_option(args, index, "--color")?;
                 }
+                "--round" => {
+                    let value = take_global_option(args, index, "--round")?;
+                    let parsed = value.parse().map_err(|reason| {
+                        anyhow!("invalid value `{value}` for --round: {reason}")
+                    })?;
+                    if rounding.replace(parsed).is_some() {
+                        bail!("global option `--round` may only be provided once");
+                    }
+                }
                 _ => index += 1,
             }
         }
+        options.rounding = rounding.unwrap_or_default();
         Ok(options)
     }
 }
@@ -233,6 +247,7 @@ fn run() -> Result<()> {
     let mut args = env::args().skip(1).collect::<Vec<_>>();
     terminal::configure(GlobalOptions::color_choice(&args)?);
     let global = GlobalOptions::parse(&mut args)?;
+    money::configure(global.rounding);
     let hubu_home = hubu_home();
     let client = CliContext::new(global.base_url, hubu_home.clone());
 
@@ -912,7 +927,7 @@ fn user_spending_target_set(base_url: &CliContext, mut args: Vec<String>) -> Res
         base_url,
         "/user/spending-target",
         json!({
-            "amount_cents": amount_to_cents(&amount)?,
+            "amount": money::parse_positive_amount(&amount, "--amount")?,
             "starting_at": starting_at,
             "ending_before": ending_before,
         }),
@@ -1523,6 +1538,19 @@ fn apply_policy(base_url: &CliContext, mut args: Vec<String>, legacy_add: bool) 
         "  default_decision: {}",
         style.semantic(string_at(&response, "default_decision")?)
     );
+    for warning in response
+        .get("warnings")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        println!(
+            "  {}: {}",
+            style.warning("warning"),
+            terminal_safe_text(warning)
+        );
+    }
     Ok(())
 }
 
@@ -1895,15 +1923,21 @@ fn budget_create(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
     let amount = take_required(&mut args, "--amount")?;
     let agent_id = take_required(&mut args, "--agent-id")
         .with_context(|| "budget create requires --agent-id")?;
+    let currency = take_value(&mut args, "--currency")
+        .map(|currency| normalize_currency(&currency))
+        .transpose()?;
     let starting_at = take_value(&mut args, "--starting-at");
     let ending_before = take_value(&mut args, "--ending-before");
     ensure_no_args(args)?;
 
     let mut body = json!({
-        "amount_cents": amount_to_cents(&amount)?,
+        "amount": money::parse_positive_amount(&amount, "--amount")?,
         "starting_at": starting_at,
         "ending_before": ending_before,
     });
+    if let Some(currency) = currency {
+        body["currency"] = json!(currency.to_string());
+    }
     body["agent_id"] = json!(agent_id);
 
     let response = post_json(base_url, "/budgets", body)?;
@@ -1982,8 +2016,8 @@ fn budget_update(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
     let budget_id = take_required(&mut args, "--budget-id")?;
     validate_public_budget_id(&budget_id)?;
     let amount = take_required(&mut args, "--amount")?;
-    let amount_limit_cents = amount_to_cents(&amount)?;
-    if amount_limit_cents <= 0 {
+    let amount_limit = money::parse_amount(&amount, "--amount")?;
+    if amount_limit.units() <= 0 {
         bail!("budget total limit must be greater than zero");
     }
     let expected_revision = take_value(&mut args, "--expected-revision")
@@ -2010,23 +2044,26 @@ fn budget_update(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
     }
     let current_revision = u64_at(current, "current_revision")?;
     let pinned_revision = expected_revision.unwrap_or(current_revision);
-    let current_total = i64_at(current, "amount_limit_cents")?;
-    let consumed = i64_at(current, "consumed_amount_cents")?;
-    let frozen = i64_at(current, "frozen_amount_cents")?;
-    let projected_remaining = amount_limit_cents
-        .checked_sub(consumed)
-        .and_then(|remaining| remaining.checked_sub(frozen))
+    let current_total = money::money_field(current, "amount_limit_cents")?;
+    let consumed = money::money_field(current, "consumed_amount_cents")?;
+    let frozen = money::money_field(current, "frozen_amount_cents")?;
+    let currency = current_total.currency;
+    let projected_remaining = amount_limit
+        .checked_sub(consumed.amount)
+        .and_then(|remaining| remaining.checked_sub(frozen.amount))
         .ok_or_else(|| anyhow!("projected remaining amount exceeds the supported range"))?;
 
     print_budget_update_review(
         &budget_id,
         pinned_revision,
         current_revision,
-        current_total,
-        consumed,
-        frozen,
-        amount_limit_cents,
-        projected_remaining,
+        BudgetUpdateAmounts {
+            current_total,
+            consumed,
+            frozen,
+            proposed_total: money::Money::new(amount_limit, currency),
+            projected_remaining: money::Money::new(projected_remaining, currency),
+        },
         reason.as_deref(),
     );
 
@@ -2038,14 +2075,23 @@ fn budget_update(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
         if status == "expired" {
             bail!("current budget is expired and cannot be updated");
         }
-        if projected_remaining < 0 {
+        if projected_remaining.is_negative() {
             let committed = consumed
-                .checked_add(frozen)
+                .amount
+                .checked_add(frozen.amount)
                 .ok_or_else(|| anyhow!("committed budget usage exceeds the supported range"))?;
             bail!(
                 "proposed total {} is below committed usage {}",
-                format_cents(amount_limit_cents, "$"),
-                format_cents(committed, "$")
+                money::format_money_with(
+                    money::Money::new(amount_limit, currency),
+                    money::Direction::Down,
+                    money::Rounding::Exact
+                ),
+                money::format_money_with(
+                    money::Money::new(committed, currency),
+                    money::Direction::Up,
+                    money::Rounding::Exact
+                )
             );
         }
     }
@@ -2055,7 +2101,7 @@ fn budget_update(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
     }
 
     let mut body = json!({
-        "amount_limit_cents": amount_limit_cents,
+        "amount_limit": amount_limit,
         "expected_revision": pinned_revision,
     });
     if let Some(reason) = &reason {
@@ -2196,9 +2242,9 @@ fn spend(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
     let lease_profile = take_value(&mut args, "--lease-profile");
     ensure_no_args(args)?;
 
-    let amount_cents = amount_to_cents(&amount)?;
+    let amount = money::parse_positive_amount(&amount, "--amount")?;
     print_spend_submission(
-        amount_cents,
+        amount,
         currency,
         currency_arg.is_some(),
         merchant.as_deref(),
@@ -2207,7 +2253,7 @@ fn spend(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
 
     let mut body = json!({
         "operation_key": operation_key,
-        "amount_cents": amount_cents,
+        "amount": amount,
         "currency": currency_arg.map(|_| currency.to_string()),
         "reason": reason,
         "merchant": merchant,
@@ -2242,9 +2288,9 @@ fn spend_authorize(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
     let lease_profile = take_value(&mut args, "--lease-profile");
     ensure_no_args(args)?;
 
-    let amount_cents = amount_to_cents(&amount)?;
+    let amount = money::parse_positive_amount(&amount, "--amount")?;
     print_spend_submission(
-        amount_cents,
+        amount,
         currency,
         currency_arg.is_some(),
         merchant.as_deref(),
@@ -2253,7 +2299,7 @@ fn spend_authorize(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
 
     let mut body = json!({
         "operation_key": operation_key,
-        "amount_cents": amount_cents,
+        "amount": amount,
         "currency": currency_arg.map(|_| currency.to_string()),
         "reason": reason,
         "merchant": merchant,
@@ -2362,7 +2408,7 @@ fn normalize_currency(value: &str) -> Result<Currency> {
 }
 
 fn print_spend_submission(
-    amount_cents: i64,
+    amount: Amount,
     currency: Currency,
     currency_supplied: bool,
     merchant: Option<&str>,
@@ -2370,10 +2416,10 @@ fn print_spend_submission(
 ) {
     println!("{}", terminal::stdout().heading("Spend request inputs"));
     println!(
-        "  amount: {} {} major units (supplied; {} minor units)",
+        "  amount: {} {} (supplied; exact, {} micro-units)",
         currency.to_string().to_ascii_uppercase(),
-        format_major_amount(amount_cents),
-        amount_cents
+        amount.display(),
+        amount.units()
     );
     println!(
         "  currency: {currency} ({}; no currency conversion is performed)",
@@ -2402,20 +2448,6 @@ fn print_spend_submission(
         println!("  capability: omitted");
         println!("  billing_merchant: omitted");
     }
-}
-
-fn format_major_amount(amount_cents: i64) -> String {
-    format_cents(amount_cents, "")
-}
-
-fn format_cents(amount_cents: i64, unit_prefix: &str) -> String {
-    let sign = if amount_cents < 0 { "-" } else { "" };
-    let magnitude = amount_cents.unsigned_abs();
-    format!(
-        "{sign}{unit_prefix}{}.{:02}",
-        magnitude / 100,
-        magnitude % 100
-    )
 }
 
 fn spend_reconcile(base_url: &CliContext, args: Vec<String>) -> Result<()> {
@@ -2468,7 +2500,61 @@ fn spend_reconcile_resolve(
     let receipt = if vendor_billed {
         let provider_request_id = take_required(&mut args, "--provider-request-id")?;
         let artifact_reference = take_required(&mut args, "--artifact-reference")?;
-        if let Some(amount) = take_value(&mut args, "--actual-vendor-cost-amount") {
+        if let Some(cost) = take_value(&mut args, "--actual-vendor-cost") {
+            let (amount, scale) = money::parse_exact_cost(&cost, "--actual-vendor-cost")?;
+            let currency = normalize_currency(
+                take_value(&mut args, "--currency")
+                    .as_deref()
+                    .unwrap_or("usd"),
+            )?
+            .to_string();
+            let price_model_snapshot = match take_value(&mut args, "--price-model-snapshot-json") {
+                Some(snapshot) => {
+                    let snapshot: Value = serde_json::from_str(&snapshot)
+                        .context("--price-model-snapshot-json must be valid JSON")?;
+                    if !snapshot.is_object() {
+                        bail!("--price-model-snapshot-json must contain a JSON object");
+                    }
+                    snapshot
+                }
+                None => {
+                    let provider = take_required(&mut args, "--provider")?;
+                    let model = take_required(&mut args, "--model")?;
+                    let pricing_unit = take_required(&mut args, "--pricing-unit")?;
+                    let mut snapshot = json!({
+                        "provider": provider,
+                        "model": model,
+                        "pricing_unit": pricing_unit,
+                        "currency": currency,
+                    });
+                    if let Some(unit_price) = take_value(&mut args, "--unit-price") {
+                        let (coefficient, scale) =
+                            money::parse_exact_cost(&unit_price, "--unit-price")?;
+                        snapshot["unit_price"] = json!({
+                            "amount": coefficient,
+                            "scale": scale,
+                            "currency": currency,
+                        });
+                    } else {
+                        snapshot["unit_price_cents"] =
+                            json!(take_required(&mut args, "--unit-price-cents")?
+                                .parse::<i64>()
+                                .context("--unit-price-cents must be an integer")?);
+                    }
+                    snapshot
+                }
+            };
+            Some(json!({
+                "actual_vendor_cost": {
+                    "amount": amount,
+                    "scale": scale,
+                    "currency": currency,
+                },
+                "provider_request_id": provider_request_id,
+                "price_model_snapshot": price_model_snapshot,
+                "artifact_reference": artifact_reference,
+            }))
+        } else if let Some(amount) = take_value(&mut args, "--actual-vendor-cost-amount") {
             let amount = amount
                 .parse::<i64>()
                 .context("--actual-vendor-cost-amount must be an integer")?;
@@ -2936,31 +3022,36 @@ fn print_budget(budget: &Value) -> Result<()> {
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+/// The amounts a budget update review shows.
+struct BudgetUpdateAmounts {
+    current_total: money::Money,
+    consumed: money::Money,
+    frozen: money::Money,
+    proposed_total: money::Money,
+    projected_remaining: money::Money,
+}
+
 fn print_budget_update_review(
     budget_id: &str,
     pinned_revision: u64,
     current_revision: u64,
-    current_total: i64,
-    consumed: i64,
-    frozen: i64,
-    proposed_total: i64,
-    projected_remaining: i64,
+    amounts: BudgetUpdateAmounts,
     reason: Option<&str>,
 ) {
+    use money::{format_money, Direction};
     println!("{}", terminal::stdout().heading("Budget update review"));
     println!("  budget_id: {budget_id}");
     println!("  pinned_revision: {pinned_revision}  current_revision: {current_revision}");
     println!(
         "  current_total: {}  consumed: {}  frozen: {}",
-        format_cents(current_total, "$"),
-        format_cents(consumed, "$"),
-        format_cents(frozen, "$")
+        format_money(amounts.current_total, Direction::Down),
+        format_money(amounts.consumed, Direction::Up),
+        format_money(amounts.frozen, Direction::Up)
     );
     println!(
         "  proposed_total: {}  projected_remaining: {}",
-        format_cents(proposed_total, "$"),
-        format_cents(projected_remaining, "$")
+        format_money(amounts.proposed_total, Direction::Down),
+        format_money(amounts.projected_remaining, Direction::Down)
     );
     println!(
         "  reason: {}",
@@ -3177,7 +3268,8 @@ fn post_budget_update_with_retry(
         if string_at(&response["current_budget"], "budget_id")? != budget_id
             || applied.get("predecessor_revision").and_then(Value::as_u64)
                 != Some(u64_at(body, "expected_revision")?)
-            || i64_at(applied, "amount_limit_cents")? != i64_at(body, "amount_limit_cents")?
+            || money::money_field(applied, "amount_limit_cents")?.amount
+                != money::parse_amount(string_at(body, "amount_limit")?, "amount_limit")?
             || applied_reason != requested_reason
         {
             bail!("server returned a budget update that does not match the pinned intent");
@@ -3198,7 +3290,7 @@ fn post_budget_update_with_retry(
                 Ok(response) => Ok(response),
                 Err(error) if !is_ambiguous_budget_update_error(&error) => Err(error),
                 Err(second_error) => {
-                    let amount_limit_cents = i64_at(body, "amount_limit_cents")?;
+                    let amount_limit = string_at(body, "amount_limit")?;
                     let expected_revision = u64_at(body, "expected_revision")?;
                     let reason = body
                         .get("reason")
@@ -3206,7 +3298,7 @@ fn post_budget_update_with_retry(
                         .map(|value| format!("{value:?}"))
                         .unwrap_or_else(|| "<omitted>".to_string());
                     bail!(
-                        "budget update outcome remains ambiguous after one exact retry: {second_error}. Retry manually without changing or omitting any field: budget_id={budget_id}, expected_revision={expected_revision}, amount_limit_cents={amount_limit_cents}, reason={reason}. First ambiguous error: {first_error}"
+                        "budget update outcome remains ambiguous after one exact retry: {second_error}. Retry manually without changing or omitting any field: budget_id={budget_id}, expected_revision={expected_revision}, amount_limit={amount_limit}, reason={reason}. First ambiguous error: {first_error}"
                     )
                 }
             }
@@ -3231,7 +3323,7 @@ fn validate_budget_update_response(response: &Value) -> Result<()> {
         .ok_or_else(|| anyhow!("server response missing `applied_version`"))?;
     let _ = string_at(applied, "version_id")?;
     let _ = u64_at(applied, "revision")?;
-    let _ = i64_at(applied, "amount_limit_cents")?;
+    let _ = money::money_field(applied, "amount_limit_cents")?;
     let _ = string_at(applied, "effective_at")?;
     let _ = string_at(applied, "actor")?;
     let _ = string_at(applied, "source")?;
@@ -3270,7 +3362,7 @@ fn validate_budget_update_response(response: &Value) -> Result<()> {
         "frozen_amount_cents",
         "remaining_amount_cents",
     ] {
-        let _ = i64_at(current, field)?;
+        let _ = money::money_field(current, field)?;
     }
     let _ = u64_at(current, "current_revision")?;
     if current
@@ -3297,7 +3389,7 @@ fn validate_budget_update_response(response: &Value) -> Result<()> {
             "allocated_amount_cents",
             "exceeded_by_cents",
         ] {
-            let _ = i64_at(warning, field)?;
+            let _ = money::money_field(warning, field)?;
         }
     }
     Ok(())
@@ -3558,13 +3650,6 @@ fn string_at<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
         .ok_or_else(|| anyhow!("server response missing `{key}`"))
 }
 
-fn i64_at(value: &Value, key: &str) -> Result<i64> {
-    value
-        .get(key)
-        .and_then(Value::as_i64)
-        .ok_or_else(|| anyhow!("server response missing `{key}`"))
-}
-
 fn u64_at(value: &Value, key: &str) -> Result<u64> {
     value
         .get(key)
@@ -3572,19 +3657,13 @@ fn u64_at(value: &Value, key: &str) -> Result<u64> {
         .ok_or_else(|| anyhow!("server response missing `{key}`"))
 }
 
+/// Show the amount at `key` (a legacy `*_cents` field name): the exact money
+/// object when the server sent one, otherwise the cent field.
 fn money_at(value: &Value, key: &str) -> Result<String> {
-    let cents = value
-        .get(key)
-        .and_then(Value::as_i64)
-        .ok_or_else(|| anyhow!("server response missing `{key}`"))?;
-    Ok(format_cents(cents, "$"))
-}
-
-// Replaced by `Amount` parsing when the CLI moves to accounting units.
-#[allow(deprecated)]
-fn amount_to_cents(value: &str) -> Result<i64> {
-    use hubu_common::money::DecimalMajorAmount;
-    Ok(value.parse::<DecimalMajorAmount>()?.minor_units())
+    Ok(money::format_money(
+        money::money_field(value, key)?,
+        money::Direction::for_field(key),
+    ))
 }
 
 fn default_policy_template() -> &'static str {
@@ -3596,7 +3675,7 @@ fn print_help() {
         "Hubu CLI
 
 Usage:
-  hubu [--url URL] [--color auto|always|never] <command>
+  hubu [--url URL] [--color auto|always|never] [--round exact|cents] <command>
 
 Commands:
   stack      Configure and operate a unified local stack profile
@@ -3618,6 +3697,9 @@ Commands:
 Global options:
   --url URL                            Manual Hubu URL; bypasses the active stack profile
   --color auto|always|never            Terminal color policy (default: auto)
+  --round exact|cents                  Show exact amounts (default) or cent-rounded
+                                       values marked ≈ (usage rounds up, limits and
+                                       remaining round down)
 
 Connection precedence:
   explicit --url and legacy credential environment/files; otherwise the selected
@@ -3687,7 +3769,7 @@ fn print_user_help() {
 
 Usage:
   hubu user list
-  hubu user spending-target set --amount AMOUNT [--starting-at RFC3339] [--ending-before RFC3339]
+  hubu user spending-target set --amount DECIMAL [--starting-at RFC3339] [--ending-before RFC3339]
   hubu user spending-target show [--all]
   hubu user spending-target revoke --target-id ID"
     );
@@ -3698,7 +3780,7 @@ fn print_user_spending_target_help() {
         "Manage the current user's advisory spending target
 
 Usage:
-  hubu user spending-target set --amount AMOUNT [--starting-at RFC3339] [--ending-before RFC3339]
+  hubu user spending-target set --amount DECIMAL [--starting-at RFC3339] [--ending-before RFC3339]
   hubu user spending-target show [--all]
   hubu user spending-target revoke --target-id ID
 
@@ -3711,7 +3793,7 @@ fn print_user_spending_target_set_help() {
         "Set an advisory spending target for the current user
 
 Usage:
-  hubu user spending-target set --amount AMOUNT [--starting-at RFC3339] [--ending-before RFC3339]"
+  hubu user spending-target set --amount DECIMAL [--starting-at RFC3339] [--ending-before RFC3339]"
     );
 }
 
@@ -3930,9 +4012,9 @@ fn print_budget_help() {
         "Create, review, update, and list agent budgets
 
 Usage:
-  hubu budget create --amount AMOUNT --agent-id ID [--starting-at RFC3339] [--ending-before RFC3339]
+  hubu budget create --amount DECIMAL --agent-id ID [--currency usd|usdc] [--starting-at RFC3339] [--ending-before RFC3339]
   hubu budget revoke --budget-id ID
-  hubu budget update --budget-id ID --amount AMOUNT [--expected-revision N] [--reason TEXT] [--yes]
+  hubu budget update --budget-id ID --amount DECIMAL [--expected-revision N] [--reason TEXT] [--yes]
   hubu budget history --budget-id ID
   hubu budget list [--all]
 
@@ -3950,13 +4032,16 @@ fn print_budget_create_help() {
         "Create a single agent budget
 
 Usage:
-  hubu budget create --amount AMOUNT --agent-id ID [--starting-at RFC3339] [--ending-before RFC3339]
+  hubu budget create --amount DECIMAL --agent-id ID [--currency usd|usdc] [--starting-at RFC3339] [--ending-before RFC3339]
 
 Options:
-  --agent-id ID  Agent this budget applies to
+  --agent-id ID      Agent this budget applies to
+  --amount DECIMAL   Exact limit with up to 6 decimal places, such as 25 or 0.50
+  --currency CODE    usd (default) or usdc; spend only counts against a budget in its own currency
 
 Examples:
-  hubu budget create --agent-id AGENT_ID --amount 25"
+  hubu budget create --agent-id AGENT_ID --amount 25
+  hubu budget create --agent-id AGENT_ID --amount 1 --currency usdc"
     );
 }
 
@@ -3990,7 +4075,7 @@ fn print_budget_update_help() {
         "Update the total cap of one stable logical budget
 
 Usage:
-  hubu budget update --budget-id ID --amount AMOUNT [--expected-revision N] [--reason TEXT] [--yes]
+  hubu budget update --budget-id ID --amount DECIMAL [--expected-revision N] [--reason TEXT] [--yes]
 
 Options:
   --expected-revision N  Pin the immutable predecessor revision; defaults to the reviewed current revision
@@ -4032,7 +4117,7 @@ Usage:
 
 Note:
   Spend commands require the agent account id because the account is the spending source. CLI spend commands are for local testing and debugging. Operational spend should normally originate from agents through MCP.
-  --amount is a decimal major-unit amount: 5 means USD 5.00 and 0.05 means USD 0.05. USD is the only supported currency; Hubu performs no currency conversion.
+  --amount is an exact decimal amount with up to 6 decimal places: 5 means 5.00, 0.05 means 0.05 and 0.005 means half a cent. --currency is usd (default) or usdc; spend only counts against a budget in its own currency, and Hubu performs no currency conversion.
   If merchant and typed execution scope are omitted, the CLI shows that omission before submission. Merchant policy conditions then cannot match and the policy may require approval.
   When authorization returns needs_approval, show the approval review to the human, then use exactly one approval approve or approval deny command with its approval_request_id.
   The client harness must supply one immutable agent-scoped operation key before the first request, then reuse it for authorization, claim, finalization, and every retry.
@@ -4066,7 +4151,7 @@ Usage:
 
 Note:
   Supply one immutable agent-scoped operation key before the first request; do not generate a new key on retry.
-  --amount is a decimal major-unit amount: 5 means USD 5.00 and 0.05 means USD 0.05. USD is the only supported currency; Hubu performs no currency conversion.
+  --amount is an exact decimal amount with up to 6 decimal places: 5 means 5.00, 0.05 means 0.05 and 0.005 means half a cent. --currency is usd (default) or usdc; spend only counts against a budget in its own currency, and Hubu performs no currency conversion.
   Omitted merchant/scope fields are shown before submission because policies that evaluate those fields will not match them.
   --task-id is an optional external business correlation. It is independent of the operation key and descriptive --reason. Omitting it preserves the legacy reason-to-task mapping for retry compatibility.
 
@@ -4081,11 +4166,14 @@ fn print_spend_reconcile_help() {
 
 Usage:
   hubu spend reconcile list
+  hubu spend reconcile billed --claim-id ID --provider-reference REF --evidence TEXT --actual-vendor-cost DECIMAL [--currency USD] --provider-request-id ID --provider NAME --model NAME --unit-price DECIMAL --pricing-unit UNIT --artifact-reference REF
+  hubu spend reconcile billed --claim-id ID --provider-reference REF --evidence TEXT --actual-vendor-cost DECIMAL [--currency USD] --price-model-snapshot-json JSON --provider-request-id ID --artifact-reference REF
   hubu spend reconcile billed --claim-id ID --provider-reference REF --evidence TEXT --actual-vendor-cost-amount INTEGER --actual-vendor-cost-scale SCALE [--currency USD] --price-model-snapshot-json JSON --provider-request-id ID --artifact-reference REF
-  hubu spend reconcile billed --claim-id ID --provider-reference REF --evidence TEXT --actual-vendor-cost-cents CENTS --provider-request-id ID --provider NAME --model NAME --unit-price-cents CENTS --pricing-unit UNIT --artifact-reference REF
   hubu spend reconcile not-billed --claim-id ID --provider-reference REF --evidence TEXT
 
-The provider reference and evidence are stored with the atomic settlement or release. A billed resolution also records the exact integer vendor-cost coefficient, decimal scale, ISO currency, full frozen pricing snapshot, provider request id, and artifact reference. Hubu conservatively rounds budget consumption up to cents; a human-confirmed overrun is recorded rather than discarded. The cents form remains available for v4.3 receipt compatibility. Do not include vendor credentials or sensitive payloads."
+--actual-vendor-cost takes the exact provider cost as a decimal, such as 0.0031 (up to 18 decimal places, never rounded). The deprecated --actual-vendor-cost-cents CENTS and --unit-price-cents CENTS flags still work in place of --actual-vendor-cost and --unit-price.
+
+The provider reference and evidence are stored with the atomic settlement or release. A billed resolution also records the exact integer vendor-cost coefficient, decimal scale, ISO currency, full frozen pricing snapshot, provider request id, and artifact reference. Hubu rounds budget consumption up only beyond six decimal places (micro-units); a human-confirmed overrun is recorded rather than discarded. Do not include vendor credentials or sensitive payloads."
     );
 }
 
@@ -4506,9 +4594,12 @@ mod tests {
     }
 
     #[test]
-    fn decimal_major_unit_amounts_distinguish_five_from_five_cents() {
-        assert_eq!(amount_to_cents("5").unwrap(), 500);
-        assert_eq!(amount_to_cents("0.05").unwrap(), 5);
+    fn decimal_amounts_distinguish_five_from_five_cents_and_half_a_cent() {
+        let units = |value| money::parse_amount(value, "--amount").unwrap().units();
+        assert_eq!(units("5"), 5_000_000);
+        assert_eq!(units("0.05"), 50_000);
+        assert_eq!(units("0.005"), 5_000);
+        assert!(money::parse_amount("0.0000001", "--amount").is_err());
     }
 
     #[test]
@@ -4635,7 +4726,7 @@ mod tests {
         assert_eq!(
             captured[1].1.as_ref().unwrap(),
             &json!({
-                "amount_limit_cents": 500,
+                "amount_limit": "5.00",
                 "expected_revision": 1,
                 "reason": "historical retry"
             })
@@ -4679,7 +4770,7 @@ mod tests {
             std::env::temp_dir().join("hubu-cli-budget-retry-test-home"),
         );
         let body = json!({
-            "amount_limit_cents": 5_000,
+            "amount_limit": "50.00",
             "expected_revision": 7,
             "reason": "historical retry"
         });
@@ -4745,7 +4836,7 @@ mod tests {
             std::env::temp_dir().join("hubu-cli-budget-storage-retry-test-home"),
         );
         let body = json!({
-            "amount_limit_cents": 5_000,
+            "amount_limit": "50.00",
             "expected_revision": 7,
             "reason": "historical retry"
         });
@@ -4792,7 +4883,7 @@ mod tests {
             std::env::temp_dir().join("hubu-cli-budget-rejection-test-home"),
         );
         let body = json!({
-            "amount_limit_cents": 5_000,
+            "amount_limit": "50.00",
             "expected_revision": 7
         });
 
@@ -4841,12 +4932,18 @@ mod tests {
     }
 
     #[test]
-    fn cents_formatting_preserves_negative_sign_and_i64_boundaries() {
-        assert_eq!(format_major_amount(0), "0.00");
-        assert_eq!(format_major_amount(-1), "-0.01");
-        assert_eq!(format_major_amount(i64::MIN), "-92233720368547758.08");
-        assert_eq!(format_major_amount(i64::MAX), "92233720368547758.07");
-
+    fn money_display_preserves_negative_sign_exact_units_and_range() {
+        assert_eq!(
+            money_at(
+                &json!({
+                    "remaining_amount": {"units": "-1", "scale": 6, "currency": "usd", "display": "-0.000001"},
+                    "remaining_amount_cents": -1
+                }),
+                "remaining_amount_cents"
+            )
+            .unwrap(),
+            "-$0.000001"
+        );
         assert_eq!(
             money_at(
                 &json!({ "remaining_amount_cents": -1 }),
@@ -4855,14 +4952,12 @@ mod tests {
             .unwrap(),
             "-$0.01"
         );
-        assert_eq!(
-            money_at(
-                &json!({ "remaining_amount_cents": i64::MIN }),
-                "remaining_amount_cents"
-            )
-            .unwrap(),
-            "-$92233720368547758.08"
-        );
+        // Legacy cents beyond the micro-unit range are reported, not wrapped.
+        assert!(money_at(
+            &json!({ "remaining_amount_cents": i64::MIN }),
+            "remaining_amount_cents"
+        )
+        .is_err());
     }
 
     #[test]
