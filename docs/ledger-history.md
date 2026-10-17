@@ -133,3 +133,8 @@ Implementation: [public projections](../crates/hubu-api/src/history.rs),
 [consistent owner snapshot](../crates/hubu-core/src/persistence/history.rs),
 [CLI](../crates/hubu-cli/src/main.rs), and
 [unified MCP adapter](../crates/hubu-unified-mcp/src/hubu/routing.rs).
+
+The [governance lifecycle evidence foundation](governance-observability.md)
+defines storage for future automatic-decision, human-intervention and recovery
+observability. Its schema alone does not add production capture or extend these
+public history reads.
