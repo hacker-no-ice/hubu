@@ -1,10 +1,13 @@
 mod accounting;
 mod authorization_void;
+mod automatic_lifecycle;
 mod history;
 mod lifecycle;
 pub use authorization_void::{AuthorizationVoidError, AuthorizationVoidResult};
+pub use automatic_lifecycle::SelectedSpendPolicy;
 pub use history::HistorySnapshot;
-pub use lifecycle::{append_lifecycle_event_in_transaction, AppendLifecycleResult};
+pub(crate) use lifecycle::append_lifecycle_event_in_transaction;
+pub use lifecycle::AppendLifecycleResult;
 
 use std::path::Path;
 use std::str::FromStr;
@@ -120,6 +123,48 @@ pub trait SpendRepository {
         agent_id: &AgentId,
         operation_key: &str,
     ) -> Result<bool, StorageError>;
+    fn save_automatic_policy_transition(
+        &mut self,
+        record: &SpendDecisionRecord,
+        policy: Option<&SelectedSpendPolicy>,
+    ) -> Result<(), StorageError>;
+    #[allow(clippy::too_many_arguments)]
+    fn save_automatic_denied_transition(
+        &mut self,
+        record: &SpendDecisionRecord,
+        policy: Option<&SelectedSpendPolicy>,
+        budget: Option<&BudgetWithBalance>,
+        cause: crate::spend::AdmissionDenialReason,
+        reasons: &[String],
+        decided_at: DateTime<Utc>,
+        budget_checked_at: DateTime<Utc>,
+    ) -> Result<(), StorageError>;
+    #[allow(clippy::too_many_arguments)]
+    fn save_automatic_approved_transition(
+        &mut self,
+        decision: &SpendDecisionRecord,
+        policy: Option<&SelectedSpendPolicy>,
+        token: &SpendAuthTokenRecord,
+        hold: &BudgetHold,
+        balance: &BudgetBalance,
+        before: &BudgetWithBalance,
+        decided_at: DateTime<Utc>,
+        budget_checked_at: DateTime<Utc>,
+    ) -> Result<(), StorageError>;
+    fn save_automatic_evaluation_failure(
+        &mut self,
+        request: &SpendRequest,
+        operation_key: &str,
+        revision: u64,
+        observation: &crate::spend::LifecycleObservationId,
+        occurred_at: DateTime<Utc>,
+    ) -> Result<(), StorageError>;
+    fn save_automatic_failure(
+        &mut self,
+        record: &SpendDecisionRecord,
+        observation: &crate::spend::LifecycleObservationId,
+        occurred_at: DateTime<Utc>,
+    ) -> Result<(), StorageError>;
     fn save_spend_decision(&mut self, record: &SpendDecisionRecord) -> Result<(), StorageError>;
     fn save_spend_auth_token(&mut self, record: &SpendAuthTokenRecord) -> Result<(), StorageError>;
     #[allow(clippy::too_many_arguments)]
@@ -221,6 +266,8 @@ pub struct PolicyAssignmentRecord {
     pub owner_user_id: UserId,
     pub scope: PolicyAssignmentScope,
     pub policy_id: String,
+    pub policy_revision: u64,
+    pub policy_hash: String,
     pub policy: Policy,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -517,38 +564,8 @@ impl SqliteGovernanceRepository {
         let sqlite_tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        validate_hold_and_balance_relationship(&sqlite_tx, hold, balance, true)?;
-        sqlite_tx.execute(
-            "INSERT INTO spend_auth_tokens
-             (id, owner_user_id, spend_decision_id, expires_at, claim_ttl_seconds,
-              used_at, used_by_payment_id, revoked_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                token.id.to_string(),
-                token.owner_user_id.to_string(),
-                token.spend_decision_id.to_string(),
-                token.expires_at.to_rfc3339(),
-                token.claim_ttl_seconds,
-                token.used_at.map(|timestamp| timestamp.to_rfc3339()),
-                token.used_by_payment_id.as_ref().map(ToString::to_string),
-                token.revoked_at.map(|timestamp| timestamp.to_rfc3339()),
-            ],
-        )?;
-        insert_budget_hold(&sqlite_tx, hold)?;
-        upsert_balance(&sqlite_tx, balance)?;
-        sqlite_tx.execute(
-            "INSERT INTO spend_authorization_outcomes
-             (agent_id, operation_key, revision, spend_decision_id, decision,
-              reasons_json, created_at)
-             VALUES (?1, ?2, ?3, ?4, 'allowed', ?5, ?6)",
-            params![
-                decision.request.agent_id.to_string(),
-                decision.operation_key,
-                decision.revision,
-                decision.id.to_string(),
-                serde_json::to_string(reasons)?,
-                decided_at.to_rfc3339(),
-            ],
+        persist_approved_spend_transition(
+            &sqlite_tx, decision, token, hold, balance, reasons, decided_at,
         )?;
         sqlite_tx.commit()?;
         Ok(())
@@ -2953,7 +2970,7 @@ impl PolicyRepository for SqliteGovernanceRepository {
     fn load_policy_assignments(&self) -> Result<Vec<PolicyAssignmentRecord>, StorageError> {
         let mut stmt = self.conn.prepare(
             "SELECT a.owner_user_id, a.scope_type, a.scope_id, a.policy_id,
-                    r.policy_json, a.created_at, a.updated_at
+                    r.policy_json, a.created_at, a.updated_at, r.revision, r.payload_hash
              FROM policy_assignments a
              JOIN policies p ON p.policy_id = a.policy_id
              JOIN policy_revisions r
@@ -2982,6 +2999,8 @@ impl PolicyRepository for SqliteGovernanceRepository {
                     },
                 )?,
                 policy_id,
+                policy_revision: row.get(7)?,
+                policy_hash: row.get(8)?,
                 policy,
                 created_at: parse_timestamp(&created_at)?,
                 updated_at: parse_timestamp(&updated_at)?,
@@ -3730,6 +3749,82 @@ impl SpendRepository for SqliteGovernanceRepository {
         Ok(!unsafe_prior)
     }
 
+    fn save_automatic_policy_transition(
+        &mut self,
+        record: &SpendDecisionRecord,
+        policy: Option<&SelectedSpendPolicy>,
+    ) -> Result<(), StorageError> {
+        automatic_lifecycle::save_policy(self, record, policy)
+    }
+    fn save_automatic_denied_transition(
+        &mut self,
+        record: &SpendDecisionRecord,
+        policy: Option<&SelectedSpendPolicy>,
+        budget: Option<&BudgetWithBalance>,
+        cause: crate::spend::AdmissionDenialReason,
+        reasons: &[String],
+        decided_at: DateTime<Utc>,
+        budget_checked_at: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        automatic_lifecycle::save_denied(
+            self,
+            record,
+            policy,
+            budget,
+            cause,
+            reasons,
+            decided_at,
+            budget_checked_at,
+        )
+    }
+    fn save_automatic_approved_transition(
+        &mut self,
+        decision: &SpendDecisionRecord,
+        policy: Option<&SelectedSpendPolicy>,
+        token: &SpendAuthTokenRecord,
+        hold: &BudgetHold,
+        balance: &BudgetBalance,
+        before: &BudgetWithBalance,
+        decided_at: DateTime<Utc>,
+        budget_checked_at: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        automatic_lifecycle::save_approved(
+            self,
+            decision,
+            policy,
+            token,
+            hold,
+            balance,
+            before,
+            decided_at,
+            budget_checked_at,
+        )
+    }
+    fn save_automatic_evaluation_failure(
+        &mut self,
+        request: &SpendRequest,
+        operation_key: &str,
+        revision: u64,
+        observation: &crate::spend::LifecycleObservationId,
+        occurred_at: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        automatic_lifecycle::save_evaluation_failure(
+            self,
+            request,
+            operation_key,
+            revision,
+            observation,
+            occurred_at,
+        )
+    }
+    fn save_automatic_failure(
+        &mut self,
+        record: &SpendDecisionRecord,
+        observation: &crate::spend::LifecycleObservationId,
+        occurred_at: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        automatic_lifecycle::save_failure(self, record, observation, occurred_at)
+    }
     fn save_spend_decision(&mut self, record: &SpendDecisionRecord) -> Result<(), StorageError> {
         self.conn.execute(
             "INSERT INTO spend_decisions
@@ -5643,6 +5738,20 @@ pub(crate) fn strip_accounting_scale_columns(conn: &Connection) {
         ))
         .unwrap();
     }
+}
+
+#[cfg(test)]
+pub(crate) fn seed_lifecycle_test_identity(
+    repo: &mut SqliteGovernanceRepository,
+    owner: &UserId,
+    agent: &AgentId,
+    account: &hubu_common::ids::AgentAccountId,
+) {
+    crate::storage::init_schema(&repo.conn).unwrap();
+    let now = Utc::now().to_rfc3339();
+    repo.conn.execute("INSERT INTO users(id,pub_id,display_name,status,created_at,updated_at) VALUES(?1,?2,'Owner','active',?3,?3)",params![owner.to_string(),format!("usr_{}",owner.public_suffix()),now]).unwrap();
+    repo.conn.execute("INSERT INTO agent_identities(id,pub_id,fingerprint,display_name,owner_user_id,agent_type,agent_status,created_at,updated_at) VALUES(?1,?2,?3,'Agent',?4,'autonomous_agent','active',?5,?5)",params![agent.to_string(),format!("agt_{}",agent.public_suffix()),format!("fingerprint:{agent}"),owner.to_string(),now]).unwrap();
+    repo.conn.execute("INSERT INTO agent_accounts(id,pub_id,agent_id,owner_user_id,account_status,created_at,updated_at) VALUES(?1,?2,?3,?4,'active',?5,?5)",params![account.to_string(),format!("aga_{}",account.public_suffix()),agent.to_string(),owner.to_string(),now]).unwrap();
 }
 
 #[cfg(test)]
@@ -10027,3 +10136,49 @@ mod sub_cent_tests;
 #[cfg(test)]
 #[path = "persistence/usdc_tests.rs"]
 mod usdc_tests;
+
+#[allow(clippy::too_many_arguments)]
+fn persist_approved_spend_transition(
+    conn: &Connection,
+    decision: &SpendDecisionRecord,
+    token: &SpendAuthTokenRecord,
+    hold: &BudgetHold,
+    balance: &BudgetBalance,
+    reasons: &[String],
+    decided_at: DateTime<Utc>,
+) -> Result<(), StorageError> {
+    validate_hold_and_balance_relationship(conn, hold, balance, true)?;
+    conn.execute(
+        "INSERT INTO spend_auth_tokens
+             (id, owner_user_id, spend_decision_id, expires_at, claim_ttl_seconds,
+              used_at, used_by_payment_id, revoked_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            token.id.to_string(),
+            token.owner_user_id.to_string(),
+            token.spend_decision_id.to_string(),
+            token.expires_at.to_rfc3339(),
+            token.claim_ttl_seconds,
+            token.used_at.map(|timestamp| timestamp.to_rfc3339()),
+            token.used_by_payment_id.as_ref().map(ToString::to_string),
+            token.revoked_at.map(|timestamp| timestamp.to_rfc3339()),
+        ],
+    )?;
+    insert_budget_hold(conn, hold)?;
+    upsert_balance(conn, balance)?;
+    conn.execute(
+        "INSERT INTO spend_authorization_outcomes
+             (agent_id, operation_key, revision, spend_decision_id, decision,
+              reasons_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, 'allowed', ?5, ?6)",
+        params![
+            decision.request.agent_id.to_string(),
+            decision.operation_key,
+            decision.revision,
+            decision.id.to_string(),
+            serde_json::to_string(reasons)?,
+            decided_at.to_rfc3339(),
+        ],
+    )?;
+    Ok(())
+}

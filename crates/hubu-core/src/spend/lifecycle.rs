@@ -442,18 +442,18 @@ impl Default for LifecycleExplanation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LifecycleEventInput {
-    pub schema_version: u32,
-    pub correlation: LifecycleCorrelation,
-    pub source: LifecycleSource,
-    pub occurred_at: DateTime<Utc>,
+    pub(crate) schema_version: u32,
+    pub(crate) correlation: LifecycleCorrelation,
+    pub(crate) source: LifecycleSource,
+    pub(crate) occurred_at: DateTime<Utc>,
     /// Request evidence is independent of why a decision was made. It may be
     /// unavailable for an early admission failure, never inferred from cents.
-    pub requested_amount: LifecycleEvidence<LifecycleAmount>,
+    pub(crate) requested_amount: LifecycleEvidence<LifecycleAmount>,
     /// Canonical IDs resolved by the existing trusted request path, never raw
     /// selectors, merchant prose, prompts, or provider request URLs.
-    pub execution_scope: LifecycleEvidence<LifecycleScopeEvidence>,
-    pub fact: LifecycleFact,
-    pub explanation: LifecycleExplanation,
+    pub(crate) execution_scope: LifecycleEvidence<LifecycleScopeEvidence>,
+    pub(crate) fact: LifecycleFact,
+    pub(crate) explanation: LifecycleExplanation,
 }
 /// Deliberately not Serialize: contains private correlation, not a public DTO.
 #[derive(Debug, Clone, PartialEq, Eq)]
