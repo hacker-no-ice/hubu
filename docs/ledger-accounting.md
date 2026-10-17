@@ -130,7 +130,7 @@ and budget relationship, even when the budget has no ledger rows. Unknown or
 foreign owner/agent combinations fail before transactions are returned.
 
 A single SQLite snapshot returns wallet, provider and adjustment records linked
-to that exact agent budget, consumed cents, summed signed budget charges,
+to that exact agent budget, the consumed amount, summed signed budget charges,
 unaccounted consumption, pending-hold count and the count of owner transactions
 without budget context. Unlinked owner transactions are not guessed into a
 budget. An unused owned budget returns an empty list and zero consumed/covered
@@ -138,7 +138,9 @@ amounts. Missing legacy source evidence remains visible on canonical records.
 
 For example, a wallet expense of USD 10.00 and a provider expense of USD 0.001
 produce two canonical transactions, exact expense of USD 10.001, budget charges
-of 1001 cents and rounding of USD 0.009. Append-only provider corrections appear
+of exactly 10.001 (10,001,000 micro-units) and no rounding. A USD 0.0000001
+provider expense would charge one micro-unit and record a rounding delta of
+USD 0.0000009. Append-only provider corrections appear
 in the same query with signed budget deltas.
 
 The old `hubu_wallet::LedgerTransaction` / `LedgerEntry` types are explicitly

@@ -12,7 +12,7 @@ use crate::{
         Receipt, Repository,
     },
     provider::{
-        contract::{PricingSnapshot, PricingUnit},
+        contract::{units_to_minor_ceil, PricingSnapshot, PricingUnit, UNITS_PER_MINOR},
         flux2_api,
         registry::ValidatedProviderCatalog,
     },
@@ -245,8 +245,10 @@ impl RedactionAttestor {
             "settlement": settlement_projection,
         });
         let actual_vendor_cost = &receipt.actual_vendor_cost;
+        // Attestation contract v1 reports whole cents; projections round up.
         let provider_cost_minor = actual_vendor_cost
-            .to_budget_minor_units(&execution.authorization_currency)
+            .to_budget_units(&execution.authorization_currency)
+            .map(units_to_minor_ceil)
             .map_err(|_| AttestationError::Internal)?;
         let artifact_content_sha256 = format!("sha256:{}", retrieved.artifact.sha256);
 
@@ -274,11 +276,11 @@ impl RedactionAttestor {
                 artifact_count: 1,
                 receipt_count: 1,
                 settlement_delivery_count: 1,
-                authorized_minor: execution.authorized_minor,
+                authorized_minor: units_to_minor_ceil(execution.authorized_units),
                 authorization_currency: execution.authorization_currency.clone(),
                 provider_cost_minor: Some(provider_cost_minor),
                 provider_cost_currency: Some(actual_vendor_cost.currency.clone()),
-                settled_minor: Some(receipt.settlement_minor),
+                settled_minor: Some(units_to_minor_ceil(receipt.settlement_units)),
                 settled_currency: Some(receipt.currency.clone()),
                 artifact_content_sha256,
             },
@@ -327,7 +329,7 @@ fn exact_provider_contract(
         && execution.target == "image_generation/flux/flux2_api/flux-2-pro"
         && execution.config_version == PROVIDER_CONFIG_VERSION
         && execution.provider_config_version == PROVIDER_CONFIG_VERSION
-        && execution.authorized_minor == 3
+        && execution.authorized_units == 3 * UNITS_PER_MINOR
         && execution.authorization_currency == "USD"
         && exact_frozen_pricing(&pricing)
 }
@@ -339,7 +341,7 @@ fn exact_frozen_pricing(pricing: &PricingSnapshot) -> bool {
         && pricing.pricing_rule_id == PRICING_RULE_ID
         && pricing.exact_estimate_numerator == "3"
         && pricing.exact_estimate_denominator == "1"
-        && pricing.estimated_amount_minor == 3
+        && pricing.estimated_units == 3 * UNITS_PER_MINOR
         && pricing.currency == "USD"
         && pricing
             .selector
@@ -377,14 +379,14 @@ fn exact_qualification_tuple(
     execution.account_id == QUALIFICATION_ACCOUNT_ID
         && execution.normalized_input == canonical_input
         && execution.input_schema_version == 1
-        && execution.pricing_schema_version == 2
+        && matches!(execution.pricing_schema_version, 2 | 3)
         && execution.operation_key == authorization.operation_key
         && valid_qualification_operation_key(&execution.operation_key)
         && execution.hubu_claim_id.as_deref().is_some_and(nonempty)
         && exact_scope(execution_scope)
         && authorization.account_id == QUALIFICATION_ACCOUNT_ID
         && authorization.agent_id == QUALIFICATION_AGENT_ID
-        && authorization.amount_minor == 3
+        && authorization.amount_units == 3 * UNITS_PER_MINOR
         && authorization.currency == "USD"
         && authorization.execution_scope == *execution_scope
         && exact_scope(&authorization.execution_scope)
@@ -423,10 +425,10 @@ fn exact_qualification_tuple(
         )
         && receipt.execution_id == execution.execution_id
         && receipt.provider_attempt_id == attempt.provider_attempt_id
-        && receipt.settlement_minor == 3
+        && receipt.settlement_units == 3 * UNITS_PER_MINOR
         && receipt.currency == "USD"
         && receipt.pricing_catalog_version == PRICING_VERSION
-        && receipt.actual_vendor_cost.to_budget_minor_units("USD").ok() == Some(3)
+        && receipt.actual_vendor_cost.to_budget_units("USD").ok() == Some(3 * UNITS_PER_MINOR)
         && receipt.actual_vendor_cost.currency == "USD"
         && receipt.transmission_started_at.is_some()
         && receipt.settled_at.is_some()
@@ -570,7 +572,7 @@ fn logical_database_projection(
             "hubu_authorization_id": execution.hubu_authorization_id,
             "hubu_claim_id": execution.hubu_claim_id,
             "hubu_token_reference": execution.hubu_token_reference.as_str(),
-            "authorized_minor": execution.authorized_minor,
+            "authorized_minor": units_to_minor_ceil(execution.authorized_units),
             "authorization_currency": execution.authorization_currency,
             "input_hash": execution.input_hash,
             "input_schema_version": execution.input_schema_version,
@@ -604,7 +606,7 @@ fn logical_database_projection(
             "agent_id": authorization.agent_id,
             "decision_id": authorization.decision_id,
             "spend_auth_token_id": authorization.spend_auth_token_id,
-            "amount_minor": authorization.amount_minor,
+            "amount_minor": units_to_minor_ceil(authorization.amount_units),
             "currency": authorization.currency,
             "execution_scope": authorization.execution_scope,
             "lease_profile": authorization.lease_profile,
@@ -636,7 +638,7 @@ fn logical_database_projection(
             "receipt_id": receipt.receipt_id,
             "execution_id": receipt.execution_id,
             "provider_attempt_id": receipt.provider_attempt_id,
-            "settlement_minor": receipt.settlement_minor,
+            "settlement_minor": units_to_minor_ceil(receipt.settlement_units),
             "currency": receipt.currency,
             "pricing_catalog_version": receipt.pricing_catalog_version,
             "actual_vendor_cost": receipt.actual_vendor_cost,
@@ -689,7 +691,7 @@ fn safe_execution_projection(
         "config_version": execution.config_version,
         "provider_config_version": execution.provider_config_version,
         "pricing_schema_version": execution.pricing_schema_version,
-        "authorized_minor": execution.authorized_minor,
+        "authorized_minor": units_to_minor_ceil(execution.authorized_units),
         "authorization_currency": execution.authorization_currency,
         "status": execution.status,
         "outcome": execution.outcome,
@@ -730,11 +732,11 @@ fn safe_artifact_projection(artifacts: &[Artifact]) -> Value {
 fn safe_settlement_projection(execution: &Execution, receipt: Option<&Receipt>) -> Value {
     json!({
         "projection_schema_version": 1,
-        "authorized_minor": execution.authorized_minor,
+        "authorized_minor": units_to_minor_ceil(execution.authorized_units),
         "authorization_currency": execution.authorization_currency,
         "receipt_count": usize::from(receipt.is_some()),
         "receipt": receipt.map(|value| json!({
-            "settlement_minor": value.settlement_minor,
+            "settlement_minor": units_to_minor_ceil(value.settlement_units),
             "currency": value.currency,
             "pricing_catalog_version": value.pricing_catalog_version,
             "actual_vendor_cost": value.actual_vendor_cost,

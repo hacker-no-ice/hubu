@@ -1578,7 +1578,7 @@ mod tests {
                 hubu_authorization_id: "sha256:authorization".into(),
                 hubu_claim_id: Some("claim".into()),
                 hubu_token_reference: HubuTokenReference::new("sha256:authorization").unwrap(),
-                authorized_minor: 500,
+                authorized_units: 500_0000,
                 authorization_currency: "USD".into(),
                 normalized_input: json!({"prompt":"cat"}),
                 input_hash: "sha256:input".into(),
@@ -2995,10 +2995,12 @@ mod tests {
             let converted = bfl_credit_cost_to_usd(raw).unwrap();
             assert_eq!(converted, expected, "raw BFL credits: {raw}");
             if raw == "100e18" || raw == "9223372036854775807e2" {
-                assert!(converted.to_budget_minor_units("USD").is_err());
+                assert!(converted.to_budget_units("USD").is_err());
             } else {
                 assert_eq!(
-                    converted.to_budget_minor_units("USD").unwrap(),
+                    crate::provider_contract::units_to_minor_ceil(
+                        converted.to_budget_units("USD").unwrap()
+                    ),
                     budget_cents,
                     "raw BFL credits: {raw}"
                 );
@@ -3617,15 +3619,15 @@ mod tests {
             .unwrap();
         let pricing = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"fixture-v2","rules":[{"rule_id":"flux2-pro-1k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"1k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":45,"rate_denominator":1}]}]}"#).unwrap();
         let snapshot = pricing.snapshot(&request()).unwrap();
-        assert_eq!(snapshot.estimated_amount_minor, 45);
+        assert_eq!(snapshot.estimated_units, 45_0000);
         let settlement = snapshot
             .settle_precise(
                 outcome.usage.as_ref().unwrap(),
                 outcome.actual_vendor_cost.as_ref(),
-                45,
+                45_0000,
             )
             .unwrap();
-        assert_eq!(settlement.budget_amount_minor, 45);
+        assert_eq!(settlement.budget_units, 45_0000);
         assert_eq!(
             settlement.actual_vendor_cost,
             ActualVendorCost::new(45, 2, "USD").unwrap(),
@@ -3640,7 +3642,7 @@ mod tests {
                 hubu_authorization_id: "token-ref".into(),
                 hubu_claim_id: Some("claim".into()),
                 hubu_token_reference: HubuTokenReference::new("token-ref").unwrap(),
-                authorized_minor: 45,
+                authorized_units: 45_0000,
                 authorization_currency: "USD".into(),
                 normalized_input: input(),
                 input_hash: "hash".into(),
@@ -3654,7 +3656,7 @@ mod tests {
                 provider_config_version: "pcv".into(),
                 provider_config_digest: format!("sha256:{}", "a".repeat(64)),
                 pricing_snapshot: serde_json::to_value(snapshot).unwrap(),
-                pricing_schema_version: 2,
+                pricing_schema_version: 3,
                 execution_scope: None,
                 created_at: "now".into(),
             })
