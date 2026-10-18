@@ -206,11 +206,11 @@ fn shown(value: &Value, key: &str) -> String {
 fn micro_units(row: &Value, key: &str) -> i128 {
     money_of(row, key).map_or(0, |amount| i128::from(amount.amount.units()))
 }
-fn clock(value: &Value) -> String {
+fn local_timestamp(value: &Value, format: &str) -> String {
     value
         .as_str()
         .and_then(|v| DateTime::parse_from_rfc3339(v).ok())
-        .map(|v| v.with_timezone(&Local).format("%H:%M:%S").to_string())
+        .map(|v| v.with_timezone(&Local).format(format).to_string())
         .unwrap_or_else(|| "—".into())
 }
 // Allocate a fixed bar using actual proportions, while retaining visibility of
@@ -347,8 +347,8 @@ fn event_line(event: &Value, single: bool, name_width: usize, width: usize) -> S
         Some("provider:google:gemini-developer") => "Gemini".into(),
         _ => text(&event["provider"]["display_name"], 6),
     };
-    // Fixed columns: time, glyph, agent, provider and status; the rule takes the rest.
-    let fixed = if single { 43 } else { 35 + name_width };
+    // Fixed columns: date/time, glyph, agent, provider and status; the rule takes the rest.
+    let fixed = if single { 54 } else { 46 + name_width };
     let rule_width = (width - 9).saturating_sub(fixed).max(14);
     let rule = if event["release_reason"].as_str() == Some("executor_rejected_before_claim") {
         "executor_rejected_before_claim".into()
@@ -372,7 +372,7 @@ fn event_line(event: &Value, single: bool, name_width: usize, width: usize) -> S
     };
     format!(
         " {}  {glyph} {agent}{} {} {rule}",
-        clock(&event["created_at"]),
+        local_timestamp(&event["created_at"], "%Y-%m-%d %H:%M:%S"),
         pad(&provider, 6),
         pad(&status, if single { 22 } else { 13 })
     )
@@ -456,7 +456,7 @@ fn render(
         format!(
             "{} · {}",
             text(&snapshot["currency"], 3).to_ascii_uppercase(),
-            clock(&snapshot["observed_at"])
+            local_timestamp(&snapshot["observed_at"], "%H:%M:%S")
         )
     };
     let header = format!(
@@ -664,6 +664,8 @@ fn render(
 
 #[cfg(test)]
 mod tests {
+    use chrono::TimeZone;
+
     #[test]
     fn admission_void_reason_is_visible_in_the_watch_event() {
         let event = serde_json::json!({"created_at":"2026-10-13T12:00:00Z", "status":"released", "reserved_cents":500,
@@ -678,6 +680,26 @@ mod tests {
     }
     fn output(s: &Value, o: &Options) -> String {
         render(s, None, o, terminal::TerminalStyle::plain(), false, 100, 70).unwrap()
+    }
+    #[test]
+    fn recent_decisions_show_the_local_date_and_time() {
+        let mut s = snapshot();
+        // Build local instants across midnight so the expected date is independent
+        // of the test machine's timezone, including zones ahead of UTC.
+        for day in [17, 18] {
+            let local = Local.with_ymd_and_hms(2026, 10, day, 0, 3, 35).unwrap();
+            s["recent_events"][0]["created_at"] =
+                json!(local.with_timezone(&chrono::Utc).to_rfc3339());
+            let expected = format!(" 2026-10-{day} 00:03:35  ✓");
+            for single in [true, false] {
+                assert!(event_line(&s["recent_events"][0], single, 12, 100).starts_with(&expected));
+            }
+            assert!(output(&s, &options(vec![]).unwrap()).contains(&expected));
+        }
+        for invalid in [Value::Null, json!("invalid\n timestamp")] {
+            s["recent_events"][0]["created_at"] = invalid;
+            assert!(event_line(&s["recent_events"][0], true, 12, 70).starts_with(" —  ✓"));
+        }
     }
     #[test]
     fn single_multi_and_compact_layouts() {
@@ -893,7 +915,7 @@ mod tests {
     }
 
     #[test]
-    fn wide_terminals_show_full_names_and_rules_within_width() {
+    fn wide_terminals_show_longer_names_and_rules_within_width() {
         let mut s = snapshot();
         let long = "research-agent-campaigns";
         let mut second = s["rows"][0].clone();
@@ -930,7 +952,7 @@ mod tests {
             wide.contains(long) && !wide.contains("research-ag…"),
             "{wide}"
         );
-        assert!(wide.contains("allow_under_40_cents_drafts"), "{wide}");
+        assert!(wide.contains("allow_under_40_cents…"), "{wide}");
         assert!(wide.lines().all(|l| display_width(l) <= 100), "{wide}");
         // Bars widen with the terminal: the wide row is longer than the narrow one.
         let bar = |out: &str| {

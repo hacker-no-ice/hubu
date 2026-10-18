@@ -188,7 +188,8 @@ current version limit. Overruns fill the bar while retaining actual dollar
 amounts and percentages above 100%.
 
 The combined feed shows the ten newest operation decisions available from the
-server, with current status updated in place: `◐` reservation, `✓` settlement,
+server, each with its local date and time (`YYYY-MM-DD HH:MM:SS`),
+with current status updated in place: `◐` reservation, `✓` settlement,
 `‖` approval, `✗` denial, `○` release/expiry, or `!` reconciliation. Settlements
 show exact vendor cost, including sub-cent precision. The first matched rule
 appears, or `budget` for capacity denials and `default` when no rule matched.
