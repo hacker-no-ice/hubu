@@ -33,6 +33,7 @@ use thiserror::Error;
 mod capability;
 mod credential;
 mod diagnostics;
+mod meta_shape;
 mod notification;
 mod operation_registry;
 mod operation_worker;
@@ -61,6 +62,7 @@ const OPERATION_TICK_ENV: &str = "HUBU_UNIFIED_OPERATION_TICK_MS";
 const GOVERNED_EXECUTION_WAIT_ENV: &str = "HUBU_UNIFIED_GOVERNED_EXECUTION_WAIT_MS";
 const OPERATION_STATE_PATH_ENV: &str = "HUBU_UNIFIED_OPERATION_STATE_PATH";
 const OPERATION_KEY_DB_ENV: &str = "HUBU_UNIFIED_OPERATION_KEY_DB";
+const META_SHAPE_DIAGNOSTICS_ENV: &str = "HUBU_UNIFIED_META_SHAPE_DIAGNOSTICS";
 const TRUST_CLIENT_APPROVAL_ENV: &str = "HUBU_MCP_TRUST_CLIENT_APPROVAL";
 const TRUST_SPEND_APPROVAL_ENV: &str = "HUBU_MCP_TRUST_SPEND_APPROVAL";
 const APPROVAL_TOKEN_ENV: &str = "HUBU_APPROVAL_TOKEN";
@@ -207,6 +209,9 @@ pub struct Config {
     pub governed_execution_wait: Duration,
     pub operation_state_path: Option<PathBuf>,
     pub preallocated_operation_key_path: Option<PathBuf>,
+    /// Emits sanitized `tools/call` metadata shapes to stderr for client
+    /// identity compatibility diagnosis. Never changes admission.
+    pub meta_shape_diagnostics: bool,
 }
 
 impl Default for Config {
@@ -220,6 +225,7 @@ impl Default for Config {
             governed_execution_wait: DEFAULT_GOVERNED_EXECUTION_WAIT,
             operation_state_path: None,
             preallocated_operation_key_path: None,
+            meta_shape_diagnostics: false,
         }
     }
 }
@@ -280,6 +286,8 @@ impl Config {
             governed_execution_wait: governed_execution_wait(lookup(GOVERNED_EXECUTION_WAIT_ENV))?,
             operation_state_path,
             preallocated_operation_key_path,
+            meta_shape_diagnostics: lookup(META_SHAPE_DIAGNOSTICS_ENV)
+                .is_some_and(|value| env_flag_value(&value)),
         })
     }
 }
@@ -505,6 +513,7 @@ pub struct Server {
     operation_worker_waker: Arc<Mutex<Option<mpsc::Sender<()>>>>,
     hubu_routing: HubuRoutingConfig,
     operation_registry: Arc<OperationRegistryCapability>,
+    meta_shape_diagnostics: bool,
     #[cfg(test)]
     use_capability_snapshot_for_test: bool,
 }
@@ -609,6 +618,7 @@ impl Server {
         let capability_poll_interval = config.capability_poll_interval;
         let operation_tick = config.operation_tick;
         let governed_execution_wait = config.governed_execution_wait;
+        let meta_shape_diagnostics = config.meta_shape_diagnostics;
         let backends = BackendClients::new(config)?;
         let snapshot = backends.probe();
         let probed_at = Instant::now();
@@ -644,6 +654,7 @@ impl Server {
             operation_worker_waker: Arc::new(Mutex::new(None)),
             hubu_routing,
             operation_registry: Arc::new(operation_registry),
+            meta_shape_diagnostics,
             #[cfg(test)]
             use_capability_snapshot_for_test: false,
         })
@@ -694,6 +705,9 @@ impl Server {
     }
 
     fn call_tool(&self, id: Value, params: Value) -> Value {
+        if self.meta_shape_diagnostics {
+            meta_shape::emit(&id, &params);
+        }
         let call: ToolCall = match serde_json::from_value::<ToolCall>(params) {
             Ok(call) => call,
             Err(_) => return error_response(id, -32602, "Invalid params"),
@@ -1856,6 +1870,25 @@ mod tests {
         assert_eq!(
             config.gongbu.as_ref().unwrap().endpoint().as_str(),
             "http://127.0.0.1:8788/"
+        );
+    }
+
+    #[test]
+    fn meta_shape_diagnostics_are_opt_in() {
+        assert!(
+            !Config::from_lookup(lookup(&[]))
+                .unwrap()
+                .meta_shape_diagnostics
+        );
+        assert!(
+            !Config::from_lookup(lookup(&[(META_SHAPE_DIAGNOSTICS_ENV, "0")]))
+                .unwrap()
+                .meta_shape_diagnostics
+        );
+        assert!(
+            Config::from_lookup(lookup(&[(META_SHAPE_DIAGNOSTICS_ENV, "1")]))
+                .unwrap()
+                .meta_shape_diagnostics
         );
     }
 

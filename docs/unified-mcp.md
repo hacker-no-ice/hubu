@@ -718,6 +718,14 @@ Reusing the same identity with different arguments or trusted aliases fails
 before backend access, while a different call ID creates a distinct operation
 even when its arguments are identical.
 
+To diagnose a client that reaches spend tools without a supported identity
+source, operators may set `HUBU_UNIFIED_META_SHAPE_DIAGNOSTICS=1`. Each
+`tools/call` then writes one `hubu-unified-mcp meta-shape:` line to stderr with
+`_meta` key names, JSON types, lengths, truncated SHA-256 digests, and the
+identity outcome. Arguments and raw values are never written, and the flag does
+not change admission. See the
+[ChatGPT tunnel runbook](operations/chatgpt-mcp-tunnel.md#capture-identity-metadata-shape).
+
 Only common identity columns and the typed Codex, Claude Code, and controlled
 envelope aliases are stored; arbitrary `_meta` content is not persisted. The
 router injects the private key and an explicit null task ID when none exists.

@@ -288,6 +288,34 @@ In a new terminal, load/export the key again before restarting. After stopping
 the client, `unset CONTROL_PLANE_API_KEY` clears it from that shell; it does not
 revoke the key in Platform.
 
+## Capture identity metadata shape
+
+When a spend tool reports that it requires supported trusted identity, capture
+what the client actually delivers before changing anything. The opt-in
+diagnostic writes one sanitized line per `tools/call` to unified MCP stderr. It
+records `_meta` key names, JSON types, string byte lengths, and 16-hex-character
+SHA-256 digest prefixes, plus the JSON-RPC ID shape, other `params` key names,
+and whether trusted identity was accepted. It never records tool arguments, raw
+`_meta` values, or responses, and it does not change routing or admission.
+
+Add these lines to the launcher, replacing its final `exec` line:
+
+```sh
+export HUBU_UNIFIED_META_SHAPE_DIAGNOSTICS=1
+exec /absolute/path/to/hubu-unified-mcp \
+  2>>"$HOME/.local/state/hubu-chatgpt/meta-shape.log"
+```
+
+Restart the tunnel client, then call the read-only `hubu_unified_capabilities`
+tool once from each client being compared, such as ChatGPT on the phone,
+ChatGPT on desktop, and Codex. Clients that send the same `_meta` for every tool
+call need no spend attempt. Read the lines prefixed with
+`hubu-unified-mcp meta-shape:`. Equal digests mean equal values, so
+redelivering the same call should repeat a per-invocation identifier's digest,
+while a new call should change it. Digest prefixes of low-entropy values such
+as locales can be guessed, so share the log only with people who may see the
+client's metadata. Remove the variable and redirect afterward.
+
 ## Troubleshooting
 
 | Symptom | Check or fix |
@@ -298,7 +326,7 @@ revoke the key in Platform.
 | Calls time out | Check Mac sleep, network, tunnel client, and stack readiness; run `doctor --explain`. |
 | Health works but spending tools are missing | Inspect `operation_registry`: `configuration_missing` needs the persistent path; `state_unavailable` needs path/permission diagnosis. Restart and refresh afterward. |
 | Protected actions are rejected | Initial trust flags are off and approval/reconciliation credentials are withheld. Verify the client approval contract before changing them. |
-| Spending fails on identity metadata | Transport alone does not supply trusted harness identity. Diagnose the exact error against unified MCP; do not put private operation keys in model arguments. |
+| Spending fails on identity metadata | Transport alone does not supply trusted harness identity. [Capture the metadata shape](#capture-identity-metadata-shape) and compare it with a working client; do not put private operation keys in model arguments or change approval trust flags to clear it. |
 | A launcher change seems ineffective | Restart the tunnel-owned MCP process, refresh the connection's metadata, and start a new conversation. |
 | Icon crops the wordmark | Export a padded square PNG under the upload limit. |
 

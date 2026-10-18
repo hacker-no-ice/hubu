@@ -96,6 +96,7 @@ fn server_with_spend_approval(
         operation_registry: Arc::new(OperationRegistryCapability::Available(Mutex::new(
             crate::operation_registry::OperationRegistry::open_in_memory().unwrap(),
         ))),
+        meta_shape_diagnostics: false,
         use_capability_snapshot_for_test: true,
     }
 }
