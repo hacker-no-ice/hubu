@@ -969,6 +969,8 @@ const detailSections = document.querySelectorAll(".detail-section");
 const highlights = document.getElementById("highlights");
 const responsibilities = document.getElementById("responsibilities");
 const sourceLinks = document.getElementById("source-links");
+const snapshotSource = document.getElementById("architecture-source-commit")?.textContent.trim();
+const sourceRef = /^[a-f0-9]{40}$/.test(snapshotSource || "") ? snapshotSource : "main";
 const topButtons = [
   document.getElementById("top-view-button"),
   document.getElementById("details-back-button"),
@@ -1255,7 +1257,7 @@ function renderSourceLinks(links) {
   links.forEach(([label, path]) => {
     const li = document.createElement("li");
     const anchor = document.createElement("a");
-    anchor.href = `https://github.com/hacker-no-ice/hubu/blob/main/${path}`;
+    anchor.href = `https://github.com/hacker-no-ice/hubu/blob/${sourceRef}/${path}`;
     anchor.target = "_blank";
     anchor.rel = "noreferrer";
     anchor.textContent = label;

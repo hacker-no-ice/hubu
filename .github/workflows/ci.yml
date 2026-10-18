@@ -85,6 +85,9 @@ jobs:
       - name: Run unified MCP routing and failure-isolation matrix
         run: ./scripts/integration-unified-mcp.sh
 
+      - name: Qualify governance history and agent read queries
+        run: ./scripts/integration-governance-observability.sh
+
       - name: Build docs
         run: cargo doc --workspace --no-deps --locked
 

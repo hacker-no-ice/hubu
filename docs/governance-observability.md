@@ -302,3 +302,5 @@ Shared reads: [query types](../crates/hubu-core/src/spend/governance_query.rs),
 HTTP adapter: [governance routes and projections](../crates/hubu-api/src/governance.rs).
 
 Unified MCP: [governance read validation and routing](../crates/hubu-unified-mcp/src/hubu/governance.rs).
+
+Release evidence and remaining limits: [qualification record](governance-observability-qualification.md).
