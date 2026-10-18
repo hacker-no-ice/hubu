@@ -2099,7 +2099,7 @@ fn governed_hubu_to_gongbu_execution_fails_closed_without_hubu() {
     let listed = mcp.list_tools();
     assert_eq!(
         tool_names(&listed).len(),
-        39,
+        42,
         "unexpected catalog {listed}; Hubu requests: {:?}; Gongbu requests: {:?}",
         hubu.requests(),
         gongbu.requests()
@@ -2369,4 +2369,233 @@ fn feedback_is_discoverable_and_prepared_without_backends() {
         "excluded-log-canary",
         "input-error-canary",
     ]);
+}
+
+fn governance_query_path(path: &str, arguments: &Value) -> String {
+    let mut url = reqwest::Url::parse(&format!("http://fixture{path}")).unwrap();
+    for key in [
+        "agent_id",
+        "account_id",
+        "occurred_from",
+        "occurred_before",
+        "snapshot",
+    ] {
+        if let Some(value) = arguments[key].as_str() {
+            url.query_pairs_mut().append_pair(key, value);
+        }
+    }
+    if let Some(limit) = arguments["limit"].as_u64() {
+        url.query_pairs_mut()
+            .append_pair("limit", &limit.to_string());
+    }
+    if let Some(cursor) = arguments["cursor"].as_str() {
+        url.query_pairs_mut().append_pair("cursor", cursor);
+    }
+    format!("{}?{}", url.path(), url.query().unwrap())
+}
+
+fn assert_governance_projection(response: &Value, expected: &Value) {
+    assert_ne!(
+        response["result"].get("isError"),
+        Some(&json!(true)),
+        "{response}"
+    );
+    assert_eq!(&response["result"]["structuredContent"], expected);
+    let text: Value =
+        serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(&text, expected);
+}
+
+#[test]
+#[ignore = "runs through scripts/integration-unified-mcp.sh with deterministic build stamps"]
+fn governance_weekly_summary_supporting_pages_and_detail_share_snapshot_without_execution() {
+    let fixture: Value =
+        serde_json::from_str(include_str!("../../../fixtures/governance-mcp-v1.json")).unwrap();
+    let snapshot = fixture["summary"]["snapshot"]["token"].as_str().unwrap();
+    let cursor = fixture["cursor"].as_str().unwrap();
+    let record_id = fixture["records"][0]["record_id"].as_str().unwrap();
+    let base_args = json!({
+        "agent_id":"agt_0123456789ab", "account_id":"aga_0123456789ab",
+        "occurred_from":"2026-10-08T00:00:00Z", "occurred_before":"2026-10-15T00:00:00Z"
+    });
+    let summary_body = json!({"schema_version":"hubu-governance-v1","filters":fixture["filters"],"summary":fixture["summary"]});
+    let page_one = json!({"schema_version":"hubu-governance-v1","filters":fixture["filters"],"summary":fixture["summary"],"records":[fixture["records"][0]],"next_cursor":cursor});
+    let page_two = json!({"schema_version":"hubu-governance-v1","filters":fixture["filters"],"summary":fixture["summary"],"records":fixture["records"].as_array().unwrap()[1..],"next_cursor":null});
+    let detail_body = json!({"schema_version":"hubu-governance-v1","filters":fixture["filters"],"summary":fixture["summary"],"record":fixture["records"][0]});
+
+    // Reads must work both without Gongbu and while the local operation store
+    // cannot open. Neither condition changes the Hubu-owned evidence contract.
+    for (connect_gongbu, unavailable_operation_store) in [(false, false), (true, true)] {
+        let hubu = BackendStub::start(BackendKind::Hubu);
+        let gongbu = BackendStub::start(BackendKind::Gongbu);
+        let state = tempfile::tempdir().unwrap();
+        let invalid_state = state.path().join("a-directory-not-a-database");
+        std::fs::create_dir(&invalid_state).unwrap();
+        let mut mcp = if unavailable_operation_store {
+            McpProcess::start_with_operation_state(
+                Some((&hubu, HUBU_TOKEN)),
+                Some((&gongbu, GONGBU_TOKEN)),
+                &invalid_state,
+            )
+        } else {
+            McpProcess::start(Some((&hubu, HUBU_TOKEN)), None)
+        };
+        let initialize = mcp.initialize();
+        assert_backend_state(&initialize, "hubu", "available");
+        assert_backend_state(
+            &initialize,
+            "gongbu",
+            if connect_gongbu {
+                "available"
+            } else {
+                "unconfigured"
+            },
+        );
+        let listed = mcp.list_tools();
+        for name in [
+            "hubu_governance_summary",
+            "hubu_list_governance_records",
+            "hubu_get_governance_record",
+        ] {
+            assert!(tool_names(&listed).contains(&name));
+        }
+        let summary_path = governance_query_path("/governance/summary", &base_args);
+        hubu.respond_json("GET", &summary_path, 200, summary_body.clone());
+        let summary = mcp.call(10, "hubu_governance_summary", base_args.clone());
+        assert_governance_projection(&summary, &summary_body);
+        assert_eq!(
+            summary["result"]["structuredContent"]["summary"]["automatic_denials"][0]
+                ["distinct_attempts"],
+            1
+        );
+        // A human decline is retained as its own stage, never another automatic denial.
+        assert_eq!(
+            summary["result"]["structuredContent"]["summary"]["stages"][3]["outcome"],
+            "human_declined"
+        );
+        assert_eq!(
+            summary["result"]["structuredContent"]["summary"]["stages"][3]["fact_count"],
+            1
+        );
+        assert_eq!(
+            summary["result"]["structuredContent"]["summary"]["stage_counts_overlap"],
+            true
+        );
+        assert_eq!(
+            summary["result"]["structuredContent"]["summary"]["backlog"]
+                ["unresolved_reconciliations"],
+            1
+        );
+        assert_eq!(
+            summary["result"]["structuredContent"]["summary"]["requested"]["per_currency"][0]
+                ["units"],
+            "9007199254740993"
+        );
+        assert_eq!(
+            summary["result"]["structuredContent"]["summary"]["automatic_denied_requested"]
+                ["per_currency"][0],
+            json!({"units":"5000","scale":6,"currency":"usdc","display":"0.005"})
+        );
+        assert_eq!(
+            summary["result"]["structuredContent"]["summary"]["legacy_coverage"]["assessed"],
+            true
+        );
+        assert_eq!(
+            summary["result"]["structuredContent"]["summary"]["record_coverage"][0]
+                ["complete_history"],
+            false
+        );
+        assert_eq!(
+            summary["result"]["structuredContent"]["summary"]["unsupported_signals"],
+            json!([
+                "provider_execution_failure",
+                "pre_expiry_billing_uncertainty"
+            ])
+        );
+
+        let mut page_args = base_args.clone();
+        page_args["snapshot"] = json!(snapshot);
+        page_args["limit"] = json!(1);
+        let first_path = governance_query_path("/governance/records", &page_args);
+        hubu.respond_json("GET", &first_path, 200, page_one.clone());
+        let first = mcp.call(11, "hubu_list_governance_records", page_args.clone());
+        assert_governance_projection(&first, &page_one);
+        page_args["cursor"] = first["result"]["structuredContent"]["next_cursor"].clone();
+        page_args["limit"] = json!(200);
+        let second_path = governance_query_path("/governance/records", &page_args);
+        hubu.respond_json("GET", &second_path, 200, page_two.clone());
+        let second = mcp.call(12, "hubu_list_governance_records", page_args);
+        assert_governance_projection(&second, &page_two);
+        assert_eq!(
+            first["result"]["structuredContent"]["summary"],
+            second["result"]["structuredContent"]["summary"]
+        );
+        let mut detail_args = base_args.clone();
+        detail_args["snapshot"] = json!(snapshot);
+        let detail_path =
+            governance_query_path(&format!("/governance/records/{record_id}"), &detail_args);
+        detail_args["record_id"] = json!(record_id);
+        hubu.respond_json("GET", &detail_path, 200, detail_body.clone());
+        let detail = mcp.call(13, "hubu_get_governance_record", detail_args);
+        assert_governance_projection(&detail, &detail_body);
+        assert_eq!(
+            detail["result"]["structuredContent"]["record"],
+            first["result"]["structuredContent"]["records"][0]
+        );
+
+        let invalid_baseline = hubu.requests().len();
+        let rejected = mcp.call(
+            14,
+            "hubu_governance_summary",
+            json!({"operation_key":"private-query-canary"}),
+        );
+        assert!(rejected.get("error").is_some());
+        assert!(!rejected.to_string().contains("private-query-canary"));
+        assert_eq!(hubu.requests().len(), invalid_baseline);
+        hubu.respond_json(
+            "GET",
+            "/governance/summary",
+            500,
+            json!({"error_code":"governance_unavailable","error":"backend-private-canary"}),
+        );
+        let error = mcp.call(15, "hubu_governance_summary", json!({}));
+        assert_eq!(error["result"]["isError"], true);
+        assert_eq!(
+            error["result"]["structuredContent"]["error_code"],
+            "governance_unavailable"
+        );
+        assert!(!error.to_string().contains("backend-private-canary"));
+
+        for request in hubu.requests() {
+            assert_eq!(request.method, "GET", "governance inquiry caused a write");
+            assert!(!request.raw.contains("hub107-approval-capability"));
+            assert!(!request.raw.contains("hub107-reconciliation-capability"));
+            if request.path.contains("snapshot=") {
+                let url = reqwest::Url::parse(&format!("http://fixture{}", request.path)).unwrap();
+                let pairs = url
+                    .query_pairs()
+                    .collect::<std::collections::BTreeMap<_, _>>();
+                assert_eq!(pairs.get("snapshot").unwrap(), snapshot);
+                if request.path == second_path {
+                    assert_eq!(pairs.get("cursor").unwrap(), cursor);
+                }
+            }
+        }
+        // The capability monitor may probe Gongbu concurrently; governance
+        // inquiry must never make a domain request or use it as a fallback.
+        assert!(
+            gongbu.requests().iter().all(|request| {
+                request.method == "GET"
+                    && matches!(request.path.as_str(), "/livez" | "/readyz" | "/version")
+            }),
+            "governance read invoked a Gongbu domain route"
+        );
+        assert_bearer_isolated(&hubu, HUBU_TOKEN, GONGBU_TOKEN);
+        mcp.finish(&[
+            HUBU_TOKEN,
+            GONGBU_TOKEN,
+            "private-query-canary",
+            "backend-private-canary",
+        ]);
+    }
 }

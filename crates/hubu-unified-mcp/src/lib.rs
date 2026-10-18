@@ -48,7 +48,7 @@ pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 pub const UNIFIED_CONTRACT_VERSION: &str = "hubu-gongbu-mcp-v1";
 pub const EXECUTOR_CONTRACT_VERSION: &str = "hubu-spend-executor-v4.5";
 pub const HUBU_ROUTING_CONTRACT_VERSION: &str = "hubu-mcp-routing-v1";
-pub const ROUTING_REVISION: u32 = 13;
+pub const ROUTING_REVISION: u32 = 14;
 
 const HUBU_ENDPOINT_ENV: &str = "HUBU_UNIFIED_HUBU_ENDPOINT";
 const HUBU_TOKEN_ENV: &str = "HUBU_UNIFIED_HUBU_BEARER_TOKEN";
@@ -91,6 +91,8 @@ const DOMAIN_TOOLS: &[(&str, BackendOwner)] = &[
     ("hubu_budget_history", BackendOwner::Hubu),
     ("hubu_create_budget", BackendOwner::Hubu),
     ("hubu_get_executor_claim", BackendOwner::Hubu),
+    ("hubu_get_governance_record", BackendOwner::Hubu),
+    ("hubu_governance_summary", BackendOwner::Hubu),
     ("hubu_get_spend_approval", BackendOwner::Hubu),
     ("hubu_get_authorization_record", BackendOwner::Hubu),
     ("hubu_list_agents", BackendOwner::Hubu),
@@ -99,6 +101,7 @@ const DOMAIN_TOOLS: &[(&str, BackendOwner)] = &[
         "hubu_list_claims_requiring_reconciliation",
         BackendOwner::Hubu,
     ),
+    ("hubu_list_governance_records", BackendOwner::Hubu),
     ("hubu_list_ledger", BackendOwner::Hubu),
     ("hubu_list_authorization_records", BackendOwner::Hubu),
     ("hubu_list_users", BackendOwner::Hubu),
@@ -2419,7 +2422,7 @@ mod tests {
 
         assert_eq!(capability["contract_version"], UNIFIED_CONTRACT_VERSION);
         assert_eq!(capability["routing_revision"], ROUTING_REVISION);
-        assert_eq!(capability["tools"].as_array().unwrap().len(), 39);
+        assert_eq!(capability["tools"].as_array().unwrap().len(), 42);
         assert_eq!(capability["backends"]["hubu"]["state"], "unavailable");
         assert!(!serialized.contains("hubu.test"));
         assert!(!serialized.contains("gongbu.test"));

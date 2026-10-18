@@ -217,6 +217,21 @@ fn all_tool_definitions() -> Vec<Value> {
             })),
         ),
         read_tool(
+            "hubu_governance_summary",
+            "Read governance counts, exact requested amounts per currency, coverage and snapshot backlog for the active owner. For 'past week', send explicit UTC occurred_from/occurred_before spanning the preceding seven days and state the actual returned bounds. Distinguish automatic_deny from human_declined. Lifecycle stages overlap; do not add their counts. Backlog includes older unresolved work regardless of period/stage filters. Qualify incomplete or unsupported history, including empty results; blocked requested amounts are not cost or savings.",
+            super::governance::input_schema("hubu_governance_summary"),
+        ),
+        read_tool(
+            "hubu_list_governance_records",
+            "List supporting governance lifecycle facts with the same complete-filter summary, exact amounts and coverage. Reuse summary.snapshot.token with the same filters; follow next_cursor unchanged. Snapshot backlog includes pre-period unresolved work. Automatic denials and human declines are distinct; stages overlap and incomplete history cannot prove zero activity. This is a read; it does not approve, execute, retry or reconcile spending.",
+            super::governance::input_schema("hubu_list_governance_records"),
+        ),
+        read_tool(
+            "hubu_get_governance_record",
+            "Inspect one public governance record and its complete-filter summary. Supply only its public lev_ record_id, plus the same filters and snapshot token used for discovery. Preserve evidence/coverage gaps and exact money strings. Claim acceptance does not prove provider work started; unsupported provider failure or pre-expiry uncertainty is not a zero count. This read has no spending or reconciliation side effects.",
+            super::governance::input_schema("hubu_get_governance_record"),
+        ),
+        read_tool(
             "hubu_list_ledger",
             "List the active user's ledger transactions with exact costs and corrections. A budget filter requires agent_id; coverage describes gaps across the complete budget, independent of pagination.",
             json_schema(json!({

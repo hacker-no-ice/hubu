@@ -37,6 +37,7 @@ const sharedLinks = {
   financialObserver: ["Independent expiry observer", "crates/hubu-api/src/financial_observer.rs"],
   lifecycleContract: ["Lifecycle evidence semantics", "docs/governance-observability.md"],
   governanceHttp: ["Governance HTTP reads", "crates/hubu-api/src/governance.rs"],
+  governanceMcp: ["Governance agent read adapter", "crates/hubu-unified-mcp/src/hubu/governance.rs"],
   lifecycleQuery: ["Shared lifecycle queries", "crates/hubu-core/src/persistence/governance_query.rs"],
   lifecycleQueryModel: ["Safe lifecycle read model", "crates/hubu-core/src/spend/governance_query.rs"],
   lifecycleCoverage: ["Legacy coverage observations", "crates/hubu-core/src/persistence/lifecycle_coverage.rs"],
@@ -734,6 +735,7 @@ const components = {
     responsibilities: [
       ["The only agent surface", "Written by `hubu init codex`, it is the only MCP server in releases and speaks JSON-RPC over stdio."],
       ["Separate backends", "Hubu and Gongbu have separate endpoints, credentials, clients, and health probes, with no fallback between them."],
+      ["Governance evidence reads", "Three read-only tools call Hubu summary, list and detail routes. They preserve one core snapshot, exact amounts and coverage, and work without Gongbu or an operation store. They never approve, retry or reconcile work."],
       ["Live tool catalog", "Probes backends every 30 seconds and notifies clients once when the callable tool set changes."],
       ["Governed execution", "One call authorizes with Hubu, starts Gongbu work, and aims to return the result within 45 seconds."],
       ["Approvals pause", "`approval_required` returns before any provider work; execution starts only after an explicit resume."],
@@ -744,7 +746,7 @@ const components = {
       ["Human gates", "Approval and reconciliation capabilities are sent only on those mutations, and tools carry approval annotations."],
       ["Result delivery", "Returns PNG or JPEG artifacts up to 8 MiB, with timing that never labels waiting as provider time. Native gallery export downloads up to 64 MiB directly from Gongbu to a local directory, verifies Hubu settlement and registry binding, and avoids passing image bytes through the model."],
     ],
-    links: [sharedLinks.gallery, sharedLinks.galleryCli, sharedLinks.feedback, sharedLinks.unifiedMcp, sharedLinks.unifiedGovernedExecution, sharedLinks.unifiedResumeOperation, sharedLinks.unifiedMcpStdio, sharedLinks.unifiedMcpNotifications, sharedLinks.unifiedHubuCatalog, sharedLinks.unifiedHubuRouting, sharedLinks.unifiedOperationRegistry, sharedLinks.unifiedOperationWorker, sharedLinks.unifiedGongbuCatalog, sharedLinks.unifiedGongbuFixture, sharedLinks.unifiedMcpContract, sharedLinks.operationKeySkill, sharedLinks.operationKeyHelper, sharedLinks.liveProviders, sharedLinks.fluxProviderContract, sharedLinks.gongbuProviderContracts, sharedLinks.api, sharedLinks.gongbuApplication],
+    links: [sharedLinks.lifecycleContract, sharedLinks.governanceHttp, sharedLinks.governanceMcp, sharedLinks.lifecycleQuery, sharedLinks.gallery, sharedLinks.galleryCli, sharedLinks.feedback, sharedLinks.unifiedMcp, sharedLinks.unifiedGovernedExecution, sharedLinks.unifiedResumeOperation, sharedLinks.unifiedMcpStdio, sharedLinks.unifiedMcpNotifications, sharedLinks.unifiedHubuCatalog, sharedLinks.unifiedHubuRouting, sharedLinks.unifiedOperationRegistry, sharedLinks.unifiedOperationWorker, sharedLinks.unifiedGongbuCatalog, sharedLinks.unifiedGongbuFixture, sharedLinks.unifiedMcpContract, sharedLinks.operationKeySkill, sharedLinks.operationKeyHelper, sharedLinks.liveProviders, sharedLinks.fluxProviderContract, sharedLinks.gongbuProviderContracts, sharedLinks.api, sharedLinks.gongbuApplication],
     zones: [
       { label: "hubu-unified-mcp process", x: 286, y: 44, w: 596, h: 670 },
       { label: "Hubu process + failure domain", x: 940, y: 44, w: 292, h: 280 },
@@ -760,7 +762,7 @@ const components = {
       { id: "hubuClient", label: "Hubu client", sub: "Hubu endpoint + credential", x: 650, y: 170, w: 200, h: 96, tone: "core", path: "crates/hubu-unified-mcp/src/hubu/transport.rs" },
       { id: "operationRegistry", label: "Operation store", sub: "scoped key + intent + replay", x: 650, y: 334, w: 200, h: 96, tone: "data", path: "crates/hubu-unified-mcp/src/operation_registry.rs" },
       { id: "gongbuClient", label: "Gongbu client", sub: "execution + artifacts", x: 650, y: 486, w: 200, h: 96, tone: "executor", path: "crates/hubu-unified-mcp/src/gongbu/transport.rs" },
-      { id: "approval", label: "Hubu HTTP API", sub: "governance + Hubu SQLite", x: 974, y: 138, w: 224, h: 104, tone: "human", path: "crates/hubu-api/src/lib.rs" },
+      { id: "approval", label: "Hubu HTTP API", sub: "governance + snapshot reads", x: 974, y: 138, w: 224, h: 104, tone: "human", path: "crates/hubu-api/src/lib.rs" },
       { id: "api", label: "Gongbu HTTP API", sub: "catalog + execution + attest", x: 974, y: 528, w: 224, h: 104, tone: "executor", path: "crates/gongbu-api/src/http/mod.rs" },
     ],
     edges: [
@@ -768,7 +770,7 @@ const components = {
       ["notifications", "agent", "list_changed", { fromSide: "left", toSide: "right", labelDy: -18 }],
       ["agent", "capability", "status", { labelDy: 48 }],
       ["keyStore", "operationRegistry", "exact scope · atomic claim", { fromSide: "right", toSide: "left", waypoints: [{ x: 260, y: 614 }, { x: 260, y: 382 }], labelSegment: 2, labelDx: -35, labelDy: 26 }],
-      ["tools", "hubuClient", "review + resolve + budget versions"],
+      ["tools", "hubuClient", "reads + decisions"],
       ["tools", "operationRegistry", "normalize + replay"],
       ["operationRegistry", "operationWorker", "", { fromSide: "left", toSide: "right" }],
       ["operationWorker", "gongbuClient", "safe create + GET"],
