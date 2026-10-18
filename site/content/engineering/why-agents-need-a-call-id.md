@@ -34,7 +34,7 @@ The rule also works in the other direction. If model-authored arguments contain 
 
 ## Under the hood: from callId to operation key
 
-Hubu's agent-facing MCP server, `hubu-unified-mcp`, does this work. I'll call it the router: it is the only MCP server the agent talks to, and it routes each tool call to the right backend, spend tools to Hubu and execution tools to Gongbu. The router turns the harness's call ID into a private operation key, which the Hubu backend uses as its idempotency key. For every spend call, it runs these steps before any money moves:
+Agents talk to Hubu through one MCP server, `hubu-unified-mcp`, which I'll call the router because it routes each tool call to the right backend: spend tools to Hubu, execution tools to Gongbu. The router turns the harness's call ID into a private operation key, which the Hubu backend uses as its idempotency key. For every spend call, it runs these steps before any money moves:
 
 1. **Reject identity in the arguments.** The fields listed above are refused if the model wrote them.
 2. **Normalize the trusted identity.** It reads `_meta` and requires exactly one supported source. No source means fail closed. Two at once, such as a `callId` and a `toolUseId`, makes the identity ambiguous, and that is refused too. Each identifier is bounded in length and character set, and becomes a `(platform, harness_call_id)` pair such as `(codex, <callId>)`.
