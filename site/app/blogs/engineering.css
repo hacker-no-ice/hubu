@@ -36,6 +36,8 @@
 .engineering-prose code { font: .86em/1.5 var(--font-geist-mono), monospace; padding: .1em .35em; border: 1px solid var(--line); border-radius: 5px; background: var(--surface-2); overflow-wrap: anywhere; }
 .engineering-prose pre { margin-top: 0; margin-bottom: 28px; padding: 18px 20px; overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
 .engineering-prose pre code { padding: 0; border: 0; background: none; font-size: 14px; line-height: 1.7; overflow-wrap: normal; }
+.engineering-prose blockquote { margin-top: 0; margin-bottom: 28px; padding: 16px 20px; border-left: 2px solid var(--warning); background: var(--surface); color: var(--text); }
+.engineering-prose blockquote p { margin: 0; font: 15px/1.7 var(--font-geist-mono), monospace; letter-spacing: 0; }
 .engineering-prose table { display: block; width: 100%; overflow-x: auto; margin-top: 0; margin-bottom: 32px; border-collapse: collapse; font-size: 15px; line-height: 1.6; }
 .engineering-prose th, .engineering-prose td { padding: 11px 14px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
 .engineering-prose th { color: var(--muted); font-size: 12px; font-weight: 500; letter-spacing: .06em; text-transform: uppercase; white-space: nowrap; }

@@ -2,9 +2,7 @@ An AI agent that can spend money needs one boring field before anything else: a 
 
 I found this out in practice. The same Hubu plugin generated a FLUX image from Codex on my desktop for 3 cents, under budget and with no approval needed. From ChatGPT on my phone, it refused to spend at all:
 
-```text
-Hubu spend tools require supported trusted identity from Codex, Claude Code, or the Hubu platform-invocation envelope
-```
+> Hubu spend tools require supported trusted identity from Codex, Claude Code, or the Hubu platform-invocation envelope
 
 That refusal is deliberate. This post explains why the per-call ID (Codex's `callId`, Claude Code's `toolUseId`) matters so much, why Hubu won't take it from the tool's own arguments, how the MCP server turns it into an idempotency key, and what I found when I looked at what each client actually sends.
 

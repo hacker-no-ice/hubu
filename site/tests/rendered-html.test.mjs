@@ -339,6 +339,8 @@ test("publishes the call ID idempotency article with its cover, flow figure, and
   assert.match(html, /<a href="\/docs\/spend-lifecycle">spend lifecycle<\/a>/);
   assert.match(html, /<a href="\/docs\/unified-mcp">unified MCP reference<\/a>/);
   assert.equal(html.match(/<table\b/g)?.length, 2, "client comparison and tradeoff tables render");
+  assert.match(html, /<blockquote>\s*<p>Hubu spend tools require supported trusted identity/, "the refusal message renders as a quote");
+  assert.doesNotMatch(html, /data-copy-code/, "the article has no copyable code blocks");
 
   const images = [...html.matchAll(/<img\b[^>]*src="(\/blogs\/why-agents-need-a-call-id\/[^"]+\.png)"[^>]*>/g)];
   assert.equal(images.length, 2, "article includes its cover and the flow figure");
