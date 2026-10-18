@@ -1,4 +1,5 @@
 mod agent_identity;
+mod financial_observer;
 mod history;
 use std::{
     collections::{BTreeMap, HashMap},
@@ -135,6 +136,9 @@ pub fn run_server(bind_addr: &str) -> Result<()> {
     let listener =
         TcpListener::bind(bind_addr).with_context(|| format!("bind Hubu server to {bind_addr}"))?;
     let state = ServerState::new()?;
+    let _financial_observer =
+        financial_observer::FinancialObserver::start(Arc::clone(&state.governance))
+            .context("start financial lifecycle observation")?;
 
     log_event(
         "info",
@@ -11076,6 +11080,85 @@ lease_profiles:
             reconciled["reconciliation_outcome"].as_str()
         );
         assert_eq!(status.evidence.as_deref(), reconciled["evidence"].as_str());
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn independent_observer_records_idle_expiry_without_touching_financial_state() {
+        let (path, state, agent, authorization) = setup_executor_authorization("idle-observer");
+        let claim = claim_executor_spend(
+            json!({
+                "spend_auth_token_id": authorization.auth_token_id.unwrap(),
+                "account_id": agent.account_id, "amount_cents": 500,
+                "merchant": "gongbu.image", "task_id": "hubu-logo-demo",
+            })
+            .to_string(),
+            &state,
+        )
+        .unwrap();
+        let owner = authenticated_user_context(&state).unwrap().user_id;
+        let persisted_claim = state
+            .spend
+            .lock()
+            .unwrap()
+            .executor_claim_records_for_owner(&owner)
+            .remove(0);
+        let observer =
+            financial_observer::FinancialObserver::start(Arc::clone(&state.governance)).unwrap();
+        // Holding both managers proves the independent worker needs only the
+        // durable repository; no request or reconciliation-queue read is made.
+        let spend = state.spend.lock().unwrap();
+        let budgets = state.budgets.lock().unwrap();
+        observer.observe_at(persisted_claim.expires_at);
+        let snapshot = state
+            .governance
+            .lock()
+            .unwrap()
+            .lifecycle_snapshot(&owner, None)
+            .unwrap();
+        let required: Vec<_> = snapshot
+            .events
+            .iter()
+            .filter(|e| {
+                serde_json::to_value(&e.event).unwrap()["fact"]["kind"] == "reconciliation_required"
+            })
+            .collect();
+        assert_eq!(required.len(), 1);
+        assert_eq!(
+            spend.executor_claim_records_for_owner(&owner)[0].status,
+            SpendExecutorClaimStatus::Claimed
+        );
+        let decision_id = spend
+            .auth_token_record(&persisted_claim.spend_auth_token_id)
+            .unwrap()
+            .spend_decision_id;
+        assert!(matches!(
+            budgets
+                .get_budget_hold_by_spend_decision(&decision_id)
+                .unwrap()
+                .status,
+            BudgetHoldStatus::Claimed
+        ));
+        drop(budgets);
+        drop(spend);
+        observer.observe_at(persisted_claim.expires_at + chrono::Duration::seconds(1));
+        assert_eq!(
+            state
+                .governance
+                .lock()
+                .unwrap()
+                .lifecycle_snapshot(&owner, None)
+                .unwrap()
+                .watermark,
+            snapshot.watermark
+        );
+        drop(observer);
+        assert_eq!(
+            get_executor_claim(Some(&claim.claim_id), &state)
+                .unwrap()
+                .status,
+            "claimed"
+        );
         std::fs::remove_file(path).ok();
     }
 

@@ -36,6 +36,7 @@ fn fixture_occurrence(
         }
         LifecycleFact::ExecutionStarted{..}=>Some("SELECT cl.claimed_at FROM spend_executor_claims cl JOIN spend_auth_tokens t ON t.id=cl.spend_auth_token_id WHERE t.spend_decision_id=?1"),
         LifecycleFact::ExecutionFinalized{..}=>Some("SELECT cl.finalized_at FROM spend_executor_claims cl JOIN spend_auth_tokens t ON t.id=cl.spend_auth_token_id WHERE t.spend_decision_id=?1"),
+        LifecycleFact::ReconciliationRequired{..}=>Some("SELECT cl.expires_at FROM spend_executor_claims cl JOIN spend_auth_tokens t ON t.id=cl.spend_auth_token_id WHERE t.spend_decision_id=?1"),
         LifecycleFact::ReconciliationResolved{..}=>Some("SELECT cl.reconciled_at FROM spend_executor_claims cl JOIN spend_auth_tokens t ON t.id=cl.spend_auth_token_id WHERE t.spend_decision_id=?1"),
         _=>None,
     };
@@ -271,20 +272,22 @@ impl Fixture {
         source: LifecycleSource,
         fact: LifecycleFact,
     ) -> LifecycleEventInput {
-        // If a real source producer already captured this fact, replay its
-        // complete immutable payload rather than inventing different evidence.
-        if let Some(record) = repo
+        // Reuse the complete immutable payload captured by a real producer.
+        // Negative tests may then alter the requested source/fact deliberately.
+        if let Some(existing) = repo
             .lifecycle_snapshot(&self.owner, None)
             .unwrap()
             .events
             .into_iter()
             .find(|record| {
                 record.event.correlation.decision_id.as_ref() == Some(&self.decision)
-                    && record.event.source == source
-                    && record.event.fact == fact
+                    && record.event.fact.slot() == fact.slot()
             })
         {
-            return record.event;
+            let mut input = existing.event;
+            input.source = source;
+            input.fact = fact;
+            return input;
         }
         LifecycleEventInput {
             schema_version: LIFECYCLE_SCHEMA_VERSION,
@@ -377,7 +380,7 @@ fn fixture_matrix_preserves_every_stage_and_technical_failure_can_retry() {
             LifecycleCount::ExecutionFailed,
         ),
         (
-            LifecycleSource::Executor,
+            LifecycleSource::Reconciliation,
             LifecycleFact::ReconciliationRequired {
                 claim_id: f.claim.clone(),
             },
@@ -414,7 +417,7 @@ fn fixture_matrix_preserves_every_stage_and_technical_failure_can_retry() {
         assert_eq!(input.fact.count_category(), *category);
         let first = repo.append_lifecycle_event(&input).unwrap();
         let replay = repo.append_lifecycle_event(&input).unwrap();
-        assert!(!first.idempotent_replay);
+        // Authoritative producers may have already inserted this exact fact.
         assert!(replay.idempotent_replay);
         assert_eq!(first.record, replay.record);
     }
@@ -673,14 +676,14 @@ fn watermark_backlog_uses_preperiod_opens_and_late_arrivals_cannot_reopen() {
         backlog(&repo.lifecycle_snapshot(&f.owner, None).unwrap()),
         0
     );
+    f.claim(&mut repo);
     let required = f.event(
         &repo,
-        LifecycleSource::Executor,
+        LifecycleSource::Reconciliation,
         LifecycleFact::ReconciliationRequired {
             claim_id: f.claim.clone(),
         },
     );
-    f.claim(&mut repo);
     f.reconcile(&mut repo, false);
     let resolution = f.event(
         &repo,
@@ -1361,7 +1364,7 @@ fn authorization_release_matches_void_reason_and_expiry_never_hides_payment_use(
     repo.expire_overdue_budget_holds(expiry_at).unwrap();
     let mut input = expired.event(
         &repo,
-        LifecycleSource::AutomatedAdmission,
+        LifecycleSource::Executor,
         LifecycleFact::AuthorizationReleased {
             authorization_id: expired.decision.clone(),
             reason: AuthorizationReleaseReason::Expired,
@@ -1503,7 +1506,7 @@ fn authoritative_occurrence_times_cannot_move_confirmed_facts_between_periods() 
         .unwrap();
     let input = expired.event(
         &repo,
-        LifecycleSource::AutomatedAdmission,
+        LifecycleSource::Executor,
         LifecycleFact::AuthorizationReleased {
             authorization_id: expired.decision.clone(),
             reason: AuthorizationReleaseReason::Expired,
