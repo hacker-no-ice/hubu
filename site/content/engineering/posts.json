@@ -1,5 +1,17 @@
 [
   {
+    "slug": "why-agents-need-a-call-id",
+    "title": "Why AI agents need a call ID before they spend money",
+    "description": "Why Hubu takes a trusted per-call ID from the agent harness, never the tool's arguments, and turns it into the idempotency key that prevents double spend.",
+    "publishedOn": "2026-10-18",
+    "cover": {
+      "src": "/blogs/why-agents-need-a-call-id/01-cover.png",
+      "width": 1672,
+      "height": 941,
+      "alt": "Hubu article cover with the title Why AI agents need a call ID before they spend money. A panel maps call IDs to operations: call_7f3a maps to op A, charged once; the same call_7f3a on retry maps to op A again, replayed with no new charge; a new call_9c1e maps to op B with a new charge."
+    }
+  },
+  {
     "slug": "budgets-that-keep-up-with-agents",
     "title": "Budgets that keep up with agents",
     "description": "A preview of the accounting precision work underway for Hubu v0.2.4, and why sub-cent agent spending makes it important now.",

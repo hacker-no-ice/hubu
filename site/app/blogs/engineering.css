@@ -28,9 +28,18 @@
 .engineering-prose p { margin-top: 0; margin-bottom: 25px; }
 .engineering-prose h2 { margin-top: 60px; margin-bottom: 25px; font-size: 30px; line-height: 1.25; font-weight: 560; letter-spacing: -.035em; scroll-margin-top: 100px; }
 .engineering-prose h3 { font-size: 23px; line-height: 1.4; }
-.engineering-prose ul { padding-left: 24px; margin-bottom: 27px; }
+.engineering-prose ul, .engineering-prose ol { padding-left: 24px; margin-bottom: 27px; }
+.engineering-prose ol { font-size: 19px; line-height: 1.85; letter-spacing: -.01em; }
 .engineering-prose li { padding-left: 4px; margin-bottom: 14px; }
+.engineering-prose li > ul { margin-top: 14px; margin-bottom: 0; }
 .engineering-prose li::marker { color: var(--cyan); }
+.engineering-prose code { font: .86em/1.5 var(--font-geist-mono), monospace; padding: .1em .35em; border: 1px solid var(--line); border-radius: 5px; background: var(--surface-2); overflow-wrap: anywhere; }
+.engineering-prose pre { margin-top: 0; margin-bottom: 28px; padding: 18px 20px; overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.engineering-prose pre code { padding: 0; border: 0; background: none; font-size: 14px; line-height: 1.7; overflow-wrap: normal; }
+.engineering-prose table { display: block; width: 100%; overflow-x: auto; margin-top: 0; margin-bottom: 32px; border-collapse: collapse; font-size: 15px; line-height: 1.6; }
+.engineering-prose th, .engineering-prose td { padding: 11px 14px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+.engineering-prose th { color: var(--muted); font-size: 12px; font-weight: 500; letter-spacing: .06em; text-transform: uppercase; white-space: nowrap; }
+.engineering-prose td code { font-size: .82em; white-space: nowrap; overflow-wrap: normal; }
 .engineering-prose a { color: var(--cyan); text-decoration: underline; text-underline-offset: 4px; }
 .engineering-prose figure { margin: 48px 0 64px; }
 .engineering-prose figcaption { max-width: 690px; margin: 18px auto 0; padding-top: 14px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; line-height: 1.7; }
@@ -48,7 +57,7 @@
   .engineering-card-copy h2 { margin-top: 12px; }
   .engineering-article { padding: 44px 22px 70px; }
   .engineering-deck { font-size: 19px; }
-  .engineering-prose p, .engineering-prose ul { font-size: 17px; line-height: 1.8; }
+  .engineering-prose p, .engineering-prose ul, .engineering-prose ol { font-size: 17px; line-height: 1.8; }
   .engineering-prose h2 { font-size: 27px; margin-top: 44px; }
   .engineering-prose figure { margin-top: 32px; margin-bottom: 44px; }
   .engineering-cover { margin-bottom: 38px; }

@@ -320,9 +320,40 @@ test("publishes the illustrated precision article with its date and in-developme
   assert.equal(missing.status, 404);
 });
 
+test("publishes the call ID idempotency article with its cover, flow figure, and tables", async () => {
+  const index = await (await render("/blogs")).text();
+  assert.match(index, /href="\/blogs\/why-agents-need-a-call-id"/);
+  assert.ok(
+    index.indexOf("/blogs/why-agents-need-a-call-id") < index.indexOf("/blogs/budgets-that-keep-up-with-agents"),
+    "the newer post is listed first",
+  );
+
+  const response = await render("/blogs/why-agents-need-a-call-id");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /<h1[^>]*>Why AI agents need a call ID before they spend money<\/h1>/);
+  assert.equal(html.match(/<h1\b/g)?.length, 1);
+  assert.match(html, /<time dateTime="2026-10-18">October 18, 2026<\/time>/i);
+  assert.match(html, /<link rel="canonical" href="https:\/\/hubustack.dev\/blogs\/why-agents-need-a-call-id"/);
+  assert.match(html, /<meta property="og:image" content="https:\/\/hubustack.dev\/blogs\/why-agents-need-a-call-id\/01-cover.png"/);
+  assert.match(html, /<a href="\/docs\/spend-lifecycle">spend lifecycle<\/a>/);
+  assert.match(html, /<a href="\/docs\/unified-mcp">unified MCP reference<\/a>/);
+  assert.equal(html.match(/<table\b/g)?.length, 2, "client comparison and tradeoff tables render");
+
+  const images = [...html.matchAll(/<img\b[^>]*src="(\/blogs\/why-agents-need-a-call-id\/[^"]+\.png)"[^>]*>/g)];
+  assert.equal(images.length, 2, "article includes its cover and the flow figure");
+  for (const [image, src] of images) {
+    assert.match(image, /alt="[^"]+"/, `${src} has descriptive alt text`);
+    await access(new URL(`../dist/client${src}`, import.meta.url));
+  }
+  const figure = html.match(/<figure\b[^>]*>(?:(?!<\/figure>)[\s\S])*02-call-id-to-operation\.png[\s\S]*?<\/figure>/)?.[0];
+  assert.ok(figure, "flow diagram renders in a figure");
+  assert.match(figure, /<figcaption[^>]*>[\s\S]*?\S[\s\S]*?<\/figcaption>/);
+});
+
 test("includes Engineering Blogs and its published article in the sitemap", async () => {
   const sitemap = await readFile(new URL("../dist/client/sitemap.xml", import.meta.url), "utf8");
-  for (const pathname of ["/blogs", "/blogs/budgets-that-keep-up-with-agents"]) {
+  for (const pathname of ["/blogs", "/blogs/budgets-that-keep-up-with-agents", "/blogs/why-agents-need-a-call-id"]) {
     assert.ok(sitemap.includes(`<loc>https://hubustack.dev${pathname}</loc>`), pathname);
   }
 });
