@@ -27,6 +27,20 @@ Future release template
 
 ### Highlights
 
+- Added append-only governance evidence for policy and automatic admission
+  decisions, human escalation and confirmed approval/decline, authorization,
+  and financial claim/reconciliation transitions. Integrated state changes
+  commit with their evidence, and exact replay adds no duplicate facts.
+  Human resolution and authorization grants remain separate facts.
+- Agents can answer questions such as "how many automatic denials occurred
+  in the past week?" and inspect supporting records through authenticated
+  summary/list/detail HTTP reads and the read-only `hubu_governance_summary`,
+  `hubu_list_governance_records` and `hubu_get_governance_record` MCP tools.
+  Owner-scoped snapshots keep records, counts, exact per-currency requested
+  totals, pending approvals, unresolved reconciliation and coverage consistent.
+  Reads neither change spend state nor call providers. See
+  [the governance read contract](docs/governance-observability.md).
+
 - USDC is a budget currency. Budgets are per currency: USDC spend counts
   only against a USDC budget and USD spend only against a USD budget, with no
   conversion between them. USDC amounts use the same micro-unit accounting
@@ -111,6 +125,12 @@ Future release template
   policy warnings. See [docs/cli.md](docs/cli.md#amounts).
 
 ### Breaking or operational changes
+
+- Governance capture does not backfill earlier policy/human history or infer
+  provider failures and pre-expiry billing uncertainty. Collection can lag,
+  and explicit coverage distinguishes incomplete history from zero activity.
+  Requested totals are not provider costs or savings. This observability
+  foundation adds no dashboard or alerting.
 
 - Read [Upgrading to v0.2.4: exact amounts](docs/operations/upgrading-to-v0.2.4.md)
   before upgrading a stack with budget data. Historical consumption is not
