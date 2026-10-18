@@ -8,8 +8,8 @@ database. Gongbu retains its own execution database and provider authority.
 HUB-291 supplies the storage foundation. HUB-292 captures new policy evaluations
 and automatic admission/authorization outcomes. HUB-293 captures genuine human
 escalation and confirmed resolution. HUB-294 captures authoritative Hubu claim
-and financial-resolution facts. HUB-295 provides shared owner-scoped queries;
-HTTP and unified MCP reads follow separately.
+and financial-resolution facts. HUB-295 provides shared owner-scoped queries,
+and HUB-296 exposes them through HTTP. Unified MCP reads follow separately.
 Installing the schema alone does **not** establish complete capture or make an
 empty event table evidence that no requests were denied.
 
@@ -108,7 +108,55 @@ refresh leaves that owner's prior observation unchanged.
 
 Reads neither collect evidence nor mutate financial state or contact providers.
 Public projections allowlist safe fields and leave money formatting to the
-transport. HTTP and unified MCP expose this model in subsequent tasks.
+transport. HTTP exposes this model without recomputing its counts or coverage.
+
+## HTTP contract
+
+All routes require the existing Hubu bearer authentication and use its owner.
+No owner selector or private operation key is accepted.
+
+| Route | Result |
+| --- | --- |
+| `GET /governance/summary` | Whole-filter counts, exact requested totals, backlog and coverage |
+| `GET /governance/records` | A page of safe lifecycle facts and the same whole-filter summary |
+| `GET /governance/records/{record_id}` | One matching public `lev_` record and the same summary |
+
+Common query parameters are `agent_id`, `account_id`, `categories`, `outcomes`,
+`occurred_from`, `occurred_before` and `snapshot`. Categories and outcomes use
+comma-separated typed names from the [query contract](../crates/hubu-core/src/spend/governance_query.rs).
+Times are RFC3339 instants: start inclusive, end exclusive. Omitted times select
+all captured history. The list also accepts `limit` (1–200; default 50) and
+`cursor`; summary and detail reject both. Unknown or duplicate parameters,
+invalid values and foreign or mismatched identity selectors fail even for empty
+results. An account selector also resolves its owning agent.
+
+Success responses use `schema_version: "hubu-governance-v1"`, normalized
+`filters`, and `summary`. List adds `records` and nullable `next_cursor`; detail
+adds `record`. Records use public `record_id`, `agent_id` and `account_id`, plus
+captured occurrence/recording times, stage, outcome, source and allowlisted
+evidence. Optional release reasons and reconciliation resolutions remain typed.
+No mutable authorization or provider state is fetched to fill missing evidence.
+
+Reuse `summary.snapshot.token` unchanged with the same normalized filters for
+summary, subsequent pages and detail. Pass each `next_cursor` unchanged to the
+next list request. A new first request without a token refreshes the snapshot.
+Totals describe the complete filter, not the current page. Backlog remains an
+identity-scoped snapshot measure, independent of the report's period or stages.
+
+Every requested, policy and budget amount uses the existing HTTP money shape:
+`{"units":"5001","scale":6,"currency":"usdc","display":"0.005001"}`.
+Summary totals use the same shape with a wide integer coefficient string;
+consumers must preserve it exactly. Currencies stay separate. Automatic-denial
+requested totals describe blocked requests, not cost or savings.
+
+Invalid queries return HTTP 400 with `governance_invalid_query`; unavailable
+storage/evidence returns 500 with `governance_unavailable`. An absent, foreign,
+filtered-out or snapshot-invisible record returns 404 with
+`governance_record_not_found`. Error messages do not expose stored payloads or
+internal diagnostics. Existing authentication errors retain their normal shape.
+A successful empty response still includes coverage: unsupported or unassessed
+history must not be presented as a proven zero. GET requests never collect facts,
+change governance state or contact providers.
 
 ## Automatic capture
 
@@ -222,3 +270,5 @@ Financial writers live in [claim and reconciliation capture](../crates/hubu-core
 Shared reads: [query types](../crates/hubu-core/src/spend/governance_query.rs),
 [query evaluator](../crates/hubu-core/src/persistence/governance_query.rs), and
 [legacy coverage observation](../crates/hubu-core/src/persistence/lifecycle_coverage.rs).
+
+HTTP adapter: [governance routes and projections](../crates/hubu-api/src/governance.rs).

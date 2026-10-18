@@ -1,5 +1,6 @@
 mod agent_identity;
 mod financial_observer;
+mod governance;
 mod history;
 use std::{
     collections::{BTreeMap, HashMap},
@@ -1162,11 +1163,20 @@ struct MoneyHttpResponse {
 
 impl MoneyHttpResponse {
     fn new(amount: Amount, currency: Currency) -> Self {
+        Self::new_wide(i128::from(amount.units()), currency)
+    }
+
+    fn new_wide(units: i128, currency: Currency) -> Self {
+        let magnitude = units.unsigned_abs();
+        let per_major = 10_u128.pow(hubu_common::money::ACCOUNTING_SCALE);
+        let fraction = format!("{:06}", magnitude % per_major);
+        let fraction = fraction.trim_end_matches('0');
+        let sign = if units < 0 { "-" } else { "" };
         Self {
-            units: amount.units().to_string(),
+            units: units.to_string(),
             scale: hubu_common::money::ACCOUNTING_SCALE,
             currency: currency.to_string(),
-            display: amount.display(),
+            display: format!("{sign}{}.{fraction:0<2}", magnitude / per_major),
         }
     }
 }
@@ -1773,7 +1783,13 @@ fn handle_connection(mut stream: TcpStream, state: &ServerState) -> Result<()> {
         return Ok(());
     }
 
-    let request = parse_request(&raw)?;
+    let (request, invalid_governance_query) = match parse_request(&raw) {
+        Ok(request) => (request, false),
+        Err(error) => {
+            let error = error.downcast::<governance::InvalidQueryRequest>()?;
+            (error.request, true)
+        }
+    };
     let operational_probe = is_operational_probe(&request);
     if !operational_probe {
         log_event(
@@ -1790,7 +1806,11 @@ fn handle_connection(mut stream: TcpStream, state: &ServerState) -> Result<()> {
     let method = request.method.clone();
     let path = request.path.clone();
     let deprecated_amounts = uses_only_legacy_amount_fields(&request);
-    let response = route(request, state);
+    let response = if invalid_governance_query {
+        governance::reject_parsed_query(&request, state)
+    } else {
+        route(request, state)
+    };
     let status = response.status;
     write_response(&mut stream, response, deprecated_amounts)
         .with_context(|| format!("write response for request {request_id}"))?;
@@ -2053,6 +2073,9 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
         ("POST", "/spend") => spend_at(request.body, state, request_now).map(to_json),
         ("GET", "/ledger") => list_ledger(state).map(to_json),
         ("GET", "/watch") => history::watch(&request, state),
+        ("GET", _) if governance::is_read_path(&request.path) => {
+            return governance::read(&request, state);
+        }
         ("GET", "/ledger/transactions") => history::ledger(&request, state),
         ("GET", "/spend/authorizations") => history::authorization_records(&request, state, false),
         ("GET", "/spend/authorizations/show") => {
@@ -6643,10 +6666,13 @@ fn parse_request(raw: &str) -> Result<HttpRequest> {
         return Err(anyhow!("malformed HTTP request line"));
     }
     let (path, query) = split_path_and_query(target);
+    let governance_path = governance::is_read_path(&path);
+    let mut invalid_governance_query = false;
     if matches!(
         path.as_str(),
         "/ledger/transactions" | "/spend/authorizations" | "/spend/authorizations/show"
-    ) {
+    ) || governance_path
+    {
         let mut keys = std::collections::HashSet::new();
         for pair in target
             .split_once('?')
@@ -6655,9 +6681,20 @@ fn parse_request(raw: &str) -> Result<HttpRequest> {
             .split('&')
             .filter(|p| !p.is_empty())
         {
-            let key = history::decode(pair.split_once('=').map(|(k, _)| k).unwrap_or(pair))?;
+            let key = match history::decode(pair.split_once('=').map(|(k, _)| k).unwrap_or(pair)) {
+                Ok(key) => key,
+                Err(_) if governance_path => {
+                    invalid_governance_query = true;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             if !keys.insert(key) {
-                return Err(anyhow!("duplicate history query parameter"));
+                if governance_path {
+                    invalid_governance_query = true;
+                    continue;
+                }
+                return Err(anyhow!("duplicate read query parameter"));
             }
         }
     }
@@ -6675,13 +6712,17 @@ fn parse_request(raw: &str) -> Result<HttpRequest> {
         }
     }
 
-    Ok(HttpRequest {
+    let request = HttpRequest {
         method,
         path,
         query,
         headers,
         body: body.to_string(),
-    })
+    };
+    if invalid_governance_query {
+        return Err(governance::InvalidQueryRequest { request }.into());
+    }
+    Ok(request)
 }
 
 fn split_path_and_query(target: &str) -> (String, HashMap<String, String>) {
@@ -6762,6 +6803,7 @@ fn write_response(
 #[cfg(test)]
 mod tests {
     mod authorization_void;
+    mod governance;
     mod history;
     use super::*;
     use chrono::Duration;
