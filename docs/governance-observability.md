@@ -6,8 +6,9 @@ It provides typed facts and append-only storage in Hubu's existing governance
 database. Gongbu retains its own execution database and provider authority.
 
 HUB-291 supplies the storage foundation. HUB-292 captures new policy evaluations
-and automatic admission/authorization outcomes. Human, executor/reconciliation
-capture, aggregate queries, HTTP and unified MCP reads follow separately.
+and automatic admission/authorization outcomes. HUB-293 captures genuine human
+escalation and confirmed resolution. Executor/reconciliation capture, aggregate
+queries, HTTP and unified MCP reads follow separately.
 Installing the schema alone does **not** establish complete capture or make an
 empty event table evidence that no requests were denied.
 
@@ -82,10 +83,24 @@ SQLite inside the write transaction. A failed append rolls back its parent
 transition. Exact replay does not regenerate facts, timestamps, explanations or
 coverage from current configuration.
 
-Only integrated policy and automatic-admission sources establish owner capture
-coverage. Existing history is not backfilled, and uninvolved streams stay
-undeclared. Reconciliation capture remains disabled until HUB-294 establishes
+Integrated policy, automatic-admission and human-approval writers establish
+their own owner capture coverage. Existing history is not backfilled, and
+uninvolved streams stay undeclared. Reconciliation capture remains disabled until HUB-294 establishes
 source eligibility and matching open/close semantics.
+
+## Human capture
+
+A genuine immutable `needs_approval` decision records escalation with its policy
+fact. The earlier evaluation-pending row does not. Confirmed decline commits
+with the denied outcome; confirmed approval and its separate authorization grant
+commit with the token, reservation and allowed outcome. Failed budget acquisition
+or evidence persistence leaves the approval pending without a confirmed outcome.
+
+Human resolution retains the original policy result and captured policy
+reference. Approval uses its own reservation-time budget snapshot. Exact replay,
+repeated resolution and restart add no facts, and conflicting resolutions cannot
+replace an accepted decision. Resolving legacy work does not manufacture an
+uncaptured earlier escalation.
 
 ## Evidence and financial meaning
 
@@ -129,5 +144,6 @@ unknown. Missing record coverage never implies zero activity.
 Implementation: [typed lifecycle contract](../crates/hubu-core/src/spend/lifecycle.rs)
 and [lifecycle persistence](../crates/hubu-core/src/persistence/lifecycle.rs).
 Automatic writers live in [transactional capture](../crates/hubu-core/src/persistence/automatic_lifecycle.rs).
+Human writers live in [confirmed resolution capture](../crates/hubu-core/src/persistence/human_lifecycle.rs).
 Existing public reads remain described by the
 [ledger and authorization history contract](ledger-history.md).

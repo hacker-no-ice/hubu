@@ -456,6 +456,9 @@ fn validate_input(
             {
                 return Err(invalid("lifecycle human approval policy mismatch"));
             }
+            if matches!(input.fact, LifecycleFact::HumanEscalation { .. }) {
+                canonical_time = decision_created_at;
+            }
             if let LifecycleFact::HumanResolutionConfirmed {
                 confirmed_by_user_id,
                 resolution,

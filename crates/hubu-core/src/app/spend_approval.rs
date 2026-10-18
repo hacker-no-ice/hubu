@@ -897,11 +897,11 @@ impl SpendApprovalService {
                 ),
             (SpendAuthorizationDecision::PendingApproval, HumanApprovalDecision::Deny) => {
                 let reasons = vec!["human denied the immutable spend request".to_string()];
-                governance.record_spend_attempt_outcome(
+                governance.save_human_declined_transition(
                     &decision_record,
-                    SpendAuthorizationDecision::Denied,
+                    &request.user.user_id,
                     &reasons,
-                    Utc::now(),
+                    Utc::now().max(decision_record.created_at),
                 )?;
                 let mut evaluation = evaluation_response_for_decision(
                     &decision_record,
@@ -926,17 +926,24 @@ impl SpendApprovalService {
                 )))
             }
             (SpendAuthorizationDecision::PendingApproval, HumanApprovalDecision::Approve) => {
-                let token =
-                    spend_manager.issue_auth_token_for_approved_decision(approval_request_id)?;
-                let token_record = spend_manager
-                    .auth_token_record(&token.id)
-                    .ok_or(SpendApprovalError::MissingSpendAuthToken)?;
+                // Select before issuing a provisional token: a missing budget
+                // must leave the immutable request pending without a token.
                 let budget_id = active_budget_id_for_spend(
                     budget_manager,
                     &decision_record.request.agent_id,
                     decision_record.request.currency,
                     now,
                 )?;
+                let before = budget_manager.get_budget_by_id(&budget_id).ok_or(
+                    SpendApprovalError::MissingActiveBudget {
+                        currency: decision_record.request.currency,
+                    },
+                )?;
+                let token =
+                    spend_manager.issue_auth_token_for_approved_decision(approval_request_id)?;
+                let token_record = spend_manager
+                    .auth_token_record(&token.id)
+                    .ok_or(SpendApprovalError::MissingSpendAuthToken)?;
                 let budget_reservation = match budget_manager.reserve_budget_at(
                     ReserveBudgetRequest {
                         budget_id,
@@ -955,15 +962,21 @@ impl SpendApprovalService {
                 };
 
                 let reasons = vec!["human approved the immutable spend request".to_string()];
-                if let Err(error) = governance.save_approved_spend_transition(
+                if let Err(error) = governance.save_human_approved_transition(
                     &decision_record,
+                    &request.user.user_id,
                     &token_record,
                     &budget_reservation.hold,
                     &budget_reservation.balance,
+                    &before,
                     &reasons,
-                    Utc::now(),
+                    Utc::now().max(decision_record.created_at),
+                    now,
                 ) {
-                    let _ = budget_manager.release_budget(&budget_reservation.hold.id);
+                    budget_manager.rollback_unpersisted_reservation(
+                        &budget_reservation.hold,
+                        &before.balance,
+                    );
                     spend_manager.discard_auth_token_for_decision(approval_request_id);
                     return Err(error.into());
                 }

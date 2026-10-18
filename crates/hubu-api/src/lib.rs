@@ -12271,6 +12271,7 @@ rules: []
             .unwrap()
             .to_string();
 
+        let pending_events = assert_human_approval_lifecycle(&state, &approval_request_id, None);
         let snapshot = route(
             authenticated_get_request(&format!(
                 "/spend/approval?approval_request_id={approval_request_id}"
@@ -12279,6 +12280,23 @@ rules: []
         );
         assert_eq!(snapshot.status, 200);
         assert_eq!(snapshot.body["status"], "pending");
+        assert_eq!(
+            human_approval_lifecycle_events(&state, &approval_request_id),
+            pending_events
+        );
+        drop(state);
+        let state = ServerState::new_with_db_path(&path).unwrap();
+        assert_eq!(
+            human_approval_lifecycle_events(&state, &approval_request_id),
+            pending_events
+        );
+        let recovered_pending = route(
+            authenticated_get_request(&format!(
+                "/spend/approval?approval_request_id={approval_request_id}"
+            )),
+            &state,
+        );
+        assert_eq!(recovered_pending.body["status"], "pending");
 
         let approved = route(
             approval_json_request(json!({
@@ -12293,6 +12311,9 @@ rules: []
         assert!(approved.body["auth_token_id"].is_string());
         assert_eq!(approved.body["budget_hold"]["amount_cents"], 600);
         let auth_token_id = approved.body["auth_token_id"].clone();
+        let approved_events =
+            assert_human_approval_lifecycle(&state, &approval_request_id, Some("approved"));
+        assert_eq!(&approved_events[..pending_events.len()], pending_events);
 
         let replay = route(
             authenticated_json_request(
@@ -12312,6 +12333,30 @@ rules: []
         assert_eq!(replay.body["approval"]["status"], "approved");
         assert_eq!(replay.body["auth_token_id"], auth_token_id);
         assert_eq!(replay.body["idempotent_replay"], true);
+        let matching = route(
+            approval_json_request(
+                json!({"approval_request_id": approval_request_id, "decision": "approve"}),
+            ),
+            &state,
+        );
+        assert_eq!(matching.status, 200);
+        assert_eq!(matching.body["auth_token_id"], auth_token_id);
+        assert_eq!(matching.body["idempotent_replay"], true);
+        let conflict = route(
+            approval_json_request(
+                json!({"approval_request_id": approval_request_id, "decision": "deny"}),
+            ),
+            &state,
+        );
+        assert_eq!(conflict.status, 400);
+        assert!(conflict.body["error"]
+            .as_str()
+            .unwrap()
+            .contains("already approved"));
+        assert_eq!(
+            human_approval_lifecycle_events(&state, &approval_request_id),
+            approved_events
+        );
 
         drop(state);
         let restarted = ServerState::new_with_db_path(&path).unwrap();
@@ -12323,6 +12368,10 @@ rules: []
         );
         assert_eq!(recovered.status, 200);
         assert_eq!(recovered.body["status"], "approved");
+        assert_eq!(
+            human_approval_lifecycle_events(&restarted, &approval_request_id),
+            approved_events
+        );
 
         let executor = route(
             authenticated_json_request(
@@ -12628,6 +12677,7 @@ rules: []
             .iter()
             .any(|response| response.body["idempotent_replay"] == true));
 
+        assert_human_approval_lifecycle(&state, &approval_request_id, Some("approved"));
         drop(state);
         std::fs::remove_file(path).ok();
     }
@@ -12669,9 +12719,14 @@ rules: []
         })
         .to_string();
 
+        let pending_events = assert_human_approval_lifecycle(&state, approval_request_id, None);
         let response = route(request, &state);
         assert_eq!(response.status, 401);
         assert_eq!(response.body["error"], "invalid authorization bearer token");
+        assert_eq!(
+            human_approval_lifecycle_events(&state, approval_request_id),
+            pending_events
+        );
         std::fs::remove_file(path).ok();
     }
 
@@ -12682,6 +12737,7 @@ rules: []
             .as_str()
             .unwrap();
 
+        let pending_events = assert_human_approval_lifecycle(&state, approval_request_id, None);
         let response = route(
             authenticated_json_request(
                 "/spend/approval/resolve",
@@ -12695,6 +12751,10 @@ rules: []
 
         assert_eq!(response.status, 400);
         assert_eq!(response.body["error"], "missing human approval capability");
+        assert_eq!(
+            human_approval_lifecycle_events(&state, approval_request_id),
+            pending_events
+        );
         std::fs::remove_file(path).ok();
     }
 
@@ -12705,6 +12765,7 @@ rules: []
             .as_str()
             .unwrap()
             .to_string();
+        let pending_events = assert_human_approval_lifecycle(&state, &approval_request_id, None);
         let body = json!({
             "approval_request_id": approval_request_id,
             "decision": "deny",
@@ -12716,6 +12777,9 @@ rules: []
         assert_eq!(denied.body["approval"]["status"], "denied");
         assert!(denied.body["auth_token_id"].is_null());
         assert!(denied.body["budget_hold"].is_null());
+        let declined_events =
+            assert_human_approval_lifecycle(&state, &approval_request_id, Some("declined"));
+        assert_eq!(&declined_events[..pending_events.len()], pending_events);
 
         let replay = route(approval_json_request(body), &state);
         assert_eq!(replay.status, 200);
@@ -12734,7 +12798,169 @@ rules: []
             .as_str()
             .unwrap()
             .contains("already denied"));
+        assert_eq!(
+            human_approval_lifecycle_events(&state, &approval_request_id),
+            declined_events
+        );
+        drop(state);
+        let restarted = ServerState::new_with_db_path(&path).unwrap();
+        let recovered = route(
+            authenticated_get_request(&format!(
+                "/spend/approval?approval_request_id={approval_request_id}"
+            )),
+            &restarted,
+        );
+        assert_eq!(recovered.status, 200);
+        assert_eq!(recovered.body["status"], "denied");
+        let replay = route(
+            approval_json_request(
+                json!({"approval_request_id": approval_request_id, "decision": "deny"}),
+            ),
+            &restarted,
+        );
+        assert_eq!(replay.status, 200);
+        assert_eq!(replay.body["idempotent_replay"], true);
+        assert_eq!(
+            human_approval_lifecycle_events(&restarted, &approval_request_id),
+            declined_events
+        );
         std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn approval_budget_failure_remains_pending_without_lifecycle_resolution() {
+        for revoke in [false, true] {
+            let name = if revoke {
+                "approval-revoked-budget"
+            } else {
+                "approval-insufficient-budget"
+            };
+            let (path, state, _agent, pending) = setup_pending_approval(name);
+            let id = pending.body["approval"]["approval_request_id"]
+                .as_str()
+                .unwrap();
+            let pending_events = assert_human_approval_lifecycle(&state, id, None);
+            let budget_id = list_budgets(&state, false).unwrap().budgets[0]
+                .budget_id
+                .clone();
+            let changed = if revoke {
+                route(
+                    authenticated_json_request("/budgets/revoke", json!({"budget_id": budget_id})),
+                    &state,
+                )
+            } else {
+                route(
+                    authenticated_json_request(
+                        &format!("/budgets/{budget_id}/versions"),
+                        json!({"amount_limit_cents": 500, "expected_revision": 1}),
+                    ),
+                    &state,
+                )
+            };
+            assert_eq!(changed.status, 200, "{}", changed.body);
+            let failed = route(
+                approval_json_request(json!({"approval_request_id": id, "decision": "approve"})),
+                &state,
+            );
+            assert_eq!(failed.status, 400, "{}", failed.body);
+            assert_eq!(human_approval_lifecycle_events(&state, id), pending_events);
+            {
+                let governance = state.governance.lock().unwrap();
+                assert!(governance.load_spend_auth_tokens().unwrap().is_empty());
+                assert!(governance.load_budget_holds().unwrap().is_empty());
+            }
+            let still_pending = route(
+                authenticated_get_request(&format!("/spend/approval?approval_request_id={id}")),
+                &state,
+            );
+            assert_eq!(still_pending.body["status"], "pending");
+            drop(state);
+            let restarted = ServerState::new_with_db_path(&path).unwrap();
+            assert_eq!(
+                human_approval_lifecycle_events(&restarted, id),
+                pending_events
+            );
+            let still_pending = route(
+                authenticated_get_request(&format!("/spend/approval?approval_request_id={id}")),
+                &restarted,
+            );
+            assert_eq!(still_pending.body["status"], "pending");
+            if !revoke {
+                let changed = route(
+                    authenticated_json_request(
+                        &format!("/budgets/{budget_id}/versions"),
+                        json!({"amount_limit_cents": 1_000, "expected_revision": 2}),
+                    ),
+                    &restarted,
+                );
+                assert_eq!(changed.status, 200, "{}", changed.body);
+                let approved = route(
+                    approval_json_request(
+                        json!({"approval_request_id": id, "decision": "approve"}),
+                    ),
+                    &restarted,
+                );
+                assert_eq!(approved.status, 200, "{}", approved.body);
+                assert_human_approval_lifecycle(&restarted, id, Some("approved"));
+            }
+            std::fs::remove_file(path).ok();
+        }
+    }
+
+    #[test]
+    fn human_approval_lifecycle_insert_failure_rolls_back_resolution() {
+        for decision in ["approve", "deny"] {
+            let (path, state, _agent, pending) =
+                setup_pending_approval(&format!("approval-lifecycle-rollback-{decision}"));
+            let id = pending.body["approval"]["approval_request_id"]
+                .as_str()
+                .unwrap();
+            let pending_events = assert_human_approval_lifecycle(&state, id, None);
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            connection.execute_batch(
+                "CREATE TRIGGER reject_human_lifecycle_resolution
+                 BEFORE INSERT ON spend_lifecycle_records
+                 WHEN json_extract(NEW.payload_json, '$.input.fact.kind') = 'human_resolution_confirmed'
+                 BEGIN SELECT RAISE(ABORT, 'injected human lifecycle failure'); END;"
+            ).unwrap();
+            let failed = route(
+                approval_json_request(json!({"approval_request_id": id, "decision": decision})),
+                &state,
+            );
+            assert_eq!(failed.status, 400, "{}", failed.body);
+            assert_eq!(human_approval_lifecycle_events(&state, id), pending_events);
+            let current_budget = list_budgets(&state, false).unwrap().budgets.remove(0);
+            assert_eq!(current_budget.frozen_amount_cents, 0);
+            assert_eq!(current_budget.remaining_amount_cents, 1_000);
+            {
+                let governance = state.governance.lock().unwrap();
+                assert!(governance.load_spend_auth_tokens().unwrap().is_empty());
+                assert!(governance.load_budget_holds().unwrap().is_empty());
+            }
+            let still_pending = route(
+                authenticated_get_request(&format!("/spend/approval?approval_request_id={id}")),
+                &state,
+            );
+            assert_eq!(still_pending.body["status"], "pending");
+            connection
+                .execute_batch("DROP TRIGGER reject_human_lifecycle_resolution;")
+                .unwrap();
+            let retried = route(
+                approval_json_request(json!({"approval_request_id": id, "decision": decision})),
+                &state,
+            );
+            assert_eq!(retried.status, 200, "{}", retried.body);
+            assert_human_approval_lifecycle(
+                &state,
+                id,
+                Some(if decision == "approve" {
+                    "approved"
+                } else {
+                    "declined"
+                }),
+            );
+            std::fs::remove_file(path).ok();
+        }
     }
 
     #[test]
@@ -12943,6 +13169,87 @@ rules: []
         let expiration = authorization.authorization_expires_at.unwrap();
         assert!(expiration.ends_with("+00:00") || expiration.ends_with('Z'));
         std::fs::remove_file(path).ok();
+    }
+
+    fn human_approval_lifecycle_events(state: &ServerState, decision_id: &str) -> Vec<Value> {
+        let owner = authenticated_user_context(state).unwrap();
+        state
+            .governance
+            .lock()
+            .unwrap()
+            .lifecycle_snapshot(&owner.user_id, None)
+            .unwrap()
+            .events
+            .into_iter()
+            .filter_map(|record| {
+                let event = serde_json::to_value(record.event).unwrap();
+                (event["correlation"]["decision_id"] == decision_id).then(|| {
+                    json!({
+                        "event_id": record.event_id,
+                        "sequence": record.sequence,
+                        "recorded_at": record.recorded_at,
+                        "agent_id": record.agent_public_id,
+                        "account_id": record.account_public_id,
+                        "event": event,
+                    })
+                })
+            })
+            .collect()
+    }
+
+    fn assert_human_approval_lifecycle(
+        state: &ServerState,
+        decision_id: &str,
+        resolution: Option<&str>,
+    ) -> Vec<Value> {
+        let events = human_approval_lifecycle_events(state, decision_id);
+        let mut kinds = events
+            .iter()
+            .map(|record| record["event"]["fact"]["kind"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        kinds.sort_unstable();
+        let mut expected = vec!["initial_policy", "human_escalation"];
+        if resolution.is_some() {
+            expected.push("human_resolution_confirmed");
+        }
+        if resolution == Some("approved") {
+            expected.push("authorization_granted");
+        }
+        expected.sort_unstable();
+        assert_eq!(kinds, expected);
+        let owner = authenticated_user_context(state).unwrap();
+        for record in &events {
+            let event = &record["event"];
+            assert_eq!(
+                event["requested_amount"]["value"]["amount"],
+                json!({"units": "6000000", "scale": 6})
+            );
+            match event["fact"]["kind"].as_str().unwrap() {
+                "initial_policy" => {
+                    assert_eq!(event["fact"]["decision"], "needs_approval");
+                    assert_eq!(event["source"], "policy_engine");
+                }
+                "human_escalation" => {
+                    assert_eq!(event["fact"]["approval_request_id"], decision_id);
+                    assert_eq!(event["source"], "human_approval");
+                }
+                "human_resolution_confirmed" => {
+                    assert_eq!(event["fact"]["approval_request_id"], decision_id);
+                    assert_eq!(event["fact"]["resolution"], resolution.unwrap());
+                    assert_eq!(
+                        event["fact"]["confirmed_by_user_id"],
+                        owner.user_id.to_string()
+                    );
+                    assert_eq!(event["source"], "human_approval");
+                }
+                "authorization_granted" => {
+                    assert_eq!(event["fact"]["authorization_id"], decision_id);
+                    assert_eq!(event["source"], "human_approval");
+                }
+                other => panic!("unexpected human approval lifecycle fact: {other}"),
+            }
+        }
+        events
     }
 
     fn setup_pending_approval(
