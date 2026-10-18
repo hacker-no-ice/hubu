@@ -110,6 +110,10 @@ impl NormalizedHarnessIdentity {
         Ok(identity)
     }
 
+    pub(crate) fn platform(&self) -> &str {
+        &self.platform
+    }
+
     fn validate(&self) -> Result<()> {
         validate_platform(&self.platform)?;
         validate_identifier(

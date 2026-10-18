@@ -119,3 +119,67 @@ fn binary_rejects_invalid_configuration_without_printing_credentials() {
     assert!(!stderr.contains("url-secret"));
     assert!(!stderr.contains(secret));
 }
+
+fn run_spend_call_with_unrecognized_meta(diagnostics: Option<&str>) -> (Value, String) {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_hubu-unified-mcp"));
+    command
+        .env_remove("HUBU_UNIFIED_OPERATION_STATE_PATH")
+        .env_remove("HUBU_UNIFIED_HUBU_ENDPOINT")
+        .env_remove("HUBU_UNIFIED_HUBU_BEARER_TOKEN")
+        .env_remove("HUBU_UNIFIED_GONGBU_ENDPOINT")
+        .env_remove("HUBU_UNIFIED_GONGBU_BEARER_TOKEN")
+        .env_remove("HUBU_UNIFIED_META_SHAPE_DIAGNOSTICS")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(value) = diagnostics {
+        command.env("HUBU_UNIFIED_META_SHAPE_DIAGNOSTICS", value);
+    }
+    let mut child = command.spawn().unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": "rpc-raw-id",
+            "method": "tools/call",
+            "params": {
+                "name": "hubu_submit_spend",
+                "arguments": {"reason": "prompt-raw-value"},
+                "_meta": {"openai/unrecognized": "meta-raw-value"}
+            }
+        })
+    )
+    .unwrap();
+    drop(stdin);
+
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    let response = serde_json::from_slice::<Value>(&output.stdout).unwrap();
+    (response, String::from_utf8(output.stderr).unwrap())
+}
+
+#[test]
+fn meta_shape_diagnostics_are_opt_in_sanitized_and_do_not_change_responses() {
+    let (default_response, default_stderr) = run_spend_call_with_unrecognized_meta(None);
+    assert!(!default_stderr.contains("meta-shape"), "{default_stderr}");
+
+    let (diagnostic_response, diagnostic_stderr) = run_spend_call_with_unrecognized_meta(Some("1"));
+    assert_eq!(diagnostic_response, default_response);
+    let lines = diagnostic_stderr
+        .lines()
+        .filter_map(|line| line.strip_prefix("hubu-unified-mcp meta-shape: "))
+        .collect::<Vec<_>>();
+    assert_eq!(lines.len(), 1, "{diagnostic_stderr}");
+    let record = serde_json::from_str::<Value>(lines[0]).unwrap();
+    assert_eq!(record["tool"], "hubu_submit_spend");
+    assert_eq!(
+        record["meta"]["keys"]["openai/unrecognized"]["type"],
+        "string"
+    );
+    assert_eq!(record["trusted_identity"]["outcome"], "rejected");
+    for raw in ["rpc-raw-id", "prompt-raw-value", "meta-raw-value", "reason"] {
+        assert!(!diagnostic_stderr.contains(raw), "{raw} leaked");
+    }
+}
