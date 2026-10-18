@@ -522,6 +522,7 @@ test("publishes one live-provider operations entry point", async () => {
 const unpublishedDocs = [
   ["docs/budget-architecture.md", "budget-architecture"],
   ["docs/governance-observability.md", "governance-observability"],
+  ["docs/governance-observability-qualification.md", "governance-observability-qualification"],
   ["docs/ledger-accounting.md", "ledger-accounting"],
   ["docs/operations/repository-security.md", "operations/repository-security"],
   ["docs/operations/benchmarking.md", "operations/benchmarking"],
