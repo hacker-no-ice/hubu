@@ -25,6 +25,8 @@ Future release template
 
 ## Unreleased
 
+## v0.2.4 — 2026-10-19
+
 ### Highlights
 
 - Added append-only governance evidence for policy and automatic admission
