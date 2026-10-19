@@ -22,5 +22,28 @@
   },
   "observability": {
     "enabled": true
-  }
+  },
+  "vars": {
+    "ANALYTICS_ENABLED": "false",
+    "ANALYTICS_ORIGIN": "https://hubustack.dev",
+    "ANALYTICS_ACCESS_TEAM_DOMAIN": "",
+    "ANALYTICS_ACCESS_AUD": ""
+  },
+  // Local D1 is available immediately. The deployment preparation script binds
+  // an explicitly configured production database, or removes this binding.
+  "d1_databases": [
+    {
+      "binding": "ANALYTICS_DB",
+      "database_name": "hubustack-analytics",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "ratelimits": [
+    {
+      "name": "ANALYTICS_RATE_LIMITER",
+      "namespace_id": "1001",
+      "simple": { "limit": 30, "period": 60 }
+    }
+  ],
+  "triggers": { "crons": ["17 3 * * *"] }
 }

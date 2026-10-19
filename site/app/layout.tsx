@@ -29,6 +29,8 @@ export default function RootLayout({
         <a className="skip-link" href="#main-content">Skip to content</a>
         {children}
         <CopyCode />
+        <aside className="analytics-privacy-link"><a href="/privacy">Privacy &amp; analytics</a></aside>
+        <script defer src="/_telemetry/beacon.js" />
       </body>
     </html>
   );

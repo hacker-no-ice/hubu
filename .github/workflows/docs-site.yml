@@ -52,6 +52,10 @@ jobs:
         working-directory: site
         run: npm run lint
 
+      - name: Check site types
+        working-directory: site
+        run: npm run typecheck
+
       - name: Build and test site
         working-directory: site
         run: npm test
@@ -69,6 +73,10 @@ jobs:
     environment:
       name: hubustack.dev
       url: https://hubustack.dev
+    env:
+      HUBUSTACK_ANALYTICS_DB_ID: ${{ vars.HUBUSTACK_ANALYTICS_DB_ID }}
+      HUBUSTACK_ANALYTICS_ACCESS_TEAM_DOMAIN: ${{ vars.HUBUSTACK_ANALYTICS_ACCESS_TEAM_DOMAIN }}
+      HUBUSTACK_ANALYTICS_ACCESS_AUD: ${{ vars.HUBUSTACK_ANALYTICS_ACCESS_AUD }}
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -102,6 +110,13 @@ jobs:
             echo "Configure CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN in the hubustack.dev GitHub environment." >&2
             exit 1
           fi
+
+      - name: Apply analytics migrations when configured
+        working-directory: site
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: npm run analytics:migrate
 
       - name: Deploy hubustack.dev
         working-directory: site

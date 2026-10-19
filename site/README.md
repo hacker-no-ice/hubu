@@ -89,6 +89,103 @@ npm run dev
 Run `npm test` for a production build and server-render smoke tests. Run
 `npm run lint` for source linting.
 
+## Private visitor analytics
+
+The first-party dashboard lives at `https://hubustack.dev/_analytics`. It shows
+estimated unique browsers, visits, page views, new and returning browsers,
+daily counts, landing referrers, popular pages, countries, and rejected bot
+beacons. Period uniques are distinct browser identifiers across the entire
+selected period, not a sum of daily uniques. Ranges are 1, 7, or 30 UTC calendar
+days including today. A visit is a browser session with a 30-minute idle expiry;
+separate tabs can have separate sessions.
+
+The public beacon is `/_telemetry/beacon.js`, and the same-origin collector is
+`POST /_telemetry/collect`. Keeping these outside `/_analytics` lets Cloudflare
+Access protect the entire private dashboard path without blocking collection.
+Both the React pages and the two static architecture guides load the beacon.
+The dashboard itself is never tracked. Nothing is collected until deployment
+configuration explicitly enables analytics.
+
+Collection uses a random, server-issued, Secure, HttpOnly, first-party
+`__Host-hubu_visitor` cookie with a one-year lifetime. Only its SHA-256 hash is
+stored in a dedicated D1 database. IP addresses and user-agent strings are not
+written to that database, queries and fragments are stripped, and only external
+referrer hostnames are retained. Page-view events expire after 90 days. Inactive
+visitor identifiers expire after 90 days too; active visitors keep their
+first-seen history. “Returning” means first seen before the selected period in
+this retained history. Data collection starts after activation; the previous
+Cloudflare totals cannot reconstruct these identities.
+
+Known crawler user agents, browser automation, Cloudflare verified bots, and low
+Cloudflare bot scores when available are excluded. Fine-grained bot scores are
+not available on every Cloudflare plan. This is a best-effort estimate of human
+browser traffic, not a guarantee of unique people or perfect bot detection.
+Rejected beacons are stored only as anonymous daily reason counts, and do not
+include requests blocked by Cloudflare before reaching the collector. A
+Cloudflare rate-limit binding limits collector requests per hashed IP key.
+
+The collector honors Do Not Track, Global Privacy Control, and the
+`hubu_analytics_exclude=1` cookie. Visitors can set that preference at `/privacy`;
+the dashboard has the same control for excluding your own browser. This opt-out
+controls this first-party dashboard, independently of Cloudflare's existing
+Web Analytics service.
+
+### One-time production setup
+
+1. Create a dedicated D1 database with `npx wrangler d1 create hubustack-analytics`
+   from `site/`, and record the returned database ID. Do not reuse a Hubu or
+   Gongbu database.
+2. Create a Cloudflare Access self-hosted application for
+   `hubustack.dev/_analytics`. Use an identity-based Allow policy limited to the
+   dashboard owner, and copy its application audience (AUD) and your bare team
+   domain, such as `example.cloudflareaccess.com`. Do not protect `/_telemetry`.
+   The Worker verifies the JWT signature, issuer, audience, expiry, and human
+   subject on both dashboard and report requests; a spoofed identity header,
+   Bypass policy, service token, or missing configuration does not grant access.
+3. Add these **variables** to the GitHub `hubustack.dev` environment:
+   `HUBUSTACK_ANALYTICS_DB_ID`, `HUBUSTACK_ANALYTICS_ACCESS_TEAM_DOMAIN`, and
+   `HUBUSTACK_ANALYTICS_ACCESS_AUD`. These are configuration identifiers, not
+   authentication secrets. The existing `CLOUDFLARE_API_TOKEN` also needs D1 Edit
+   permission for this account's analytics database.
+4. Merge the reviewed PR or run the existing Docs site workflow on `main`.
+   It prepares the built Wrangler configuration, applies the D1 migration, and
+   deploys. Open `/_analytics` through Access, then exclude your own browser
+   before browsing public pages. Confirm a fresh browser visit appears once and
+   multiple pages increase views without increasing period uniques.
+
+With all three analytics variables absent, the standard deployment keeps the
+public site working and removes the production D1 binding and analytics cron.
+Partial configuration fails before migration/deployment. All three present
+activate collection and a daily UTC retention job. To pause collection, remove
+all three variables and redeploy; the existing database is preserved. Manual
+deployments must use `npm run deploy`, which prepares the generated bundle, and
+the same variables. Run `npm run analytics:migrate` before deploying a newly
+created database. Avoid invoking `wrangler deploy` directly, since it bypasses
+this configuration preparation. The source `wrangler.jsonc` intentionally has
+no production database ID; deployments pin the configured database and do not
+silently provision a replacement.
+
+### Local verification
+
+Run `npm run cf:typegen` after changing bindings, and `npm run typecheck` for the
+application and Worker types. `npm test` includes real SQLite aggregation tests,
+JWT signature/claims tests, beacon navigation/privacy tests, and dashboard
+rendering tests. Local databases use Wrangler's ignored project-local state.
+Apply the schema with `npx wrangler d1 migrations apply ANALYTICS_DB --local`.
+
+For local browser collection, put `ANALYTICS_ENABLED=true` and
+`ANALYTICS_ORIGIN=http://localhost:5173` in ignored `site/.dev.vars`, then run
+`npm run dev`. The configured origin must match the actual dev-server port.
+Only explicit loopback HTTP development is accepted; production uses HTTPS.
+The dashboard remains closed unless Access JWT validation is configured; the
+offline auth tests verify its success and rejection paths without a production
+login or auth bypass. Never add a public demo mode to the production dashboard.
+
+Website analytics is separate from Hubu's governance plane and Gongbu's
+execution plane. Their architecture diagrams intentionally remain focused on
+those product boundaries; this website-only storage and request flow are
+documented here instead.
+
 ## Deployment
 
 Merges to `main` that change `site/**`, `docs/**`, or `architecture/**` are
