@@ -1,6 +1,6 @@
 [package]
 name = "hubu-feedback"
-version = "0.2.3"
+version = "0.2.4"
 description = "Offline, reviewable feedback preparation for Hubu clients"
 edition.workspace = true
 homepage.workspace = true
