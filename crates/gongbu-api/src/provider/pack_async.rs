@@ -24,7 +24,7 @@ use super::{
     },
     targets::ProviderConfigVersion,
 };
-use crate::secrets::ProviderSecret;
+use crate::{redaction::Redactor, secrets::ProviderSecret};
 use reqwest::Url;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -32,6 +32,7 @@ use std::{sync::Arc, thread, time::Duration};
 
 pub const ENGINE_ID: &str = "async_poll";
 const POLLING_POLICY_VERSION: &str = "pack-poll-v1";
+const MAX_POLLING_URL_BYTES: usize = 4096;
 
 pub struct AsyncPollEngine<T = ReqwestSyncTransport> {
     pack: Arc<Pack>,
@@ -74,6 +75,18 @@ fn rejection_code(status: u16) -> &'static str {
         429 => "provider_rate_limited",
         _ => "provider_rejected",
     }
+}
+
+fn safe_recovery_host(host: &str, redactor: &Redactor) -> bool {
+    !host.is_empty()
+        && host.len() <= 253
+        && host.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'.')
+        })
+        && !host.starts_with(['-', '.'])
+        && !host.ends_with(['-', '.'])
+        && !host.contains("..")
+        && redactor.redact(host) == host
 }
 
 impl<T: SyncTransport> AsyncPollEngine<T> {
@@ -232,19 +245,21 @@ impl<T: SyncTransport> AsyncPollEngine<T> {
             .operation_id
             .clone()
             .ok_or_else(|| reconcile("malformed_response", ProviderPhase::Processing, &evidence))?;
-        let operation = self.checkpoint(&response.body, &evidence, job_id, deadline)?;
+        let operation = self.checkpoint(&response.body, &evidence, job_id, deadline, secret)?;
         Ok(AdapterSubmission::Pending(operation))
     }
 
     /// Choose the polling host and record sanitized evidence about any URL the
-    /// provider returned. The checkpoint never stores a URL, only a host that
-    /// the pack allows, and the poll URL is always rebuilt from the pack.
+    /// provider returned. A rejected origin remains checkpointable, but never
+    /// falls back to a different host. Polling revalidates the same recorded
+    /// origin against the pack before rebuilding a URL or making any request.
     fn checkpoint(
         &self,
         body: &Value,
         evidence: &Evidence,
         job_id: String,
         deadline: InvocationDeadline,
+        secret: &ProviderSecret,
     ) -> Result<AsyncProviderOperation, ProviderFailure> {
         let poll = self.poll_spec();
         let endpoint_host = self
@@ -270,23 +285,84 @@ impl<T: SyncTransport> AsyncPollEngine<T> {
                             .as_bytes()
                     )
                 );
-                let parsed = raw.as_deref().and_then(|raw| Url::parse(raw).ok());
-                let expected = parsed
+                let mut reason = match raw.as_deref() {
+                    None => Some("polling_url_unavailable"),
+                    Some(raw) if raw.len() > MAX_POLLING_URL_BYTES => Some("url_too_long"),
+                    Some(raw) if !raw.is_ascii() => Some("non_ascii_url"),
+                    _ => None,
+                };
+                let parsed = raw
+                    .as_deref()
+                    .filter(|_| reason.is_none())
+                    .and_then(|raw| Url::parse(raw).ok());
+                if raw.is_some() && reason.is_none() && parsed.is_none() {
+                    reason = Some("malformed_url");
+                }
+                // Host canonicalization folds case. Omit both literal and
+                // ASCII-folded credential renderings from durable evidence.
+                let folded_secret = secret
+                    .expose()
+                    .iter()
+                    .map(u8::to_ascii_lowercase)
+                    .collect::<Vec<_>>();
+                let redactor = Redactor::new([secret.expose(), folded_secret.as_slice()]);
+                let host = parsed
                     .as_ref()
-                    .and_then(|url| self.pack.poll_url(url.host_str()?, &job_id));
-                let reason = match (&raw, &parsed, &expected) {
-                    (None, _, _) => Some("polling_url_unavailable"),
-                    (Some(_), None, _) => Some("malformed_url"),
-                    (Some(_), Some(_), None) => Some("host_not_allowlisted"),
-                    (Some(_), Some(url), Some(expected)) if url != expected => {
-                        Some("path_contract_mismatch")
-                    }
-                    _ => None,
-                };
-                let host = match (reason, &parsed) {
-                    (None, Some(url)) => url.host_str().map(str::to_owned),
-                    _ => None,
-                };
+                    .and_then(Url::host_str)
+                    .filter(|host| safe_recovery_host(host, &redactor))
+                    .map(str::to_owned);
+                // Compare shape before allowlisting the host. Otherwise a URL
+                // with both a foreign host and a bad path could be mistaken for
+                // an origin that becomes safe after a host-policy update.
+                let declared = self
+                    .pack
+                    .poll_url(&endpoint_host, &job_id)
+                    .expect("validated declared poll URL");
+                let mut explicit_port = None;
+                if let (Some(raw), Some(url)) = (raw.as_deref(), parsed.as_ref()) {
+                    let authority = raw
+                        .split_once("://")
+                        .map(|(_, rest)| rest.split(['/', '?', '#']).next().unwrap_or(""))
+                        .unwrap_or("");
+                    let raw_port = authority
+                        .rsplit_once(':')
+                        .and_then(|(_, port)| port.parse::<u16>().ok());
+                    let has_explicit_port = authority.rsplit('@').next().is_some_and(|host| {
+                        if host.starts_with('[') {
+                            host.split_once(']')
+                                .is_some_and(|(_, suffix)| suffix.starts_with(':'))
+                        } else {
+                            host.contains(':')
+                        }
+                    });
+                    explicit_port = raw_port.filter(|port| {
+                        let value = port.to_string();
+                        redactor.redact(&value) == value
+                    });
+                    reason = reason.or_else(|| {
+                        if authority.contains('%') {
+                            Some("encoded_host")
+                        } else if url.scheme() != "https" {
+                            Some("scheme_not_https")
+                        } else if !url.username().is_empty() || url.password().is_some() {
+                            Some("userinfo_present")
+                        } else if has_explicit_port || url.port().is_some() {
+                            Some("explicit_port_present")
+                        } else if url.fragment().is_some() {
+                            Some("fragment_present")
+                        } else if url.path() != declared.path() {
+                            Some("path_contract_mismatch")
+                        } else if url.query() != declared.query() {
+                            Some("query_contract_mismatch")
+                        } else if host.is_none() {
+                            Some("polling_host_unavailable")
+                        } else if self.pack.poll_url(url.host_str()?, &job_id).is_none() {
+                            Some("host_not_allowlisted")
+                        } else {
+                            None
+                        }
+                    });
+                }
                 let context = PollingRecoveryContext {
                     schema_version: 1,
                     policy_version: POLLING_POLICY_VERSION.to_owned(),
@@ -298,19 +374,37 @@ impl<T: SyncTransport> AsyncPollEngine<T> {
                         }
                     }),
                     normalized_host: host.clone(),
-                    explicit_port: None,
-                    endpoint_shape: if reason == Some("path_contract_mismatch") {
-                        "unexpected".to_owned()
-                    } else {
-                        "declared".to_owned()
-                    },
-                    query_keys: poll.query.keys().take(8).cloned().collect(),
+                    explicit_port,
+                    endpoint_shape: match parsed.as_ref() {
+                        Some(url) if url.path() == declared.path() => "declared",
+                        Some(_) => "unexpected",
+                        None => "unparseable",
+                    }
+                    .to_owned(),
+                    query_keys: parsed
+                        .as_ref()
+                        .into_iter()
+                        .flat_map(Url::query_pairs)
+                        .filter_map(|(key, _)| {
+                            (!key.is_empty()
+                                && key.len() <= 64
+                                && key.bytes().all(|byte| {
+                                    byte.is_ascii_lowercase()
+                                        || byte.is_ascii_digit()
+                                        || matches!(byte, b'-' | b'_' | b'.')
+                                })
+                                && redactor.redact(&key) == key)
+                                .then(|| key.into_owned())
+                        })
+                        .take(8)
+                        .collect(),
                     url_fingerprint: fingerprint,
                     validation_reason: reason.map(str::to_owned),
                 };
-                // A rejected returned URL falls back to the endpoint host, which
-                // always matches the declared poll shape.
-                (host.unwrap_or(endpoint_host), Some(context))
+                (
+                    host.unwrap_or_else(|| "unavailable".to_owned()),
+                    Some(context),
+                )
             }
         };
         let operation = AsyncProviderOperation {
@@ -349,6 +443,24 @@ impl<T: SyncTransport> AsyncPollEngine<T> {
         operation
             .validate()
             .map_err(|_| processing("invalid_provider_operation", &evidence))?;
+        if operation.polling_recovery.as_ref().is_some_and(|context| {
+            context.scheme.as_deref() != Some("https")
+                || context.explicit_port.is_some()
+                || context.endpoint_shape != "declared"
+                || context.normalized_host.as_deref() != Some(operation.polling_host.as_str())
+                || !context.query_keys.iter().map(String::as_str).eq(self
+                    .poll_spec()
+                    .query
+                    .keys()
+                    .take(8)
+                    .map(String::as_str))
+                || context
+                    .validation_reason
+                    .as_deref()
+                    .is_some_and(|reason| reason != "host_not_allowlisted")
+        }) {
+            return Err(processing("polling_origin_rejected", &evidence));
+        }
         let deadline = InvocationDeadline::from_unix_millis(operation.deadline_unix_ms)
             .map_err(|_| processing("timeout_unknown_outcome", &evidence))?;
         let poll_url = self
@@ -628,6 +740,7 @@ mod tests {
         polls: Arc<Mutex<VecDeque<Result<TransportResponse, TransportFailure>>>>,
         posts: Arc<Mutex<u32>>,
         poll_urls: Arc<Mutex<Vec<String>>>,
+        artifact_urls: Arc<Mutex<Vec<String>>>,
         artifact: Vec<u8>,
     }
 
@@ -656,6 +769,7 @@ mod tests {
                 polls: Arc::new(Mutex::new(polls.into_iter().map(ok).collect())),
                 posts: Arc::default(),
                 poll_urls: Arc::default(),
+                artifact_urls: Arc::default(),
                 artifact: PNG.to_vec(),
             }
         }
@@ -694,6 +808,7 @@ mod tests {
             policy: &ArtifactDownloadPolicy,
             _: InvocationDeadline,
         ) -> Result<Vec<u8>, ArtifactFetchError> {
+            self.artifact_urls.lock().unwrap().push(url.to_string());
             policy
                 .validate_url(url)
                 .map_err(|_| ArtifactFetchError::Failed)?;
@@ -844,40 +959,306 @@ mod tests {
     }
 
     #[test]
-    fn a_returned_polling_url_off_the_allowlist_falls_back_to_the_endpoint_host() {
-        let mut body = accepted();
-        body["polling_url"] = json!("https://attacker.example/v1/get_result?id=job-1");
-        let AdapterSubmission::Pending(operation) = engine(Fake::new(body, vec![]))
-            .submit(&request(), &input(), &secret_for_test("k"), None)
-            .unwrap()
-        else {
-            panic!("expected a pending job");
-        };
-        assert_eq!(operation.polling_host, "api.async-image.test");
-        let recovery = operation.polling_recovery.unwrap();
-        assert_eq!(
-            recovery.validation_reason.as_deref(),
-            Some("host_not_allowlisted")
-        );
-        assert_eq!(recovery.normalized_host, None);
-
-        let mut shape = accepted();
-        shape["polling_url"] = json!("https://api.eu.async-image.test/v2/other?id=job-1");
-        let AdapterSubmission::Pending(operation) = engine(Fake::new(shape, vec![]))
-            .submit(&request(), &input(), &secret_for_test("k"), None)
-            .unwrap()
-        else {
-            panic!("expected a pending job");
-        };
-        assert_eq!(operation.polling_host, "api.async-image.test");
-        assert_eq!(
-            operation
-                .polling_recovery
+    fn rejected_returned_origins_are_checkpointed_and_never_polled_after_restart() {
+        struct NoTraffic;
+        impl ProviderTransportObserver for NoTraffic {
+            fn record(&self, _: ProviderTransportInteraction) -> bool {
+                panic!("rejected polling origins cannot reach a transport boundary")
+            }
+        }
+        for (returned, reason, host) in [
+            (None, "polling_url_unavailable", None),
+            (Some(json!(7)), "polling_url_unavailable", None),
+            (Some(json!("not a URL")), "malformed_url", None),
+            (
+                Some(json!(format!(
+                    "https://api.eu.async-image.test/v1/get_result?id=job-1&padding={}",
+                    "x".repeat(MAX_POLLING_URL_BYTES)
+                ))),
+                "url_too_long",
+                None,
+            ),
+            (
+                Some(json!("https://éxample.test/v1/get_result?id=job-1")),
+                "non_ascii_url",
+                None,
+            ),
+            (
+                Some(json!("https://attacker.example/v1/get_result?id=job-1")),
+                "host_not_allowlisted",
+                Some("attacker.example"),
+            ),
+            (
+                Some(json!("https://api.eu.async-image.test/v2/other?id=job-1")),
+                "path_contract_mismatch",
+                Some("api.eu.async-image.test"),
+            ),
+            (
+                Some(json!("https://attacker.example/v2/other?id=job-1")),
+                "path_contract_mismatch",
+                Some("attacker.example"),
+            ),
+            (
+                Some(json!(
+                    "https://attacker.example/v1/get_result?id=another-job"
+                )),
+                "query_contract_mismatch",
+                Some("attacker.example"),
+            ),
+            (
+                Some(json!(
+                    "http://api.eu.async-image.test/v1/get_result?id=job-1"
+                )),
+                "scheme_not_https",
+                Some("api.eu.async-image.test"),
+            ),
+            (
+                Some(json!(
+                    "https://user@api.eu.async-image.test/v1/get_result?id=job-1"
+                )),
+                "userinfo_present",
+                Some("api.eu.async-image.test"),
+            ),
+            (
+                Some(json!(
+                    "https://api.eu.async-image.test:443/v1/get_result?id=job-1"
+                )),
+                "explicit_port_present",
+                Some("api.eu.async-image.test"),
+            ),
+            (
+                Some(json!(
+                    "https://api.eu.async-image.test/v1/get_result?id=job-1#fragment"
+                )),
+                "fragment_present",
+                Some("api.eu.async-image.test"),
+            ),
+            (
+                Some(json!(
+                    "https://%61pi.eu.async-image.test/v1/get_result?id=job-1"
+                )),
+                "encoded_host",
+                Some("api.eu.async-image.test"),
+            ),
+            (
+                Some(json!(
+                    "https://secret-canary.example/v1/get_result?id=job-1"
+                )),
+                "polling_host_unavailable",
+                None,
+            ),
+        ] {
+            let mut body = accepted();
+            if let Some(returned) = returned {
+                body["polling_url"] = returned;
+            } else {
+                body.as_object_mut().unwrap().remove("polling_url");
+            }
+            let first = Fake::new(body, vec![ready()]);
+            let AdapterSubmission::Pending(operation) = engine(first.clone())
+                .submit(
+                    &request(),
+                    &input(),
+                    &secret_for_test("secret-canary"),
+                    None,
+                )
                 .unwrap()
-                .validation_reason
-                .as_deref(),
-            Some("path_contract_mismatch")
+            else {
+                panic!("accepted job identity must remain checkpointable");
+            };
+            operation.validate().unwrap();
+            assert_eq!(*first.posts.lock().unwrap(), 1, "{reason}");
+            assert!(first.poll_urls.lock().unwrap().is_empty(), "{reason}");
+            assert_eq!(
+                operation.polling_host,
+                host.unwrap_or("unavailable"),
+                "{reason}"
+            );
+            let recovery = operation.polling_recovery.as_ref().unwrap();
+            assert_eq!(recovery.validation_reason.as_deref(), Some(reason));
+            assert_eq!(recovery.normalized_host.as_deref(), host);
+            let durable = serde_json::to_string(&operation).unwrap();
+            assert!(!durable.contains("https://"));
+            assert!(!durable.contains("secret-canary"));
+            let stored: AsyncProviderOperation = serde_json::from_str(&durable).unwrap();
+            assert_eq!(stored.deadline_unix_ms, operation.deadline_unix_ms);
+            let resumed = Fake::new(Value::Null, vec![ready()]);
+            let failure = engine(resumed.clone())
+                .poll_observed(
+                    &request(),
+                    &input(),
+                    &secret_for_test("secret-canary"),
+                    &stored,
+                    &NoTraffic,
+                )
+                .unwrap_err();
+            assert_eq!(failure.code, "polling_origin_rejected", "{reason}");
+            assert_eq!(failure.spend_disposition, SpendDisposition::Reconcile);
+            assert_eq!(failure.evidence.operation_id.as_deref(), Some("job-1"));
+            assert_eq!(*resumed.posts.lock().unwrap(), 0, "{reason}");
+            assert!(resumed.poll_urls.lock().unwrap().is_empty(), "{reason}");
+            assert!(resumed.artifact_urls.lock().unwrap().is_empty(), "{reason}");
+        }
+    }
+
+    #[test]
+    fn a_pack_without_a_returned_url_contract_polls_the_declared_endpoint() {
+        let source = PACK
+            .lines()
+            .filter(|line| !line.starts_with("url = ") && !line.starts_with("hosts = "))
+            .collect::<Vec<_>>()
+            .join("\n");
+        // Artifact downloads still need their own host allowlist.
+        let source = source.replace(
+            "[artifacts]",
+            "[artifacts]\nhosts = [\"delivery.*.async-image.test\"]",
         );
+        let pack = Arc::new(Pack::from_toml_str(&source).unwrap());
+        let request = pack.prepare("image-v1", &input()).unwrap().request;
+        let fake = Fake::new(accepted(), vec![ready()]);
+        let engine = AsyncPollEngine::new(pack, "image-v1", fake.clone(), MAX_ARTIFACT).unwrap();
+        let outcome = engine
+            .invoke(&request, &input(), &secret_for_test("k"), None)
+            .unwrap();
+        outcome.validate().unwrap();
+        assert_eq!(*fake.posts.lock().unwrap(), 1);
+        assert_eq!(
+            fake.poll_urls.lock().unwrap().as_slice(),
+            ["https://api.async-image.test/v1/get_result?id=job-1"]
+        );
+    }
+
+    #[test]
+    fn a_legacy_fallback_checkpoint_cannot_authorize_polling_the_substitute_host() {
+        let first = Fake::new(accepted(), vec![]);
+        let AdapterSubmission::Pending(mut operation) = engine(first)
+            .submit(&request(), &input(), &secret_for_test("k"), None)
+            .unwrap()
+        else {
+            panic!("expected a pending job");
+        };
+        operation.polling_host = "api.async-image.test".into();
+        let recovery = operation.polling_recovery.as_mut().unwrap();
+        recovery.normalized_host = None;
+        recovery.validation_reason = Some("host_not_allowlisted".into());
+        let resumed = Fake::new(Value::Null, vec![ready()]);
+        let failure = engine(resumed.clone())
+            .poll(&request(), &input(), &secret_for_test("k"), &operation)
+            .unwrap_err();
+        assert_eq!(failure.code, "polling_origin_rejected");
+        assert!(resumed.poll_urls.lock().unwrap().is_empty());
+        assert_eq!(*resumed.posts.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn only_a_pure_host_rejection_can_pass_reinspection_under_current_host_policy() {
+        // Exercise the engine's recovery gate only. Updating an active pack
+        // must still satisfy the catalog's independent frozen-digest checks.
+        let source = PACK.replace(
+            "\"api.us.async-image.test\"",
+            "\"api.us.async-image.test\", \"api.future.async-image.test\"",
+        );
+        let current_pack = Arc::new(Pack::from_toml_str(&source).unwrap());
+        for (path, reason) in [
+            ("/v1/get_result?id=job-1", "host_not_allowlisted"),
+            ("/v2/other?id=job-1", "path_contract_mismatch"),
+            ("/v1/get_result?id=another-job", "query_contract_mismatch"),
+        ] {
+            let mut body = accepted();
+            body["polling_url"] = json!(format!("https://api.future.async-image.test{path}"));
+            let first = Fake::new(body, vec![]);
+            let AdapterSubmission::Pending(operation) = engine(first.clone())
+                .submit(&request(), &input(), &secret_for_test("k"), None)
+                .unwrap()
+            else {
+                panic!("accepted job must remain checkpointable");
+            };
+            assert_eq!(*first.posts.lock().unwrap(), 1);
+            let recovery = operation.polling_recovery.as_ref().unwrap();
+            assert_eq!(recovery.validation_reason.as_deref(), Some(reason));
+            assert_eq!(
+                recovery.normalized_host.as_deref(),
+                Some(operation.polling_host.as_str())
+            );
+            let stored: AsyncProviderOperation =
+                serde_json::from_str(&serde_json::to_string(&operation).unwrap()).unwrap();
+            let resumed = Fake::new(Value::Null, vec![ready()]);
+            let result = AsyncPollEngine::new(
+                current_pack.clone(),
+                "image-v1",
+                resumed.clone(),
+                MAX_ARTIFACT,
+            )
+            .unwrap()
+            .poll(&request(), &input(), &secret_for_test("k"), &stored);
+            assert_eq!(*resumed.posts.lock().unwrap(), 0);
+            if reason == "host_not_allowlisted" {
+                result.unwrap().validate().unwrap();
+                assert_eq!(
+                    resumed.poll_urls.lock().unwrap().as_slice(),
+                    ["https://api.future.async-image.test/v1/get_result?id=job-1"]
+                );
+            } else {
+                let failure = result.unwrap_err();
+                assert_eq!(failure.code, "polling_origin_rejected");
+                assert_eq!(failure.spend_disposition, SpendDisposition::Reconcile);
+                assert!(resumed.poll_urls.lock().unwrap().is_empty());
+                assert!(resumed.artifact_urls.lock().unwrap().is_empty());
+            }
+            assert_eq!(stored.deadline_unix_ms, operation.deadline_unix_ms);
+        }
+    }
+
+    #[test]
+    fn declared_query_keys_keep_their_supported_shape_and_evidence_bound() {
+        for query in [
+            BTreeMap::from([("job.id".to_owned(), "{{job_id}}".to_owned())]),
+            std::iter::once(("id".to_owned(), "{{job_id}}".to_owned()))
+                .chain((0..9).map(|index| (format!("key{index}"), "value".to_owned())))
+                .collect(),
+        ] {
+            let mut document: toml::Value = toml::from_str(PACK).unwrap();
+            document["poll"]["query"] = toml::Value::try_from(&query).unwrap();
+            let pack = Arc::new(Pack::from_toml_str(&toml::to_string(&document).unwrap()).unwrap());
+            let url = pack.poll_url("api.eu.async-image.test", "job-1").unwrap();
+            let mut body = accepted();
+            body["polling_url"] = json!(url.as_str());
+            let fake = Fake::new(body, vec![ready()]);
+            let engine =
+                AsyncPollEngine::new(pack, "image-v1", fake.clone(), MAX_ARTIFACT).unwrap();
+            let AdapterSubmission::Pending(operation) = engine
+                .submit(
+                    &request(),
+                    &input(),
+                    &secret_for_test("secret-canary"),
+                    None,
+                )
+                .unwrap()
+            else {
+                panic!("expected accepted job");
+            };
+            assert!(
+                operation
+                    .polling_recovery
+                    .as_ref()
+                    .unwrap()
+                    .query_keys
+                    .len()
+                    <= 8
+            );
+            engine
+                .poll(
+                    &request(),
+                    &input(),
+                    &secret_for_test("secret-canary"),
+                    &operation,
+                )
+                .unwrap()
+                .validate()
+                .unwrap();
+            assert_eq!(*fake.posts.lock().unwrap(), 1);
+            assert_eq!(fake.poll_urls.lock().unwrap().as_slice(), [url.as_str()]);
+        }
     }
 
     #[test]

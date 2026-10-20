@@ -175,12 +175,23 @@ impl GenericProviderActivities {
 impl ProviderActivities for GenericProviderActivities {
     fn preflight(&self, execution: &Execution) -> Result<(), WorkflowActivityError> {
         let (target, adapter, request, normalized_input) = self.selected(execution)?;
-        crate::provider_contract::validate_image_input_versioned(
-            &request,
-            &normalized_input,
-            execution.input_schema_version,
-        )
-        .map_err(map_contract_error)?;
+        if target.pack().is_some() {
+            // A pack engine checks the input against the pack's own bounded
+            // parameters in `preflight_input`, which may go beyond the
+            // image-generation input shape.
+            if execution.input_schema_version != 1 {
+                return Err(map_contract_error(
+                    crate::provider_contract::ContractError::IndeterminableCost,
+                ));
+            }
+        } else {
+            crate::provider_contract::validate_image_input_versioned(
+                &request,
+                &normalized_input,
+                execution.input_schema_version,
+            )
+            .map_err(map_contract_error)?;
+        }
         adapter
             .preflight_input(&request, &normalized_input)
             .map_err(map_contract_error)?;
@@ -2658,7 +2669,9 @@ mod tests {
             .unwrap()
             .clone();
         let create = |operation: &str, prompt: &str| {
-            let input = json!({"prompt": prompt});
+            // `output_format` is a pack parameter outside the image input shape;
+            // the pack engine, not the image schema, validates it.
+            let input = json!({"prompt": prompt, "output_format": "png"});
             let request = pack.prepare(&model.model, &input).unwrap().request;
             let snapshot = pricing
                 .snapshot_for_target(&target.target_key(), &request)

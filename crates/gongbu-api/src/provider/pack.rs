@@ -12,7 +12,8 @@ use super::{
     contract::{
         ActualVendorCost, AdapterCapabilities, AdapterOutcome, ContractError, NormalizedArtifact,
         NormalizedRequest, NormalizedUsage, PriceComponent, PricingCatalog, PricingRule,
-        PricingSelector, ProviderAdapter, ProviderFailure, ProviderPhase, REQUEST_QUANTITIES,
+        PricingSelector, ProviderAdapter, ProviderFailure, ProviderPhase, MAX_VENDOR_COST_SCALE,
+        REQUEST_QUANTITIES,
     },
     http_kernel::{valid_provider_deadline_ms, validate_https_origin, validate_safe_headers},
     targets::{PackTargetConfig, TargetKey},
@@ -1150,6 +1151,12 @@ impl PackDocument {
                 ));
             }
         }
+        if response.reported_cost_scale > MAX_VENDOR_COST_SCALE {
+            return Err(invalid(
+                "response.reported_cost_scale",
+                format!("must be at most {MAX_VENDOR_COST_SCALE}"),
+            ));
+        }
         if response.provider_request_id.is_none() && response.request_id_headers.is_empty() {
             return Err(invalid(
                 "response",
@@ -1860,6 +1867,13 @@ fn validate_hosts(hosts: &[String], field: &str) -> Result<(), PackError> {
     for host in hosts {
         let labels: Vec<_> = host.split('.').collect();
         let wildcards = labels.iter().filter(|label| **label == "*").count();
+        // `*` stands only for a whole label, never part of one.
+        if labels
+            .iter()
+            .any(|label| label.contains('*') && *label != "*")
+        {
+            return Err(invalid(field, format!("{host}: `*` must be a whole label")));
+        }
         let concrete = host.replace('*', "wildcard");
         let parsed = Url::parse(&format!("https://{concrete}/")).ok();
         if !unique.insert(host)
@@ -2552,6 +2566,7 @@ mod tests {
                         headers: BTreeMap::new(),
                         body,
                     },
+                    &Evidence::default(),
                     &downloads(),
                     1024,
                 )
@@ -2851,6 +2866,17 @@ mod tests {
                 "hosts = [\"*.*.async-image.test\"]"
             )),
             "artifacts.hosts"
+        );
+        assert_eq!(
+            field(edit(
+                "hosts = [\"delivery.*.async-image.test\"]",
+                "hosts = [\"delivery.*eu.async-image.test\"]"
+            )),
+            "artifacts.hosts"
+        );
+        assert_eq!(
+            field(edit("reported_cost_scale = 2", "reported_cost_scale = 19")),
+            "response.reported_cost_scale"
         );
         // A pattern that could name a credential-bearing host is refused.
         assert_eq!(

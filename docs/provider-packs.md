@@ -199,7 +199,7 @@ declared shape; the engine never follows a provider-supplied URL as is.
 | `job_id` | Required response path to the job ID in the submission response. |
 | `path` | Required poll path of plain segments; one segment may be exactly `{{job_id}}`. |
 | `query` | Optional poll query. Keys are lowercase tokens; a value is a plain token or exactly `{{job_id}}`. The job ID must appear in the path or the query. |
-| `url` | Optional response path to a polling URL the provider returns. Its host is adopted only when it matches `hosts` and its path and query equal the declared shape; otherwise the engine polls the endpoint host. Either way the checkpoint records why. |
+| `url` | Optional response path to a polling URL the provider returns. Its host must match `hosts`, and its path and query must equal the declared shape. A missing or rejected URL is checkpointed and sent to reconciliation without polling another host. When `url` is not declared, the engine polls the configured endpoint. |
 | `hosts` | Polling hosts (or patterns) a returned URL may name. They receive the credential, so each must also be in `transport.allowed_hosts`. Required with `url`. |
 | `interval_ms` | Required delay between polls, from 1 to `transport.timeout_ms`. |
 | `status` | Required response path to the job status, in submission and poll responses. |
