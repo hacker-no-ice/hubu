@@ -888,7 +888,9 @@ mod tests {
 
     #[test]
     fn restart_during_polling_resumes_from_the_checkpoint_without_resubmitting() {
-        let first = Fake::new(accepted(), vec![]);
+        let mut first = Fake::new(accepted(), vec![]);
+        first.submit.as_mut().unwrap().headers =
+            BTreeMap::from([("x-request-id".into(), "req-submit".into())]);
         let submission = engine(first.clone())
             .submit(&request(), &input(), &secret_for_test("k"), None)
             .unwrap();
@@ -897,7 +899,7 @@ mod tests {
         };
         assert_eq!(*first.posts.lock().unwrap(), 1);
         assert_eq!(operation.provider_operation_id, "job-1");
-        assert_eq!(operation.provider_request_id.as_deref(), Some("req-1"));
+        assert_eq!(operation.provider_request_id.as_deref(), Some("req-submit"));
         assert_eq!(operation.polling_host, "api.eu.async-image.test");
         assert_eq!(
             operation
@@ -916,6 +918,16 @@ mod tests {
             Value::Null,
             vec![json!({"id": "job-1", "status": "Generating"}), ready()],
         );
+        for (response, request_id) in resumed
+            .polls
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .zip(["req-pending-poll", "req-ready-poll"])
+        {
+            response.as_mut().unwrap().headers =
+                BTreeMap::from([("x-request-id".into(), request_id.into())]);
+        }
         let poll_urls = resumed.poll_urls.clone();
         let posts = resumed.posts.clone();
         let outcome = engine(resumed)
@@ -931,7 +943,8 @@ mod tests {
         );
         outcome.validate().unwrap();
         assert_eq!(outcome.provider_operation_id.as_deref(), Some("job-1"));
-        assert_eq!(outcome.provider_request_id.as_deref(), Some("req-1"));
+        assert_eq!(outcome.provider_request_id, stored.provider_request_id);
+        assert_eq!(outcome.provider_request_id.as_deref(), Some("req-submit"));
         // 3.5 one-cent credits are exactly $0.035.
         assert_eq!(
             outcome.actual_vendor_cost,
@@ -956,6 +969,36 @@ mod tests {
             )
             .unwrap();
         assert_eq!(settled.budget_units, 35_000);
+    }
+
+    #[test]
+    fn a_ready_poll_supplies_a_request_id_when_submission_did_not_have_one() {
+        let mut first = Fake::new(accepted(), vec![]);
+        first.submit.as_mut().unwrap().headers.clear();
+        let AdapterSubmission::Pending(operation) = engine(first.clone())
+            .submit(&request(), &input(), &secret_for_test("k"), None)
+            .unwrap()
+        else {
+            panic!("expected a pending job");
+        };
+        assert_eq!(operation.provider_request_id, None);
+        let stored: AsyncProviderOperation =
+            serde_json::from_str(&serde_json::to_string(&operation).unwrap()).unwrap();
+        let resumed = Fake::new(Value::Null, vec![ready()]);
+        resumed.polls.lock().unwrap()[0].as_mut().unwrap().headers =
+            BTreeMap::from([("x-request-id".into(), "req-ready-poll".into())]);
+        let outcome = engine(resumed.clone())
+            .poll(&request(), &input(), &secret_for_test("k"), &stored)
+            .unwrap();
+        outcome.validate().unwrap();
+        assert_eq!(
+            outcome.provider_request_id.as_deref(),
+            Some("req-ready-poll")
+        );
+        assert_eq!(outcome.provider_operation_id.as_deref(), Some("job-1"));
+        assert_eq!(*first.posts.lock().unwrap(), 1);
+        assert_eq!(*resumed.posts.lock().unwrap(), 0);
+        assert_eq!(resumed.poll_urls.lock().unwrap().len(), 1);
     }
 
     #[test]

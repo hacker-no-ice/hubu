@@ -654,8 +654,9 @@ impl Pack {
     /// reports less.
     ///
     /// `known` carries evidence the engine already holds, such as the request
-    /// ID from a submission and the job ID being polled; the response's own
-    /// request ID wins when it has one.
+    /// ID from a submission and the job ID being polled. Preserve that request
+    /// ID so a poll response cannot replace the durable operation identity;
+    /// the response supplies it only when no earlier ID is known.
     pub fn map_response(
         &self,
         request: &NormalizedRequest,
@@ -665,9 +666,10 @@ impl Pack {
         max_artifact_bytes: usize,
     ) -> Result<AdapterOutcome, ProviderFailure> {
         let mapping = &self.document.response;
-        let request_id = self
-            .provider_request_id(response)
-            .or_else(|| known.request_id.clone());
+        let request_id = known
+            .request_id
+            .clone()
+            .or_else(|| self.provider_request_id(response));
         let operation_id = known.operation_id.clone();
         let fail = |code: &str, phase: ProviderPhase| {
             ProviderFailure::reconcile(code.to_owned(), phase)

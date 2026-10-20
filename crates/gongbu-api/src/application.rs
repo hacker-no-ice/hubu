@@ -2577,7 +2577,7 @@ mod tests {
                 self.polls.lock().unwrap().push(url.to_string());
                 Ok(TransportResponse {
                     status: 200,
-                    headers: BTreeMap::new(),
+                    headers: BTreeMap::from([("x-request-id".into(), "req-poll".into())]),
                     body: json!({"id": "job-1", "status": "Ready",
                         "result": {"sample": "https://delivery.us1.async-image.test/out.png"}}),
                 })
@@ -2740,6 +2740,14 @@ mod tests {
         assert_eq!(
             transport.polls.lock().unwrap().as_slice(),
             ["https://api.us.async-image.test/v1/get_result?id=job-1"]
+        );
+        assert_eq!(
+            repository
+                .get_provider_attempt_for_execution(&delivered.execution_id)
+                .unwrap()
+                .provider_request_id
+                .as_deref(),
+            Some("req-ok")
         );
         // 0.5¢ per request + 3¢ per image, settled exactly once.
         assert_eq!(hubu.1.lock().unwrap().as_slice(), [35_000]);
