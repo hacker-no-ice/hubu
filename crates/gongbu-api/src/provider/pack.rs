@@ -573,14 +573,20 @@ impl Pack {
                 *slot = request.quantity(quantity);
             }
         }
-        let actual_vendor_cost = match &mapping.reported_cost {
-            None => None,
-            Some(path) => Some(
-                select_path(body, path)
-                    .first()
-                    .and_then(|value| decimal_cost(value))
-                    .ok_or_else(|| ambiguous("pack_response_cost_invalid"))?,
-            ),
+        // Fixed-price settlement uses frozen prices and delivered usage;
+        // a provider-controlled amount must never override that calculation.
+        let actual_vendor_cost = if self.archetype() == Archetype::SyncFixed {
+            None
+        } else {
+            match &mapping.reported_cost {
+                None => None,
+                Some(path) => Some(
+                    select_path(body, path)
+                        .first()
+                        .and_then(|value| decimal_cost(value))
+                        .ok_or_else(|| ambiguous("pack_response_cost_invalid"))?,
+                ),
+            }
         };
         let items = match select_path(body, &mapping.artifact_items).as_slice() {
             [Value::Array(items)] => items.iter().collect::<Vec<_>>(),

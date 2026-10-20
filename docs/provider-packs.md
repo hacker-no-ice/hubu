@@ -222,7 +222,7 @@ whose `type` is `model_output`, then the elements of their `content` whose
 | `request_id_headers` | Optional response headers that carry the provider request ID, checked in order. |
 | `provider_request_id` | Optional body path to the request ID, used when no header carries it. Set it, `request_id_headers`, or both. |
 | `usage` | Map of usage quantity (`images`, `input_tokens`, `output_tokens`, `results`, `pages`, `seconds`) to a path at an integer, at an array whose length counts, or at a filtered selection whose size counts. |
-| `reported_cost` | Optional. A decimal amount in major currency units, such as `"0.012"`. |
+| `reported_cost` | Optional. A decimal amount in major currency units, such as `"0.012"`. Ignored by `sync_fixed`, which settles from frozen prices and delivered usage. |
 | `artifact_items` | Required path to the artifacts: an array, or a filtered selection. |
 | `artifact_url` / `artifact_base64` | Exactly one: a path inside each item to a download URL or to inline base64 bytes. |
 

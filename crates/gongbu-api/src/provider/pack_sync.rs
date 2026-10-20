@@ -525,6 +525,56 @@ mod tests {
     }
 
     #[test]
+    fn reported_cost_cannot_replace_fixed_pricing_or_partial_delivery_adjustments() {
+        let source = URL_PACK.replace("[response]", "[response]\nreported_cost = \"/cost\"");
+        let pack = Pack::from_toml_str(&source).unwrap();
+        let catalog = PricingCatalog::from_json(
+            &serde_json::to_vec(&json!({
+                "schema_version": 2, "catalog_version": "fixed-v1", "rules": pack.pricing_rules()
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let request = pack.prepare("image-v1", &url_input()).unwrap().request;
+        let snapshot = catalog.snapshot(&request).unwrap();
+        assert_eq!(snapshot.estimated_units, 121_000);
+        for delivered in [1, 2] {
+            for reported_cost in [json!(0), json!("0.121"), json!("unreadable")] {
+                let mut body: Value = serde_json::from_str(URL_RESPONSE).unwrap();
+                body["data"].as_array_mut().unwrap().truncate(delivered);
+                body["cost"] = reported_cost.clone();
+                let transport = FakeTransport::ok(body);
+                let posts = transport.posts.clone();
+                let outcome = engine(&source, "image-v1", transport)
+                    .invoke(&request, &url_input(), &secret_for_test("sk-test"), None)
+                    .unwrap();
+                assert_eq!(posts.lock().unwrap().len(), 1);
+                assert_eq!(outcome.artifacts.len(), delivered);
+                assert_eq!(
+                    outcome.usage.as_ref().unwrap().images,
+                    Some(delivered as i64)
+                );
+                assert_eq!(outcome.actual_vendor_cost, None, "{reported_cost}");
+                // This is the workflow's settlement path. Passing the engine's
+                // result must use frozen per-request plus delivered-image prices,
+                // including when the provider reports zero or the entire hold.
+                let settlement = snapshot
+                    .settle_precise(
+                        outcome.usage.as_ref().unwrap(),
+                        outcome.actual_vendor_cost.as_ref(),
+                        snapshot.estimated_units,
+                    )
+                    .unwrap();
+                assert_eq!(
+                    settlement.budget_units,
+                    if delivered == 1 { 61_000 } else { 121_000 },
+                    "reported {reported_cost}, delivered {delivered}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn nested_template_header_request_id_and_filtered_inline_images() {
         let encoded = base64::engine::general_purpose::STANDARD.encode(PNG);
         let body = json!({

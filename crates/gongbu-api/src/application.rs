@@ -2314,7 +2314,7 @@ mod tests {
                 Ok(TransportResponse {
                     status: 200,
                     headers: BTreeMap::from([("x-goog-request-id".into(), "req-ok".into())]),
-                    body: json!({"steps": [{"type": "model_output", "content": [
+                    body: json!({"cost": 0, "steps": [{"type": "model_output", "content": [
                         {"type": "image", "mime_type": "image/png", "data": data}
                     ]}]}),
                 })
@@ -2358,8 +2358,9 @@ mod tests {
             }
         }
 
-        let pack =
-            Pack::from_toml_str(include_str!("../../../fixtures/packs/inline-image.toml")).unwrap();
+        let source = include_str!("../../../fixtures/packs/inline-image.toml")
+            .replace("[response]", "[response]\nreported_cost = \"/cost\"");
+        let pack = Pack::from_toml_str(&source).unwrap();
         let secret = SecretReference::new("gongbu.inline-image", "fixture").unwrap();
         let targets: ProviderTargetConfig = serde_json::from_value(json!({
             "schema_version": 2,
