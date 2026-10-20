@@ -195,7 +195,7 @@ spend is reserved.
 
 | Field | Rules |
 | --- | --- |
-| `name` | Required lowercase identifier the agent uses. |
+| `name` | Required lowercase identifier the agent uses. `model` is reserved for the selected target's model ID. |
 | `type` | Required: `string`, `integer`, `boolean` or `enum`. |
 | `field` | Optional provider request field. Defaults to `name`. |
 | `required` / `default` | A required parameter has no default. A default must satisfy the bounds. |
@@ -230,6 +230,13 @@ Usage a pack doesn't map settles at the requested quantity, because a
 fixed-price call delivers what it was asked for. Map a usage path when the
 provider can return less, such as fewer images than requested; settlement
 then charges only what arrived.
+
+Every declared usage path must be present and have the expected shape. An
+unfiltered path must select one nonnegative integer or one array. A path whose
+last segment filters an array counts its matches, including zero matches;
+missing fields and non-array filter inputs still fail validation. Malformed
+or missing declared usage sends the response to reconciliation with its
+provider request ID, instead of treating it as zero or one unit.
 
 A response the mapping can't read arrives after the provider accepted the
 work, so the engine sends it to reconciliation and never releases the claim.

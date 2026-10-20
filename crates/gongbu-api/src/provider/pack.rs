@@ -563,13 +563,8 @@ impl Pack {
         let body = &response.body;
         let mut usage = NormalizedUsage::default();
         for (quantity, path) in &mapping.usage {
-            let selected = select_path(body, path);
-            let count = match selected.as_slice() {
-                [Value::Array(items)] => i64::try_from(items.len()).ok(),
-                [value] if value.is_i64() || value.is_u64() => value.as_i64().filter(|v| *v >= 0),
-                items => i64::try_from(items.len()).ok(),
-            }
-            .ok_or_else(|| ambiguous("pack_response_usage_invalid"))?;
+            let count =
+                usage_count(body, path).map_err(|_| ambiguous("pack_response_usage_invalid"))?;
             *usage_slot(&mut usage, quantity).expect("validated usage quantity") = Some(count);
         }
         for (field, quantity) in USAGE_QUANTITIES {
@@ -734,6 +729,12 @@ impl Parameter {
             return Err(invalid(
                 format!("{field}.name"),
                 "must be a lowercase identifier",
+            ));
+        }
+        if self.name == MODEL_PLACEHOLDER {
+            return Err(invalid(
+                format!("{field}.name"),
+                "model is reserved for the selected target's model ID",
             ));
         }
         if self
@@ -1390,6 +1391,64 @@ fn parse_path(path: &str) -> Option<Vec<PathSegment<'_>>> {
 
 fn valid_path(path: &str) -> bool {
     parse_path(path).is_some()
+}
+
+/// Read a declared usage count without turning a missing path or malformed
+/// scalar into a collection count. Only a terminal filter counts selections;
+/// every field and array traversed to reach it must exist with the right shape.
+fn usage_count(root: &Value, path: &str) -> Result<i64, UsagePathError> {
+    let segments = parse_path(path).ok_or(UsagePathError::Invalid)?;
+    let filtered = segments
+        .last()
+        .is_some_and(|segment| segment.filter.is_some());
+    let mut current = vec![root];
+    for segment in segments {
+        let mut next = Vec::new();
+        for value in current {
+            let child = match value {
+                Value::Object(map) => map.get(&segment.name).ok_or(UsagePathError::Missing),
+                Value::Array(items) => segment
+                    .name
+                    .parse::<usize>()
+                    .map_err(|_| UsagePathError::Invalid)
+                    .and_then(|index| items.get(index).ok_or(UsagePathError::Missing)),
+                _ => Err(UsagePathError::Invalid),
+            }?;
+            match segment.filter {
+                None => next.push(child),
+                Some((key, expected)) => {
+                    let items = child.as_array().ok_or(UsagePathError::Invalid)?;
+                    next.extend(items.iter().filter(|item| {
+                        item.get(key).is_some_and(|actual| match actual {
+                            Value::String(text) => text == expected,
+                            Value::Number(number) => number.to_string() == expected,
+                            Value::Bool(flag) => flag.to_string() == expected,
+                            _ => false,
+                        })
+                    }));
+                }
+            }
+        }
+        current = next;
+    }
+    if filtered {
+        return i64::try_from(current.len()).map_err(|_| UsagePathError::Invalid);
+    }
+    match current.as_slice() {
+        [Value::Array(items)] => i64::try_from(items.len()).map_err(|_| UsagePathError::Invalid),
+        [value] => value
+            .as_i64()
+            .filter(|count| *count >= 0)
+            .ok_or(UsagePathError::Invalid),
+        [] => Err(UsagePathError::Missing),
+        _ => Err(UsagePathError::Invalid),
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum UsagePathError {
+    Missing,
+    Invalid,
 }
 
 /// Every value a response path selects. A filter segment keeps the array
@@ -2131,6 +2190,164 @@ mod tests {
             Some(ActualVendorCost::new(12, 3, "USD").unwrap())
         );
         assert_eq!(decimal_cost(&json!(-1)), None);
+    }
+
+    #[test]
+    fn declared_usage_paths_reconcile_when_missing_or_malformed() {
+        let pack = Pack::from_toml_str(&edited(
+            "usage = { images = \"/data\" }",
+            "usage = { images = \"/usage/images\" }",
+        ))
+        .unwrap();
+        let request = pack
+            .prepare("image-v1", &json!({"prompt": "x", "image_count": 2}))
+            .unwrap()
+            .request;
+        let invalid_usage = [
+            None,
+            Some(json!({})),
+            Some(json!(null)),
+            Some(json!([])),
+            Some(json!({"images": null})),
+            Some(json!({"images": false})),
+            Some(json!({"images": true})),
+            Some(json!({"images": "2"})),
+            Some(json!({"images": {}})),
+            Some(json!({"images": 2.0})),
+            Some(json!({"images": -1})),
+            Some(json!({"images": 9_223_372_036_854_775_808_u64})),
+        ];
+        for reported_usage in invalid_usage {
+            let mut body: Value = serde_json::from_str(RESPONSE).unwrap();
+            if let Some(value) = &reported_usage {
+                body["usage"] = value.clone();
+            }
+            let failure = pack
+                .map_response(
+                    &request,
+                    &ProviderResponse {
+                        headers: BTreeMap::new(),
+                        body,
+                    },
+                    &downloads(),
+                    1024,
+                )
+                .unwrap_err();
+            assert_eq!(
+                failure.code, "pack_response_usage_invalid",
+                "{reported_usage:?}"
+            );
+            assert_eq!(
+                failure.spend_disposition,
+                crate::provider_contract::SpendDisposition::Reconcile
+            );
+            assert_eq!(failure.evidence.request_id.as_deref(), Some("sbx-req-7f3a"));
+        }
+    }
+
+    #[test]
+    fn usage_counts_distinguish_values_from_explicit_filtered_selections() {
+        for (body, expected) in [
+            (json!({"count": 0}), Some(0)),
+            (json!({"count": i64::MAX}), Some(i64::MAX)),
+            (json!({"count": []}), Some(0)),
+            (json!({"count": ["a", "b"]}), Some(2)),
+        ] {
+            assert_eq!(usage_count(&body, "/count").ok(), expected);
+        }
+        let path = "/steps[type=model_output]/content[type=image]";
+        for (body, expected) in [
+            (json!({"steps": []}), Some(0)),
+            (json!({"steps": [{"type": "thought"}]}), Some(0)),
+            (
+                json!({"steps": [{"type": "model_output", "content": []}]}),
+                Some(0),
+            ),
+            (
+                json!({"steps": [{"type": "model_output", "content": [
+                    {"type": "image"}, {"type": "text"}
+                ]}]}),
+                Some(1),
+            ),
+            (
+                json!({"steps": [
+                    {"type": "model_output", "content": [{"type": "image"}]},
+                    {"type": "model_output", "content": [{"type": "image"}]}
+                ]}),
+                Some(2),
+            ),
+            (json!({}), None),
+            (json!({"steps": null}), None),
+            (json!({"steps": {}}), None),
+            (json!({"steps": [{"type": "model_output"}]}), None),
+            (
+                json!({"steps": [{"type": "model_output", "content": {}}]}),
+                None,
+            ),
+            (
+                json!({"steps": [
+                    {"type": "model_output", "content": [{"type": "image"}]},
+                    {"type": "model_output"}
+                ]}),
+                None,
+            ),
+        ] {
+            assert_eq!(usage_count(&body, path).ok(), expected, "{body}");
+        }
+        // A nonterminal filter does not make a scalar or a set of scalar
+        // values into a count of selected items.
+        let body = json!({"entries": [
+            {"type": "match", "count": 3},
+            {"type": "match", "count": 4}
+        ]});
+        assert_eq!(
+            usage_count(&body, "/entries[type=match]/count"),
+            Err(UsagePathError::Invalid)
+        );
+        assert_eq!(
+            usage_count(
+                &json!({"entries": [{"type": "match", "count": false}]}),
+                "/entries[type=match]/count"
+            ),
+            Err(UsagePathError::Invalid)
+        );
+        assert_eq!(usage_count(&body, "/entries/0/count"), Ok(3));
+        assert_eq!(usage_count(&body, "/missing"), Err(UsagePathError::Missing));
+    }
+
+    #[test]
+    fn parameters_cannot_shadow_the_reserved_model_placeholder() {
+        const INLINE: &str = include_str!("../../../../fixtures/packs/inline-image.toml");
+        for (required, default, alias) in [
+            (true, None, None),
+            (false, Some(json!("expensive-model")), None),
+            (true, None, Some("provider_model".to_owned())),
+        ] {
+            let mut document: PackDocument = toml::from_str(INLINE).unwrap();
+            document.parameters[0].name = "model".to_owned();
+            document.parameters[0].required = required;
+            document.parameters[0].default = default;
+            document.parameters[0].field = alias;
+            let error = Pack::from_toml_str(&toml::to_string(&document).unwrap()).unwrap_err();
+            assert_eq!(
+                error,
+                invalid(
+                    "parameters[0].name",
+                    "model is reserved for the selected target's model ID"
+                )
+            );
+        }
+        let pack = Pack::from_toml_str(INLINE).unwrap();
+        let prepared = pack
+            .prepare("inline-image-v1", &json!({"prompt": "a lighthouse"}))
+            .unwrap();
+        assert_eq!(prepared.body["model"], "inline-image-v1");
+        assert!(pack
+            .prepare(
+                "inline-image-v1",
+                &json!({"prompt": "a lighthouse", "model": "expensive-model"}),
+            )
+            .is_err());
     }
 
     #[test]
