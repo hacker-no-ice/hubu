@@ -318,9 +318,11 @@ Required currency code. Schema version 2 currently supports `USD`; it is normali
 
 ### `pricing_rules.selector`
 
-Optional inline table used to distinguish prices for the same provider/model. Current image pricing supports `selector = { image_size = "1k" }`, with normalized `1k`, `2k`, or `4k` values.
+Optional inline table of named dimensions used to distinguish prices for the same provider/model, such as `selector = { image_size = "1k" }` or `selector = { mode = "fast" }`. A rule prices a request only when the request's selector equals the rule's selector exactly; a rule without a selector prices only requests that carry none.
 
-A selector-qualified rule must contain exactly one `image` price component. Define one unambiguous rule for every enabled image size. Two rules with the same provider, model, and selector are rejected.
+Selector keys are lowercase identifiers (`a`–`z`, digits and `_`, starting with a letter). Values are trimmed and lowercased and may contain letters, digits, `_`, `-`, `.` and `:` (for example `aspect_ratio = "16:9"`). An empty selector is rejected.
+
+A selector that includes `image_size` must contain exactly one `image` price component. Define one unambiguous rule for every enabled image size. Two rules with the same provider, model, and selector are rejected.
 
 ### `pricing_rules.selector.image_size`
 
@@ -342,9 +344,17 @@ Required non-empty array of price component tables. Each unit may appear at most
 
 Required. Allowed values:
 
-- `image` — quantity of generated images;
-- `input_token` — billable input-token quantity;
-- `output_token` — billable output-token quantity.
+- `image` — quantity of generated images (request quantity `image_count`);
+- `input_token` — billable input-token quantity (`input_tokens`);
+- `output_token` — billable output-token quantity (`max_output_tokens`);
+- `request` — one per provider call, whatever it returns;
+- `result` — quantity of returned results (`results`);
+- `page` — quantity of returned pages of content (`pages`);
+- `second` — billable seconds of generated or processed media (`seconds`).
+
+A component is priced against the named request quantity shown in brackets.
+The estimate uses the requested quantity and settlement uses the delivered
+quantity, which can never exceed what was held.
 
 ### `pricing_rules.components.rate_numerator_minor`
 
@@ -383,7 +393,7 @@ billable component.
 - Every selectable live target needs a pricing rule for its exact provider/model and request selector.
 - Rule IDs are globally unique within the catalog.
 - Provider/model/selector combinations are unambiguous.
-- Image selectors require one image component.
+- Selectors that include `image_size` require one image component.
 - Component units cannot repeat within one rule.
 - Rates cannot be negative and denominators must be positive.
 - Unsupported currencies, units, selectors, or old flat pricing shapes are rejected.

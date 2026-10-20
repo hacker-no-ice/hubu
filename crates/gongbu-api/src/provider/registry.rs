@@ -172,7 +172,7 @@ impl ProviderAdapter for DeterministicFixtureAdapter {
                     ProviderPhase::Submission,
                 )
             })?;
-        let actual_cost_minor = local_fixture_cost_minor(request.image_size.as_deref())?;
+        let actual_cost_minor = local_fixture_cost_minor(request.image_size())?;
         Ok(AdapterOutcome {
             usage: Some(crate::provider_contract::NormalizedUsage {
                 images: Some(1),
@@ -327,7 +327,7 @@ impl ValidatedProviderCatalog {
                     .filter_map(|rule| {
                         rule.selector
                             .as_ref()
-                            .map(|selector| selector.image_size.clone())
+                            .and_then(|selector| selector.image_size().map(str::to_owned))
                     })
                     .collect::<Vec<_>>();
                 image_sizes.sort();

@@ -14,9 +14,8 @@ use crate::{
     provider::{
         contract::{
             enforce_cost, vendor_idempotency_key, AdapterOutcome, AdapterSubmission,
-            AsyncProviderOperation, NormalizedRequest, PricingSnapshot, PricingUnit,
-            ProviderFailure, ProviderTransportInteraction, ProviderTransportObserver,
-            SpendDisposition,
+            AsyncProviderOperation, NormalizedRequest, PricingSnapshot, ProviderFailure,
+            ProviderTransportInteraction, ProviderTransportObserver, SpendDisposition,
         },
         flux2_api,
         registry::ValidatedProviderCatalog,
@@ -135,10 +134,8 @@ impl GenericProviderActivities {
             &execution.authorization_currency,
         )
         .map_err(|_| WorkflowActivityError::Proven("authorization_invalid".into()))?;
-        let image_size = snapshot
-            .selector
-            .as_ref()
-            .map(|selector| selector.image_size.clone());
+        let selector = snapshot.selector.clone().unwrap_or_default();
+        let image_size = selector.image_size().map(str::to_owned);
         let mut normalized_input = execution.normalized_input.clone();
         let output_dimensions = match snapshot.output_dimensions.clone() {
             Some(dimensions) => Some(dimensions),
@@ -158,15 +155,16 @@ impl GenericProviderActivities {
             }
             None => None,
         };
-        let request = NormalizedRequest {
-            provider: snapshot.provider.clone(),
-            model: snapshot.model.clone(),
-            image_count: snapshot.estimated_quantity(PricingUnit::Image),
-            input_tokens: None,
-            max_output_tokens: None,
-            image_size,
-            output_dimensions,
-        };
+        // Rebuild exactly the request that was priced: every frozen quantity
+        // and the full selector that picked the rule.
+        let mut request = NormalizedRequest::new(snapshot.provider.clone(), snapshot.model.clone())
+            .with_output_dimensions(output_dimensions);
+        request.selector = selector;
+        for component in &snapshot.components {
+            if let Some(name) = component.unit.quantity_name() {
+                request.set_quantity(name, Some(component.quantity));
+            }
+        }
         Ok((target, adapter, request, normalized_input))
     }
 }
@@ -1779,18 +1777,13 @@ mod tests {
         }))
         .unwrap();
         let pricing = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"flux-v1","rules":[{"rule_id":"flux-1k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"1k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":45,"rate_denominator":1}]},{"rule_id":"flux-2k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"2k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":90,"rate_denominator":1}]},{"rule_id":"flux-4k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"4k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":180,"rate_denominator":1}]}]}"#).unwrap();
-        let request = NormalizedRequest {
-            provider: "flux".into(),
-            model: "flux-2-pro".into(),
-            image_count: Some(1),
-            input_tokens: None,
-            max_output_tokens: None,
-            image_size: Some("1k".into()),
-            output_dimensions: Some(OutputDimensions {
+        let request = NormalizedRequest::new("flux", "flux-2-pro")
+            .with_quantity("image_count", Some(1))
+            .with_selector("image_size", Some("1k".into()))
+            .with_output_dimensions(Some(OutputDimensions {
                 width: 1024,
                 height: 1024,
-            }),
-        };
+            }));
         let snapshot = pricing.snapshot(&request).unwrap();
         let target = targets
             .resolve("image_generation", "flux", "flux2_api", "flux-2-pro")
@@ -2098,18 +2091,13 @@ mod tests {
         let target_name = target.target_key().canonical_name();
         let target_version = target.provider_config_version.clone();
         let target_digest = target.digest().to_owned();
-        let request = NormalizedRequest {
-            provider: "flux".into(),
-            model: "flux-2-pro".into(),
-            image_count: Some(1),
-            input_tokens: None,
-            max_output_tokens: None,
-            image_size: Some("1k".into()),
-            output_dimensions: Some(OutputDimensions {
+        let request = NormalizedRequest::new("flux", "flux-2-pro")
+            .with_quantity("image_count", Some(1))
+            .with_selector("image_size", Some("1k".into()))
+            .with_output_dimensions(Some(OutputDimensions {
                 width: 1024,
                 height: 1024,
-            }),
-        };
+            }));
         let snapshot = pricing
             .snapshot_for_target(&target.target_key(), &request)
             .unwrap();
@@ -2365,6 +2353,7 @@ mod tests {
                         images: Some(1),
                         input_tokens: None,
                         output_tokens: None,
+                        ..Default::default()
                     }),
                     actual_vendor_cost: None,
                     artifacts: vec![NormalizedArtifact {
@@ -2440,18 +2429,15 @@ mod tests {
                 .resolve("image_generation", provider, adapter, model)
                 .unwrap();
             let is_flux = provider == "flux";
-            let request = NormalizedRequest {
-                provider: provider.into(),
-                model: model.into(),
-                image_count: Some(1),
-                input_tokens: None,
-                max_output_tokens: None,
-                image_size: is_flux.then(|| "1k".into()),
-                output_dimensions: is_flux.then_some(crate::provider_contract::OutputDimensions {
-                    width: 1024,
-                    height: 1024,
-                }),
-            };
+            let request = NormalizedRequest::new(provider, model)
+                .with_quantity("image_count", Some(1))
+                .with_selector("image_size", is_flux.then(|| "1k".into()))
+                .with_output_dimensions(is_flux.then_some(
+                    crate::provider_contract::OutputDimensions {
+                        width: 1024,
+                        height: 1024,
+                    },
+                ));
             let snapshot = pricing
                 .snapshot_for_target(&target.target_key(), &request)
                 .unwrap();

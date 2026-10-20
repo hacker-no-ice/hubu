@@ -687,14 +687,13 @@ impl<T: Flux2Transport> ProviderAdapter for Flux2ApiAdapter<T> {
         if request.provider != PROVIDER_ID
             || request.model != MODEL_ID
             || request.model != self.model
-            || request.image_count != Some(1)
+            || request.image_count() != Some(1)
         {
             return Err(provider_error("invalid_request"));
         }
         let expected = contract_dimensions(
             request
-                .image_size
-                .as_deref()
+                .image_size()
                 .ok_or_else(|| provider_error("invalid_request"))?,
         )?;
         let dimensions = request
@@ -1623,15 +1622,10 @@ mod tests {
         request_for("1k")
     }
     fn request_for(preset: &str) -> NormalizedRequest {
-        NormalizedRequest {
-            provider: PROVIDER_ID.into(),
-            model: MODEL_ID.into(),
-            image_count: Some(1),
-            input_tokens: None,
-            max_output_tokens: None,
-            image_size: Some(preset.into()),
-            output_dimensions: Some(contract_dimensions(preset).unwrap()),
-        }
+        NormalizedRequest::new(PROVIDER_ID, MODEL_ID)
+            .with_quantity("image_count", Some(1))
+            .with_selector("image_size", Some(preset.into()))
+            .with_output_dimensions(Some(contract_dimensions(preset).unwrap()))
     }
     fn input() -> Value {
         input_for("1k")
@@ -1730,7 +1724,7 @@ mod tests {
             };
             let mut conformance_request = request();
             if matches!(case, Case::InvalidRequest) {
-                conformance_request.image_count = Some(2);
+                conformance_request.set_quantity("image_count", Some(2));
             }
             let result = adapter.invoke(
                 &conformance_request,
@@ -3528,7 +3522,7 @@ mod tests {
     fn rejects_invalid_request_and_retry_policy_before_network() {
         let (adapter, submits) = fixture(vec![]);
         let mut bad = request();
-        bad.image_count = Some(2);
+        bad.set_quantity("image_count", Some(2));
         assert_eq!(
             code(
                 adapter

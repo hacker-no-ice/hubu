@@ -1,0 +1,49 @@
+{
+  "description": "Frozen pricing parity for the shipped provider contracts, captured before HUB-302 generalized the cost model. The catalog is every shipped contract's pricing rules under catalog_version parity-v1. A change here means frozen catalogs or snapshots would no longer match executions recorded before the change.",
+  "catalog_version": "parity-v1",
+  "catalog_digest": "sha256:ecb2aecb3ed72f1386cd778caf3fc8664c391f3fe8f40c3da20a77bd435515df",
+  "snapshots": [
+    {
+      "provider": "google",
+      "model": "gemini-3.1-flash-lite-image",
+      "image_size": "1k",
+      "snapshot": "{\"schema_version\":3,\"provider\":\"google\",\"model\":\"gemini-3.1-flash-lite-image\",\"catalog_version\":\"parity-v1\",\"catalog_digest\":\"sha256:ecb2aecb3ed72f1386cd778caf3fc8664c391f3fe8f40c3da20a77bd435515df\",\"pricing_rule_id\":\"google-gemini-3.1-flash-lite-image-1k-2026-09-01-v1\",\"selector\":{\"image_size\":\"1k\"},\"output_dimensions\":{\"width\":1024,\"height\":1024},\"components\":[{\"unit\":\"image\",\"rate_numerator_minor\":336,\"rate_denominator\":100,\"quantity\":1}],\"exact_estimate_numerator\":\"84\",\"exact_estimate_denominator\":\"25\",\"estimated_units\":33600,\"currency\":\"USD\"}"
+    },
+    {
+      "provider": "google",
+      "model": "gemini-3.1-flash-image",
+      "image_size": "1k",
+      "snapshot": "{\"schema_version\":3,\"provider\":\"google\",\"model\":\"gemini-3.1-flash-image\",\"catalog_version\":\"parity-v1\",\"catalog_digest\":\"sha256:ecb2aecb3ed72f1386cd778caf3fc8664c391f3fe8f40c3da20a77bd435515df\",\"pricing_rule_id\":\"google-gemini-3.1-flash-image-1k-2026-09-01-v1\",\"selector\":{\"image_size\":\"1k\"},\"output_dimensions\":{\"width\":1024,\"height\":1024},\"components\":[{\"unit\":\"image\",\"rate_numerator_minor\":67,\"rate_denominator\":10,\"quantity\":1}],\"exact_estimate_numerator\":\"67\",\"exact_estimate_denominator\":\"10\",\"estimated_units\":67000,\"currency\":\"USD\"}"
+    },
+    {
+      "provider": "google",
+      "model": "gemini-3.1-flash-image",
+      "image_size": "2k",
+      "snapshot": "{\"schema_version\":3,\"provider\":\"google\",\"model\":\"gemini-3.1-flash-image\",\"catalog_version\":\"parity-v1\",\"catalog_digest\":\"sha256:ecb2aecb3ed72f1386cd778caf3fc8664c391f3fe8f40c3da20a77bd435515df\",\"pricing_rule_id\":\"google-gemini-3.1-flash-image-2k-2026-09-01-v1\",\"selector\":{\"image_size\":\"2k\"},\"output_dimensions\":{\"width\":2048,\"height\":2048},\"components\":[{\"unit\":\"image\",\"rate_numerator_minor\":101,\"rate_denominator\":10,\"quantity\":1}],\"exact_estimate_numerator\":\"101\",\"exact_estimate_denominator\":\"10\",\"estimated_units\":101000,\"currency\":\"USD\"}"
+    },
+    {
+      "provider": "google",
+      "model": "gemini-3.1-flash-image",
+      "image_size": "4k",
+      "snapshot": "{\"schema_version\":3,\"provider\":\"google\",\"model\":\"gemini-3.1-flash-image\",\"catalog_version\":\"parity-v1\",\"catalog_digest\":\"sha256:ecb2aecb3ed72f1386cd778caf3fc8664c391f3fe8f40c3da20a77bd435515df\",\"pricing_rule_id\":\"google-gemini-3.1-flash-image-4k-2026-09-01-v1\",\"selector\":{\"image_size\":\"4k\"},\"output_dimensions\":{\"width\":4096,\"height\":4096},\"components\":[{\"unit\":\"image\",\"rate_numerator_minor\":151,\"rate_denominator\":10,\"quantity\":1}],\"exact_estimate_numerator\":\"151\",\"exact_estimate_denominator\":\"10\",\"estimated_units\":151000,\"currency\":\"USD\"}"
+    },
+    {
+      "provider": "flux",
+      "model": "flux-2-pro",
+      "image_size": "1k",
+      "snapshot": "{\"schema_version\":3,\"provider\":\"flux\",\"model\":\"flux-2-pro\",\"catalog_version\":\"parity-v1\",\"catalog_digest\":\"sha256:ecb2aecb3ed72f1386cd778caf3fc8664c391f3fe8f40c3da20a77bd435515df\",\"pricing_rule_id\":\"bfl-flux-2-pro-1k-2026-08-28-v1\",\"selector\":{\"image_size\":\"1k\"},\"output_dimensions\":{\"width\":1024,\"height\":1024},\"components\":[{\"unit\":\"image\",\"rate_numerator_minor\":3,\"rate_denominator\":1,\"quantity\":1}],\"exact_estimate_numerator\":\"3\",\"exact_estimate_denominator\":\"1\",\"estimated_units\":30000,\"currency\":\"USD\"}"
+    },
+    {
+      "provider": "flux",
+      "model": "flux-2-pro",
+      "image_size": "2k",
+      "snapshot": "{\"schema_version\":3,\"provider\":\"flux\",\"model\":\"flux-2-pro\",\"catalog_version\":\"parity-v1\",\"catalog_digest\":\"sha256:ecb2aecb3ed72f1386cd778caf3fc8664c391f3fe8f40c3da20a77bd435515df\",\"pricing_rule_id\":\"bfl-flux-2-pro-2k-2026-08-28-v1\",\"selector\":{\"image_size\":\"2k\"},\"output_dimensions\":{\"width\":1920,\"height\":1088},\"components\":[{\"unit\":\"image\",\"rate_numerator_minor\":45,\"rate_denominator\":10,\"quantity\":1}],\"exact_estimate_numerator\":\"9\",\"exact_estimate_denominator\":\"2\",\"estimated_units\":45000,\"currency\":\"USD\"}"
+    },
+    {
+      "provider": "flux",
+      "model": "flux-2-pro",
+      "image_size": "4k",
+      "snapshot": "{\"schema_version\":3,\"provider\":\"flux\",\"model\":\"flux-2-pro\",\"catalog_version\":\"parity-v1\",\"catalog_digest\":\"sha256:ecb2aecb3ed72f1386cd778caf3fc8664c391f3fe8f40c3da20a77bd435515df\",\"pricing_rule_id\":\"bfl-flux-2-pro-4k-2026-08-28-v1\",\"selector\":{\"image_size\":\"4k\"},\"output_dimensions\":{\"width\":2048,\"height\":2048},\"components\":[{\"unit\":\"image\",\"rate_numerator_minor\":75,\"rate_denominator\":10,\"quantity\":1}],\"exact_estimate_numerator\":\"15\",\"exact_estimate_denominator\":\"2\",\"estimated_units\":75000,\"currency\":\"USD\"}"
+    }
+  ]
+}

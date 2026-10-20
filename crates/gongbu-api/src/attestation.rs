@@ -346,7 +346,7 @@ fn exact_frozen_pricing(pricing: &PricingSnapshot) -> bool {
         && pricing
             .selector
             .as_ref()
-            .is_some_and(|selector| selector.image_size == "1k")
+            .is_some_and(|selector| selector.image_size() == Some("1k"))
         && pricing
             .output_dimensions
             .as_ref()
