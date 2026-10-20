@@ -19,10 +19,12 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+mod artifact;
 mod codex_mcp;
 mod feedback;
 mod gallery;
 mod money;
+mod save_folders;
 mod stack;
 mod terminal;
 mod watch;
@@ -276,6 +278,8 @@ fn run() -> Result<()> {
         "watch" => watch::command(&client, args),
         "feedback" => feedback::command(args),
         "gallery" => gallery::command(&client, args),
+        "artifact" => artifact::command(&client, args),
+        "folders" => save_folders::command(&hubu_home, args),
         "version" | "--version" | "-V" => version(),
         "-h" | "--help" | "help" => {
             print_help();
@@ -466,6 +470,7 @@ fn init_codex(base_url: &str, explicit_base_url: bool, mut args: Vec<String>) ->
         interactive,
         prompt_trust_client_approval,
     )?;
+    let save_folders_file = save_folders::file_path(&hubu_home())?;
     let block = codex_mcp::unified_block(codex_mcp::UnifiedConfig {
         mcp_server: &mcp_server,
         hubu_endpoint,
@@ -474,6 +479,7 @@ fn init_codex(base_url: &str, explicit_base_url: bool, mut args: Vec<String>) ->
         reconciliation_token_file: &reconciliation_token_file,
         operation_state_path: &operation_state_path,
         operation_key_db: operation_key_db.as_deref(),
+        save_folders_file: &save_folders_file,
         gongbu: gongbu_endpoint.as_deref().zip(gongbu_token_file.as_deref()),
         trust_client_approval,
     });
@@ -497,6 +503,7 @@ fn init_codex(base_url: &str, explicit_base_url: bool, mut args: Vec<String>) ->
         reconciliation_token_file.display()
     );
     println!("  mcp_state_file: {}", operation_state_path.display());
+    println!("  save_folders_file: {}", save_folders_file.display());
     if let Some(operation_key_db) = &operation_key_db {
         println!("  operation_key_db: {}", operation_key_db.display());
     }
@@ -3689,6 +3696,8 @@ Commands:
   spend      Test spend and reconcile uncertain executor claims
   watch      Watch live agent budgets and recent decisions
   ledger     Read ledger transactions
+  artifact   Save a governed artifact into an allowlisted folder
+  folders    Allowlist folders agents may save artifacts into
   gallery    Export completed images to a local directory
   feedback   Send feedback: guidance and local report preview (hubu feedback --help)
   health     Check the Hubu server

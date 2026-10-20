@@ -14,6 +14,7 @@ pub(crate) struct UnifiedConfig<'a> {
     pub reconciliation_token_file: &'a Path,
     pub operation_state_path: &'a Path,
     pub operation_key_db: Option<&'a Path>,
+    pub save_folders_file: &'a Path,
     pub gongbu: Option<(&'a str, &'a Path)>,
     pub trust_client_approval: bool,
 }
@@ -67,13 +68,15 @@ pub(crate) fn unified_block(config: UnifiedConfig<'_>) -> String {
          HUBU_APPROVAL_TOKEN_FILE = \"{}\"\n\
          HUBU_MCP_TRUST_SPEND_APPROVAL = \"1\"\n\
          HUBU_RECONCILIATION_TOKEN_FILE = \"{}\"\n\
-         HUBU_UNIFIED_OPERATION_STATE_PATH = \"{}\"\n",
+         HUBU_UNIFIED_OPERATION_STATE_PATH = \"{}\"\n\
+         HUBU_UNIFIED_SAVE_FOLDERS_FILE = \"{}\"\n",
         toml_string(&config.mcp_server.display().to_string()),
         toml_string(config.hubu_endpoint),
         toml_string(&config.hubu_token_file.display().to_string()),
         toml_string(&config.approval_token_file.display().to_string()),
         toml_string(&config.reconciliation_token_file.display().to_string()),
         toml_string(&config.operation_state_path.display().to_string()),
+        toml_string(&config.save_folders_file.display().to_string()),
     );
     if let Some((endpoint, token_file)) = config.gongbu {
         let _ = writeln!(
@@ -227,6 +230,7 @@ mod tests {
             reconciliation_token_file: Path::new("/tmp/hubu\\reconciliation-token"),
             operation_state_path: Path::new("/tmp/hubu\\unified-operations.sqlite3"),
             operation_key_db: Some(Path::new("/tmp/hubu\\operation-keys.sqlite3")),
+            save_folders_file: Path::new("/tmp/hubu/save-folders.json"),
             gongbu: Some(("http://127.0.0.1:8788", Path::new("/tmp/gongbu-token"))),
             trust_client_approval: false,
         });
@@ -242,6 +246,7 @@ mod tests {
         ));
         assert!(block
             .contains("HUBU_UNIFIED_OPERATION_KEY_DB = \"/tmp/hubu\\\\operation-keys.sqlite3\""));
+        assert!(block.contains("HUBU_UNIFIED_SAVE_FOLDERS_FILE = \"/tmp/hubu/save-folders.json\""));
         assert!(block.contains(
             "[mcp_servers.hubu.tools.hubu_authorize_spend]\napproval_mode = \"approve\""
         ));
@@ -266,6 +271,7 @@ mod tests {
             reconciliation_token_file: Path::new("/tmp/reconciliation-token"),
             operation_state_path: Path::new("/tmp/unified-operations.sqlite3"),
             operation_key_db: None,
+            save_folders_file: Path::new("/tmp/hubu/save-folders.json"),
             gongbu: None,
             trust_client_approval: false,
         });
@@ -320,6 +326,7 @@ mod tests {
                 reconciliation_token_file: Path::new("/tmp/reconciliation-token"),
                 operation_state_path: Path::new("/tmp/unified-operations.sqlite3"),
                 operation_key_db: None,
+                save_folders_file: Path::new("/tmp/hubu/save-folders.json"),
                 gongbu: None,
                 trust_client_approval: trust,
             });

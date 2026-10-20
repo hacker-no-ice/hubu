@@ -94,6 +94,7 @@ not forwarded as a backend query parameter.
 | `gongbu_get_execution` | Gongbu | Read execution status by ID, including when the MCP store is unavailable |
 | `gongbu_list_artifacts` | Gongbu | Recover output IDs |
 | `gongbu_get_artifact` | Gongbu | Retrieve original output |
+| `hubu_save_artifact` | Hubu + Gongbu + store + allowlisted folder | Save a chosen output and its receipt into a human-allowlisted folder |
 
 Provider-contract diagnostics and guarded-FLUX attestation are not MCP tools;
 they remain available through authenticated Gongbu operator endpoints.

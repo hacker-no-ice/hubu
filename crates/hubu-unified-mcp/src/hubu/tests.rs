@@ -97,6 +97,7 @@ fn server_with_spend_approval(
             crate::operation_registry::OperationRegistry::open_in_memory().unwrap(),
         ))),
         meta_shape_diagnostics: false,
+        save_folders_path: None,
         use_capability_snapshot_for_test: true,
     }
 }
@@ -2459,4 +2460,88 @@ fn governance_reads_survive_unavailable_operation_store_and_never_fallback_to_go
     assert_eq!(response["error"]["data"]["code"], "backend_unavailable");
     assert_eq!(response["error"]["data"]["retryable"], true);
     assert!(matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock));
+}
+
+#[test]
+fn save_artifact_tool_is_listed_only_for_human_allowlisted_folders() {
+    let mut server = server_with_backends(
+        "http://127.0.0.1:1",
+        Some("http://127.0.0.1:2"),
+        false,
+        None,
+    );
+    let listed = |server: &Server| {
+        server
+            .list_tools_for_snapshot()
+            .into_iter()
+            .find(|tool| tool["name"] == artifact_save::TOOL_NAME)
+    };
+    let capability = |server: &Server| {
+        server.capabilities()["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == artifact_save::TOOL_NAME)
+            .cloned()
+            .unwrap()
+    };
+    assert!(listed(&server).is_none());
+    assert_eq!(
+        capability(&server)["reason_code"],
+        "save_folders_unconfigured"
+    );
+
+    let root = tempfile::tempdir().unwrap();
+    let folders = root.path().join("save-folders.json");
+    server.save_folders_path = Some(folders.clone());
+    assert!(
+        listed(&server).is_none(),
+        "missing file is an empty allowlist"
+    );
+    std::fs::write(
+        &folders,
+        serde_json::to_vec(&json!({"schema_version":1,"folders":[
+            {"name":"brand","path":root.path().join("brand")}
+        ]}))
+        .unwrap(),
+    )
+    .unwrap();
+    let definition = listed(&server).expect("allowlisted folder lists the tool");
+    assert_eq!(
+        definition["inputSchema"]["properties"]["folder"]["enum"],
+        json!(["brand"])
+    );
+    assert!(!definition
+        .to_string()
+        .contains(root.path().to_str().unwrap()));
+    assert_eq!(capability(&server)["available"], true);
+
+    let handle = "hubu:public-operation:v1:0123456789abcdef0123456789abcdef";
+    for (arguments, expected) in [
+        (
+            json!({"operation_handle":handle,"folder":"other"}),
+            "allowlisted folders: brand",
+        ),
+        (
+            json!({"operation_handle":handle,"folder":"/tmp"}),
+            "not a path",
+        ),
+        (
+            json!({"operation_handle":handle,"folder":"brand"}),
+            "not yet succeeded",
+        ),
+    ] {
+        let response = tool_call(&server, artifact_save::TOOL_NAME, arguments, None);
+        assert_eq!(response["result"]["isError"], true, "{response}");
+        let text = response["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains(expected), "{text}");
+    }
+    let response = tool_call(
+        &server,
+        artifact_save::TOOL_NAME,
+        json!({"operation_handle":handle,"folder":"brand","path":"/tmp"}),
+        None,
+    );
+    assert_eq!(response["error"]["code"], -32602);
+    assert!(!root.path().join("brand").exists());
 }

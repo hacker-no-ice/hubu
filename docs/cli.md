@@ -205,6 +205,36 @@ Denied decisions are included while authorization-history discovery retains
 its existing behavior. Raw reasons, operation keys, authorization tokens,
 provider references, pricing evidence, and artifacts are excluded.
 
+## Save artifacts into a project folder
+
+Allowlist the folders agents may save into. Agents refer to them only by name;
+they never choose a path.
+
+```sh
+hubu folders allow brand /Users/alice/projects/acme/brand
+hubu folders list
+```
+
+An agent then calls `hubu_save_artifact` over MCP with the operation handle,
+the folder name and the chosen artifact. The same save is available from the
+CLI with the selected stack profile:
+
+```sh
+hubu artifact save \
+  --operation-handle hubu:public-operation:v1:EXACT_COMPLETED_HANDLE \
+  --folder brand \
+  --artifact-id ARTIFACT_ID \
+  --name logo-final
+```
+
+This writes `logo-final.png` and `logo-final.png.receipt.json`, which records
+the artifact ID, SHA-256 digest and exact settled operation cost. An existing
+file with different content is never overwritten. `--artifact-id` may be
+omitted when the operation produced one artifact. Remove a folder with
+`hubu folders remove brand`. See the
+[unified MCP reference](unified-mcp.md#save-artifacts-into-a-project-folder)
+for verification and receipt details.
+
 ## Export completed images
 
 The native client reads an existing succeeded operation and saves its image

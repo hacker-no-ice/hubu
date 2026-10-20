@@ -12,6 +12,48 @@ The [core MCP tool set](mcp-tool-consolidation.md) is the canonical catalog of
 supported tools, their prerequisites and their gates. This page describes
 setup, boundaries and the implemented behavior behind those tools.
 
+## Save artifacts into a project folder
+
+`hubu_save_artifact` saves one artifact of a succeeded governed operation into
+a folder the human allowlisted. The agent passes the public operation handle,
+an allowlisted folder **name**, and optionally the chosen `artifact_id` and a
+file name stem. It never passes a filesystem path, and the tool's input schema
+lists only the allowlisted names. The human manages the allowlist:
+
+```sh
+hubu folders allow brand /Users/alice/projects/acme/brand
+hubu folders list
+hubu folders remove brand
+```
+
+The allowlist lives in `$HUBU_HOME/save-folders.json`; `hubu init codex`
+renders `HUBU_UNIFIED_SAVE_FOLDERS_FILE` pointing at it, and the server rereads
+it on every `tools/list` and call. The tool is listed only when at least one
+folder is allowlisted and Hubu, Gongbu and the operation store are available;
+`hubu_unified_capabilities` otherwise reports `save_folders_unconfigured`.
+
+The router reads the operation's binding from its store, fetches the original
+bytes from Gongbu by artifact ID, verifies size, SHA-256, media type and image
+signature, and re-reads the Hubu authorization after the fetch so a settlement
+correction refuses the save. It then writes `NAME.png` (or `.jpg`) and a
+`NAME.png.receipt.json` sidecar with the artifact ID, digest, media type,
+dimensions, operation handle, execution, authorization, settlement and ledger
+identities, provider and exact settled cost. The cost is the operation total
+(`cost_semantics: operation_total_not_per_artifact`). Neither the response nor
+the receipt contains Gongbu endpoints or storage paths, and image bytes never
+pass through the model.
+
+`artifact_id` may be omitted only when the operation produced exactly one
+artifact; otherwise the error lists the candidate IDs. Saves never overwrite a
+different file: an existing file with other content is refused, while
+re-saving identical bytes returns `already_saved` and refreshes the receipt.
+Nothing is written when verification or accounting checks fail.
+
+`hubu artifact save --operation-handle HANDLE --folder NAME [--artifact-id ID]
+[--name STEM]` is the CLI form using the selected stack profile. A manually
+configured shell can invoke `hubu-unified-mcp artifact save` with the same
+arguments and environment.
+
 ## Demo image gallery
 
 Activate the [Hubu demo gallery skill](../skills/hubu-demo-gallery/SKILL.md) once
@@ -113,6 +155,9 @@ Manual MCP clients configure these inputs for the router:
   reuse, or store failure rejects the call before backend access with no
   allocator fallback. Exact redelivery and restart use the binding already in
   the router registry and do not reread the helper database.
+- `HUBU_UNIFIED_SAVE_FOLDERS_FILE`, an optional absolute path to the
+  human-managed [save folder allowlist](#save-artifacts-into-a-project-folder).
+  Managed setup renders `$HUBU_HOME/save-folders.json`.
 - `HUBU_UNIFIED_HUBU_ENDPOINT`
 - `HUBU_UNIFIED_HUBU_BEARER_TOKEN` or
   `HUBU_UNIFIED_HUBU_BEARER_TOKEN_FILE`

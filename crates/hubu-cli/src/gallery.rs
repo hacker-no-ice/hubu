@@ -1,7 +1,10 @@
 //! Local export delegates to the native adapter, using the selected profile.
-use crate::{stack, CliContext};
+use crate::{save_folders, stack, CliContext};
 use anyhow::{bail, Context, Result};
-use std::{path::PathBuf, process::Command};
+use std::{
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 pub(crate) fn command(context: &CliContext, mut args: Vec<String>) -> Result<()> {
     if args.is_empty() || args.iter().any(|arg| arg == "--help" || arg == "-h") {
@@ -11,20 +14,10 @@ pub(crate) fn command(context: &CliContext, mut args: Vec<String>) -> Result<()>
     if context.has_explicit_base_url() {
         bail!("gallery export uses a stack profile; use hubu-unified-mcp gallery export for manual backend configuration");
     }
-    let mut profile = None;
-    if let Some(index) = args.iter().position(|arg| arg == "--stack-profile") {
-        args.remove(index);
-        if index >= args.len() {
-            bail!("missing value for --stack-profile");
-        }
-        profile = Some(PathBuf::from(args.remove(index)));
-    }
-    let handoff = match profile {
-        Some(profile) => stack::codex_handoff(&profile, &context.hubu_home)?,
-        None => stack::active_client_handoff(&context.hubu_home)?
-            .context("gallery export requires an initialized stack profile")?,
-    };
-    let status = export_command(&handoff, &args)?
+    let handoff = profile_handoff(context, &mut args, "gallery export")?;
+    let mut native_args = vec!["gallery".to_owned()];
+    native_args.extend(args);
+    let status = native_command(&handoff, &context.hubu_home, &native_args)?
         .status()
         .context("could not start native gallery exporter")?;
     if !status.success() {
@@ -33,17 +26,44 @@ pub(crate) fn command(context: &CliContext, mut args: Vec<String>) -> Result<()>
     Ok(())
 }
 
-fn export_command(handoff: &stack::CodexHandoff, args: &[String]) -> Result<Command> {
+/// Resolves `--stack-profile PATH` (removed from `args`) or the active profile.
+pub(crate) fn profile_handoff(
+    context: &CliContext,
+    args: &mut Vec<String>,
+    purpose: &str,
+) -> Result<stack::CodexHandoff> {
+    let mut profile = None;
+    if let Some(index) = args.iter().position(|arg| arg == "--stack-profile") {
+        args.remove(index);
+        if index >= args.len() {
+            bail!("missing value for --stack-profile");
+        }
+        profile = Some(PathBuf::from(args.remove(index)));
+    }
+    match profile {
+        Some(profile) => stack::codex_handoff(&profile, &context.hubu_home),
+        None => stack::active_client_handoff(&context.hubu_home)?
+            .with_context(|| format!("{purpose} requires an initialized stack profile")),
+    }
+}
+
+/// Builds a profile-bound native `hubu-unified-mcp` read command (gallery
+/// export or artifact save). It never starts the MCP server or worker.
+pub(crate) fn native_command(
+    handoff: &stack::CodexHandoff,
+    hubu_home: &Path,
+    args: &[String],
+) -> Result<Command> {
     let gongbu_endpoint = handoff
         .gongbu_endpoint
         .as_ref()
-        .context("gallery export requires a local-stack profile with Gongbu")?;
+        .context("artifact reads require a local-stack profile with Gongbu")?;
     let gongbu_token = handoff
         .gongbu_token_file
         .as_ref()
-        .context("gallery export requires the profile's Gongbu credential")?;
+        .context("artifact reads require the profile's Gongbu credential")?;
     let mut command = Command::new(&handoff.mcp_server);
-    command.arg("gallery").args(args);
+    command.args(args);
     // Profile-bound reads must not inherit credentials or mutation authority from
     // another shell session. The native exporter never starts the MCP worker.
     for name in [
@@ -56,6 +76,7 @@ fn export_command(handoff: &stack::CodexHandoff, args: &[String]) -> Result<Comm
         "HUBU_MCP_TRUST_CLIENT_APPROVAL",
         "HUBU_MCP_TRUST_SPEND_APPROVAL",
         "HUBU_UNIFIED_OPERATION_KEY_DB",
+        save_folders::ENV,
     ] {
         command.env_remove(name);
     }
@@ -70,7 +91,8 @@ fn export_command(handoff: &stack::CodexHandoff, args: &[String]) -> Result<Comm
         .env(
             "HUBU_UNIFIED_OPERATION_STATE_PATH",
             &handoff.operation_state_path,
-        );
+        )
+        .env(save_folders::ENV, save_folders::file_path(hubu_home)?);
     Ok(command)
 }
 
@@ -91,11 +113,12 @@ mod tests {
             gongbu_token_file: Some("/profile/gongbu-token".into()),
         };
         let args = vec![
+            "gallery".into(),
             "export".into(),
             "--operation-handle".into(),
             "op_example".into(),
         ];
-        let command = export_command(&handoff, &args).unwrap();
+        let command = native_command(&handoff, Path::new("/home/.hubu"), &args).unwrap();
         assert_eq!(command.get_program(), handoff.mcp_server.as_os_str());
         assert_eq!(
             command.get_args().collect::<Vec<_>>(),
@@ -117,6 +140,10 @@ mod tests {
             Some(handoff.gongbu_token_file.as_ref().unwrap().as_os_str())
         );
         assert_eq!(
+            environment[std::ffi::OsStr::new(save_folders::ENV)],
+            Some(std::ffi::OsStr::new("/home/.hubu/save-folders.json"))
+        );
+        assert_eq!(
             environment[std::ffi::OsStr::new("HUBU_UNIFIED_HUBU_BEARER_TOKEN")],
             None
         );
@@ -130,6 +157,6 @@ mod tests {
         );
         let mut hubu_only = handoff;
         hubu_only.gongbu_endpoint = None;
-        assert!(export_command(&hubu_only, &args).is_err());
+        assert!(native_command(&hubu_only, Path::new("/home/.hubu"), &args).is_err());
     }
 }

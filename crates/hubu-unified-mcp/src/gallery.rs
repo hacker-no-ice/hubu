@@ -96,11 +96,15 @@ fn parse_options(arguments: Vec<String>) -> Result<Options> {
     Ok(options)
 }
 
-fn read_json(client: &BackendClient, path: &str, query: &[(&str, &str)]) -> Result<Value> {
+pub(crate) fn read_json(
+    client: &BackendClient,
+    path: &str,
+    query: &[(&str, &str)],
+) -> Result<Value> {
     let mut url = client
         .endpoint()
         .join(path.trim_start_matches('/'))
-        .map_err(|_| anyhow!("invalid gallery read route"))?;
+        .map_err(|_| anyhow!("invalid backend read route"))?;
     if !query.is_empty() {
         url.query_pairs_mut().extend_pairs(query.iter().copied());
     }
@@ -108,32 +112,32 @@ fn read_json(client: &BackendClient, path: &str, query: &[(&str, &str)]) -> Resu
         .http_client()
         .get(url)
         .send()
-        .map_err(|_| anyhow!("gallery backend read unavailable"))?;
+        .map_err(|_| anyhow!("backend read unavailable"))?;
     ensure!(
         response.status().is_success(),
-        "gallery backend read rejected (HTTP {})",
+        "backend read rejected (HTTP {})",
         response.status().as_u16()
     );
     let mut bytes = Vec::new();
     response
         .take(JSON_LIMIT + 1)
         .read_to_end(&mut bytes)
-        .map_err(|_| anyhow!("gallery backend response unavailable"))?;
+        .map_err(|_| anyhow!("backend response unavailable"))?;
     ensure!(
         bytes.len() as u64 <= JSON_LIMIT,
-        "gallery JSON response exceeds limit"
+        "backend JSON response exceeds limit"
     );
-    serde_json::from_slice(&bytes).map_err(|_| anyhow!("invalid gallery backend JSON"))
+    serde_json::from_slice(&bytes).map_err(|_| anyhow!("invalid backend JSON"))
 }
 
-fn string<'a>(value: &'a Value, name: &str) -> Result<&'a str> {
+pub(crate) fn string<'a>(value: &'a Value, name: &str) -> Result<&'a str> {
     value
         .get(name)
         .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("missing gallery evidence field {name}"))
+        .ok_or_else(|| anyhow!("missing artifact evidence field {name}"))
 }
 
-fn history_record(client: &BackendClient, id: &str) -> Result<Value> {
+pub(crate) fn history_record(client: &BackendClient, id: &str) -> Result<Value> {
     let value = read_json(
         client,
         "spend/authorizations/show",
@@ -154,7 +158,7 @@ fn history_record(client: &BackendClient, id: &str) -> Result<Value> {
 fn exact_cents(cost: &Value) -> Result<String> {
     ensure!(
         cost["currency"] == "usd",
-        "demo filenames require canonical usd"
+        "exact cost requires canonical usd"
     );
     let raw = string(cost, "amount")?;
     ensure!(
@@ -184,7 +188,7 @@ fn exact_cents(cost: &Value) -> Result<String> {
     Ok(format!("{whole}.{}", fraction.trim_end_matches('0')))
 }
 
-fn ledger_rows(client: &BackendClient, record: &Value) -> Result<Vec<Value>> {
+pub(crate) fn ledger_rows(client: &BackendClient, record: &Value) -> Result<Vec<Value>> {
     let agent = string(record, "agent_id")?;
     let account = string(record, "account_id")?;
     let mut cursor = String::new();
@@ -214,10 +218,7 @@ fn ledger_rows(client: &BackendClient, record: &Value) -> Result<Vec<Value>> {
             "ledger page exceeds advertised maximum"
         );
         rows.extend(transactions.iter().cloned());
-        ensure!(
-            rows.len() <= 10_000,
-            "gallery ledger snapshot exceeds limit"
-        );
+        ensure!(rows.len() <= 10_000, "ledger snapshot exceeds limit");
         match page.get("next_cursor") {
             None | Some(Value::Null) => return Ok(rows),
             Some(Value::String(next)) if !next.is_empty() && seen.insert(next.clone()) => {
@@ -226,10 +227,10 @@ fn ledger_rows(client: &BackendClient, record: &Value) -> Result<Vec<Value>> {
             _ => bail!("invalid or repeating ledger cursor"),
         }
     }
-    bail!("gallery ledger pagination limit exceeded")
+    bail!("ledger pagination limit exceeded")
 }
 
-fn validate_accounting(
+pub(crate) fn validate_accounting(
     record: &Value,
     fresh: &Value,
     rows: &[Value],
@@ -254,7 +255,7 @@ fn validate_accounting(
         .ok_or_else(|| anyhow!("missing ledger links"))?;
     ensure!(
         links.len() == 1,
-        "corrected/multiple ledger postings require gallery reconciliation"
+        "corrected/multiple ledger postings require explicit reconciliation"
     );
     let transaction_id = links[0]
         .as_str()
@@ -293,7 +294,7 @@ fn validate_accounting(
     ))
 }
 
-fn safe_id(id: &str) -> bool {
+pub(crate) fn safe_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 255
         && id
@@ -301,7 +302,7 @@ fn safe_id(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
 }
 
-fn artifact_bytes(
+pub(crate) fn artifact_bytes(
     client: &BackendClient,
     artifact: &Value,
     execution: &str,
@@ -315,12 +316,12 @@ fn artifact_bytes(
     let media = string(artifact, "media_type")?;
     ensure!(
         matches!(media, "image/png" | "image/jpeg"),
-        "unsupported gallery image format"
+        "unsupported artifact image format"
     );
     let expected = artifact["size_bytes"]
         .as_u64()
         .filter(|s| *s > 0 && *s <= IMAGE_LIMIT)
-        .ok_or_else(|| anyhow!("invalid gallery artifact size"))?;
+        .ok_or_else(|| anyhow!("invalid artifact size"))?;
     let digest = string(artifact, "sha256")?;
     ensure!(
         digest.len() == 64
@@ -456,27 +457,27 @@ fn export(config: Config, options: Options) -> Result<Value> {
     )
 }
 
-fn reject_symlink(path: &Path) -> Result<()> {
+pub(crate) fn reject_symlink(path: &Path) -> Result<()> {
     if let Ok(metadata) = fs::symlink_metadata(path) {
         ensure!(
             !metadata.file_type().is_symlink(),
-            "gallery refuses symlink output"
+            "refusing symlink output"
         );
     }
     Ok(())
 }
 
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     reject_symlink(path)?;
     let mut temporary = tempfile::NamedTempFile::new_in(
         path.parent()
-            .ok_or_else(|| anyhow!("invalid gallery path"))?,
+            .ok_or_else(|| anyhow!("invalid output path"))?,
     )?;
     temporary.write_all(bytes)?;
     temporary.as_file().sync_all()?;
     temporary
         .persist(path)
-        .map_err(|_| anyhow!("atomic gallery write failed"))?;
+        .map_err(|_| anyhow!("atomic output write failed"))?;
     Ok(())
 }
 
