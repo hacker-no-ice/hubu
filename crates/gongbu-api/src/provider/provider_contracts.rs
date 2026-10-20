@@ -11,7 +11,7 @@ use thiserror::Error;
 
 const CONTRACT_DOCUMENT: &str = include_str!("../../../../contracts/provider-contracts-v1.json");
 const CONTRACT_DOCUMENT_SHA256: &str =
-    "bb473462a7e2bca3b9633f4a141dfdd8e8972e31d6579ccf22469c618b3875cf";
+    "f617e221ca6153ca1fd0191e3169436e76e0d6b0127a63479fff4cf6b720155a";
 
 #[derive(Debug, Error)]
 pub(crate) enum Error {

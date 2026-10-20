@@ -181,7 +181,7 @@ Never reuse a version label with changed model, credential coordinates, activati
 - `flux2_api` for the Flux 2 API adapter;
 - `fixture` for test/local fixture execution only.
 
-The adapter ID must agree with `targets.settings.type`. Do not infer one from provider marketing text.
+A non-pack adapter ID must agree with `targets.settings.type`. Do not infer one from provider marketing text.
 
 ### `targets.model`
 
@@ -216,7 +216,7 @@ Required boolean. `true` permits a selected active revision to execute new work.
 
 ### `targets.settings`
 
-Required tagged adapter settings. `settings.type` selects the service-owned settings schema and must agree with `targets.adapter`. `settings.config` contains the adapter-specific non-secret transport configuration.
+Required tagged adapter settings. `settings.type` selects the service-owned settings schema; non-pack settings must agree with `targets.adapter`. `settings.config` contains the adapter-specific non-secret configuration.
 
 ```toml
 [targets.settings]
@@ -237,7 +237,7 @@ Fixture settings use only `type = "fixture"` and no config table. Fixture execut
 
 ## Adapter setting fields
 
-The selected `gongbu-server` production validator is authoritative. Unknown adapter-setting fields are rejected.
+The selected `gongbu-server` production validator is authoritative. Unknown adapter-setting fields are rejected. Pack settings take only `pack_id`, `pack_version`, `pack_digest` and `archetype`; the transport fields below do not apply to them, because the pack declares its own transport.
 
 ### `targets.settings.type`
 
@@ -245,7 +245,7 @@ Required tag. Allowed current values are `flux2_api`, `pack`, and `fixture`. Non
 
 ### `targets.settings.config.endpoint`
 
-Required for every non-fixture adapter. **Defined by the provider integration.** Use the expected HTTPS API origin or base endpoint, not a documentation page. Verify the exact path behavior in the adapter's operational guide.
+Required for every adapter except `pack` and `fixture`. **Defined by the provider integration.** Use the expected HTTPS API origin or base endpoint, not a documentation page. Verify the exact path behavior in the adapter's operational guide.
 
 For `flux2_api`, the endpoint must be one of BFL's current documented API
 origins: `https://api.bfl.ai`, `https://api.eu.bfl.ai`, or
@@ -258,11 +258,12 @@ the fixed HTTPS path, query, operation-ID, port, fragment, and redirect checks.
 
 ### `targets.settings.config.api_version`
 
-Required for every non-fixture adapter. **Defined by the provider.** Use the exact API version supported by the selected adapter and model.
+Required for every adapter except `pack` and `fixture`. **Defined by the provider.** Use the exact API version supported by the selected adapter and model.
 
 ### `targets.settings.config.timeout_ms`
 
-Required invocation budget in milliseconds for every non-fixture adapter. The
+Required invocation budget in milliseconds for every adapter except `pack` and
+`fixture`. The
 accepted range is `1..=270000` (up to 270 seconds). It covers the complete
 adapter operation described by its schema, which may include submission,
 polling, and artifact retrieval. For asynchronous FLUX work, Gongbu checkpoints
@@ -272,7 +273,7 @@ the same operation under that deadline and never create a fresh timeout budget.
 ### `targets.settings.config.max_retries`
 
 Optional unsigned integer; defaults to `0`. The only currently accepted value is `0`
-for every non-fixture adapter; Gongbu rejects nonzero values during
+for every adapter except `pack` and `fixture`; Gongbu rejects nonzero values during
 provider-contract validation. Provider generation retries are not enabled even
 when an adapter exposes an idempotency header. Read-only polling of one durably
 checkpointed asynchronous operation is recovery, not a generation retry.

@@ -18,7 +18,7 @@
           "config": {
             "pack_id": "google-gemini-developer-image",
             "pack_version": "2026-10-20.1",
-            "pack_digest": "sha256:194caa40ff41cdbfe8cb039459e6f7a500950b9fdf20d3b9ea4b385dab906737",
+            "pack_digest": "sha256:72e285e35ec4de3d59795600dc7ad237c7d7230063a71d5300cbd8a5c1fcb509",
             "archetype": "sync_fixed"
           }
         }
@@ -67,7 +67,7 @@
           "config": {
             "pack_id": "google-gemini-developer-image",
             "pack_version": "2026-10-20.1",
-            "pack_digest": "sha256:194caa40ff41cdbfe8cb039459e6f7a500950b9fdf20d3b9ea4b385dab906737",
+            "pack_digest": "sha256:72e285e35ec4de3d59795600dc7ad237c7d7230063a71d5300cbd8a5c1fcb509",
             "archetype": "sync_fixed"
           }
         }

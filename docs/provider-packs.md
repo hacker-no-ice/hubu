@@ -280,6 +280,7 @@ whose `type` is `model_output`, then the elements of their `content` whose
 | `request_id_headers` | Optional response headers that carry the provider request ID, checked in order. |
 | `provider_request_id` | Optional body path to the request ID, used when no header carries it. Set it, `request_id_headers`, or both. |
 | `usage` | Map of usage quantity (`images`, `input_tokens`, `output_tokens`, `results`, `pages`, `seconds`) to a path at an integer, at an array whose length counts, or at a filtered selection whose size counts. |
+| `optional_usage` | Optional set of keys already in `usage` that may be absent. Only informational quantities without a declared request `quantity` binding may be optional; repeated entries have set semantics. |
 | `reported_cost` | Optional. A decimal amount in USD, such as `"0.012"`. Ignored by `sync_fixed`, which settles from frozen prices and delivered usage. Other archetypes use the frozen price when the response omits it and send an unreadable reported cost to reconciliation. |
 | `reported_cost_scale` | Optional decimal places to shift the reported cost: `2` when the provider reports one-cent credits. Defaults to `0`. |
 | `artifact_items` | Required path to the artifacts: an array, or a filtered selection. |
@@ -290,12 +291,18 @@ fixed-price call delivers what it was asked for. Map a usage path when the
 provider can return less, such as fewer images than requested; settlement
 then charges only what arrived.
 
-Every declared usage path must be present and have the expected shape. An
+Every required usage path must be present and have the expected shape. An
 unfiltered path must select one nonnegative integer or one array. A path whose
 last segment filters an array counts its matches, including zero matches;
 missing fields and non-array filter inputs still fail validation. Malformed
 or missing declared usage sends the response to reconciliation with its
 provider request ID, instead of treating it as zero or one unit.
+
+For informational telemetry that a provider may omit, list the mapped keys in
+`optional_usage`, such as `["input_tokens", "output_tokens"]` on an image-only
+pack. Missing optional values stay unreported; present values must still have
+the expected shape. Billed quantities, including zero-rate quantities frozen
+into a bundle, cannot be optional.
 
 A response the mapping can't read arrives after the provider accepted the
 work, so the engine sends it to reconciliation and never releases the claim.

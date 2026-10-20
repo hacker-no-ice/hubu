@@ -345,6 +345,10 @@ pub struct ResponseMapping {
     /// Usage quantity → pointer to an integer or an array whose length counts.
     #[serde(default)]
     pub usage: BTreeMap<String, String>,
+    /// Informational usage fields the provider may omit. Priced quantities
+    /// always remain required when mapped.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub optional_usage: BTreeSet<String>,
     /// Pointer to the provider-reported cost, a decimal in major currency units.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reported_cost: Option<String>,
@@ -701,8 +705,13 @@ impl Pack {
         let body = &response.body;
         let mut usage = NormalizedUsage::default();
         for (quantity, path) in &mapping.usage {
-            let count =
-                usage_count(body, path).map_err(|_| ambiguous("pack_response_usage_invalid"))?;
+            let count = match usage_count(body, path) {
+                Ok(count) => count,
+                Err(UsagePathError::Missing) if mapping.optional_usage.contains(quantity) => {
+                    continue
+                }
+                Err(_) => return Err(ambiguous("pack_response_usage_invalid")),
+            };
             *usage_slot(&mut usage, quantity).expect("validated usage quantity") = Some(count);
         }
         for (field, quantity) in USAGE_QUANTITIES {
@@ -1170,6 +1179,26 @@ impl PackDocument {
                 ));
             }
             paths.push(("response.usage", Some(path)));
+        }
+        for quantity in &response.optional_usage {
+            let field = format!("response.optional_usage.{quantity}");
+            if !response.usage.contains_key(quantity) {
+                return Err(invalid(field, "must name a mapped usage quantity"));
+            }
+            let request_quantity = USAGE_QUANTITIES
+                .iter()
+                .find_map(|(usage, request)| (*usage == quantity.as_str()).then_some(*request))
+                .expect("validated usage quantity");
+            if self
+                .parameters
+                .iter()
+                .any(|parameter| parameter.quantity.as_deref() == Some(request_quantity))
+            {
+                return Err(invalid(
+                    field,
+                    "a declared priced quantity cannot have optional usage",
+                ));
+            }
         }
         for (field, path) in paths {
             if path.is_some_and(|path| !valid_path(path)) {
@@ -2632,6 +2661,153 @@ mod tests {
             );
             assert_eq!(failure.evidence.request_id.as_deref(), Some("sbx-req-7f3a"));
         }
+    }
+
+    #[test]
+    fn optional_telemetry_preserves_reported_values_without_inventing_missing_usage() {
+        let pack = Pack::from_toml_str(&edited(
+            "usage = { images = \"/data\" }",
+            "usage = { images = \"/data\", input_tokens = \"/usage/input_tokens\", output_tokens = \"/usage/output_tokens\" }\noptional_usage = [\"input_tokens\", \"output_tokens\"]",
+        ))
+        .unwrap();
+        let request = pack
+            .prepare("image-v1", &json!({"prompt": "x", "image_count": 2}))
+            .unwrap()
+            .request;
+        for reported in [
+            None,
+            Some(json!({})),
+            Some(json!({"input_tokens": 13})),
+            Some(json!({"input_tokens": 0, "output_tokens": 27})),
+        ] {
+            let mut body: Value = serde_json::from_str(RESPONSE).unwrap();
+            if let Some(value) = &reported {
+                body["usage"] = value.clone();
+            }
+            let outcome = pack
+                .map_response(
+                    &request,
+                    &ProviderResponse {
+                        headers: BTreeMap::new(),
+                        body,
+                    },
+                    &Evidence::default(),
+                    &downloads(),
+                    1024,
+                )
+                .unwrap();
+            let usage = outcome.usage.unwrap();
+            assert_eq!(usage.images, Some(2));
+            assert_eq!(
+                usage.input_tokens,
+                reported
+                    .as_ref()
+                    .and_then(|value| value.get("input_tokens"))
+                    .and_then(Value::as_i64)
+            );
+            assert_eq!(
+                usage.output_tokens,
+                reported
+                    .as_ref()
+                    .and_then(|value| value.get("output_tokens"))
+                    .and_then(Value::as_i64)
+            );
+        }
+        for reported in [
+            json!(null),
+            json!({"input_tokens": null}),
+            json!({"input_tokens": "13"}),
+            json!({"input_tokens": true}),
+            json!({"output_tokens": -1}),
+            json!({"output_tokens": 2.5}),
+            json!({"output_tokens": 9_223_372_036_854_775_808_u64}),
+        ] {
+            let mut body: Value = serde_json::from_str(RESPONSE).unwrap();
+            body["usage"] = reported.clone();
+            let failure = pack
+                .map_response(
+                    &request,
+                    &ProviderResponse {
+                        headers: BTreeMap::new(),
+                        body,
+                    },
+                    &Evidence::default(),
+                    &downloads(),
+                    1024,
+                )
+                .unwrap_err();
+            assert_eq!(failure.code, "pack_response_usage_invalid", "{reported}");
+            assert_eq!(
+                failure.spend_disposition,
+                crate::provider_contract::SpendDisposition::Reconcile
+            );
+            assert_eq!(failure.evidence.request_id.as_deref(), Some("sbx-req-7f3a"));
+        }
+    }
+
+    #[test]
+    fn optional_usage_only_names_mapped_informational_quantities() {
+        for (usage, request, unit) in [
+            ("images", "image_count", PricingUnit::Image),
+            ("input_tokens", "input_tokens", PricingUnit::InputToken),
+            (
+                "output_tokens",
+                "max_output_tokens",
+                PricingUnit::OutputToken,
+            ),
+            ("results", "results", PricingUnit::Result),
+            ("pages", "pages", PricingUnit::Page),
+            ("seconds", "seconds", PricingUnit::Second),
+        ] {
+            for zero_rate in [false, true] {
+                let mut document: PackDocument = toml::from_str(FIXTURE).unwrap();
+                document.parameters[1].quantity = Some(request.to_owned());
+                document.response.usage = [(usage.to_owned(), "/data".to_owned())]
+                    .into_iter()
+                    .collect();
+                document.response.optional_usage.insert(usage.to_owned());
+                for rule in &mut document.models[0].pricing_rules {
+                    for component in &mut rule.components {
+                        if component.unit == PricingUnit::Image {
+                            component.unit = unit;
+                            if zero_rate {
+                                component.rate_numerator_minor = 0;
+                            }
+                        }
+                    }
+                }
+                assert_eq!(
+                    Pack::from_toml_str(&toml::to_string(&document).unwrap()).unwrap_err(),
+                    invalid(
+                        format!("response.optional_usage.{usage}"),
+                        "a declared priced quantity cannot have optional usage"
+                    ),
+                    "{usage} zero_rate={zero_rate}"
+                );
+            }
+        }
+        for usage in ["output_tokens", "unknown_quantity"] {
+            let mut document: PackDocument = toml::from_str(FIXTURE).unwrap();
+            document.response.optional_usage.insert(usage.to_owned());
+            assert_eq!(
+                Pack::from_toml_str(&toml::to_string(&document).unwrap()).unwrap_err(),
+                invalid(
+                    format!("response.optional_usage.{usage}"),
+                    "must name a mapped usage quantity"
+                )
+            );
+        }
+        let pack = Pack::from_toml_str(FIXTURE).unwrap();
+        let explicit_empty = Pack::from_toml_str(&edited(
+            "usage = { images = \"/data\" }",
+            "usage = { images = \"/data\" }\noptional_usage = []",
+        ))
+        .unwrap();
+        assert_eq!(pack.digest(), explicit_empty.digest());
+        assert!(serde_json::to_value(&pack.document.response)
+            .unwrap()
+            .get("optional_usage")
+            .is_none());
     }
 
     #[test]

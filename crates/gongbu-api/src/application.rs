@@ -1045,10 +1045,7 @@ pub fn listener_address(listener: &tokio::net::TcpListener) -> std::io::Result<S
 mod tests {
     use super::*;
     use crate::{
-        provider::{
-            contract::PricingCatalog,
-            registry::ProviderRegistry,
-        },
+        provider::{contract::PricingCatalog, registry::ProviderRegistry},
         provider_targets::ProviderTargetConfig,
     };
 
@@ -3041,13 +3038,7 @@ mod tests {
                 })
                 .unwrap()
         };
-        let sync = create(
-            "sync-example",
-            "sync_example",
-            "image-v1",
-            "sync-v1",
-            25,
-        );
+        let sync = create("sync-example", "sync_example", "image-v1", "sync-v1", 25);
         let ambiguous = create("example", "fixture", "image-v1", "example-v1", 30);
         let flux = create("flux", "flux2_api", "flux-2-pro", "flux-v1", 45);
         let root = tempdir().unwrap();
