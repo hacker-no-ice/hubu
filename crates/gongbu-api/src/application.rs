@@ -1036,7 +1036,6 @@ mod tests {
         provider::{
             contract::PricingCatalog,
             gemini_developer_image::{GeminiDeveloperImageAdapter, GeminiDeveloperTransport},
-            ideogram_image::{IdeogramImageAdapter, IdeogramTransport},
             registry::ProviderRegistry,
         },
         provider_targets::ProviderTargetConfig,
@@ -1664,164 +1663,6 @@ mod tests {
         }
         assert_eq!(hubu.claims.load(Ordering::SeqCst), 1);
         assert_eq!(calls.0.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn fixture_ideogram_uses_frozen_price_and_durable_artifact_pipeline() {
-        use crate::{
-            artifact::{ArtifactLimits, LocalFsStorage},
-            execution::{CreateExecutionParams, HubuTokenReference},
-            provider::ideogram_image::TransportResponse,
-            secrets::{ProviderSecret, SecretError, SecretReference},
-        };
-        use image::{DynamicImage, ImageOutputFormat, RgbaImage};
-        use serde_json::json;
-        use std::{
-            io::Cursor,
-            sync::atomic::{AtomicUsize, Ordering},
-            time::Duration,
-        };
-        use tempfile::tempdir;
-
-        struct Secrets;
-        impl SecretProvider for Secrets {
-            fn resolve(&self, _: &SecretReference) -> Result<ProviderSecret, SecretError> {
-                Ok(crate::secrets::secret_for_test("ideogram-fixture-secret"))
-            }
-        }
-        struct Transport(AtomicUsize, Vec<u8>);
-        impl IdeogramTransport for Transport {
-            fn generate(
-                &self,
-                _: &reqwest::Url,
-                _: &[u8],
-                _: Duration,
-                _: &std::collections::BTreeMap<String, String>,
-                _: &serde_json::Value,
-            ) -> Result<TransportResponse, Box<dyn std::error::Error + Send + Sync>> {
-                self.0.fetch_add(1, Ordering::SeqCst);
-                Ok(TransportResponse {
-                    status: 200,
-                    request_id: Some("ideogram-request-1".into()),
-                    operation_id: Some("ideogram-generation-1".into()),
-                    body: json!({"data":[{"url":"https://ideogram.ai/output.png"}]}),
-                })
-            }
-            fn fetch_artifact(
-                &self,
-                _: &reqwest::Url,
-                _: Duration,
-                _: usize,
-            ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
-                Ok(self.1.clone())
-            }
-        }
-        #[derive(Default)]
-        struct Hubu(AtomicUsize);
-        impl HubuActivities for Hubu {
-            fn preflight(&self, _: &Execution) -> Result<(), WorkflowActivityError> {
-                Ok(())
-            }
-            fn claim(&self, _: &Execution) -> Result<String, WorkflowActivityError> {
-                unreachable!()
-            }
-            fn validate_claim(&self, _: &Execution) -> Result<(), WorkflowActivityError> {
-                Ok(())
-            }
-            fn settle(
-                &self,
-                _: &Execution,
-                _: &str,
-                amount_minor: i64,
-            ) -> Result<String, WorkflowActivityError> {
-                assert_eq!(amount_minor, 30_0000);
-                self.0.fetch_add(1, Ordering::SeqCst);
-                Ok("settlement-1".into())
-            }
-            fn release(&self, _: &Execution) -> Result<(), WorkflowActivityError> {
-                unreachable!()
-            }
-        }
-
-        let mut png = Vec::new();
-        DynamicImage::ImageRgba8(RgbaImage::new(1, 1))
-            .write_to(&mut Cursor::new(&mut png), ImageOutputFormat::Png)
-            .unwrap();
-        let transport = Arc::new(Transport(AtomicUsize::new(0), png.clone()));
-        let targets: ProviderTargetConfig = serde_json::from_value(json!({"provider_configs":[{
-            "provider_config_version":"ideogram-pcv-1","workload_type":"image_generation","provider":"ideogram","adapter":"ideogram_image","model":"ideogram-v3","secret_service":"gongbu.ideogram","secret_account":"fixture","ideogram_image":{"endpoint":"https://api.ideogram.ai","api_version":"v1","timeout_ms":1000,"max_retries":0,"approved_artifact_hosts":["ideogram.ai"]}
-        }]})).unwrap();
-        targets.validate().unwrap();
-        let repository = Repository::in_memory().unwrap();
-        let execution = repository.create_execution(&CreateExecutionParams {
-            account_id:"account".into(), operation_key:"ideogram-workflow".into(), hubu_authorization_id:"token-ref".into(), hubu_claim_id:Some("claim".into()), hubu_token_reference:HubuTokenReference::new("token-ref").unwrap(), authorized_units:30_0000, authorization_currency:"USD".into(), normalized_input:json!({"prompt":"draw a cat","image_count":1}), input_hash:"hash".into(), input_schema_version:1, target:"image_generation/ideogram/ideogram_image/ideogram-v3".into(), config_version:"ideogram-pcv-1".into(), workload_type:"image_generation".into(), provider:"ideogram".into(), adapter:"ideogram_image".into(), model:"ideogram-v3".into(), provider_config_version:"ideogram-pcv-1".into(), provider_config_digest:targets.resolve("image_generation","ideogram","ideogram_image","ideogram-v3").unwrap().digest().to_owned(), pricing_snapshot:json!({"schema_version":2,"provider":"ideogram","model":"ideogram-v3","catalog_version":"prices-v2","catalog_digest":format!("sha256:{}", "a".repeat(64)),"pricing_rule_id":"ideogram-image","components":[{"unit":"image","rate_numerator_minor":30,"rate_denominator":1,"quantity":1}],"exact_estimate_numerator":"30","exact_estimate_denominator":"1","estimated_amount_minor":30,"currency":"USD"}), pricing_schema_version:2, execution_scope:None, created_at:"now".into()
-        }).unwrap();
-        let root = tempdir().unwrap();
-        let artifacts = ArtifactService::new(
-            repository.clone(),
-            LocalFsStorage::new(root.path()),
-            ArtifactLimits::default(),
-        );
-        let hubu = Arc::new(Hubu::default());
-        let mut registry = ProviderRegistry::new();
-        let fixture_transport = transport.clone();
-        registry.register("ideogram", "ideogram_image", move |target| {
-            Ok(Arc::new(IdeogramImageAdapter::new(
-                target.ideogram_image().cloned().unwrap(),
-                target.model.clone(),
-                fixture_transport.clone(),
-            )?))
-        });
-        let pricing = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"prices-v2","rules":[{"rule_id":"ideogram-image","provider":"ideogram","model":"ideogram-v3","currency":"USD","components":[{"unit":"image","rate_numerator_minor":30,"rate_denominator":1}]}]}"#).unwrap();
-        let providers = ValidatedProviderCatalog::bind(targets, pricing, &registry).unwrap();
-        let runner = PersistedExecutionRunner::new(
-            repository.clone(),
-            hubu.clone(),
-            Arc::new(GenericProviderActivities::new(
-                repository.clone(),
-                providers,
-                Arc::new(Secrets),
-            )),
-            Arc::new(ArtifactServiceActivities::new(artifacts.clone(), || {
-                "now".into()
-            })),
-            || "now".into(),
-        );
-        assert_eq!(
-            runner.run_execution(&execution.execution_id).unwrap(),
-            "succeeded"
-        );
-        assert_eq!(transport.0.load(Ordering::SeqCst), 1);
-        assert_eq!(hubu.0.load(Ordering::SeqCst), 1);
-        let attempt = repository
-            .get_provider_attempt_for_execution(&execution.execution_id)
-            .unwrap();
-        assert_eq!(
-            attempt.provider_request_id.as_deref(),
-            Some("ideogram-request-1")
-        );
-        assert_eq!(
-            attempt.provider_operation_id.as_deref(),
-            Some("ideogram-generation-1")
-        );
-        let stored = artifacts
-            .list_for_account(&execution.execution_id, "account")
-            .unwrap();
-        assert_eq!(stored.len(), 1);
-        assert_eq!(
-            artifacts
-                .retrieve_for_account(&stored[0].artifact_id, "account")
-                .unwrap()
-                .bytes,
-            png
-        );
-        assert_eq!(
-            repository
-                .get_receipt_for_execution(&execution.execution_id)
-                .unwrap()
-                .settlement_units,
-            30_0000
-        );
     }
 
     #[test]
@@ -2564,11 +2405,11 @@ mod tests {
             "schema_version": 2,
             "provider_configs": [
                 {"provider_config_version":"google-v1","workload_type":"image_generation","provider":"google","adapter":"gemini_developer_image","model":"gemini-3.1-flash-lite-image","secret_service":"gongbu.google","secret_account":"gemini","active":true,"execution_enabled":true,"settings":{"type":"gemini_developer_image","config":{"endpoint":"https://generativelanguage.googleapis.com","api_version":"v1beta","timeout_ms":1000}}},
-                {"provider_config_version":"ideogram-v1","workload_type":"image_generation","provider":"ideogram","adapter":"ideogram_image","model":"ideogram-v3","secret_service":"gongbu.ideogram","secret_account":"ideogram","active":true,"execution_enabled":true,"settings":{"type":"ideogram_image","config":{"endpoint":"https://ideogram.example","api_version":"v1","timeout_ms":1000,"approved_artifact_hosts":["ideogram.example"]}}},
+                {"provider_config_version":"example-v1","workload_type":"image_generation","provider":"example","adapter":"fixture","model":"image-v1","secret_service":"gongbu.example","secret_account":"example","active":true,"execution_enabled":true,"settings":{"type":"fixture"}},
                 {"provider_config_version":"flux-v1","workload_type":"image_generation","provider":"flux","adapter":"flux2_api","model":"flux-2-pro","secret_service":"gongbu.flux","secret_account":"flux","active":true,"execution_enabled":true,"settings":{"type":"flux2_api","config":{"endpoint":"https://api.bfl.ai","api_version":"v1","timeout_ms":1000,"poll_interval_ms":10,"idempotency_header":"x-idempotency-key","approved_artifact_hosts":[]}}}
             ]
         })).unwrap();
-        let pricing = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"mixed-v2","rules":[{"rule_id":"g","provider":"google","model":"gemini-3.1-flash-lite-image","currency":"USD","components":[{"unit":"image","rate_numerator_minor":25,"rate_denominator":1}]},{"rule_id":"i","provider":"ideogram","model":"ideogram-v3","currency":"USD","components":[{"unit":"image","rate_numerator_minor":30,"rate_denominator":1}]},{"rule_id":"f-1k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"1k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":45,"rate_denominator":1}]},{"rule_id":"f-2k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"2k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":90,"rate_denominator":1}]},{"rule_id":"f-4k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"4k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":180,"rate_denominator":1}]}]}"#).unwrap();
+        let pricing = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"mixed-v2","rules":[{"rule_id":"g","provider":"google","model":"gemini-3.1-flash-lite-image","currency":"USD","components":[{"unit":"image","rate_numerator_minor":25,"rate_denominator":1}]},{"rule_id":"e","provider":"example","model":"image-v1","currency":"USD","components":[{"unit":"image","rate_numerator_minor":30,"rate_denominator":1}]},{"rule_id":"f-1k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"1k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":45,"rate_denominator":1}]},{"rule_id":"f-2k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"2k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":90,"rate_denominator":1}]},{"rule_id":"f-4k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"4k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":180,"rate_denominator":1}]}]}"#).unwrap();
         let mut png = Vec::new();
         DynamicImage::ImageRgba8(RgbaImage::new(1, 1))
             .write_to(&mut Cursor::new(&mut png), ImageOutputFormat::Png)
@@ -2577,7 +2418,7 @@ mod tests {
         let mut registry = ProviderRegistry::new();
         for (provider, id, ambiguous) in [
             ("google", "gemini_developer_image", false),
-            ("ideogram", "ideogram_image", true),
+            ("example", "fixture", true),
             ("flux", "flux2_api", false),
         ] {
             let calls = calls.clone();
@@ -2662,13 +2503,7 @@ mod tests {
             "google-v1",
             25,
         );
-        let ideogram = create(
-            "ideogram",
-            "ideogram_image",
-            "ideogram-v3",
-            "ideogram-v1",
-            30,
-        );
+        let ambiguous = create("example", "fixture", "image-v1", "example-v1", 30);
         let flux = create("flux", "flux2_api", "flux-2-pro", "flux-v1", 45);
         let root = tempdir().unwrap();
         let artifacts = ArtifactService::new(
@@ -2692,7 +2527,7 @@ mod tests {
             "succeeded"
         );
         assert_eq!(
-            runner.run_execution(&ideogram.execution_id, None).unwrap(),
+            runner.run_execution(&ambiguous.execution_id, None).unwrap(),
             "reconciliation_required"
         );
         assert_eq!(
@@ -2704,7 +2539,7 @@ mod tests {
             "succeeded"
         );
         assert_eq!(
-            runner.run_execution(&ideogram.execution_id, None).unwrap(),
+            runner.run_execution(&ambiguous.execution_id, None).unwrap(),
             "reconciliation_required"
         );
         assert_eq!(
@@ -2714,7 +2549,7 @@ mod tests {
 
         let counts = calls.counts.lock().unwrap();
         assert_eq!(counts.get("gemini_developer_image"), Some(&1));
-        assert_eq!(counts.get("ideogram_image"), Some(&1));
+        assert_eq!(counts.get("fixture"), Some(&1));
         assert_eq!(counts.get("flux2_api"), Some(&1));
         drop(counts);
         let expected_key =
@@ -2727,7 +2562,7 @@ mod tests {
         let resolved = secrets.0.lock().unwrap();
         for expected in [
             ("gongbu.google", "gemini"),
-            ("gongbu.ideogram", "ideogram"),
+            ("gongbu.example", "example"),
             ("gongbu.flux", "flux"),
         ] {
             assert_eq!(
@@ -2755,7 +2590,7 @@ mod tests {
             1
         );
         assert!(artifacts
-            .list_for_account(&ideogram.execution_id, "account")
+            .list_for_account(&ambiguous.execution_id, "account")
             .unwrap()
             .is_empty());
         let gemini_attempt = repository
