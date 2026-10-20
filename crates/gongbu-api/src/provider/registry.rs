@@ -11,6 +11,7 @@ use super::{
         PROVIDER_ID as GEMINI_DEVELOPER_PROVIDER_ID,
     },
     pack::{Archetype, Pack},
+    pack_sync::SyncFixedEngine,
     provider_contracts::{self, CatalogContract},
     targets::{AdapterSettings, ProviderConfigVersion, ProviderTargetConfig, TargetKey},
 };
@@ -108,6 +109,13 @@ impl ProviderRegistry {
         registry.register(FLUX_PROVIDER_ID, FLUX_ADAPTER_ID, move |target| {
             Ok(Arc::new(Flux2ApiAdapter::from_target_with_artifact_limit(
                 target,
+                max_artifact_bytes,
+            )?))
+        });
+        registry.register_pack_engine(Archetype::SyncFixed, move |target, pack| {
+            Ok(Arc::new(SyncFixedEngine::from_target(
+                target,
+                pack,
                 max_artifact_bytes,
             )?))
         });

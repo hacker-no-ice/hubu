@@ -32,6 +32,19 @@ use thiserror::Error;
 
 pub const PACK_SCHEMA_VERSION: u32 = 1;
 
+/// Template placeholder that expands to the target's model ID.
+const MODEL_PLACEHOLDER: &str = "model";
+
+/// Usage fields and the request quantity each one settles against.
+const USAGE_QUANTITIES: &[(&str, &str)] = &[
+    ("images", "image_count"),
+    ("input_tokens", "input_tokens"),
+    ("output_tokens", "max_output_tokens"),
+    ("results", "results"),
+    ("pages", "pages"),
+    ("seconds", "seconds"),
+];
+
 /// Artifact media types the Gongbu artifact store accepts today.
 const PACK_ARTIFACT_MEDIA_TYPES: &[&str] = &["image/png", "image/jpeg"];
 
@@ -143,6 +156,8 @@ struct PackDocument {
     adapter: Option<String>,
     pricing_trust: PricingTrust,
     transport: Transport,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    request: Option<RequestTemplate>,
     #[serde(default)]
     parameters: Vec<Parameter>,
     #[serde(default)]
@@ -164,6 +179,44 @@ pub struct Transport {
     pub timeout_ms: u64,
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "AuthScheme::is_raw")]
+    pub auth_scheme: AuthScheme,
+}
+
+/// How the credential is written into `auth_header`.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthScheme {
+    /// The secret as is.
+    #[default]
+    Raw,
+    /// `Bearer <secret>`.
+    Bearer,
+}
+
+impl AuthScheme {
+    fn is_raw(&self) -> bool {
+        *self == Self::Raw
+    }
+    pub fn header_value(self, secret: &str) -> String {
+        match self {
+            Self::Raw => secret.to_owned(),
+            Self::Bearer => format!("Bearer {secret}"),
+        }
+    }
+}
+
+/// The provider request an engine sends: a JSON POST to `path` on the
+/// endpoint. `body` is a template; a string that is exactly `{{name}}`
+/// becomes the typed value of parameter `name` (or the model ID for
+/// `{{model}}`), `{{name|upper}}` and `{{name|lower}}` change a string's case,
+/// and a key whose placeholder has no value is left out.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RequestTemplate {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<Map<String, Value>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -204,11 +257,18 @@ pub enum ParameterKind {
     Enum,
 }
 
-/// JSON Pointers (RFC 6901) into the provider's response.
+/// Response paths into the provider's JSON body. A path is a JSON Pointer
+/// whose segments may filter an array, as in `/steps[type=model_output]`,
+/// which keeps the elements of `steps` whose `type` is `model_output`.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ResponseMapping {
-    pub provider_request_id: String,
+    /// Response headers that carry the provider request ID, checked in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub request_id_headers: Vec<String>,
+    /// Body path to the provider request ID, used when no header carries it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_request_id: Option<String>,
     /// Usage quantity → pointer to an integer or an array whose length counts.
     #[serde(default)]
     pub usage: BTreeMap<String, String>,
@@ -411,7 +471,8 @@ impl Pack {
             return Err(indeterminable());
         }
         let mut request = NormalizedRequest::new(&self.document.provider, &model.model);
-        let mut body = self.document.fixed.clone();
+        let mut values = BTreeMap::from([(MODEL_PLACEHOLDER.to_owned(), json!(model.model))]);
+        let mut flat = self.document.fixed.clone();
         for parameter in &self.document.parameters {
             let value = match input.get(&parameter.name).or(parameter.default.as_ref()) {
                 Some(value) => value.clone(),
@@ -429,95 +490,155 @@ impl Pack {
                     .selector
                     .insert(key, value.as_str().ok_or_else(indeterminable)?);
             }
-            body.insert(parameter.field().to_owned(), value);
+            flat.insert(parameter.field().to_owned(), value.clone());
+            values.insert(parameter.name.clone(), value);
         }
         request.validate()?;
-        Ok(PreparedRequest {
-            request,
-            body: Value::Object(body),
-        })
+        let body = match self.document.request.as_ref().and_then(|r| r.body.as_ref()) {
+            Some(template) => render_template(&Value::Object(template.clone()), &values)
+                .ok_or_else(indeterminable)?,
+            None => Value::Object(flat),
+        };
+        Ok(PreparedRequest { request, body })
     }
 
-    /// Map a provider response to a normalized outcome. Anything the mapping
-    /// cannot read is an ambiguous outcome: the provider accepted the work.
-    pub fn map_response(
-        &self,
-        response: &Value,
-        downloads: &dyn ArtifactSource,
-    ) -> Result<AdapterOutcome, ProviderFailure> {
+    /// The provider request URL: the endpoint plus the declared request path.
+    pub fn request_url(&self) -> Url {
+        let mut url = Url::parse(&self.document.transport.endpoint).expect("validated endpoint");
+        url.set_path(
+            self.document
+                .request
+                .as_ref()
+                .map_or("/", |request| request.path.as_str()),
+        );
+        url
+    }
+
+    /// The provider's request ID: the first declared header present, else the
+    /// declared body path.
+    pub fn provider_request_id(&self, response: &ProviderResponse) -> Option<String> {
         let mapping = &self.document.response;
-        let ambiguous =
-            |code: &str| ProviderFailure::reconcile(code.to_owned(), ProviderPhase::Processing);
-        let provider_request_id = response
-            .pointer(&mapping.provider_request_id)
-            .and_then(|value| match value {
-                Value::String(s) => Some(s.trim().to_owned()),
-                Value::Number(n) => Some(n.to_string()),
-                _ => None,
+        mapping
+            .request_id_headers
+            .iter()
+            .find_map(|name| response.headers.get(&name.to_ascii_lowercase()).cloned())
+            .or_else(|| {
+                mapping.provider_request_id.as_deref().and_then(|path| {
+                    select_path(&response.body, path)
+                        .first()
+                        .and_then(|value| match value {
+                            Value::String(s) => Some(s.trim().to_owned()),
+                            Value::Number(n) => Some(n.to_string()),
+                            _ => None,
+                        })
+                })
             })
             .filter(|id| !id.is_empty() && id.len() <= 255)
+    }
+
+    /// Map a successful provider response to a normalized outcome. Anything the
+    /// mapping cannot read is an ambiguous outcome, because the provider
+    /// accepted the work; every failure keeps the request ID as evidence.
+    ///
+    /// Usage the pack does not map settles at the requested quantity: a
+    /// fixed-price call delivers what it was asked for unless the response
+    /// reports less.
+    pub fn map_response(
+        &self,
+        request: &NormalizedRequest,
+        response: &ProviderResponse,
+        downloads: &dyn ArtifactSource,
+        max_artifact_bytes: usize,
+    ) -> Result<AdapterOutcome, ProviderFailure> {
+        let mapping = &self.document.response;
+        let request_id = self.provider_request_id(response);
+        let fail = |code: &str, phase: ProviderPhase| {
+            ProviderFailure::reconcile(code.to_owned(), phase)
+                .with_evidence(request_id.clone(), None)
+        };
+        let ambiguous = |code: &str| fail(code, ProviderPhase::Processing);
+        let provider_request_id = request_id
+            .clone()
             .ok_or_else(|| ambiguous("pack_response_request_id_missing"))?;
+        let body = &response.body;
         let mut usage = NormalizedUsage::default();
-        for (quantity, pointer) in &mapping.usage {
-            let count = match response.pointer(pointer) {
-                Some(Value::Array(items)) => i64::try_from(items.len()).ok(),
-                Some(value) => value.as_i64().filter(|v| *v >= 0),
-                None => None,
-            }
-            .ok_or_else(|| ambiguous("pack_response_usage_invalid"))?;
+        for (quantity, path) in &mapping.usage {
+            let count =
+                usage_count(body, path).map_err(|_| ambiguous("pack_response_usage_invalid"))?;
             *usage_slot(&mut usage, quantity).expect("validated usage quantity") = Some(count);
         }
-        let actual_vendor_cost = match &mapping.reported_cost {
-            None => None,
-            Some(pointer) => Some(
-                response
-                    .pointer(pointer)
-                    .and_then(decimal_cost)
-                    .ok_or_else(|| ambiguous("pack_response_cost_invalid"))?,
-            ),
+        for (field, quantity) in USAGE_QUANTITIES {
+            let slot = usage_slot(&mut usage, field).expect("known usage quantity");
+            if slot.is_none() {
+                *slot = request.quantity(quantity);
+            }
+        }
+        // Fixed-price settlement uses frozen prices and delivered usage;
+        // a provider-controlled amount must never override that calculation.
+        let actual_vendor_cost = if self.archetype() == Archetype::SyncFixed {
+            None
+        } else {
+            match &mapping.reported_cost {
+                None => None,
+                Some(path) => Some(
+                    select_path(body, path)
+                        .first()
+                        .and_then(|value| decimal_cost(value))
+                        .ok_or_else(|| ambiguous("pack_response_cost_invalid"))?,
+                ),
+            }
         };
-        let items = response
-            .pointer(&mapping.artifact_items)
-            .and_then(Value::as_array)
-            .filter(|items| !items.is_empty())
-            .ok_or_else(|| ambiguous("pack_response_artifacts_missing"))?;
+        let items = match select_path(body, &mapping.artifact_items).as_slice() {
+            [Value::Array(items)] => items.iter().collect::<Vec<_>>(),
+            items => items.to_vec(),
+        };
+        if items.is_empty() {
+            return Err(ambiguous("pack_response_artifacts_missing"));
+        }
+        let policy_failure = || fail("artifact_policy_failure", ProviderPhase::Artifact);
         let mut artifacts = Vec::with_capacity(items.len());
         for item in items {
-            let (media_type, bytes) = if let Some(pointer) = &mapping.artifact_base64 {
-                let encoded = item
-                    .pointer(pointer)
-                    .and_then(Value::as_str)
+            let bytes = if let Some(path) = &mapping.artifact_base64 {
+                let encoded = select_path(item, path)
+                    .first()
+                    .and_then(|value| value.as_str())
                     .ok_or_else(|| ambiguous("pack_response_artifact_invalid"))?;
-                let bytes = base64::engine::general_purpose::STANDARD
+                if encoded.len() > max_artifact_bytes.saturating_mul(4).div_ceil(3) {
+                    return Err(policy_failure());
+                }
+                base64::engine::general_purpose::STANDARD
                     .decode(encoded)
-                    .map_err(|_| ambiguous("pack_response_artifact_invalid"))?;
-                (sniff_media_type(&bytes), bytes)
+                    .map_err(|_| ambiguous("pack_response_artifact_invalid"))?
             } else {
-                let pointer = mapping.artifact_url.as_deref().expect("validated mapping");
-                let url = item
-                    .pointer(pointer)
-                    .and_then(Value::as_str)
+                let path = mapping.artifact_url.as_deref().expect("validated mapping");
+                let url = select_path(item, path)
+                    .first()
+                    .and_then(|value| value.as_str())
                     .and_then(|raw| Url::parse(raw).ok())
                     .ok_or_else(|| ambiguous("pack_response_artifact_invalid"))?;
                 if url.scheme() != "https"
                     || !url.username().is_empty()
                     || url.password().is_some()
                     || url.port().is_some()
+                    || url.fragment().is_some()
                     || !url
                         .host_str()
                         .is_some_and(|host| self.document.artifacts.hosts.iter().any(|h| h == host))
                 {
-                    return Err(ProviderFailure::reconcile(
-                        "artifact_policy_failure",
-                        ProviderPhase::Artifact,
-                    ));
+                    return Err(policy_failure());
                 }
-                let bytes = downloads.fetch(&url).ok_or_else(|| {
-                    ProviderFailure::reconcile("artifact_fetch_failed", ProviderPhase::Artifact)
-                })?;
-                (sniff_media_type(&bytes), bytes)
+                match downloads.fetch(&url, max_artifact_bytes) {
+                    Ok(bytes) => bytes,
+                    Err(ArtifactFetchError::TooLarge) => return Err(policy_failure()),
+                    Err(ArtifactFetchError::Failed) => {
+                        return Err(fail("artifact_fetch_failed", ProviderPhase::Artifact))
+                    }
+                }
             };
-            let media_type = media_type
+            if bytes.len() > max_artifact_bytes {
+                return Err(policy_failure());
+            }
+            let media_type = sniff_media_type(&bytes)
                 .filter(|media| {
                     self.document
                         .artifacts
@@ -525,9 +646,7 @@ impl Pack {
                         .iter()
                         .any(|m| m == media)
                 })
-                .ok_or_else(|| {
-                    ProviderFailure::reconcile("artifact_policy_failure", ProviderPhase::Artifact)
-                })?;
+                .ok_or_else(policy_failure)?;
             artifacts.push(NormalizedArtifact {
                 media_type: media_type.to_owned(),
                 bytes,
@@ -550,10 +669,25 @@ pub struct PreparedRequest {
     pub body: Value,
 }
 
-/// Downloads artifact bytes from an already allowlisted URL.
+/// A provider response as an engine received it: lowercase header names and
+/// the parsed JSON body.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProviderResponse {
+    pub headers: BTreeMap<String, String>,
+    pub body: Value,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArtifactFetchError {
+    /// The artifact is larger than the engine's artifact bound.
+    TooLarge,
+    Failed,
+}
+
+/// Downloads artifact bytes from an already allowlisted URL, never sending
+/// credentials and never reading past `max_bytes`.
 pub trait ArtifactSource {
-    /// `None` when the bytes could not be fetched.
-    fn fetch(&self, url: &Url) -> Option<Vec<u8>>;
+    fn fetch(&self, url: &Url, max_bytes: usize) -> Result<Vec<u8>, ArtifactFetchError>;
 }
 
 impl Parameter {
@@ -601,6 +735,12 @@ impl Parameter {
             return Err(invalid(
                 format!("{field}.name"),
                 "must be a lowercase identifier",
+            ));
+        }
+        if self.name == MODEL_PLACEHOLDER {
+            return Err(invalid(
+                format!("{field}.name"),
+                "model is reserved for the selected target's model ID",
             ));
         }
         if self
@@ -658,7 +798,7 @@ impl Parameter {
                 || unique.len() != self.values.len()
                 || self.values.iter().any(|value| {
                     let mut selector = PricingSelector::default();
-                    selector.insert("value", value.as_str());
+                    selector.insert(self.selector.as_deref().unwrap_or("value"), value.as_str());
                     selector.normalized().ok().as_ref() != Some(&selector)
                 })
             {
@@ -682,15 +822,15 @@ impl Parameter {
                 ));
             }
         }
-        if let Some(selector) = &self.selector {
-            let mut probe = PricingSelector::default();
-            probe.insert(selector.as_str(), "probe");
-            if probe.normalized().is_err() {
-                return Err(invalid(
-                    format!("{field}.selector"),
-                    "must be a lowercase identifier",
-                ));
-            }
+        if self
+            .selector
+            .as_deref()
+            .is_some_and(|key| !valid_field_name(key))
+        {
+            return Err(invalid(
+                format!("{field}.selector"),
+                "must be a lowercase identifier",
+            ));
         }
         if self.required && self.default.is_some() {
             return Err(invalid(
@@ -789,6 +929,7 @@ impl PackDocument {
                 "collides with a parameter field",
             ));
         }
+        self.validate_request()?;
         self.validate_response()?;
         self.validate_artifacts()?;
         self.validate_models(&quantities, &selectors)
@@ -853,10 +994,10 @@ impl PackDocument {
 
     fn validate_response(&self) -> Result<(), PackError> {
         let response = &self.response;
-        let mut pointers = vec![
+        let mut paths = vec![
             (
                 "response.provider_request_id",
-                Some(&response.provider_request_id),
+                response.provider_request_id.as_ref(),
             ),
             ("response.reported_cost", response.reported_cost.as_ref()),
             ("response.artifact_items", Some(&response.artifact_items)),
@@ -866,25 +1007,118 @@ impl PackDocument {
                 response.artifact_base64.as_ref(),
             ),
         ];
-        for (quantity, pointer) in &response.usage {
-            if usage_slot(&mut NormalizedUsage::default(), quantity).is_none() {
+        for (quantity, path) in &response.usage {
+            if !USAGE_QUANTITIES.iter().any(|(field, _)| field == quantity) {
                 return Err(invalid(
                     format!("response.usage.{quantity}"),
                     "is not a usage quantity (images, input_tokens, output_tokens, results, pages, seconds)",
                 ));
             }
-            pointers.push(("response.usage", Some(pointer)));
+            paths.push(("response.usage", Some(path)));
         }
-        for (field, pointer) in pointers {
-            if pointer.is_some_and(|p| !(p.is_empty() || p.starts_with('/')) || p.len() > 256) {
-                return Err(invalid(field, "must be a JSON Pointer such as /data/0/url"));
+        for (field, path) in paths {
+            if path.is_some_and(|path| !valid_path(path)) {
+                return Err(invalid(
+                    field,
+                    "must be a response path such as /data/0/url or /steps[type=image]",
+                ));
             }
+        }
+        if response.provider_request_id.is_none() && response.request_id_headers.is_empty() {
+            return Err(invalid(
+                "response",
+                "set provider_request_id, request_id_headers, or both",
+            ));
+        }
+        if response
+            .request_id_headers
+            .iter()
+            .any(|name| name.parse::<HeaderName>().is_err())
+        {
+            return Err(invalid(
+                "response.request_id_headers",
+                "must be HTTP header names",
+            ));
         }
         if response.artifact_url.is_some() == response.artifact_base64.is_some() {
             return Err(invalid(
                 "response",
                 "set exactly one of artifact_url or artifact_base64",
             ));
+        }
+        Ok(())
+    }
+
+    fn validate_request(&self) -> Result<(), PackError> {
+        let Some(request) = &self.request else {
+            return Ok(());
+        };
+        let path_ok = request.path.starts_with('/')
+            && request.path.len() <= 256
+            && !request.path.contains(['?', '#', '\\'])
+            && !request.path.split('/').any(|segment| segment == "..")
+            && Url::parse(&self.transport.endpoint)
+                .ok()
+                .is_some_and(|mut url| {
+                    url.set_path(&request.path);
+                    url.path() == request.path
+                });
+        if !path_ok {
+            return Err(invalid(
+                "request.path",
+                "must be an absolute path with no query, fragment or '..'",
+            ));
+        }
+        let Some(body) = &request.body else {
+            return Ok(());
+        };
+        if !self.fixed.is_empty() {
+            return Err(invalid(
+                "fixed",
+                "use request.body instead when a body template is set",
+            ));
+        }
+        if let Some(index) = self.parameters.iter().position(|p| p.field.is_some()) {
+            return Err(invalid(
+                format!("parameters[{index}].field"),
+                "use a request.body placeholder instead when a body template is set",
+            ));
+        }
+        let mut referenced = BTreeSet::new();
+        collect_placeholders(&Value::Object(body.clone()), &mut referenced)
+            .map_err(|reason| invalid("request.body", reason))?;
+        for (name, transform) in &referenced {
+            let parameter = self.parameters.iter().find(|p| &p.name == name);
+            if name != MODEL_PLACEHOLDER && parameter.is_none() {
+                return Err(invalid(
+                    "request.body",
+                    format!("{{{{{name}}}}} names no declared parameter"),
+                ));
+            }
+            if transform.is_some()
+                && parameter
+                    .is_some_and(|p| !matches!(p.kind, ParameterKind::String | ParameterKind::Enum))
+            {
+                return Err(invalid(
+                    "request.body",
+                    format!("{{{{{name}}}}} can change case only on a string parameter"),
+                ));
+            }
+        }
+        // A parameter the provider never receives must not change the price
+        // or what was asked: only a constant may stay out of the body.
+        for (index, parameter) in self.parameters.iter().enumerate() {
+            let constant = match parameter.kind {
+                ParameterKind::Integer => parameter.min.is_some() && parameter.min == parameter.max,
+                ParameterKind::Enum => parameter.values.len() == 1,
+                _ => false,
+            };
+            if !constant && !referenced.iter().any(|(name, _)| name == &parameter.name) {
+                return Err(invalid(
+                    format!("parameters[{index}].name"),
+                    "is never sent; reference it in request.body or make it a constant",
+                ));
+            }
         }
         Ok(())
     }
@@ -1124,6 +1358,219 @@ fn usage_slot<'a>(usage: &'a mut NormalizedUsage, quantity: &str) -> Option<&'a 
     })
 }
 
+/// A response path segment: a field or index, optionally filtering an array.
+struct PathSegment<'a> {
+    name: String,
+    filter: Option<(&'a str, &'a str)>,
+}
+
+fn parse_path(path: &str) -> Option<Vec<PathSegment<'_>>> {
+    if path.is_empty() {
+        return Some(Vec::new());
+    }
+    if path.len() > 256 {
+        return None;
+    }
+    path.strip_prefix('/')?
+        .split('/')
+        .map(|segment| {
+            let (name, filter) = match segment.split_once('[') {
+                Some((name, rest)) => {
+                    let (key, value) = rest.strip_suffix(']')?.split_once('=')?;
+                    if key.is_empty() || value.is_empty() || value.contains(['[', ']']) {
+                        return None;
+                    }
+                    (name, Some((key, value)))
+                }
+                None => (segment, None),
+            };
+            if name.is_empty() || name.contains(']') {
+                return None;
+            }
+            Some(PathSegment {
+                name: name.replace("~1", "/").replace("~0", "~"),
+                filter,
+            })
+        })
+        .collect()
+}
+
+fn valid_path(path: &str) -> bool {
+    parse_path(path).is_some()
+}
+
+/// Read a declared usage count without turning a missing path or malformed
+/// scalar into a collection count. Only a terminal filter counts selections;
+/// every field and array traversed to reach it must exist with the right shape.
+fn usage_count(root: &Value, path: &str) -> Result<i64, UsagePathError> {
+    let segments = parse_path(path).ok_or(UsagePathError::Invalid)?;
+    let filtered = segments
+        .last()
+        .is_some_and(|segment| segment.filter.is_some());
+    let mut current = vec![root];
+    for segment in segments {
+        let mut next = Vec::new();
+        for value in current {
+            let child = match value {
+                Value::Object(map) => map.get(&segment.name).ok_or(UsagePathError::Missing),
+                Value::Array(items) => segment
+                    .name
+                    .parse::<usize>()
+                    .map_err(|_| UsagePathError::Invalid)
+                    .and_then(|index| items.get(index).ok_or(UsagePathError::Missing)),
+                _ => Err(UsagePathError::Invalid),
+            }?;
+            match segment.filter {
+                None => next.push(child),
+                Some((key, expected)) => {
+                    let items = child.as_array().ok_or(UsagePathError::Invalid)?;
+                    next.extend(items.iter().filter(|item| {
+                        item.get(key).is_some_and(|actual| match actual {
+                            Value::String(text) => text == expected,
+                            Value::Number(number) => number.to_string() == expected,
+                            Value::Bool(flag) => flag.to_string() == expected,
+                            _ => false,
+                        })
+                    }));
+                }
+            }
+        }
+        current = next;
+    }
+    if filtered {
+        return i64::try_from(current.len()).map_err(|_| UsagePathError::Invalid);
+    }
+    match current.as_slice() {
+        [Value::Array(items)] => i64::try_from(items.len()).map_err(|_| UsagePathError::Invalid),
+        [value] => value
+            .as_i64()
+            .filter(|count| *count >= 0)
+            .ok_or(UsagePathError::Invalid),
+        [] => Err(UsagePathError::Missing),
+        _ => Err(UsagePathError::Invalid),
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum UsagePathError {
+    Missing,
+    Invalid,
+}
+
+/// Every value a response path selects. A filter segment keeps the array
+/// elements whose `key` equals `value` (strings, numbers and booleans compare
+/// by their text) and flattens them into the selection.
+pub fn select_path<'a>(root: &'a Value, path: &str) -> Vec<&'a Value> {
+    let Some(segments) = parse_path(path) else {
+        return Vec::new();
+    };
+    let mut current = vec![root];
+    for segment in segments {
+        let mut next = Vec::new();
+        for value in current {
+            let child = match value {
+                Value::Object(map) => map.get(&segment.name),
+                Value::Array(items) => segment
+                    .name
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|index| items.get(index)),
+                _ => None,
+            };
+            match (child, segment.filter) {
+                (Some(child), None) => next.push(child),
+                (Some(Value::Array(items)), Some((key, expected))) => {
+                    next.extend(items.iter().filter(|item| {
+                        item.get(key).is_some_and(|actual| match actual {
+                            Value::String(text) => text == expected,
+                            Value::Number(number) => number.to_string() == expected,
+                            Value::Bool(flag) => flag.to_string() == expected,
+                            _ => false,
+                        })
+                    }))
+                }
+                _ => {}
+            }
+        }
+        current = next;
+    }
+    current
+}
+
+/// A placeholder string `{{name}}` or `{{name|upper}}` / `{{name|lower}}`.
+fn placeholder(text: &str) -> Option<(&str, Option<&str>)> {
+    let inner = text.strip_prefix("{{")?.strip_suffix("}}")?.trim();
+    let (name, transform) = match inner.split_once('|') {
+        Some((name, transform)) => (name.trim(), Some(transform.trim())),
+        None => (inner, None),
+    };
+    valid_field_name(name).then_some((name, transform))
+}
+
+fn collect_placeholders(
+    template: &Value,
+    found: &mut BTreeSet<(String, Option<String>)>,
+) -> Result<(), String> {
+    match template {
+        Value::String(text) if text.contains("{{") || text.contains("}}") => {
+            let (name, transform) = placeholder(text).ok_or_else(|| {
+                format!("{text:?} must be exactly one placeholder such as {{{{prompt}}}}")
+            })?;
+            if transform.is_some_and(|t| !matches!(t, "upper" | "lower")) {
+                return Err(format!(
+                    "{text:?} uses an unknown transform; use upper or lower"
+                ));
+            }
+            found.insert((name.to_owned(), transform.map(str::to_owned)));
+        }
+        Value::Object(map) => {
+            for value in map.values() {
+                collect_placeholders(value, found)?;
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_placeholders(item, found)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Render a validated body template. `None` means "leave this value out";
+/// the top-level object always renders.
+fn render_template(template: &Value, values: &BTreeMap<String, Value>) -> Option<Value> {
+    fn render(template: &Value, values: &BTreeMap<String, Value>) -> Option<Value> {
+        match template {
+            Value::String(text) => match placeholder(text) {
+                Some((name, transform)) => {
+                    let value = values.get(name)?;
+                    Some(match (transform, value.as_str()) {
+                        (Some("upper"), Some(text)) => json!(text.to_ascii_uppercase()),
+                        (Some("lower"), Some(text)) => json!(text.to_ascii_lowercase()),
+                        _ => value.clone(),
+                    })
+                }
+                None => Some(template.clone()),
+            },
+            Value::Object(map) => Some(Value::Object(
+                map.iter()
+                    .filter_map(|(key, value)| Some((key.clone(), render(value, values)?)))
+                    .collect(),
+            )),
+            Value::Array(items) => Some(Value::Array(
+                items
+                    .iter()
+                    .filter_map(|item| render(item, values))
+                    .collect(),
+            )),
+            other => Some(other.clone()),
+        }
+    }
+    render(template, values).filter(Value::is_object)
+}
+
 /// A provider-reported decimal amount in major currency units (USD only).
 fn decimal_cost(value: &Value) -> Option<ActualVendorCost> {
     let text = match value {
@@ -1232,8 +1679,12 @@ impl SandboxPackAdapter {
 }
 
 impl ArtifactSource for BTreeMap<String, Vec<u8>> {
-    fn fetch(&self, url: &Url) -> Option<Vec<u8>> {
-        self.get(url.as_str()).cloned()
+    fn fetch(&self, url: &Url, max_bytes: usize) -> Result<Vec<u8>, ArtifactFetchError> {
+        let bytes = self.get(url.as_str()).ok_or(ArtifactFetchError::Failed)?;
+        if bytes.len() > max_bytes {
+            return Err(ArtifactFetchError::TooLarge);
+        }
+        Ok(bytes.clone())
     }
 }
 
@@ -1284,8 +1735,15 @@ impl ProviderAdapter for SandboxPackAdapter {
                 ProviderPhase::PreSend,
             ));
         }
-        self.pack
-            .map_response(&self.recorded_response, &self.downloads)
+        self.pack.map_response(
+            request,
+            &ProviderResponse {
+                headers: BTreeMap::new(),
+                body: self.recorded_response.clone(),
+            },
+            &self.downloads,
+            crate::artifact::DEFAULT_MAX_ENCODED_BYTES as usize,
+        )
     }
 }
 
@@ -1695,8 +2153,22 @@ mod tests {
     fn response_mapping_failures_after_acceptance_go_to_reconciliation() {
         let pack = Pack::from_toml_str(FIXTURE).unwrap();
         let response: Value = serde_json::from_str(RESPONSE).unwrap();
+        let request = pack
+            .prepare("image-v1", &json!({"prompt": "x", "image_count": 2}))
+            .unwrap()
+            .request;
         let code = |response: &Value, downloads: &BTreeMap<String, Vec<u8>>| {
-            let failure = pack.map_response(response, downloads).unwrap_err();
+            let failure = pack
+                .map_response(
+                    &request,
+                    &ProviderResponse {
+                        headers: BTreeMap::new(),
+                        body: response.clone(),
+                    },
+                    downloads,
+                    1024,
+                )
+                .unwrap_err();
             assert_eq!(
                 failure.spend_disposition,
                 crate::provider_contract::SpendDisposition::Reconcile
@@ -1724,5 +2196,249 @@ mod tests {
             Some(ActualVendorCost::new(12, 3, "USD").unwrap())
         );
         assert_eq!(decimal_cost(&json!(-1)), None);
+    }
+
+    #[test]
+    fn declared_usage_paths_reconcile_when_missing_or_malformed() {
+        let pack = Pack::from_toml_str(&edited(
+            "usage = { images = \"/data\" }",
+            "usage = { images = \"/usage/images\" }",
+        ))
+        .unwrap();
+        let request = pack
+            .prepare("image-v1", &json!({"prompt": "x", "image_count": 2}))
+            .unwrap()
+            .request;
+        let invalid_usage = [
+            None,
+            Some(json!({})),
+            Some(json!(null)),
+            Some(json!([])),
+            Some(json!({"images": null})),
+            Some(json!({"images": false})),
+            Some(json!({"images": true})),
+            Some(json!({"images": "2"})),
+            Some(json!({"images": {}})),
+            Some(json!({"images": 2.0})),
+            Some(json!({"images": -1})),
+            Some(json!({"images": 9_223_372_036_854_775_808_u64})),
+        ];
+        for reported_usage in invalid_usage {
+            let mut body: Value = serde_json::from_str(RESPONSE).unwrap();
+            if let Some(value) = &reported_usage {
+                body["usage"] = value.clone();
+            }
+            let failure = pack
+                .map_response(
+                    &request,
+                    &ProviderResponse {
+                        headers: BTreeMap::new(),
+                        body,
+                    },
+                    &downloads(),
+                    1024,
+                )
+                .unwrap_err();
+            assert_eq!(
+                failure.code, "pack_response_usage_invalid",
+                "{reported_usage:?}"
+            );
+            assert_eq!(
+                failure.spend_disposition,
+                crate::provider_contract::SpendDisposition::Reconcile
+            );
+            assert_eq!(failure.evidence.request_id.as_deref(), Some("sbx-req-7f3a"));
+        }
+    }
+
+    #[test]
+    fn usage_counts_distinguish_values_from_explicit_filtered_selections() {
+        for (body, expected) in [
+            (json!({"count": 0}), Some(0)),
+            (json!({"count": i64::MAX}), Some(i64::MAX)),
+            (json!({"count": []}), Some(0)),
+            (json!({"count": ["a", "b"]}), Some(2)),
+        ] {
+            assert_eq!(usage_count(&body, "/count").ok(), expected);
+        }
+        let path = "/steps[type=model_output]/content[type=image]";
+        for (body, expected) in [
+            (json!({"steps": []}), Some(0)),
+            (json!({"steps": [{"type": "thought"}]}), Some(0)),
+            (
+                json!({"steps": [{"type": "model_output", "content": []}]}),
+                Some(0),
+            ),
+            (
+                json!({"steps": [{"type": "model_output", "content": [
+                    {"type": "image"}, {"type": "text"}
+                ]}]}),
+                Some(1),
+            ),
+            (
+                json!({"steps": [
+                    {"type": "model_output", "content": [{"type": "image"}]},
+                    {"type": "model_output", "content": [{"type": "image"}]}
+                ]}),
+                Some(2),
+            ),
+            (json!({}), None),
+            (json!({"steps": null}), None),
+            (json!({"steps": {}}), None),
+            (json!({"steps": [{"type": "model_output"}]}), None),
+            (
+                json!({"steps": [{"type": "model_output", "content": {}}]}),
+                None,
+            ),
+            (
+                json!({"steps": [
+                    {"type": "model_output", "content": [{"type": "image"}]},
+                    {"type": "model_output"}
+                ]}),
+                None,
+            ),
+        ] {
+            assert_eq!(usage_count(&body, path).ok(), expected, "{body}");
+        }
+        // A nonterminal filter does not make a scalar or a set of scalar
+        // values into a count of selected items.
+        let body = json!({"entries": [
+            {"type": "match", "count": 3},
+            {"type": "match", "count": 4}
+        ]});
+        assert_eq!(
+            usage_count(&body, "/entries[type=match]/count"),
+            Err(UsagePathError::Invalid)
+        );
+        assert_eq!(
+            usage_count(
+                &json!({"entries": [{"type": "match", "count": false}]}),
+                "/entries[type=match]/count"
+            ),
+            Err(UsagePathError::Invalid)
+        );
+        assert_eq!(usage_count(&body, "/entries/0/count"), Ok(3));
+        assert_eq!(usage_count(&body, "/missing"), Err(UsagePathError::Missing));
+    }
+
+    #[test]
+    fn parameters_cannot_shadow_the_reserved_model_placeholder() {
+        const INLINE: &str = include_str!("../../../../fixtures/packs/inline-image.toml");
+        for (required, default, alias) in [
+            (true, None, None),
+            (false, Some(json!("expensive-model")), None),
+            (true, None, Some("provider_model".to_owned())),
+        ] {
+            let mut document: PackDocument = toml::from_str(INLINE).unwrap();
+            document.parameters[0].name = "model".to_owned();
+            document.parameters[0].required = required;
+            document.parameters[0].default = default;
+            document.parameters[0].field = alias;
+            let error = Pack::from_toml_str(&toml::to_string(&document).unwrap()).unwrap_err();
+            assert_eq!(
+                error,
+                invalid(
+                    "parameters[0].name",
+                    "model is reserved for the selected target's model ID"
+                )
+            );
+        }
+        let pack = Pack::from_toml_str(INLINE).unwrap();
+        let prepared = pack
+            .prepare("inline-image-v1", &json!({"prompt": "a lighthouse"}))
+            .unwrap();
+        assert_eq!(prepared.body["model"], "inline-image-v1");
+        assert!(pack
+            .prepare(
+                "inline-image-v1",
+                &json!({"prompt": "a lighthouse", "model": "expensive-model"}),
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn request_templates_and_response_paths_are_validated() {
+        const INLINE: &str = include_str!("../../../../fixtures/packs/inline-image.toml");
+        let inline = |from: &str, to: &str| {
+            assert_eq!(INLINE.matches(from).count(), 1, "{from}");
+            INLINE.replace(from, to)
+        };
+        let field = |source: String| match Pack::from_toml_str(&source).unwrap_err() {
+            PackError::Invalid { field, .. } => field,
+            other => panic!("{other}"),
+        };
+        let pack = Pack::from_toml_str(INLINE).unwrap();
+        assert_eq!(
+            pack.request_url().as_str(),
+            "https://api.inline-image.test/v1beta/interactions"
+        );
+        assert_eq!(
+            field(inline("text = \"{{prompt}}\"", "text = \"{{subject}}\"")),
+            "request.body"
+        );
+        assert_eq!(
+            field(inline(
+                "text = \"{{prompt}}\"",
+                "text = \"Draw: {{prompt}}\""
+            )),
+            "request.body"
+        );
+        assert_eq!(
+            field(inline("{{image_size|upper}}", "{{image_size|reverse}}")),
+            "request.body"
+        );
+        // The prompt is no longer sent anywhere.
+        assert_eq!(
+            field(inline("text = \"{{prompt}}\"", "text = \"fixed\"")),
+            "parameters[0].name"
+        );
+        assert_eq!(
+            field(inline(
+                "path = \"/v1beta/interactions\"",
+                "path = \"/v1/../admin\""
+            )),
+            "request.path"
+        );
+        assert_eq!(
+            field(inline(
+                "path = \"/v1beta/interactions\"",
+                "path = \"v1?x=1\""
+            )),
+            "request.path"
+        );
+        assert_eq!(
+            field(inline(
+                "artifact_items = \"/steps[type=model_output]/content[type=image]\"",
+                "artifact_items = \"steps[type=model_output\""
+            )),
+            "response.artifact_items"
+        );
+        assert_eq!(
+            field(inline(
+                "request_id_headers = [\"x-goog-request-id\", \"x-request-id\"]\nprovider_request_id = \"/id\"\n",
+                ""
+            )),
+            "response"
+        );
+        // The image_count constant may stay out of the body; a range may not.
+        assert_eq!(
+            field(inline("max = 1\n", "max = 2\n")),
+            "parameters[1].name"
+        );
+        assert_eq!(
+            field(format!("{INLINE}\n[fixed]\nkind = \"image\"\n")),
+            "fixed"
+        );
+
+        let body = json!({"a": [{"t": "x", "v": 1}, {"t": "y", "v": 2}, {"t": "x", "v": 3}], "n": {"m": "k"}});
+        let values: Vec<_> = select_path(&body, "/a[t=x]")
+            .into_iter()
+            .map(|item| item["v"].clone())
+            .collect();
+        assert_eq!(values, [json!(1), json!(3)]);
+        assert_eq!(select_path(&body, "/a/1/v"), [&json!(2)]);
+        assert_eq!(select_path(&body, "/n/m"), [&json!("k")]);
+        assert!(select_path(&body, "/missing").is_empty());
+        assert_eq!(select_path(&body, ""), [&body]);
     }
 }
