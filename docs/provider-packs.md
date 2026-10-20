@@ -5,9 +5,20 @@ that a reviewed Gongbu engine runs. Adding a provider, a model or a price
 becomes a pack change instead of Rust code and a release.
 
 > **Status.** Schema v1 is defined, Gongbu validates and loads packs, and the
-> `sync_fixed` and `async_poll` engines run them. The verified FLUX and Gemini
-> packs and the `hubu provider` commands that activate packs in a stack arrive
-> in later releases. You can't activate a pack in a stack yet.
+> `sync_fixed` and `async_poll` engines run them. The shipped Gemini contracts
+> run from the verified pack in `packs/verified/`. The verified FLUX pack and
+> the `hubu provider` commands that activate your own packs arrive in later
+> releases.
+
+## Verified packs
+
+Verified packs live in `packs/verified/` and are compiled into Gongbu. Each
+shipped contract in `contracts/provider-contracts-v1.json` whose target
+settings say `type = "pack"` is that pack's checked-in projection: the same
+`provider_config_version`, pricing version, review date and pricing rules,
+pinned to the pack's content digest. Gongbu's tests fail if a pack and its
+contract entries disagree, so a pack change ships with a matching contract
+update.
 
 ## What a pack declares and what engines own
 
@@ -269,6 +280,7 @@ whose `type` is `model_output`, then the elements of their `content` whose
 | `request_id_headers` | Optional response headers that carry the provider request ID, checked in order. |
 | `provider_request_id` | Optional body path to the request ID, used when no header carries it. Set it, `request_id_headers`, or both. |
 | `usage` | Map of usage quantity (`images`, `input_tokens`, `output_tokens`, `results`, `pages`, `seconds`) to a path at an integer, at an array whose length counts, or at a filtered selection whose size counts. |
+| `optional_usage` | Optional set of keys already in `usage` that may be absent. Only informational quantities without a declared request `quantity` binding may be optional; repeated entries have set semantics. |
 | `reported_cost` | Optional. A decimal amount in USD, such as `"0.012"`. Ignored by `sync_fixed`, which settles from frozen prices and delivered usage. Other archetypes use the frozen price when the response omits it and send an unreadable reported cost to reconciliation. |
 | `reported_cost_scale` | Optional decimal places to shift the reported cost: `2` when the provider reports one-cent credits. Defaults to `0`. |
 | `artifact_items` | Required path to the artifacts: an array, or a filtered selection. |
@@ -279,12 +291,18 @@ fixed-price call delivers what it was asked for. Map a usage path when the
 provider can return less, such as fewer images than requested; settlement
 then charges only what arrived.
 
-Every declared usage path must be present and have the expected shape. An
+Every required usage path must be present and have the expected shape. An
 unfiltered path must select one nonnegative integer or one array. A path whose
 last segment filters an array counts its matches, including zero matches;
 missing fields and non-array filter inputs still fail validation. Malformed
 or missing declared usage sends the response to reconciliation with its
 provider request ID, instead of treating it as zero or one unit.
+
+For informational telemetry that a provider may omit, list the mapped keys in
+`optional_usage`, such as `["input_tokens", "output_tokens"]` on an image-only
+pack. Missing optional values stay unreported; present values must still have
+the expected shape. Billed quantities, including zero-rate quantities frozen
+into a bundle, cannot be optional.
 
 A response the mapping can't read arrives after the provider accepted the
 work, so the engine sends it to reconciliation and never releases the claim.
@@ -366,3 +384,4 @@ version without changing those per-model rules.
 - [Spend executor contract](spend-executor-contract.md)
 - [Gongbu execution](gongbu-execution.md)
 - [`providers.toml` reference](configuration/local-stack/v1/providers-toml.md)
+- [Upgrading to v0.2.5](operations/upgrading-to-v0.2.5.md)

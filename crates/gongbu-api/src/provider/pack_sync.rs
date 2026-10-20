@@ -79,6 +79,36 @@ pub trait SyncTransport: Send + Sync {
     ) -> Result<Vec<u8>, ArtifactFetchError>;
 }
 
+impl<T: SyncTransport + ?Sized> SyncTransport for Arc<T> {
+    fn post_json(
+        &self,
+        url: &Url,
+        auth: (&str, &str),
+        headers: &BTreeMap<String, String>,
+        body: &Value,
+        timeout: Duration,
+    ) -> Result<TransportResponse, TransportFailure> {
+        self.as_ref().post_json(url, auth, headers, body, timeout)
+    }
+    fn get_json(
+        &self,
+        url: &Url,
+        auth: (&str, &str),
+        headers: &BTreeMap<String, String>,
+        timeout: Duration,
+    ) -> Result<TransportResponse, TransportFailure> {
+        self.as_ref().get_json(url, auth, headers, timeout)
+    }
+    fn download(
+        &self,
+        url: &Url,
+        policy: &ArtifactDownloadPolicy,
+        deadline: InvocationDeadline,
+    ) -> Result<Vec<u8>, ArtifactFetchError> {
+        self.as_ref().download(url, policy, deadline)
+    }
+}
+
 pub struct ReqwestSyncTransport;
 
 impl SyncTransport for ReqwestSyncTransport {
@@ -160,9 +190,18 @@ fn read_response(
             body: Value::Null,
         });
     }
+    // Keep the provider's request ID as evidence even when the body can't be
+    // read: `x-request-id`, else a provider-specific `*-request-id` header
+    // such as `x-goog-request-id`.
     let unknown = |headers: &BTreeMap<String, String>| TransportFailure::UnknownOutcome {
         request_id: headers
             .get("x-request-id")
+            .or_else(|| {
+                headers
+                    .iter()
+                    .find(|(name, _)| name.ends_with("-request-id"))
+                    .map(|(_, value)| value)
+            })
             .filter(|id| !id.is_empty() && id.len() <= 255)
             .cloned(),
     };
@@ -391,6 +430,96 @@ mod tests {
         1, 1, 39, 24, 227, 102, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
     ];
     const MAX_ARTIFACT: u64 = 1024;
+
+    fn response_read_failure(
+        status: u16,
+        body: Vec<u8>,
+        declared_length: usize,
+    ) -> TransportFailure {
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+            thread,
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let mut request = Vec::new();
+            while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                let mut buffer = [0; 1024];
+                let count = stream.read(&mut buffer).unwrap();
+                assert!(count > 0, "client closed before sending request headers");
+                request.extend_from_slice(&buffer[..count]);
+                assert!(request.len() <= 8192);
+            }
+            write!(
+                stream,
+                "HTTP/1.1 {status} Provider response\r\nContent-Length: {declared_length}\r\nContent-Type: application/json\r\nConnection: close\r\nx-goog-request-id: goog-transport-123\r\n\r\n"
+            )
+            .unwrap();
+            if let Err(error) = stream.write_all(&body) {
+                // The bounded reader may close as soon as it sees the first
+                // excess byte, before the server finishes the oversized body.
+                assert!(matches!(
+                    error.kind(),
+                    std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+                ));
+            }
+        });
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap();
+        let result = read_response(client.get(format!("http://{address}/result")).send());
+        server.join().unwrap();
+        result.unwrap_err()
+    }
+
+    #[test]
+    fn google_request_id_survives_invalid_json_response() {
+        assert_eq!(
+            response_read_failure(200, b"not-json".to_vec(), 8),
+            TransportFailure::UnknownOutcome {
+                request_id: Some("goog-transport-123".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn google_request_id_survives_unreadable_response_body() {
+        // Valid JSON with an incomplete HTTP body exercises the response-read
+        // error path, rather than JSON parsing.
+        assert_eq!(
+            response_read_failure(503, b"{}".to_vec(), 20),
+            TransportFailure::UnknownOutcome {
+                request_id: Some("goog-transport-123".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn google_request_id_survives_oversized_response_body() {
+        // The whole body is valid JSON. Without the response-size bound this
+        // would parse successfully, rather than exercising a second JSON error.
+        let mut body = vec![b' '; MAX_PROVIDER_RESPONSE_BYTES];
+        body.extend_from_slice(b"{}");
+        let length = body.len();
+        assert_eq!(
+            response_read_failure(200, body, length),
+            TransportFailure::UnknownOutcome {
+                request_id: Some("goog-transport-123".into()),
+            }
+        );
+    }
 
     type Posts = Arc<Mutex<Vec<(String, (String, String), Value)>>>;
 

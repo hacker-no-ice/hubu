@@ -14,13 +14,12 @@
         "active": true,
         "execution_enabled": true,
         "settings": {
-          "type": "gemini_developer_image",
+          "type": "pack",
           "config": {
-            "endpoint": "https://generativelanguage.googleapis.com/",
-            "api_version": "v1beta",
-            "timeout_ms": 30000,
-            "max_retries": 0,
-            "headers": {}
+            "pack_id": "google-gemini-developer-image",
+            "pack_version": "2026-10-20.1",
+            "pack_digest": "sha256:72e285e35ec4de3d59795600dc7ad237c7d7230063a71d5300cbd8a5c1fcb509",
+            "archetype": "sync_fixed"
           }
         }
       },
@@ -64,13 +63,12 @@
         "active": true,
         "execution_enabled": true,
         "settings": {
-          "type": "gemini_developer_image",
+          "type": "pack",
           "config": {
-            "endpoint": "https://generativelanguage.googleapis.com/",
-            "api_version": "v1beta",
-            "timeout_ms": 30000,
-            "max_retries": 0,
-            "headers": {}
+            "pack_id": "google-gemini-developer-image",
+            "pack_version": "2026-10-20.1",
+            "pack_digest": "sha256:72e285e35ec4de3d59795600dc7ad237c7d7230063a71d5300cbd8a5c1fcb509",
+            "archetype": "sync_fixed"
           }
         }
       },

@@ -11,7 +11,7 @@ use thiserror::Error;
 
 const CONTRACT_DOCUMENT: &str = include_str!("../../../../contracts/provider-contracts-v1.json");
 const CONTRACT_DOCUMENT_SHA256: &str =
-    "7fc57f137d4d55380820b3548af7f0fb289320079cd56275a40542d3c8db68ad";
+    "f617e221ca6153ca1fd0191e3169436e76e0d6b0127a63479fff4cf6b720155a";
 
 #[derive(Debug, Error)]
 pub(crate) enum Error {
@@ -646,10 +646,11 @@ mod tests {
                 "secret_account":"operator",
                 "active":true,
                 "execution_enabled":true,
-                "settings":{"type":"gemini_developer_image","config":{
-                    "endpoint":"https://generativelanguage.googleapis.com",
-                    "api_version":"v1beta","timeout_ms":30000,
-                    "max_retries":0,"headers":{}
+                "settings":{"type":"pack","config":{
+                    "pack_id":"google-gemini-developer-image",
+                    "pack_version":"2026-10-20.1",
+                    "pack_digest":format!("sha256:{}", "a".repeat(64)),
+                    "archetype":"sync_fixed"
                 }}
             }));
         let targets: ProviderTargetConfig = serde_json::from_value(targets).unwrap();
