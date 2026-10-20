@@ -76,6 +76,12 @@ function harness(t, initialReport = report()) {
         listForRepo: async () => ({ data: state.issues }),
         create: async args => create('issues', args),
         update: async args => update('issues', args),
+        addAssignees: async args => {
+          state.writes.push({ kind: 'issues.addAssignees', args });
+          const item = [...state.issues, ...state.pulls].find(value => value.number === args.issue_number);
+          item.assignees = args.assignees.map(login => ({ login }));
+          return { data: item };
+        },
       },
       pulls: {
         list: async () => ({ data: state.pulls.filter(pull => pull.state === 'open') }),
@@ -128,12 +134,47 @@ test('compatible validated candidate produces one stable non-draft PR', async t 
   assert.match(pull.body, /hubu-api → vulnerable 1\.0\.0/);
   assert.equal(h.state.issues.length, 0);
   await h.run();
-  assert.deepEqual(h.state.writes.map(write => write.kind), ['pulls.create', 'actions.createWorkflowDispatch']);
-  assert.deepEqual(h.state.writes[1].args, {
+  assert.deepEqual(h.state.writes.map(write => write.kind), ['pulls.create', 'issues.addAssignees', 'actions.createWorkflowDispatch']);
+  assert.deepEqual(pull.assignees, [{ login: 'hacker-no-ice' }]);
+  assert.deepEqual(h.state.writes[2].args, {
     owner: 'hacker-no-ice', repo: 'hubu', workflow_id: 'ci.yml', ref: FIX_BRANCH,
   });
   assert.ok(h.state.refReads.length >= 2);
   assert.ok(h.state.refReads.every(read => read.ref === `heads/${FIX_BRANCH}`));
+});
+
+test('an unassigned managed PR is assigned once to the configured maintainer', async t => {
+  const h = harness(t);
+  await h.run();
+  h.state.pulls[0].assignees = [];
+  h.env.SECURITY_MAINTAINER = '@security-owner';
+  await h.run();
+  assert.deepEqual(h.state.pulls[0].assignees, [{ login: 'security-owner' }]);
+  const assignments = h.state.writes.filter(write => write.kind === 'issues.addAssignees').length;
+  await h.run();
+  assert.equal(h.state.writes.filter(write => write.kind === 'issues.addAssignees').length, assignments);
+});
+
+test('an existing human assignee on a managed PR is preserved', async t => {
+  const h = harness(t);
+  await h.run();
+  h.state.pulls[0].assignees = [{ login: 'existing-owner' }];
+  h.env.SECURITY_MAINTAINER = 'security-owner';
+  const count = h.state.writes.length;
+  await h.run();
+  assert.deepEqual(h.state.pulls[0].assignees, [{ login: 'existing-owner' }]);
+  assert.equal(h.state.writes.length, count);
+});
+
+test('managed PR assignment failure is an owned incident and fails visibly', async t => {
+  const h = harness(t);
+  h.github.rest.issues.addAssignees = async () => { throw new Error('PR assignment denied: 403'); };
+  await assert.rejects(h.run(), /PR assignment denied/);
+  assert.equal(h.state.pulls.length, 1);
+  assert.equal(h.state.issues.length, 1);
+  assert.equal(h.state.issues[0].assignees[0].login, 'hacker-no-ice');
+  assert.match(h.state.issues[0].body, /PR assignment denied/);
+  assert.equal(h.state.writes.filter(write => write.kind === 'actions.createWorkflowDispatch').length, 0);
 });
 
 test('an updated managed branch dispatches full CI once for the changed commit', async t => {

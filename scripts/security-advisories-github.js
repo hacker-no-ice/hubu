@@ -180,6 +180,15 @@ async function verifyValidatedRef(github, repo, expectedSha, pull) {
   }
 }
 
+function securityMaintainer(context, env) {
+  const fallback = context.payload.repository.owner?.type === 'User' ? context.repo.owner : 'hacker-no-ice';
+  const maintainer = (env.SECURITY_MAINTAINER || fallback).replace(/^@/, '');
+  if (!/^[a-z\d](?:[a-z\d-]{0,37}[a-z\d])?$/i.test(maintainer)) {
+    throw new Error('SECURITY_MAINTAINER must be one GitHub username');
+  }
+  return maintainer;
+}
+
 async function publish({ github, context, core }, env = process.env) {
   const defaultBranch = context.payload.repository?.default_branch;
   if (!['schedule', 'workflow_dispatch'].includes(context.eventName)
@@ -272,6 +281,12 @@ async function publish({ github, context, core }, env = process.env) {
           pull = response.data;
           dispatchCi = true;
         }
+        if (!pull.assignees?.length) {
+          await verifyValidatedRef(github, repo, env.FIX_HEAD_SHA, pull);
+          await github.rest.issues.addAssignees({
+            ...repo, issue_number: pull.number, assignees: [securityMaintainer(context, env)],
+          });
+        }
       }
       // GITHUB_TOKEN-created PR checks can require human workflow approval.
       // Explicit dispatch runs read-only CI and recovers a missing dispatch;
@@ -297,11 +312,7 @@ async function publish({ github, context, core }, env = process.env) {
 
   if (reason || issue) {
     const body = issueBody(report, reason, workflowUrl, runbookUrl, pull);
-    const fallback = context.payload.repository.owner?.type === 'User' ? repo.owner : 'hacker-no-ice';
-    const maintainer = (env.SECURITY_MAINTAINER || fallback).replace(/^@/, '');
-    if (!/^[a-z\d](?:[a-z\d-]{0,37}[a-z\d])?$/i.test(maintainer)) {
-      throw new Error('SECURITY_MAINTAINER must be one GitHub username');
-    }
+    const maintainer = securityMaintainer(context, env);
     if (!issue) {
       const response = await github.rest.issues.create({
         ...repo, title: ISSUE_TITLE, body, assignees: [maintainer],
