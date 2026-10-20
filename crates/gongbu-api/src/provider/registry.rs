@@ -2,9 +2,9 @@
 
 use super::{
     contract::{ContractError, PriceComponent, PricingCatalog, PricingSelector, ProviderAdapter},
-    flux2_api::{
-        Flux2ApiAdapter, ADAPTER_ID as FLUX_ADAPTER_ID, MODEL_ID as FLUX_MODEL_ID,
-        PROVIDER_ID as FLUX_PROVIDER_ID, SUPPORTED_PRESETS as FLUX_SUPPORTED_PRESETS,
+    flux_contract::{
+        ADAPTER_ID as FLUX_ADAPTER_ID, MODEL_ID as FLUX_MODEL_ID, PROVIDER_ID as FLUX_PROVIDER_ID,
+        SUPPORTED_PRESETS as FLUX_SUPPORTED_PRESETS,
     },
     pack::{Archetype, Pack},
     pack_async::AsyncPollEngine,
@@ -95,12 +95,6 @@ impl ProviderRegistry {
         for pack in verified_packs() {
             registry.register_pack(pack);
         }
-        registry.register(FLUX_PROVIDER_ID, FLUX_ADAPTER_ID, move |target| {
-            Ok(Arc::new(Flux2ApiAdapter::from_target_with_artifact_limit(
-                target,
-                max_artifact_bytes,
-            )?))
-        });
         registry.register_pack_engine(Archetype::AsyncPoll, move |target, pack| {
             Ok(Arc::new(AsyncPollEngine::from_target(
                 target,
@@ -459,11 +453,7 @@ impl ValidatedProviderCatalog {
     }
 
     pub fn needs_stable_idempotency_key(target: &ProviderConfigVersion) -> bool {
-        match target.settings() {
-            AdapterSettings::Fixture => true,
-            AdapterSettings::Flux2Api(config) => config.idempotency_header.is_some(),
-            _ => false,
-        }
+        matches!(target.settings(), AdapterSettings::Fixture)
     }
 }
 

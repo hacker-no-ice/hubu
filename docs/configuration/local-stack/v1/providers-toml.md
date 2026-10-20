@@ -175,10 +175,10 @@ Never reuse a version label with changed model, credential coordinates, activati
 
 **Defined by Gongbu's adapter registry.** Current adapter IDs include:
 
-- `gemini_developer_image` for the Gemini Developer API image targets, run
-  from the verified Gemini [provider pack](../../../provider-packs.md) (their
-  settings use `type = "pack"`);
-- `flux2_api` for the Flux 2 API adapter;
+- `gemini_developer_image` for the Gemini Developer API image targets and
+  `flux2_api` for the FLUX.2 targets, each run from a verified
+  [provider pack](../../../provider-packs.md) (their settings use
+  `type = "pack"`);
 - `fixture` for test/local fixture execution only.
 
 A non-pack adapter ID must agree with `targets.settings.type`. Do not infer one from provider marketing text.
@@ -218,91 +218,56 @@ Required boolean. `true` permits a selected active revision to execute new work.
 
 Required tagged adapter settings. `settings.type` selects the service-owned settings schema; non-pack settings must agree with `targets.adapter`. `settings.config` contains the adapter-specific non-secret configuration.
 
-```toml
-[targets.settings]
-type = "flux2_api"
-
-[targets.settings.config]
-endpoint = "https://api.bfl.ai"
-api_version = "v1"
-timeout_ms = 30000
-```
-
 A target run from a [provider pack](../../../provider-packs.md) uses
 `type = "pack"` with the pack's ID, version, content digest and archetype. The
 shipped contracts supply these for you; a pack target binds only to the exact
-pack digest it names.
+pack digest it names:
+
+```toml
+[targets.settings]
+type = "pack"
+
+[targets.settings.config]
+pack_id = "bfl-flux-2"
+pack_version = "2026-10-20.1"
+pack_digest = "sha256:<the pack's content digest>"
+archetype = "async_poll"
+```
 
 Fixture settings use only `type = "fixture"` and no config table. Fixture execution is not a live provider substitute.
 
 ## Adapter setting fields
 
-The selected `gongbu-server` production validator is authoritative. Unknown adapter-setting fields are rejected. Pack settings take only `pack_id`, `pack_version`, `pack_digest` and `archetype`; the transport fields below do not apply to them, because the pack declares its own transport.
+The selected `gongbu-server` production validator is authoritative. Unknown
+adapter-setting fields are rejected. Provider transport, response mapping and
+pricing belong to the [provider pack](../../../provider-packs.md), rather than
+`targets.settings.config`.
 
 ### `targets.settings.type`
 
-Required tag. Allowed current values are `flux2_api`, `pack`, and `fixture`. Non-pack settings must match `targets.adapter`.
+Required tag. Allowed current values are `pack` and `fixture`. Fixture settings
+have no config table and cannot stand in for the shipped Google or FLUX
+providers.
 
-### `targets.settings.config.endpoint`
+### `targets.settings.config.pack_id`
 
-Required for every adapter except `pack` and `fixture`. **Defined by the provider integration.** Use the expected HTTPS API origin or base endpoint, not a documentation page. Verify the exact path behavior in the adapter's operational guide.
+Required for `pack`. The exact ID of the registered provider pack.
 
-For `flux2_api`, the endpoint must be one of BFL's current documented API
-origins: `https://api.bfl.ai`, `https://api.eu.bfl.ai`, or
-`https://api.us.bfl.ai`. Paths, query strings, fragments, user information,
-explicit ports, and other origins are rejected before execution is enabled.
-This literal list governs configured generation POST endpoints. It is separate
-from provider-returned polling URLs, which may use `api.bfl.ai` or exactly
-`api.<region-or-shard>.bfl.ai` with one safe ASCII DNS label while retaining
-the fixed HTTPS path, query, operation-ID, port, fragment, and redirect checks.
+### `targets.settings.config.pack_version`
 
-### `targets.settings.config.api_version`
+Required for `pack`. The immutable version of that pack.
 
-Required for every adapter except `pack` and `fixture`. **Defined by the provider.** Use the exact API version supported by the selected adapter and model.
+### `targets.settings.config.pack_digest`
 
-### `targets.settings.config.timeout_ms`
+Required for `pack`. The exact `sha256:` content digest supplied by the pack's
+shipped contract. The target binds only to that pack content; changing the
+pack requires a matching contract and target revision.
 
-Required invocation budget in milliseconds for every adapter except `pack` and
-`fixture`. The
-accepted range is `1..=270000` (up to 270 seconds). It covers the complete
-adapter operation described by its schema, which may include submission,
-polling, and artifact retrieval. For asynchronous FLUX work, Gongbu checkpoints
-one absolute deadline after submit; activity recovery and worker restart resume
-the same operation under that deadline and never create a fresh timeout budget.
+### `targets.settings.config.archetype`
 
-### `targets.settings.config.max_retries`
-
-Optional unsigned integer; defaults to `0`. The only currently accepted value is `0`
-for every adapter except `pack` and `fixture`; Gongbu rejects nonzero values during
-provider-contract validation. Provider generation retries are not enabled even
-when an adapter exposes an idempotency header. Read-only polling of one durably
-checkpointed asynchronous operation is recovery, not a generation retry.
-
-### `targets.settings.config.headers`
-
-Optional map of non-secret HTTP headers, defaulting to empty. Header names are normalized by Gongbu. Do not place authorization values or provider secrets here; use `targets.credential` and the owning secret resolver.
-
-### `targets.settings.config.approved_artifact_hosts`
-
-Artifact-host allowlist for provider-referenced downloads. It defaults to
-empty.
-
-For `flux2_api`, this list must be empty. FLUX delivery regions are dynamic, so
-Gongbu always applies its built-in `delivery.<region>.bfl.ai` matcher with one
-safe ASCII DNS label instead of accepting static host pins or configurable
-wildcards. Extra labels, IDNA labels, lookalikes, URL syntax, and suffix matches
-are rejected. These artifact hosts never receive the BFL `x-key` credential.
-
-### `targets.settings.config.poll_interval_ms`
-
-Optional for `flux2_api`; defaults to `500`. It is the delay between GET status
-polls for one durably checkpointed provider operation and remains bounded by
-the original overall `timeout_ms`. It never authorizes another generation
-submission.
-
-### `targets.settings.config.idempotency_header`
-
-Optional for `flux2_api`. Name of the provider-supported idempotency header. Configure it only when the provider documents durable idempotency semantics for the selected operation; it is not an arbitrary client header.
+Required for `pack`. The pack's engine: `sync_fixed`, `async_poll` or `metered`.
+The selected engine must be registered by Gongbu. Packs cannot enable generation
+retries or change engine-owned settlement and recovery rules.
 
 ## `[[pricing_rules]]`
 

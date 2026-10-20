@@ -17,7 +17,7 @@ use crate::{
             AsyncProviderOperation, NormalizedRequest, PricingSnapshot, ProviderFailure,
             ProviderTransportInteraction, ProviderTransportObserver, SpendDisposition,
         },
-        flux2_api,
+        flux_contract,
         registry::ValidatedProviderCatalog,
     },
     secrets::{MacOsKeychain, SecretProvider},
@@ -142,12 +142,12 @@ impl GenericProviderActivities {
         let mut normalized_input = execution.normalized_input.clone();
         let output_dimensions = match snapshot.output_dimensions.clone() {
             Some(dimensions) => Some(dimensions),
-            None if target.provider == flux2_api::PROVIDER_ID
-                && target.adapter == flux2_api::ADAPTER_ID
-                && target.model == flux2_api::MODEL_ID =>
+            None if target.provider == flux_contract::PROVIDER_ID
+                && target.adapter == flux_contract::ADAPTER_ID
+                && target.model == flux_contract::MODEL_ID =>
             {
                 Some(
-                    flux2_api::bind_legacy_output_dimensions(
+                    flux_contract::bind_legacy_output_dimensions(
                         image_size.as_deref().ok_or_else(|| {
                             WorkflowActivityError::Proven("pricing_snapshot_invalid".into())
                         })?,
@@ -1724,16 +1724,17 @@ mod tests {
             execution::{CreateExecutionParams, HubuTokenReference},
             provider::{
                 contract::OutputDimensions,
-                flux2_api::{
-                    Flux2ApiAdapter, Flux2Transport, TransportResponse as FluxTransportResponse,
-                },
+                http_kernel::{ArtifactDownloadPolicy, InvocationDeadline},
+                pack::{Archetype, ArtifactFetchError},
+                pack_async::AsyncPollEngine,
+                pack_sync::{SyncTransport, TransportFailure, TransportResponse},
+                verified_packs::verified_packs,
             },
             secrets::{ProviderSecret, SecretError, SecretReference},
         };
         use serde_json::{json, Value};
         use std::{
             collections::BTreeMap,
-            error::Error as StdError,
             sync::atomic::{AtomicUsize, Ordering},
             time::Duration,
         };
@@ -1747,35 +1748,34 @@ mod tests {
         }
         #[derive(Clone)]
         struct Transport(Arc<AtomicUsize>);
-        impl Flux2Transport for Transport {
-            fn submit(
+        impl SyncTransport for Transport {
+            fn post_json(
                 &self,
                 _: &reqwest::Url,
-                _: &[u8],
-                _: Duration,
+                _: (&str, &str),
                 _: &BTreeMap<String, String>,
-                _: Option<(&str, &str)>,
                 _: &Value,
-            ) -> Result<FluxTransportResponse, Box<dyn StdError + Send + Sync>> {
+                _: Duration,
+            ) -> Result<TransportResponse, TransportFailure> {
                 self.0.fetch_add(1, Ordering::SeqCst);
                 unreachable!("invalid frozen dimensions must not reach FLUX submission")
             }
-            fn poll(
+            fn get_json(
                 &self,
                 _: &reqwest::Url,
-                _: &[u8],
-                _: Duration,
+                _: (&str, &str),
                 _: &BTreeMap<String, String>,
-            ) -> Result<FluxTransportResponse, Box<dyn StdError + Send + Sync>> {
+                _: Duration,
+            ) -> Result<TransportResponse, TransportFailure> {
                 self.0.fetch_add(1, Ordering::SeqCst);
                 unreachable!("invalid frozen dimensions must not reach FLUX polling")
             }
-            fn fetch_artifact(
+            fn download(
                 &self,
                 _: &reqwest::Url,
-                _: Duration,
-                _: usize,
-            ) -> Result<Vec<u8>, Box<dyn StdError + Send + Sync>> {
+                _: &ArtifactDownloadPolicy,
+                _: InvocationDeadline,
+            ) -> Result<Vec<u8>, ArtifactFetchError> {
                 self.0.fetch_add(1, Ordering::SeqCst);
                 unreachable!("invalid frozen dimensions must not fetch FLUX artifacts")
             }
@@ -1808,26 +1808,15 @@ mod tests {
             }
         }
 
+        let flux = verified_packs()
+            .into_iter()
+            .find(|pack| pack.pack_id() == "bfl-flux-2")
+            .unwrap();
         let targets: ProviderTargetConfig = serde_json::from_value(json!({
-            "schema_version":2,
-            "provider_configs":[{
-                "provider_config_version":"flux-v1",
-                "workload_type":"image_generation",
-                "provider":"flux",
-                "adapter":"flux2_api",
-                "model":"flux-2-pro",
-                "secret_service":"gongbu.flux",
-                "secret_account":"fixture",
-                "active":true,
-                "execution_enabled":true,
-                "settings":{"type":"flux2_api","config":{
-                    "endpoint":"https://api.bfl.ai",
-                    "api_version":"v1",
-                    "timeout_ms":1000,
-                    "poll_interval_ms":10,
-                    "approved_artifact_hosts":[]
-                }}
-            }]
+            "schema_version": 2,
+            "provider_configs": flux.provider_configs(
+                &SecretReference::new("gongbu.flux", "fixture").unwrap()
+            ),
         }))
         .unwrap();
         let pricing = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"flux-v1","rules":[{"rule_id":"flux-1k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"1k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":45,"rate_denominator":1}]},{"rule_id":"flux-2k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"2k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":90,"rate_denominator":1}]},{"rule_id":"flux-4k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"4k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":180,"rate_denominator":1}]}]}"#).unwrap();
@@ -1856,12 +1845,12 @@ mod tests {
             input_hash: format!("hash-{operation_key}"),
             input_schema_version: 1,
             target: target.target_key().canonical_name(),
-            config_version: "flux-v1".into(),
+            config_version: target.provider_config_version.clone(),
             workload_type: "image_generation".into(),
             provider: "flux".into(),
             adapter: "flux2_api".into(),
             model: "flux-2-pro".into(),
-            provider_config_version: "flux-v1".into(),
+            provider_config_version: target.provider_config_version.clone(),
             provider_config_digest: target.digest().into(),
             pricing_snapshot: snapshot,
             pricing_schema_version: 3,
@@ -1940,11 +1929,18 @@ mod tests {
         let transport_calls = Arc::new(AtomicUsize::new(0));
         let mut registry = ProviderRegistry::new();
         let fixture_calls = transport_calls.clone();
-        registry.register("flux", "flux2_api", move |target| {
-            Ok(Arc::new(Flux2ApiAdapter::new(
-                target.flux2_api().cloned().unwrap(),
-                target.model.clone(),
+        registry.register_pack(
+            verified_packs()
+                .into_iter()
+                .find(|pack| pack.pack_id() == "bfl-flux-2")
+                .unwrap(),
+        );
+        registry.register_pack_engine(Archetype::AsyncPoll, move |target, pack| {
+            Ok(Arc::new(AsyncPollEngine::new(
+                pack.clone(),
+                &target.model,
                 Transport(fixture_calls.clone()),
+                ArtifactLimits::default().max_encoded_bytes,
             )?))
         });
         let providers = ValidatedProviderCatalog::bind(targets, pricing, &registry).unwrap();
@@ -1997,16 +1993,17 @@ mod tests {
             execution::{CreateExecutionParams, HubuTokenReference},
             provider::{
                 contract::OutputDimensions,
-                flux2_api::{
-                    Flux2ApiAdapter, Flux2Transport, TransportResponse as FluxTransportResponse,
-                },
+                http_kernel::{ArtifactDownloadPolicy, InvocationDeadline},
+                pack::{Archetype, ArtifactFetchError},
+                pack_async::AsyncPollEngine,
+                pack_sync::{SyncTransport, TransportFailure, TransportResponse},
+                verified_packs::verified_packs,
             },
             secrets::{ProviderSecret, SecretError, SecretReference},
         };
         use serde_json::{json, Value};
         use std::{
             collections::BTreeMap,
-            error::Error as StdError,
             fs,
             sync::atomic::{AtomicUsize, Ordering},
             time::Duration,
@@ -2034,35 +2031,34 @@ mod tests {
 
         #[derive(Clone)]
         struct Transport(Arc<AtomicUsize>);
-        impl Flux2Transport for Transport {
-            fn submit(
+        impl SyncTransport for Transport {
+            fn post_json(
                 &self,
                 _: &reqwest::Url,
-                _: &[u8],
-                _: Duration,
+                _: (&str, &str),
                 _: &BTreeMap<String, String>,
-                _: Option<(&str, &str)>,
                 _: &Value,
-            ) -> Result<FluxTransportResponse, Box<dyn StdError + Send + Sync>> {
+                _: Duration,
+            ) -> Result<TransportResponse, TransportFailure> {
                 self.0.fetch_add(1, Ordering::SeqCst);
                 unreachable!("managed FLUX preflight rejection must not submit")
             }
-            fn poll(
+            fn get_json(
                 &self,
                 _: &reqwest::Url,
-                _: &[u8],
-                _: Duration,
+                _: (&str, &str),
                 _: &BTreeMap<String, String>,
-            ) -> Result<FluxTransportResponse, Box<dyn StdError + Send + Sync>> {
+                _: Duration,
+            ) -> Result<TransportResponse, TransportFailure> {
                 self.0.fetch_add(1, Ordering::SeqCst);
                 unreachable!("managed FLUX preflight rejection must not poll")
             }
-            fn fetch_artifact(
+            fn download(
                 &self,
                 _: &reqwest::Url,
-                _: Duration,
-                _: usize,
-            ) -> Result<Vec<u8>, Box<dyn StdError + Send + Sync>> {
+                _: &ArtifactDownloadPolicy,
+                _: InvocationDeadline,
+            ) -> Result<Vec<u8>, ArtifactFetchError> {
                 self.0.fetch_add(1, Ordering::SeqCst);
                 unreachable!("managed FLUX preflight rejection must not fetch")
             }
@@ -2163,11 +2159,18 @@ mod tests {
         let transport_calls = Arc::new(AtomicUsize::new(0));
         let mut registry = ProviderRegistry::new();
         let fixture_calls = transport_calls.clone();
-        registry.register("flux", "flux2_api", move |target| {
-            Ok(Arc::new(Flux2ApiAdapter::new(
-                target.flux2_api().cloned().unwrap(),
-                target.model.clone(),
+        registry.register_pack(
+            verified_packs()
+                .into_iter()
+                .find(|pack| pack.pack_id() == "bfl-flux-2")
+                .unwrap(),
+        );
+        registry.register_pack_engine(Archetype::AsyncPoll, move |target, pack| {
+            Ok(Arc::new(AsyncPollEngine::new(
+                pack.clone(),
+                &target.model,
                 Transport(fixture_calls.clone()),
+                ArtifactLimits::default().max_encoded_bytes,
             )?))
         });
         let providers = ValidatedProviderCatalog::bind(targets, pricing, &registry).unwrap();
@@ -2946,25 +2949,60 @@ mod tests {
             }
         }
 
+        let flux_pack = crate::provider::verified_packs::verified_packs()
+            .into_iter()
+            .find(|pack| pack.pack_id() == "bfl-flux-2")
+            .unwrap();
+        let flux_target = flux_pack
+            .provider_configs(&SecretReference::new("gongbu.flux", "flux").unwrap())
+            .remove(0);
         let targets: ProviderTargetConfig = serde_json::from_value(json!({
             "schema_version": 2,
             "provider_configs": [
                 {"provider_config_version":"sync-v1","workload_type":"image_generation","provider":"sync-example","adapter":"sync_example","model":"image-v1","secret_service":"gongbu.sync","secret_account":"sync","active":true,"execution_enabled":true,"settings":{"type":"fixture"}},
                 {"provider_config_version":"example-v1","workload_type":"image_generation","provider":"example","adapter":"fixture","model":"image-v1","secret_service":"gongbu.example","secret_account":"example","active":true,"execution_enabled":true,"settings":{"type":"fixture"}},
-                {"provider_config_version":"flux-v1","workload_type":"image_generation","provider":"flux","adapter":"flux2_api","model":"flux-2-pro","secret_service":"gongbu.flux","secret_account":"flux","active":true,"execution_enabled":true,"settings":{"type":"flux2_api","config":{"endpoint":"https://api.bfl.ai","api_version":"v1","timeout_ms":1000,"poll_interval_ms":10,"idempotency_header":"x-idempotency-key","approved_artifact_hosts":[]}}}
+                flux_target
             ]
         })).unwrap();
-        let pricing = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"mixed-v2","rules":[{"rule_id":"g","provider":"sync-example","model":"image-v1","currency":"USD","components":[{"unit":"image","rate_numerator_minor":25,"rate_denominator":1}]},{"rule_id":"e","provider":"example","model":"image-v1","currency":"USD","components":[{"unit":"image","rate_numerator_minor":30,"rate_denominator":1}]},{"rule_id":"f-1k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"1k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":45,"rate_denominator":1}]},{"rule_id":"f-2k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"2k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":90,"rate_denominator":1}]},{"rule_id":"f-4k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"4k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":180,"rate_denominator":1}]}]}"#).unwrap();
+        let mut rules = vec![
+            json!({"rule_id":"sync-fixture","provider":"sync-example","model":"image-v1","currency":"USD","components":[{"unit":"image","rate_numerator_minor":25,"rate_denominator":1}]}),
+            json!({"rule_id":"ambiguous-fixture","provider":"example","model":"image-v1","currency":"USD","components":[{"unit":"image","rate_numerator_minor":30,"rate_denominator":1}]}),
+        ];
+        rules.extend(
+            flux_pack
+                .pricing_rules()
+                .into_iter()
+                .map(|rule| serde_json::to_value(rule).unwrap()),
+        );
+        let pricing = PricingCatalog::from_json(
+            &serde_json::to_vec(
+                &json!({"schema_version":2,"catalog_version":"mixed-v2","rules":rules}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
         let mut png = Vec::new();
         DynamicImage::ImageRgba8(RgbaImage::new(1, 1))
             .write_to(&mut Cursor::new(&mut png), ImageOutputFormat::Png)
             .unwrap();
         let calls = Arc::new(Calls::default());
         let mut registry = ProviderRegistry::new();
+        // FLUX binds through its verified pack; the async engine here is the
+        // same counting fixture adapter as the other providers.
+        registry.register_pack(flux_pack.clone());
+        let flux_calls = calls.clone();
+        let flux_png = png.clone();
+        registry.register_pack_engine(crate::provider::pack::Archetype::AsyncPoll, move |_, _| {
+            Ok(Arc::new(Adapter {
+                id: "flux2_api",
+                ambiguous: false,
+                calls: flux_calls.clone(),
+                png: flux_png.clone(),
+            }))
+        });
         for (provider, id, ambiguous) in [
             ("sync-example", "sync_example", false),
             ("example", "fixture", true),
-            ("flux", "flux2_api", false),
         ] {
             let calls = calls.clone();
             let png = png.clone();
@@ -3040,7 +3078,13 @@ mod tests {
         };
         let sync = create("sync-example", "sync_example", "image-v1", "sync-v1", 25);
         let ambiguous = create("example", "fixture", "image-v1", "example-v1", 30);
-        let flux = create("flux", "flux2_api", "flux-2-pro", "flux-v1", 45);
+        let flux = create(
+            "flux",
+            "flux2_api",
+            "flux-2-pro",
+            "hubu-flux-2-pro-t2i-2026-08-28-v1",
+            3,
+        );
         let root = tempdir().unwrap();
         let artifacts = ArtifactService::new(
             repository.clone(),
@@ -3088,12 +3132,9 @@ mod tests {
         assert_eq!(counts.get("fixture"), Some(&1));
         assert_eq!(counts.get("flux2_api"), Some(&1));
         drop(counts);
-        let expected_key =
-            vendor_idempotency_key("flux", "flux-2-pro", "account", "mixed-flux").unwrap();
-        assert_eq!(
-            calls.flux_keys.lock().unwrap().as_slice(),
-            &[Some(expected_key)]
-        );
+        // Pack targets never send a vendor idempotency key: the engines refuse
+        // one, because they never retry a provider mutation.
+        assert_eq!(calls.flux_keys.lock().unwrap().as_slice(), &[None]);
         assert_eq!(hubu.0.load(Ordering::SeqCst), 2);
         let resolved = secrets.0.lock().unwrap();
         for expected in [
@@ -3163,7 +3204,7 @@ mod tests {
                 .get_receipt_for_execution(&flux.execution_id)
                 .unwrap()
                 .settlement_units,
-            45_0000
+            3_0000
         );
         let recovered_legacy_flux = repository.get_execution(&flux.execution_id).unwrap();
         assert!(recovered_legacy_flux

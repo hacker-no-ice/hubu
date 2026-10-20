@@ -72,7 +72,7 @@ const sharedLinks = {
   gongbuAttestation: ["Gongbu FLUX attestation", "crates/gongbu-api/src/attestation.rs"],
   gongbuProvider: ["Gongbu provider boundary", "crates/gongbu-api/src/provider/mod.rs"],
   gongbuPricing: ["Gongbu provider contract", "crates/gongbu-api/src/provider/contract.rs"],
-  gongbuFlux: ["FLUX asynchronous adapter", "crates/gongbu-api/src/provider/flux2_api.rs"],
+  gongbuFlux: ["Verified FLUX.2 provider pack", "packs/verified/bfl-flux-2.toml"],
   gongbuProviderContracts: ["Provider contract production validator", "crates/gongbu-api/src/provider/provider_contracts.rs"],
   gongbuPacks: ["Provider pack schema and sandbox engine", "crates/gongbu-api/src/provider/pack.rs"],
   gongbuSyncEngine: ["Sync fixed-price pack engine", "crates/gongbu-api/src/provider/pack_sync.rs"],

@@ -5,10 +5,10 @@ that a reviewed Gongbu engine runs. Adding a provider, a model or a price
 becomes a pack change instead of Rust code and a release.
 
 > **Status.** Schema v1 is defined, Gongbu validates and loads packs, and the
-> `sync_fixed` and `async_poll` engines run them. The shipped Gemini contracts
-> run from the verified pack in `packs/verified/`. The verified FLUX pack and
-> the `hubu provider` commands that activate your own packs arrive in later
-> releases.
+> `sync_fixed` and `async_poll` engines run them. Every shipped contract
+> (Gemini and FLUX.2) runs from a verified pack in `packs/verified/`. The
+> `hubu provider` commands that activate your own packs arrive in a later
+> release.
 
 ## Verified packs
 
@@ -262,6 +262,12 @@ spend is reserved.
 | `values` | `enum` only: unique, lowercase selector values. |
 | `quantity` | `integer` only: the priced quantity it sets (`image_count`, `input_tokens`, `max_output_tokens`, `results`, `pages`, `seconds`). Needs `min >= 0` and a `max`, so every hold is bounded. |
 | `selector` | `enum` only: the pricing selector key it sets. |
+| `output_dimensions` | `enum` with a `selector` only: the certified `[width, height]` for each value, such as `{ "1k" = [1024, 1024] }`. The chosen size is frozen into the request and available to the body template as `{{output_width}}` and `{{output_height}}`. |
+| `equals` | `integer` only: `output_width` or `output_height`. The value must equal the size the preset certifies, and the parameter is sent as that size. |
+
+A parameter name may sit in one input group, such as `options.seed`: the agent
+sends it as `{"options": {"seed": 7}}`, and the template refers to it as
+`{{options.seed}}`. Grouped parameters need a body template.
 
 A priced parameter (`quantity` or `selector`) must be required or have a
 default. `[fixed]` fields are sent with every request and can't collide with a
