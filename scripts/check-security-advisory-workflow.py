@@ -123,6 +123,14 @@ for required in (
 for binary in ("hubu", "hubu-server", "hubu-unified-mcp", "gongbu-server"):
     if not re.search(rf"--bin {re.escape(binary)}(?:\s|$)", workflow):
         fail(f"monitor must validate production binary {binary}")
+for integrity_binding in (
+    "report_sha: ${{ steps.candidate.outputs.report_sha || steps.healthy.outputs.report_sha || steps.source.outputs.report_sha }}",
+    "lock_sha: ${{ steps.candidate.outputs.lock_sha }}",
+    "EXPECTED_REPORT_SHA: ${{ needs.scan.outputs.report_sha }}",
+    "EXPECTED_LOCK_SHA: ${{ needs.scan.outputs.lock_sha }}",
+):
+    if integrity_binding not in workflow:
+        fail("publication must bind artifacts to hashes captured before validation")
 if "python3 scripts/check-security-advisory-workflow.py" not in ci_workflow:
     fail("ordinary CI must check the advisory workflow boundary")
 

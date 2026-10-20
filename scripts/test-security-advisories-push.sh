@@ -38,6 +38,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 EOF
 }
 
+capture_expected_lock_hash() {
+  EXPECTED_LOCK_SHA=$(python3 - "$REPORT_DIR/Cargo.lock" <<'PY'
+import hashlib
+import sys
+from pathlib import Path
+print(hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest())
+PY
+  )
+  export EXPECTED_LOCK_SHA
+}
+
 new_case() {
   local name=$1
   case_dir="$test_root/$name"
@@ -69,6 +80,7 @@ new_case() {
   printf '%s\n' "$source_sha" > "$REPORT_DIR/source-sha"
   printf '%s\n' passed > "$REPORT_DIR/validation"
   write_lock "$REPORT_DIR/Cargo.lock" 1.0.2
+  capture_expected_lock_hash
   : > "$GITHUB_OUTPUT"
 }
 
@@ -117,6 +129,25 @@ assert_output pushed true
 assert_output updated true
 assert_output verified_sha "$published"
 pass_case 'publishes the exact validated lockfile and excludes unrelated files'
+
+for integrity in missing malformed tampered; do
+  new_case "artifact-hash-$integrity"
+  case "$integrity" in
+    missing) unset EXPECTED_LOCK_SHA ;;
+    malformed) export EXPECTED_LOCK_SHA=not-a-sha256 ;;
+    tampered) write_lock "$REPORT_DIR/Cargo.lock" 1.0.99 ;;
+  esac
+  if invoke; then
+    fail "a $integrity lockfile integrity check should prevent publication"
+  fi
+  assert_no_fix_branch
+  [ "$(remote_sha main)" = "$source_sha" ] || fail 'an integrity failure changed main'
+  cmp -s "$worker/Cargo.lock" "$seed/Cargo.lock" || fail 'an integrity failure copied the unverified artifact'
+  assert_output pushed false
+  assert_output updated false
+  [ -z "$(output_value verified_sha)" ] || fail 'an integrity failure reported a verified branch'
+  pass_case "a $integrity pre-build lockfile hash prevents publication"
+done
 
 for dirty in tracked staged; do
   new_case "dirty-$dirty"
@@ -189,6 +220,7 @@ pass_case 'a safe previous fix is recreated on freshly validated main with only 
 
 new_case unchanged-lockfile
 cp "$seed/Cargo.lock" "$REPORT_DIR/Cargo.lock"
+capture_expected_lock_hash
 invoke || fail 'an unchanged validated lockfile should be a successful no-op'
 assert_no_fix_branch
 assert_output changed false

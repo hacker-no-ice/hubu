@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const crypto = require('node:crypto');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
@@ -102,11 +103,15 @@ function harness(t, initialReport = report()) {
   const env = {
     REPORT_PATH: reportPath, FIX_VALIDATION_STATUS: 'passed',
     FIX_CHANGED: 'true', FIX_BRANCH_PUSHED: 'true', FIX_HEAD_SHA: VALIDATED_SHA,
+    EXPECTED_REPORT_SHA: crypto.createHash('sha256').update(fs.readFileSync(reportPath)).digest('hex'),
   };
   return {
     state, github, context, env,
     run: () => publish({ github, context, core }, env),
-    setReport: value => fs.writeFileSync(reportPath, JSON.stringify(value)),
+    setReport: value => {
+      fs.writeFileSync(reportPath, JSON.stringify(value));
+      env.EXPECTED_REPORT_SHA = crypto.createHash('sha256').update(fs.readFileSync(reportPath)).digest('hex');
+    },
   };
 }
 
@@ -408,5 +413,58 @@ test('malformed or contradictory reports cannot close existing incidents', async
   h.setReport({ status: 'healthy' });
   await assert.rejects(h.run(), /Invalid security report schema/);
   assert.equal(h.state.issues[0].state, 'open');
-  assert.deepEqual(h.state.writes, []);
+  assert.equal(h.state.writes.length, 1);
+  assert.equal(h.state.writes[0].kind, 'issues.update');
+  assert.match(h.state.issues[0].body, /Trusted security scan evidence is unavailable or invalid/);
+});
+
+test('a healthy report with failed validation cannot close an incident', async t => {
+  const h = harness(t, report({ status: 'healthy', advisories: [], updates: [] }));
+  h.state.issues.push({ number: 10, body: ISSUE_MARKER, state: 'open' });
+  h.env.FIX_VALIDATION_STATUS = 'failed';
+  await assert.rejects(h.run(), /Failed validation cannot establish a healthy/);
+  assert.equal(h.state.issues[0].state, 'open');
+  assert.equal(h.state.issues[0].assignees[0].login, 'hacker-no-ice');
+});
+
+test('healthy main with no candidate validation can close an incident', async t => {
+  const h = harness(t, report({ status: 'healthy', advisories: [], updates: [] }));
+  h.state.issues.push({ number: 10, body: ISSUE_MARKER, state: 'open' });
+  h.env.FIX_VALIDATION_STATUS = 'not_run';
+  await h.run();
+  assert.equal(h.state.issues[0].state, 'closed');
+});
+
+for (const invalidDigest of [undefined, '', 'short', 'a'.repeat(64)]) {
+  test(`missing, malformed, or mismatched report digest (${String(invalidDigest)}) is owned and visible`, async t => {
+    const h = harness(t, report({ status: 'healthy', advisories: [], updates: [] }));
+    h.env.EXPECTED_REPORT_SHA = invalidDigest;
+    await assert.rejects(h.run(), /trusted pre-build SHA-256 digest/);
+    assert.equal(h.state.issues.length, 1);
+    assert.equal(h.state.issues[0].state, 'open');
+    assert.equal(h.state.pulls.length, 0);
+    assert.match(h.state.issues[0].body, /Trusted scan report authentication or validation failed/);
+  });
+}
+
+test('a tampered healthy report is never trusted or published', async t => {
+  const h = harness(t);
+  h.state.issues.push({ number: 10, body: ISSUE_MARKER, state: 'open' });
+  fs.writeFileSync(h.env.REPORT_PATH, JSON.stringify(report({
+    status: 'healthy', advisories: [], updates: [], message: 'ATTACKER-CONTROLLED CONTENT',
+  })));
+  h.env.FIX_VALIDATION_STATUS = 'failed';
+  await assert.rejects(h.run(), /trusted pre-build SHA-256 digest/);
+  assert.equal(h.state.issues[0].state, 'open');
+  assert.doesNotMatch(h.state.issues[0].body, /ATTACKER-CONTROLLED CONTENT/);
+});
+
+test('authenticated invalid JSON creates a canonical incident before failing visibly', async t => {
+  const h = harness(t);
+  fs.writeFileSync(h.env.REPORT_PATH, '{"untrusted": "ATTACKER-CONTROLLED CONTENT"');
+  h.env.EXPECTED_REPORT_SHA = crypto.createHash('sha256').update(fs.readFileSync(h.env.REPORT_PATH)).digest('hex');
+  await assert.rejects(h.run(), SyntaxError);
+  assert.equal(h.state.issues.length, 1);
+  assert.equal(h.state.issues[0].assignees[0].login, 'hacker-no-ice');
+  assert.doesNotMatch(h.state.issues[0].body, /ATTACKER-CONTROLLED CONTENT/);
 });

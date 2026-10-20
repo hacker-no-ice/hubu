@@ -1,6 +1,7 @@
 // Metadata-only publisher invoked by actions/github-script after trusted-main scans.
 // It never checks out or executes pull-request content.
 const fs = require('node:fs');
+const crypto = require('node:crypto');
 
 const FIX_BRANCH = 'codex/security-advisories';
 const ISSUE_MARKER = '<!-- hubu-security-advisories:tracker:v1 -->';
@@ -185,7 +186,27 @@ async function publish({ github, context, core }, env = process.env) {
       || !defaultBranch || context.ref !== `refs/heads/${defaultBranch}`) {
     throw new Error('Security publishing accepts only scheduled or manual runs from the default branch');
   }
-  const report = validateReport(JSON.parse(fs.readFileSync(env.REPORT_PATH, 'utf8')));
+  let report;
+  let reportError;
+  try {
+    const bytes = fs.readFileSync(env.REPORT_PATH);
+    if (!/^[a-f\d]{64}$/i.test(env.EXPECTED_REPORT_SHA || '')
+        || crypto.createHash('sha256').update(bytes).digest('hex') !== env.EXPECTED_REPORT_SHA) {
+      throw new Error('Security report does not match the trusted pre-build SHA-256 digest');
+    }
+    report = validateReport(JSON.parse(bytes.toString('utf8')));
+    if (report.status === 'healthy' && env.FIX_VALIDATION_STATUS === 'failed') {
+      throw new Error('Failed validation cannot establish a healthy default branch');
+    }
+  } catch (error) {
+    reportError = error;
+    // Never publish fields from evidence that failed authentication or parsing.
+    report = {
+      schema_version: 1, status: 'error', advisories: [], updates: [],
+      errors: ['Trusted scan report authentication or validation failed.'],
+      message: 'Trusted security scan evidence is unavailable or invalid; manual investigation is required.',
+    };
+  }
   const repo = context.repo;
   const workflowUrl = `https://github.com/${repo.owner}/${repo.repo}/actions/workflows/security-advisories.yml`;
   const runbookUrl = `https://github.com/${repo.owner}/${repo.repo}/blob/${encodeURIComponent(defaultBranch)}/docs/operations/repository-security.md#advisory-and-license-exceptions`;
@@ -205,7 +226,7 @@ async function publish({ github, context, core }, env = process.env) {
 
   let reason = validationReason(report, env);
   let pull;
-  let publicationError;
+  let publicationError = reportError;
   if (!reason) {
     try {
       let dispatchCi = false;

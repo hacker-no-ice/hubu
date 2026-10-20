@@ -31,6 +31,8 @@ jobs:
     timeout-minutes: 60
     outputs:
       source_sha: ${{ steps.source.outputs.sha }}
+      report_sha: ${{ steps.candidate.outputs.report_sha || steps.healthy.outputs.report_sha || steps.source.outputs.report_sha }}
+      lock_sha: ${{ steps.candidate.outputs.lock_sha }}
     env:
       REPORT_DIR: ${{ runner.temp }}/security-advisories
     steps:
@@ -46,13 +48,15 @@ jobs:
           git rev-parse HEAD > "$REPORT_DIR/source-sha"
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           python3 - <<'PY'
-          import json, os
+          import hashlib, json, os
           from pathlib import Path
           report = {"schema_version": 1, "status": "error", "advisories": [], "updates": [],
                     "errors": ["Scheduled advisory detection did not complete; inspect the workflow logs."]}
           root = Path(os.environ["REPORT_DIR"])
           (root / "report.json").write_text(json.dumps(report))
           (root / "validation").write_text("not_run")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write("report_sha=" + hashlib.sha256((root / "report.json").read_bytes()).hexdigest() + "\n")
           PY
 
       - name: Check main for Rust advisories
@@ -66,12 +70,16 @@ jobs:
 
       - name: Record healthy main
         if: steps.advisories.outcome == 'success'
+        id: healthy
         run: |
           python3 - <<'PY'
-          import json, os
+          import hashlib, json, os
           from pathlib import Path
           report = {"schema_version": 1, "status": "healthy", "advisories": [], "updates": [], "errors": []}
-          (Path(os.environ["REPORT_DIR"]) / "report.json").write_text(json.dumps(report))
+          path = Path(os.environ["REPORT_DIR"]) / "report.json"
+          path.write_text(json.dumps(report))
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write("report_sha=" + hashlib.sha256(path.read_bytes()).hexdigest() + "\n")
           PY
 
       - name: Install matching diagnostic scanner
@@ -197,6 +205,8 @@ jobs:
     env:
       REPORT_DIR: ${{ runner.temp }}/security-advisories
       SECURITY_MAINTAINER: ${{ vars.SECURITY_MAINTAINER || github.repository_owner }}
+      EXPECTED_REPORT_SHA: ${{ needs.scan.outputs.report_sha }}
+      EXPECTED_LOCK_SHA: ${{ needs.scan.outputs.lock_sha }}
     steps:
       # Execute only trusted default-branch scripts; never code from a fix PR.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

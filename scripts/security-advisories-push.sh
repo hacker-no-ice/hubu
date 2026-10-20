@@ -17,6 +17,23 @@ echo 'pushed=false' >> "$GITHUB_OUTPUT"
 echo 'updated=false' >> "$GITHUB_OUTPUT"
 [ "$validation" = passed ] || exit 0
 
+# Compare against the trusted step output captured before dependency builds.
+# Artifact files themselves cannot establish their own integrity.
+[[ "${EXPECTED_LOCK_SHA:-}" =~ ^[0-9a-f]{64}$ ]] || {
+  echo 'Missing or invalid trusted candidate lockfile hash' >&2
+  exit 1
+}
+actual_lock_sha=$(python3 - "$REPORT_DIR/Cargo.lock" <<'PY'
+import hashlib, sys
+from pathlib import Path
+print(hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest())
+PY
+)
+[ "$actual_lock_sha" = "$EXPECTED_LOCK_SHA" ] || {
+  echo 'Candidate lockfile artifact changed after validation; refusing publication.' >&2
+  exit 1
+}
+
 source_sha=$(tr -d '\n' < "$REPORT_DIR/source-sha")
 [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || { echo 'Invalid source commit' >&2; exit 1; }
 [ "$(git rev-parse HEAD)" = "$source_sha" ] || { echo 'Source commit does not match the validated checkout' >&2; exit 1; }
