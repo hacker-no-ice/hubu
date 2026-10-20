@@ -482,7 +482,7 @@ test("publishes the versioned local-stack configuration reference at stable publ
   assert.match(providersHtml, /provider_config_version/);
   assert.match(providersHtml, /1\.\.=270000/);
   assert.match(providersHtml, /only currently accepted value is <code>0<\/code>/);
-  assert.match(providersHtml, /required and must contain at least\s+one host for <code>ideogram_image<\/code>/);
+  assert.match(providersHtml, /For <code>flux2_api<\/code>, this list must be empty/);
   assert.match(providersHtml, /delivery\.&lt;region&gt;\.bfl\.ai/);
 });
 

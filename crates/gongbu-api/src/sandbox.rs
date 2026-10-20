@@ -1977,48 +1977,46 @@ mod tests {
         let files = tempfile::tempdir().unwrap();
         let targets = files.path().join("targets.json");
         let pricing = files.path().join("pricing.json");
+        let document: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../contracts/provider-contracts-v1.json"
+        ))
+        .unwrap();
+        let flux = document["contracts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|contract| contract["target"]["provider"] == "flux")
+            .unwrap();
+        let policies = &flux["policies"];
+        let mut target = flux["target"].clone();
+        target["secret_service"] = json!("gongbu.flux");
+        target["secret_account"] = json!("sandbox");
         fs::write(
             &targets,
-            br#"{
-          "schema_version":2,
-          "provider_configs":[{
-            "provider_config_version":"ideogram-sandbox-v1",
-            "workload_type":"image_generation",
-            "provider":"ideogram",
-            "adapter":"ideogram_image",
-            "model":"ideogram-test",
-            "secret_service":"gongbu.ideogram",
-            "secret_account":"sandbox",
-            "active":true,
-            "execution_enabled":true,
-            "settings":{"type":"ideogram_image","config":{
-              "endpoint":"https://api.ideogram.ai",
-              "api_version":"v1",
-              "timeout_ms":1000,
-              "approved_artifact_hosts":["ideogram.ai"],
-              "headers":{}
-            }}
-          }]
-        }"#,
+            serde_json::to_vec(&json!({
+                "schema_version":3,
+                "contract_bindings":[{
+                    "contract":flux["contract"],
+                    "pricing_version":flux["pricing_version"],
+                    "poll_policy":policies["poll"],
+                    "artifact_delivery_policy":policies["artifact_delivery"],
+                    "recovery_policy":policies["recovery"],
+                    "generation_retries":0,
+                    "fallback":false
+                }],
+                "provider_configs":[target]
+            }))
+            .unwrap(),
         )
         .unwrap();
         fs::write(
             &pricing,
-            br#"{
-          "schema_version":2,
-          "catalog_version":"sandbox-prices-v2",
-          "rules":[{
-            "rule_id":"ideogram-test-image",
-            "provider":"ideogram",
-            "model":"ideogram-test",
-            "currency":"USD",
-            "components":[{
-              "unit":"image",
-              "rate_numerator_minor":10,
-              "rate_denominator":1
-            }]
-          }]
-        }"#,
+            serde_json::to_vec(&json!({
+                "schema_version":2,
+                "catalog_version":flux["pricing_version"],
+                "rules":flux["pricing_rules"]
+            }))
+            .unwrap(),
         )
         .unwrap();
         for (hubu, provider) in [
@@ -2038,11 +2036,11 @@ mod tests {
                 config.provider.pricing_catalog = Some(pricing.clone());
                 config.provider.target = Some(ProviderSelection {
                     workload_type: "image_generation".into(),
-                    provider: "ideogram".into(),
-                    adapter: "ideogram_image".into(),
-                    model: "ideogram-test".into(),
+                    provider: "flux".into(),
+                    adapter: "flux2_api".into(),
+                    model: "flux-2-pro".into(),
                 });
-                config.provider.credential_reference = Some("gongbu.ideogram:sandbox".into());
+                config.provider.credential_reference = Some("gongbu.flux:sandbox".into());
                 config.provider.maximum_spend_minor = Some(10);
                 config.provider.live_spend_acknowledgement =
                     Some(LIVE_SPEND_ACKNOWLEDGEMENT.into());

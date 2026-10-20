@@ -10,10 +10,6 @@ use super::{
         GeminiDeveloperImageAdapter, ADAPTER_ID as GEMINI_DEVELOPER_ADAPTER_ID,
         PROVIDER_ID as GEMINI_DEVELOPER_PROVIDER_ID,
     },
-    ideogram_image::{
-        IdeogramImageAdapter, ADAPTER_ID as IDEOGRAM_ADAPTER_ID,
-        PROVIDER_ID as IDEOGRAM_PROVIDER_ID,
-    },
     provider_contracts::{self, CatalogContract},
     targets::{AdapterSettings, ProviderConfigVersion, ProviderTargetConfig, TargetKey},
 };
@@ -102,11 +98,6 @@ impl ProviderRegistry {
                 ))
             },
         );
-        registry.register(IDEOGRAM_PROVIDER_ID, IDEOGRAM_ADAPTER_ID, move |target| {
-            Ok(Arc::new(
-                IdeogramImageAdapter::from_target_with_artifact_limit(target, max_artifact_bytes)?,
-            ))
-        });
         registry.register(FLUX_PROVIDER_ID, FLUX_ADAPTER_ID, move |target| {
             Ok(Arc::new(Flux2ApiAdapter::from_target_with_artifact_limit(
                 target,
@@ -519,7 +510,7 @@ mod tests {
     }
 
     #[test]
-    fn production_registry_binds_gemini_developer_ideogram_and_flux() {
+    fn production_registry_binds_gemini_developer_and_flux() {
         let document: serde_json::Value = serde_json::from_str(include_str!(
             "../../../../contracts/provider-contracts-v1.json"
         ))
@@ -529,7 +520,7 @@ mod tests {
             let policies = &contract["policies"];
             json!({"contract":contract["contract"],"pricing_version":contract["pricing_version"],"poll_policy":policies["poll"],"artifact_delivery_policy":policies["artifact_delivery"],"recovery_policy":policies["recovery"],"generation_retries":0,"fallback":false})
         }).collect::<Vec<_>>();
-        let mut provider_configs = contracts
+        let provider_configs = contracts
             .iter()
             .map(|contract| {
                 let mut target = contract["target"].clone();
@@ -539,13 +530,11 @@ mod tests {
                 target
             })
             .collect::<Vec<_>>();
-        provider_configs.push(json!({"provider_config_version":"i-v1","workload_type":"image_generation","provider":"ideogram","adapter":"ideogram_image","model":"ideogram-v3","secret_service":"gongbu.ideogram","secret_account":"one","active":true,"execution_enabled":true,"settings":{"type":"ideogram_image","config":{"endpoint":"https://ideogram.example","api_version":"v1","timeout_ms":1000,"approved_artifact_hosts":["ideogram.example"]}}}));
         let targets: ProviderTargetConfig = serde_json::from_value(json!({"schema_version":3,"contract_bindings":bindings,"provider_configs":provider_configs})).unwrap();
-        let mut rules = contracts
+        let rules = contracts
             .iter()
             .flat_map(|contract| contract["pricing_rules"].as_array().unwrap().clone())
             .collect::<Vec<_>>();
-        rules.push(json!({"rule_id":"i","provider":"ideogram","model":"ideogram-v3","currency":"USD","components":[{"unit":"image","rate_numerator_minor":1,"rate_denominator":1}]}));
         let pricing = PricingCatalog::from_json(&serde_json::to_vec(&json!({"schema_version":2,"catalog_version":"provider-composite-v1","rules":rules})).unwrap()).unwrap();
         let catalog = ValidatedProviderCatalog::bind(
             targets,
@@ -560,14 +549,13 @@ mod tests {
                 "gemini-3.1-flash-lite-image",
             ),
             ("google", "gemini_developer_image", "gemini-3.1-flash-image"),
-            ("ideogram", "ideogram_image", "ideogram-v3"),
             ("flux", "flux2_api", "flux-2-pro"),
         ] {
             let key = TargetKey::new("image_generation", provider, adapter, model).unwrap();
             assert_eq!(catalog.resolve_active(&key).unwrap().adapter, adapter);
         }
         let execution_targets = catalog.execution_targets();
-        assert_eq!(execution_targets.len(), 4);
+        assert_eq!(execution_targets.len(), 3);
         let gemini_full = execution_targets
             .iter()
             .find(|target| target.model == "gemini-3.1-flash-image")

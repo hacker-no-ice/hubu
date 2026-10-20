@@ -177,7 +177,6 @@ Never reuse a version label with changed model, credential coordinates, activati
 
 - `gemini_developer_image` for the Gemini Developer API image path;
 - `flux2_api` for the Flux 2 API adapter;
-- `ideogram_image` for the Ideogram image adapter;
 - `fixture` for test/local fixture execution only.
 
 The adapter ID must agree with `targets.settings.type`. Do not infer one from provider marketing text.
@@ -235,7 +234,7 @@ The selected `gongbu-server` production validator is authoritative. Unknown adap
 
 ### `targets.settings.type`
 
-Required tag. Allowed current values are `gemini_developer_image`, `flux2_api`, `ideogram_image`, and `fixture`. It must match `targets.adapter`.
+Required tag. Allowed current values are `gemini_developer_image`, `flux2_api`, and `fixture`. It must match `targets.adapter`.
 
 ### `targets.settings.config.endpoint`
 
@@ -277,9 +276,8 @@ Optional map of non-secret HTTP headers, defaulting to empty. Header names are n
 
 ### `targets.settings.config.approved_artifact_hosts`
 
-Artifact-host allowlist for provider-referenced downloads. It defaults to empty
-when an adapter does not require it. It is required and must contain at least
-one host for `ideogram_image`.
+Artifact-host allowlist for provider-referenced downloads. It defaults to
+empty.
 
 For `flux2_api`, this list must be empty. FLUX delivery regions are dynamic, so
 Gongbu always applies its built-in `delivery.<region>.bfl.ai` matcher with one
