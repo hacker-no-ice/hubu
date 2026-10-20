@@ -4,10 +4,10 @@ A provider pack describes one provider integration as data: a single TOML file
 that a reviewed Gongbu engine runs. Adding a provider, a model or a price
 becomes a pack change instead of Rust code and a release.
 
-> **Status.** Schema v1 is defined, and Gongbu validates and loads packs. The
-> sync and async engines, the verified FLUX and Gemini packs, and the `hubu
-> provider` commands that activate packs in a stack arrive in later releases.
-> You can't activate a pack in a stack yet.
+> **Status.** Schema v1 is defined, Gongbu validates and loads packs, and the
+> `sync_fixed` engine runs them. The async engine, the verified FLUX and Gemini
+> packs, and the `hubu provider` commands that activate packs in a stack arrive
+> in later releases. You can't activate a pack in a stack yet.
 
 ## What a pack declares and what engines own
 
@@ -156,6 +156,36 @@ With this pack, `{"prompt": "a red circle", "image_count": 2, "quality":
 | `credential` | Required credential alias. The stack profile binds it to a Keychain item; the secret never appears in a pack. |
 | `timeout_ms` | Required overall deadline, within Gongbu's provider deadline range. |
 | `headers` | Optional non-secret headers. `authorization`, `cookie` and the auth header are rejected. |
+| `auth_scheme` | Optional: `raw` (default, the secret as is) or `bearer` (`Bearer <secret>`). |
+
+### `[request]`
+
+Optional. Engines send one JSON `POST` to `path` on the endpoint; without
+`[request]`, the path is `/`.
+
+| Field | Rules |
+| --- | --- |
+| `path` | Required absolute path, such as `/v1beta/interactions`, with no query, fragment or `..`. |
+| `body` | Optional body template. Without it, the body is `[fixed]` plus each parameter under its `field`. |
+
+In a body template, a string that is exactly `{{name}}` becomes the typed
+value of parameter `name`, and `{{model}}` becomes the model ID.
+`{{name|upper}}` and `{{name|lower}}` change a string's case. A key whose
+placeholder has no value (an optional parameter with no default) is left out.
+A placeholder must be the whole string, so values are never spliced into
+text. With a template, `[fixed]` and `field` aren't used, and every parameter
+must appear in the template unless it is a constant (an integer with
+`min = max`, or an enum with one value):
+
+```toml
+[request]
+path = "/v1beta/interactions"
+
+[request.body]
+model = "{{model}}"
+input = [{ type = "text", text = "{{prompt}}" }]
+response_format = { type = "image", image_size = "{{image_size|upper}}" }
+```
 
 ### `[[parameters]]`
 
@@ -181,19 +211,40 @@ parameter's field.
 
 ### `[response]`
 
-Every value is a [JSON Pointer](https://www.rfc-editor.org/rfc/rfc6901) into
-the provider's response.
+Every value is a response path: a [JSON Pointer](https://www.rfc-editor.org/rfc/rfc6901)
+into the provider's JSON body whose segments may filter an array.
+`/steps[type=model_output]/content[type=image]` keeps the elements of `steps`
+whose `type` is `model_output`, then the elements of their `content` whose
+`type` is `image`.
 
 | Field | Rules |
 | --- | --- |
-| `provider_request_id` | Required. A string or number. |
-| `usage` | Map of usage quantity (`images`, `input_tokens`, `output_tokens`, `results`, `pages`, `seconds`) to a pointer at an integer, or at an array whose length counts. |
+| `request_id_headers` | Optional response headers that carry the provider request ID, checked in order. |
+| `provider_request_id` | Optional body path to the request ID, used when no header carries it. Set it, `request_id_headers`, or both. |
+| `usage` | Map of usage quantity (`images`, `input_tokens`, `output_tokens`, `results`, `pages`, `seconds`) to a path at an integer, at an array whose length counts, or at a filtered selection whose size counts. |
 | `reported_cost` | Optional. A decimal amount in major currency units, such as `"0.012"`. |
-| `artifact_items` | Required pointer to the array of artifacts. |
-| `artifact_url` / `artifact_base64` | Exactly one: a pointer inside each item to a download URL or to inline base64 bytes. |
+| `artifact_items` | Required path to the artifacts: an array, or a filtered selection. |
+| `artifact_url` / `artifact_base64` | Exactly one: a path inside each item to a download URL or to inline base64 bytes. |
+
+Usage a pack doesn't map settles at the requested quantity, because a
+fixed-price call delivers what it was asked for. Map a usage path when the
+provider can return less, such as fewer images than requested; settlement
+then charges only what arrived.
 
 A response the mapping can't read arrives after the provider accepted the
 work, so the engine sends it to reconciliation and never releases the claim.
+
+## How the `sync_fixed` engine classifies outcomes
+
+| Outcome | Claim |
+| --- | --- |
+| Input fails the declared parameters, or a retry is requested | Released; nothing was sent |
+| The request couldn't be sent | Released |
+| HTTP 4xx | Released as `provider_rejected` |
+| Timeout or lost response after sending | Reconciliation (`timeout_unknown_outcome`) |
+| HTTP 5xx or any other non-2xx | Reconciliation (`provider_failure`) |
+| 2xx the mapping can't read, an artifact off the allowlist, too large, or of the wrong type | Reconciliation, keeping the request ID |
+| 2xx that maps cleanly | Settled from the frozen price |
 
 ### `[artifacts]`
 

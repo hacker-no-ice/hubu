@@ -19,6 +19,9 @@ auth_header = "x-api-key"
 credential = "sandbox_image"
 timeout_ms = 30000
 
+[request]
+path = "/v1/images"
+
 [[parameters]]
 name = "prompt"
 type = "string"

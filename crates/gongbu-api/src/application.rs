@@ -2256,6 +2256,241 @@ mod tests {
     }
 
     #[test]
+    fn sync_pack_engine_settles_once_and_replay_never_calls_the_provider_again() {
+        use crate::{
+            artifact::{ArtifactLimits, LocalFsStorage},
+            execution::{CreateExecutionParams, HubuTokenReference},
+            provider::{
+                http_kernel::{ArtifactDownloadPolicy, InvocationDeadline},
+                pack::{Archetype, ArtifactFetchError, Pack},
+                pack_sync::{SyncFixedEngine, SyncTransport, TransportFailure, TransportResponse},
+            },
+            secrets::{ProviderSecret, SecretError, SecretReference},
+        };
+        use base64::Engine as _;
+        use image::{DynamicImage, ImageOutputFormat, RgbaImage};
+        use serde_json::json;
+        use std::{
+            collections::BTreeMap,
+            io::Cursor,
+            sync::{
+                atomic::{AtomicUsize, Ordering},
+                Mutex,
+            },
+            time::Duration,
+        };
+        use tempfile::tempdir;
+
+        struct Secrets;
+        impl SecretProvider for Secrets {
+            fn resolve(&self, _: &SecretReference) -> Result<ProviderSecret, SecretError> {
+                Ok(crate::secrets::secret_for_test("pack-secret"))
+            }
+        }
+
+        // Succeeds for "a lighthouse"; loses the response for anything else.
+        #[derive(Clone, Default)]
+        struct Transport {
+            posts: Arc<Mutex<Vec<String>>>,
+            png: Vec<u8>,
+        }
+        impl SyncTransport for Transport {
+            fn post_json(
+                &self,
+                _: &reqwest::Url,
+                _: (&str, &str),
+                _: &BTreeMap<String, String>,
+                body: &serde_json::Value,
+                _: Duration,
+            ) -> Result<TransportResponse, TransportFailure> {
+                let prompt = body["input"][0]["text"].as_str().unwrap().to_owned();
+                self.posts.lock().unwrap().push(prompt.clone());
+                if prompt != "a lighthouse" {
+                    return Err(TransportFailure::UnknownOutcome {
+                        request_id: Some("lost-1".into()),
+                    });
+                }
+                let data = base64::engine::general_purpose::STANDARD.encode(&self.png);
+                Ok(TransportResponse {
+                    status: 200,
+                    headers: BTreeMap::from([("x-goog-request-id".into(), "req-ok".into())]),
+                    body: json!({"steps": [{"type": "model_output", "content": [
+                        {"type": "image", "mime_type": "image/png", "data": data}
+                    ]}]}),
+                })
+            }
+            fn download(
+                &self,
+                _: &reqwest::Url,
+                _: &ArtifactDownloadPolicy,
+                _: InvocationDeadline,
+            ) -> Result<Vec<u8>, ArtifactFetchError> {
+                Err(ArtifactFetchError::Failed)
+            }
+        }
+
+        #[derive(Default)]
+        struct Hubu(AtomicUsize, Mutex<Vec<i64>>);
+        impl HubuActivities for Hubu {
+            fn preflight(&self, _: &Execution) -> Result<(), WorkflowActivityError> {
+                Ok(())
+            }
+            fn claim(&self, _: &Execution) -> Result<String, WorkflowActivityError> {
+                Ok("claim".into())
+            }
+            fn validate_claim(&self, _: &Execution) -> Result<(), WorkflowActivityError> {
+                Ok(())
+            }
+            fn settle(
+                &self,
+                _: &Execution,
+                _: &str,
+                units: i64,
+            ) -> Result<String, WorkflowActivityError> {
+                self.1.lock().unwrap().push(units);
+                Ok(format!(
+                    "settlement-{}",
+                    self.0.fetch_add(1, Ordering::SeqCst)
+                ))
+            }
+            fn release(&self, _: &Execution) -> Result<(), WorkflowActivityError> {
+                Ok(())
+            }
+        }
+
+        let pack =
+            Pack::from_toml_str(include_str!("../../../fixtures/packs/inline-image.toml")).unwrap();
+        let secret = SecretReference::new("gongbu.inline-image", "fixture").unwrap();
+        let targets: ProviderTargetConfig = serde_json::from_value(json!({
+            "schema_version": 2,
+            "provider_configs": pack.provider_configs(&secret),
+        }))
+        .unwrap();
+        let pricing = PricingCatalog::from_json(
+            &serde_json::to_vec(&json!({
+                "schema_version": 2,
+                "catalog_version": pack.models()[0].pricing_version,
+                "rules": pack.pricing_rules(),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut png = Vec::new();
+        DynamicImage::ImageRgba8(RgbaImage::new(1, 1))
+            .write_to(&mut Cursor::new(&mut png), ImageOutputFormat::Png)
+            .unwrap();
+        let transport = Transport {
+            png,
+            ..Default::default()
+        };
+        let mut registry = ProviderRegistry::new();
+        registry.register_pack(pack.clone());
+        let engine_transport = transport.clone();
+        registry.register_pack_engine(Archetype::SyncFixed, move |target, pack| {
+            Ok(Arc::new(SyncFixedEngine::new(
+                pack.clone(),
+                &target.model,
+                engine_transport.clone(),
+                ArtifactLimits::default().max_encoded_bytes,
+            )?))
+        });
+        let providers =
+            ValidatedProviderCatalog::bind(targets.clone(), pricing.clone(), &registry).unwrap();
+        let repository = Repository::in_memory().unwrap();
+        let model = &pack.models()[0];
+        let target = targets
+            .resolve_active(&pack.target_key(model))
+            .unwrap()
+            .clone();
+        let create = |operation: &str, prompt: &str| {
+            let input = json!({"prompt": prompt, "image_size": "2k"});
+            let request = pack.prepare(&model.model, &input).unwrap().request;
+            let snapshot = pricing
+                .snapshot_for_target(&target.target_key(), &request)
+                .unwrap();
+            repository
+                .create_execution(&CreateExecutionParams {
+                    account_id: "account".into(),
+                    operation_key: operation.into(),
+                    hubu_authorization_id: format!("token-{operation}"),
+                    hubu_claim_id: Some(format!("claim-{operation}")),
+                    hubu_token_reference: HubuTokenReference::new(format!("token-{operation}"))
+                        .unwrap(),
+                    authorized_units: snapshot.estimated_units,
+                    authorization_currency: "USD".into(),
+                    normalized_input: input,
+                    input_hash: format!("hash-{operation}"),
+                    input_schema_version: 1,
+                    target: target.target_key().canonical_name(),
+                    config_version: target.provider_config_version.clone(),
+                    workload_type: target.workload_type.clone(),
+                    provider: target.provider.clone(),
+                    adapter: target.adapter.clone(),
+                    model: target.model.clone(),
+                    provider_config_version: target.provider_config_version.clone(),
+                    provider_config_digest: target.digest().into(),
+                    pricing_snapshot: serde_json::to_value(&snapshot).unwrap(),
+                    pricing_schema_version: i64::from(snapshot.schema_version),
+                    execution_scope: None,
+                    created_at: "now".into(),
+                })
+                .unwrap()
+        };
+        let delivered = create("pack-ok", "a lighthouse");
+        let lost = create("pack-lost", "a storm");
+        let root = tempdir().unwrap();
+        let artifacts = ArtifactService::new(
+            repository.clone(),
+            LocalFsStorage::new(root.path()),
+            ArtifactLimits::default(),
+        );
+        let hubu = Arc::new(Hubu::default());
+        let runner = provider_execution_runner(
+            repository.clone(),
+            hubu.clone(),
+            artifacts.clone(),
+            providers,
+            Arc::new(Secrets),
+            || "now".into(),
+        );
+        for _ in 0..2 {
+            assert_eq!(
+                runner.run_execution(&delivered.execution_id, None).unwrap(),
+                "succeeded"
+            );
+            assert_eq!(
+                runner.run_execution(&lost.execution_id, None).unwrap(),
+                "reconciliation_required"
+            );
+        }
+        // One provider call per execution, however often it is replayed.
+        assert_eq!(
+            transport.posts.lock().unwrap().as_slice(),
+            ["a lighthouse", "a storm"]
+        );
+        // 10.1¢ for one 2k image, settled exactly once.
+        assert_eq!(hubu.1.lock().unwrap().as_slice(), [101_000]);
+        assert_eq!(
+            repository
+                .get_receipt_for_execution(&delivered.execution_id)
+                .unwrap()
+                .settlement_units,
+            101_000
+        );
+        assert_eq!(
+            artifacts
+                .list_for_account(&delivered.execution_id, "account")
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(artifacts
+            .list_for_account(&lost.execution_id, "account")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
     fn mixed_provider_dispatch_recovers_legacy_flux_dimensions_and_is_replay_safe() {
         use crate::{
             artifact::{ArtifactLimits, LocalFsStorage},
