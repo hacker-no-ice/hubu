@@ -17,7 +17,7 @@ use crate::{
             NormalizedRequest, OutputDimensions, PollingRecoveryContext, PricingSnapshot,
             UNITS_PER_MINOR,
         },
-        flux2_api,
+        flux_contract,
         registry::{ExecutionTarget, ValidatedProviderCatalog},
     },
     provider_targets::{Error as TargetError, ProviderConfigVersion, TargetKey},
@@ -860,11 +860,14 @@ fn normalize_provider_input(
     request: &CreateExecutionRequest,
     mut input: Value,
 ) -> Result<(Value, Option<OutputDimensions>), ApiError> {
-    let output_dimensions = if request.provider == flux2_api::PROVIDER_ID
-        && request.adapter == flux2_api::ADAPTER_ID
-        && request.model == flux2_api::MODEL_ID
+    let output_dimensions = if request.provider == flux_contract::PROVIDER_ID
+        && request.adapter == flux_contract::ADAPTER_ID
+        && request.model == flux_contract::MODEL_ID
     {
-        Some(flux2_api::bind_output_dimensions(&mut input).map_err(|_| ApiError::validation())?)
+        Some(
+            flux_contract::bind_output_dimensions(&mut input)
+                .map_err(|_| ApiError::validation())?,
+        )
     } else {
         None
     };

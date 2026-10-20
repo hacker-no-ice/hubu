@@ -1,6 +1,4 @@
 use super::contract::{AdapterOutcome, ProviderFailure, ProviderPhase, SpendDisposition};
-use reqwest::Url;
-use std::io::{Cursor, Read, Write};
 
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Case {
@@ -105,43 +103,4 @@ pub(super) fn assert_adapter_conformance(mut run: impl FnMut(Case) -> Observatio
         }
         assert!(!error.to_string().contains("secret-canary"), "{case:?}");
     }
-}
-
-pub(super) fn assert_body_and_artifact_bounds(
-    mut provider_body_rejected: impl FnMut(&mut Cursor<Vec<u8>>, usize) -> bool,
-    mut artifact_body_rejected: impl FnMut(&mut Cursor<Vec<u8>>, usize) -> bool,
-) {
-    assert!(!provider_body_rejected(&mut Cursor::new(vec![0; 8]), 8));
-    assert!(provider_body_rejected(&mut Cursor::new(vec![0; 9]), 8));
-    assert!(!artifact_body_rejected(&mut Cursor::new(vec![0; 8]), 8));
-    assert!(artifact_body_rejected(&mut Cursor::new(vec![0; 9]), 8));
-}
-
-pub(super) fn assert_redirect_blocked(fetch_rejected: impl FnOnce(&Url) -> bool) {
-    use std::net::TcpListener;
-
-    let destination = TcpListener::bind("127.0.0.1:0").unwrap();
-    destination.set_nonblocking(true).unwrap();
-    let destination_url = format!("http://{}/secret", destination.local_addr().unwrap());
-    let redirector = TcpListener::bind("127.0.0.1:0").unwrap();
-    let redirect_url = Url::parse(&format!(
-        "http://{}/artifact",
-        redirector.local_addr().unwrap()
-    ))
-    .unwrap();
-    let server = std::thread::spawn(move || {
-        let (mut stream, _) = redirector.accept().unwrap();
-        let mut request = [0; 1024];
-        let _ = stream.read(&mut request).unwrap();
-        write!(
-            stream,
-            "HTTP/1.1 302 Found\r\nLocation: {destination_url}\r\nContent-Length: 0\r\n\r\n"
-        )
-        .unwrap();
-    });
-    assert!(fetch_rejected(&redirect_url));
-    server.join().unwrap();
-    assert!(
-        matches!(destination.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
-    );
 }

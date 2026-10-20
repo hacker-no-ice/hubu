@@ -480,10 +480,9 @@ test("publishes the versioned local-stack configuration reference at stable publ
   assert.match(providersHtml, /I_ACKNOWLEDGE_LIVE_PROVIDER_SPEND/);
   assert.match(providersHtml, /rate_numerator_minor/);
   assert.match(providersHtml, /provider_config_version/);
-  assert.match(providersHtml, /1\.\.=270000/);
-  assert.match(providersHtml, /only currently accepted value is <code>0<\/code>/);
-  assert.match(providersHtml, /For <code>flux2_api<\/code>, this list must be empty/);
-  assert.match(providersHtml, /delivery\.&lt;region&gt;\.bfl\.ai/);
+  assert.match(providersHtml, /pack_digest/);
+  assert.match(providersHtml, /Allowed current values are <code>pack<\/code> and <code>fixture<\/code>/);
+  assert.doesNotMatch(providersHtml, /ideogram_image/);
 });
 
 test("documents every schema-v1 local-stack source field", async () => {
@@ -514,11 +513,9 @@ test("documents every schema-v1 local-stack source field", async () => {
       "live_spend_acknowledgement", "targets.provider_config_version",
       "targets.workload_type", "targets.provider", "targets.adapter", "targets.model",
       "targets.credential", "targets.active", "targets.execution_enabled", "targets.settings",
-      "targets.settings.type", "targets.settings.config.endpoint",
-      "targets.settings.config.api_version", "targets.settings.config.timeout_ms",
-      "targets.settings.config.max_retries", "targets.settings.config.headers",
-      "targets.settings.config.approved_artifact_hosts",
-      "targets.settings.config.poll_interval_ms", "targets.settings.config.idempotency_header",
+      "targets.settings.type", "targets.settings.config.pack_id",
+      "targets.settings.config.pack_version", "targets.settings.config.pack_digest",
+      "targets.settings.config.archetype",
       "pricing_rules.rule_id", "pricing_rules.provider", "pricing_rules.model",
       "pricing_rules.currency", "pricing_rules.selector", "pricing_rules.selector.image_size",
       "pricing_rules.components", "pricing_rules.components.unit",

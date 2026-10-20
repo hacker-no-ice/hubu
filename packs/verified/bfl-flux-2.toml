@@ -1,0 +1,139 @@
+# Verified provider pack: Black Forest Labs FLUX.2 image generation.
+#
+# Replaces the flux2_api Rust adapter (HUB-305) on the async_poll engine.
+# FLUX.2 Pro keeps its shipped contract ID, provider_config_version and pricing
+# version; contracts/provider-contracts-v1.json carries this pack's checked-in
+# projection, and Gongbu's tests fail if the two ever disagree.
+schema_version = 1
+pack_id = "bfl-flux-2"
+pack_version = "2026-10-20.1"
+provider = "flux"
+display_name = "Black Forest Labs FLUX.2"
+billing_merchant = "merchant:black-forest-labs"
+capability = "capability:image:generate"
+workload_type = "image_generation"
+archetype = "async_poll"
+adapter = "flux2_api"
+pricing_trust = "verified"
+
+[transport]
+endpoint = "https://api.bfl.ai"
+api_version = "v1"
+# Regional API hosts receive the credential when BFL returns them for polling.
+allowed_hosts = ["api.bfl.ai", "api.*.bfl.ai"]
+auth_header = "x-key"
+credential = "bfl_flux2_pro"
+timeout_ms = 270000
+
+[request]
+path = "/v1/flux-2-pro"
+
+[request.body]
+prompt = "{{prompt}}"
+width = "{{output_width}}"
+height = "{{output_height}}"
+seed = "{{options.seed}}"
+safety_tolerance = "{{options.safety_tolerance}}"
+output_format = "{{options.output_format}}"
+
+[[parameters]]
+name = "prompt"
+type = "string"
+required = true
+max_length = 32000
+
+[[parameters]]
+name = "image_count"
+type = "integer"
+min = 1
+max = 1
+default = 1
+quantity = "image_count"
+
+[[parameters]]
+name = "image_size"
+type = "enum"
+values = ["1k", "2k", "4k"]
+required = true
+selector = "image_size"
+output_dimensions = { "1k" = [1024, 1024], "2k" = [1920, 1088], "4k" = [2048, 2048] }
+
+# Gongbu's create path writes the certified size into the stored input.
+[[parameters]]
+name = "options.width"
+type = "integer"
+required = true
+equals = "output_width"
+
+[[parameters]]
+name = "options.height"
+type = "integer"
+required = true
+equals = "output_height"
+
+[[parameters]]
+name = "options.seed"
+type = "integer"
+min = 0
+max = 9223372036854775807
+
+[[parameters]]
+name = "options.safety_tolerance"
+type = "integer"
+min = 0
+max = 5
+
+[[parameters]]
+name = "options.output_format"
+type = "enum"
+values = ["png", "jpeg"]
+
+[poll]
+job_id = "/id"
+path = "/v1/get_result"
+query = { id = "{{job_id}}" }
+url = "/polling_url"
+hosts = ["api.bfl.ai", "api.*.bfl.ai"]
+interval_ms = 500
+status = "/status"
+pending = ["pending", "reasoning", "generating"]
+ready = ["ready", "succeeded", "completed"]
+rejected = { "request moderated" = "provider_request_moderated", "content moderated" = "provider_content_moderated", "error" = "provider_error", "failed" = "provider_error", "rejected" = "provider_rejected" }
+ambiguous = { "task not found" = "provider_task_not_found" }
+
+[response]
+request_id_headers = ["x-request-id", "x-bfl-request-id"]
+provider_request_id = "/request_id"
+# BFL reports settled cost in credits; one credit is exactly USD 0.01.
+reported_cost = "/cost"
+reported_cost_scale = 2
+artifact_items = "/result"
+artifact_url = "/sample"
+
+[artifacts]
+media_types = ["image/png", "image/jpeg"]
+hosts = ["delivery.*.bfl.ai"]
+
+[[models]]
+model = "flux-2-pro"
+provider_config_version = "hubu-flux-2-pro-t2i-2026-08-28-v1"
+pricing_version = "bfl-flux-2-pro-usd-2026-08-28-v1"
+pricing_reviewed_on = "2026-08-28"
+
+[[models.pricing_rules]]
+rule_id = "bfl-flux-2-pro-1k-2026-08-28-v1"
+currency = "USD"
+selector = { image_size = "1k" }
+components = [{ unit = "image", rate_numerator_minor = 3, rate_denominator = 1 }]
+
+[[models.pricing_rules]]
+rule_id = "bfl-flux-2-pro-2k-2026-08-28-v1"
+currency = "USD"
+selector = { image_size = "2k" }
+components = [{ unit = "image", rate_numerator_minor = 45, rate_denominator = 10 }]
+
+[[models.pricing_rules]]
+rule_id = "bfl-flux-2-pro-4k-2026-08-28-v1"
+currency = "USD"
+selector = { image_size = "4k" }
+components = [{ unit = "image", rate_numerator_minor = 75, rate_denominator = 10 }]

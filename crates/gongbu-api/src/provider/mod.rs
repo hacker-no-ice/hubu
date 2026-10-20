@@ -1,7 +1,7 @@
 //! Provider contracts, target configuration, and adapter-facing types.
 
 pub mod contract;
-pub mod flux2_api;
+pub mod flux_contract;
 pub mod http_kernel;
 pub mod pack;
 pub mod pack_async;

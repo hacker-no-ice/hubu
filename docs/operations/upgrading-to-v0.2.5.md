@@ -1,7 +1,7 @@
 # Upgrading to v0.2.5: provider packs
 
-v0.2.5 runs the shipped Gemini image targets from a verified
-[provider pack](../provider-packs.md) instead of a dedicated Rust adapter.
+v0.2.5 runs the shipped Gemini and FLUX.2 image targets from verified
+[provider packs](../provider-packs.md) instead of dedicated Rust adapters.
 Contract IDs, `provider_config_version` values, pricing versions, prices and
 provider behavior are unchanged. What changes is each target's settings, which
 now name the pack and its content digest, so the targets' revision digests
@@ -33,7 +33,8 @@ do not block startup.
 2. Re-render and activate the stack so the provider target config carries the
    new pack settings: `hubu stack render`, review, then activate. A provider
    target config rendered by an earlier version names the removed
-   `gemini_developer_image` settings type and is rejected at startup.
+   `gemini_developer_image` or `flux2_api` settings type and is rejected at
+   startup.
 3. Start the stack.
 
 ## If Gongbu refuses to start
@@ -53,6 +54,6 @@ applies to any later change that replaces a provider target revision.
 ## What is no longer available
 
 Redaction attestation re-reads the target revision of a finished FLUX
-execution. Once FLUX moves to a provider pack, attestation of FLUX executions
-created before that upgrade fails with `UnsupportedTarget`. Receipts, the
+execution, so attestation of FLUX executions created before the upgrade fails
+with `UnsupportedTarget`. Receipts, the
 ledger, settlement history and artifact retrieval are unaffected.

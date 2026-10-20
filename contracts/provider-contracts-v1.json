@@ -134,16 +134,12 @@
         "active": true,
         "execution_enabled": true,
         "settings": {
-          "type": "flux2_api",
+          "type": "pack",
           "config": {
-            "endpoint": "https://api.bfl.ai/",
-            "api_version": "v1",
-            "timeout_ms": 270000,
-            "poll_interval_ms": 500,
-            "max_retries": 0,
-            "idempotency_header": null,
-            "approved_artifact_hosts": [],
-            "headers": {}
+            "pack_id": "bfl-flux-2",
+            "pack_version": "2026-10-20.1",
+            "pack_digest": "sha256:6ad54d80278c40948066af3ae3bd895a4e2d36f5ec04d77afe0c9d2bad0dcc8c",
+            "archetype": "async_poll"
           }
         }
       },

@@ -32,7 +32,7 @@ const MANAGED_GONGBU_CALLER_ACCOUNT: &str = "gongbu-caller";
 const PROVIDER_CONTRACTS_DOCUMENT: &str =
     include_str!("../../../contracts/provider-contracts-v1.json");
 const PROVIDER_CONTRACTS_DOCUMENT_SHA256: &str =
-    "f617e221ca6153ca1fd0191e3169436e76e0d6b0127a63479fff4cf6b720155a";
+    "f016d273c246807bc2b1dfdb75e71965ad18fc1343fe736cc2ae6c7056aa71f5";
 const MANAGED_CREDENTIAL_IGNORE: &[u8] =
     b"# Hubu-managed credentials. Do not edit or remove.\n*\n!.gitignore\n";
 
@@ -5077,7 +5077,11 @@ account = "gemini"
             .unwrap();
         assert_eq!(flux["adapter"], "flux2_api");
         assert_eq!(flux["model"], "flux-2-pro");
-        assert_eq!(flux["settings"]["config"]["poll_interval_ms"], 500);
+        // FLUX runs from its verified pack; the renderer copies the frozen
+        // pack settings from the contract document.
+        assert_eq!(flux["settings"]["type"], "pack");
+        assert_eq!(flux["settings"]["config"]["pack_id"], "bfl-flux-2");
+        assert_eq!(flux["settings"]["config"]["archetype"], "async_poll");
         let gemini_models = targets["provider_configs"]
             .as_array()
             .unwrap()
@@ -5088,11 +5092,6 @@ account = "gemini"
         assert_eq!(
             gemini_models,
             BTreeSet::from(["gemini-3.1-flash-image", "gemini-3.1-flash-lite-image"])
-        );
-        assert_eq!(flux["settings"]["config"]["max_retries"], 0);
-        assert_eq!(
-            flux["settings"]["config"]["approved_artifact_hosts"],
-            json!([])
         );
 
         let pricing = render_pricing_catalog(&providers).unwrap();

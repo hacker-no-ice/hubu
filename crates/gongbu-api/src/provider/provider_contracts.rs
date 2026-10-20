@@ -11,7 +11,7 @@ use thiserror::Error;
 
 const CONTRACT_DOCUMENT: &str = include_str!("../../../../contracts/provider-contracts-v1.json");
 const CONTRACT_DOCUMENT_SHA256: &str =
-    "f617e221ca6153ca1fd0191e3169436e76e0d6b0127a63479fff4cf6b720155a";
+    "f016d273c246807bc2b1dfdb75e71965ad18fc1343fe736cc2ae6c7056aa71f5";
 
 #[derive(Debug, Error)]
 pub(crate) enum Error {
@@ -412,14 +412,21 @@ mod tests {
                 "secret_account": "operator",
                 "active": true,
                 "execution_enabled": true,
-                "settings": {"type":"flux2_api","config":{
-                    "endpoint":"https://api.bfl.ai","api_version":"v1",
-                    "timeout_ms":270000,"poll_interval_ms":500,"max_retries":0,
-                    "idempotency_header":null,"approved_artifact_hosts":[],"headers":{}
-                }}
+                "settings": flux_pack_settings()
             }]
         }))
         .unwrap()
+    }
+
+    /// The shipped FLUX target settings, which name the verified pack.
+    fn flux_pack_settings() -> serde_json::Value {
+        serde_json::from_str::<serde_json::Value>(CONTRACT_DOCUMENT).unwrap()["contracts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["contract"] == "hubu.flux-2-pro.text-to-image/v1")
+            .unwrap()["target"]["settings"]
+            .clone()
     }
 
     fn exact_pricing() -> PricingCatalog {
@@ -538,7 +545,8 @@ mod tests {
         ));
 
         let mut targets = serde_json::to_value(exact_targets()).unwrap();
-        targets["provider_configs"][0]["settings"]["config"]["poll_interval_ms"] = json!(1000);
+        targets["provider_configs"][0]["settings"]["config"]["pack_version"] =
+            json!("2026-10-20.2");
         let targets: ProviderTargetConfig = serde_json::from_value(targets).unwrap();
         assert!(matches!(
             validate_and_project(&targets, &exact_pricing()),
@@ -568,11 +576,7 @@ mod tests {
                 "secret_account":"other",
                 "active":true,
                 "execution_enabled":true,
-                "settings":{"type":"flux2_api","config":{
-                    "endpoint":"https://api.bfl.ai","api_version":"v1",
-                    "timeout_ms":270000,"poll_interval_ms":500,"max_retries":0,
-                    "idempotency_header":null,"approved_artifact_hosts":[],"headers":{}
-                }}
+                "settings": flux_pack_settings()
             }));
         let targets: ProviderTargetConfig = serde_json::from_value(targets).unwrap();
         assert!(matches!(
@@ -594,11 +598,7 @@ mod tests {
                 "secret_account":"other",
                 "active":true,
                 "execution_enabled":true,
-                "settings":{"type":"flux2_api","config":{
-                    "endpoint":"https://api.bfl.ai","api_version":"v1",
-                    "timeout_ms":270000,"poll_interval_ms":500,"max_retries":0,
-                    "idempotency_header":null,"approved_artifact_hosts":[],"headers":{}
-                }}
+                "settings": flux_pack_settings()
             }));
         let targets: ProviderTargetConfig = serde_json::from_value(targets).unwrap();
         let document: Value = serde_json::from_str(CONTRACT_DOCUMENT).unwrap();

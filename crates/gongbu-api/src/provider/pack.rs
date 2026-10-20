@@ -11,9 +11,9 @@
 use super::{
     contract::{
         ActualVendorCost, AdapterCapabilities, AdapterOutcome, ContractError, NormalizedArtifact,
-        NormalizedRequest, NormalizedUsage, PriceComponent, PricingCatalog, PricingRule,
-        PricingSelector, ProviderAdapter, ProviderFailure, ProviderPhase, MAX_VENDOR_COST_SCALE,
-        REQUEST_QUANTITIES,
+        NormalizedRequest, NormalizedUsage, OutputDimensions, PriceComponent, PricingCatalog,
+        PricingRule, PricingSelector, ProviderAdapter, ProviderFailure, ProviderPhase,
+        MAX_VENDOR_COST_SCALE, REQUEST_QUANTITIES,
     },
     http_kernel::{valid_provider_deadline_ms, validate_https_origin, validate_safe_headers},
     targets::{PackTargetConfig, TargetKey},
@@ -35,6 +35,10 @@ pub const PACK_SCHEMA_VERSION: u32 = 1;
 
 /// Poll path or query value that expands to the job ID.
 const JOB_ID_PLACEHOLDER: &str = "{{job_id}}";
+
+/// Template placeholders that expand to the certified output size.
+const OUTPUT_WIDTH_PLACEHOLDER: &str = "output_width";
+const OUTPUT_HEIGHT_PLACEHOLDER: &str = "output_height";
 
 /// Template placeholder that expands to the target's model ID.
 const MODEL_PLACEHOLDER: &str = "model";
@@ -319,6 +323,32 @@ pub struct Parameter {
     /// The pricing selector key this enum parameter sets.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selector: Option<String>,
+    /// The certified output size for each value of an image-preset enum. The
+    /// chosen size becomes the request's frozen output dimensions and the
+    /// `{{output_width}}` / `{{output_height}}` placeholders.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub output_dimensions: BTreeMap<String, [u32; 2]>,
+    /// Ties an integer parameter to a derived output dimension: if supplied,
+    /// it must equal the size the preset certifies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub equals: Option<Derived>,
+}
+
+/// A value derived from another parameter rather than chosen freely.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Derived {
+    OutputWidth,
+    OutputHeight,
+}
+
+impl Derived {
+    fn placeholder(self) -> &'static str {
+        match self {
+            Self::OutputWidth => OUTPUT_WIDTH_PLACEHOLDER,
+            Self::OutputHeight => OUTPUT_HEIGHT_PLACEHOLDER,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -590,17 +620,55 @@ impl Pack {
         let indeterminable = || ContractError::IndeterminableCost;
         let model = self.model(model).ok_or(ContractError::UnsupportedTarget)?;
         let input = input.as_object().ok_or_else(indeterminable)?;
-        if input
-            .keys()
-            .any(|key| !self.document.parameters.iter().any(|p| &p.name == key))
-        {
-            return Err(indeterminable());
+        for (key, value) in input {
+            let members: Vec<_> = self
+                .document
+                .parameters
+                .iter()
+                .filter(|p| p.group() == Some(key.as_str()))
+                .collect();
+            if members.is_empty() {
+                if !self.document.parameters.iter().any(|p| &p.name == key) {
+                    return Err(indeterminable());
+                }
+            } else {
+                let group = value.as_object().ok_or_else(indeterminable)?;
+                if group.keys().any(|member| {
+                    !members
+                        .iter()
+                        .any(|p| p.name.split_once('.').map(|(_, m)| m) == Some(member.as_str()))
+                }) {
+                    return Err(indeterminable());
+                }
+            }
         }
+        // The certified output size comes from the preset parameter, so it is
+        // known before any parameter tied to it is checked.
+        let dimensions = self
+            .document
+            .parameters
+            .iter()
+            .find(|p| !p.output_dimensions.is_empty())
+            .and_then(|p| {
+                let value = p.input_value(input).or(p.default.as_ref())?;
+                p.output_dimensions.get(value.as_str()?)
+            })
+            .map(|[width, height]| OutputDimensions {
+                width: *width,
+                height: *height,
+            });
         let mut request = NormalizedRequest::new(&self.document.provider, &model.model);
         let mut values = BTreeMap::from([(MODEL_PLACEHOLDER.to_owned(), json!(model.model))]);
+        if let Some(dimensions) = &dimensions {
+            values.insert(OUTPUT_WIDTH_PLACEHOLDER.to_owned(), json!(dimensions.width));
+            values.insert(
+                OUTPUT_HEIGHT_PLACEHOLDER.to_owned(),
+                json!(dimensions.height),
+            );
+        }
         let mut flat = self.document.fixed.clone();
         for parameter in &self.document.parameters {
-            let value = match input.get(&parameter.name).or(parameter.default.as_ref()) {
+            let value = match parameter.input_value(input).or(parameter.default.as_ref()) {
                 Some(value) => value.clone(),
                 None if parameter.required => return Err(indeterminable()),
                 None => continue,
@@ -614,6 +682,15 @@ impl Pack {
             {
                 return Err(indeterminable());
             }
+            if let Some(derived) = parameter.equals {
+                let expected = dimensions.as_ref().map(|d| match derived {
+                    Derived::OutputWidth => i64::from(d.width),
+                    Derived::OutputHeight => i64::from(d.height),
+                });
+                if expected.is_none() || value.as_i64() != expected {
+                    return Err(indeterminable());
+                }
+            }
             if let Some(quantity) = &parameter.quantity {
                 request.set_quantity(quantity, value.as_i64());
             }
@@ -625,6 +702,7 @@ impl Pack {
             flat.insert(parameter.field().to_owned(), value.clone());
             values.insert(parameter.name.clone(), value);
         }
+        request.output_dimensions = dimensions;
         request.validate()?;
         let body = match self.document.request.as_ref().and_then(|r| r.body.as_ref()) {
             Some(template) => render_template(&Value::Object(template.clone()), &values)
@@ -893,18 +971,38 @@ impl Parameter {
         Ok(())
     }
 
+    /// The input group this parameter lives in (`options` for `options.seed`).
+    fn group(&self) -> Option<&str> {
+        self.name.split_once('.').map(|(group, _)| group)
+    }
+
+    /// The input value for this parameter: top level, or inside its group.
+    fn input_value<'a>(&self, input: &'a Map<String, Value>) -> Option<&'a Value> {
+        match self.name.split_once('.') {
+            Some((group, member)) => input.get(group)?.as_object()?.get(member),
+            None => input.get(&self.name),
+        }
+    }
+
     fn validate(&self, field: &str) -> Result<(), PackError> {
-        if !valid_field_name(&self.name) {
+        if !valid_parameter_name(&self.name) {
             return Err(invalid(
                 format!("{field}.name"),
-                "must be a lowercase identifier",
+                "must be a lowercase identifier, optionally in one group such as options.seed",
             ));
         }
-        if self.name == MODEL_PLACEHOLDER {
-            return Err(invalid(
-                format!("{field}.name"),
-                "model is reserved for the selected target's model ID",
-            ));
+        let reserved = match self.name.as_str() {
+            MODEL_PLACEHOLDER => Some("model is reserved for the selected target's model ID"),
+            OUTPUT_WIDTH_PLACEHOLDER => {
+                Some("output_width is reserved for the certified output width")
+            }
+            OUTPUT_HEIGHT_PLACEHOLDER => {
+                Some("output_height is reserved for the certified output height")
+            }
+            _ => None,
+        };
+        if let Some(reason) = reserved {
+            return Err(invalid(format!("{field}.name"), reason));
         }
         if self
             .field
@@ -945,6 +1043,24 @@ impl Parameter {
         }
         if self.selector.is_some() {
             only(enumeration, "selector")?;
+        }
+        if self.equals.is_some() {
+            only(integer, "equals")?;
+        }
+        if !self.output_dimensions.is_empty() {
+            only(enumeration && self.selector.is_some(), "output_dimensions")?;
+            let keys: BTreeSet<_> = self.output_dimensions.keys().collect();
+            let values: BTreeSet<_> = self.values.iter().collect();
+            if keys != values
+                || self.output_dimensions.values().any(|[width, height]| {
+                    *width == 0 || *height == 0 || *width > 65_535 || *height > 65_535
+                })
+            {
+                return Err(invalid(
+                    format!("{field}.output_dimensions"),
+                    "must give a positive [width, height] for exactly each enum value",
+                ));
+            }
         }
         if self.min.zip(self.max).is_some_and(|(min, max)| min > max) {
             return Err(invalid(format!("{field}.min"), "must not exceed max"));
@@ -1084,6 +1200,46 @@ impl PackDocument {
                         "is set by two parameters",
                     ));
                 }
+            }
+        }
+        let presets = self
+            .parameters
+            .iter()
+            .filter(|p| !p.output_dimensions.is_empty())
+            .count();
+        if presets > 1 {
+            return Err(invalid(
+                "parameters",
+                "only one parameter may declare output_dimensions",
+            ));
+        }
+        if presets == 0 && self.parameters.iter().any(|p| p.equals.is_some()) {
+            return Err(invalid(
+                "parameters",
+                "equals needs a parameter that declares output_dimensions",
+            ));
+        }
+        if let Some(parameter) = self.parameters.iter().find(|p| p.group().is_some()) {
+            if self
+                .request
+                .as_ref()
+                .and_then(|r| r.body.as_ref())
+                .is_none()
+            {
+                return Err(invalid(
+                    "request.body",
+                    format!("grouped parameter {} needs a body template", parameter.name),
+                ));
+            }
+            if self
+                .parameters
+                .iter()
+                .any(|p| p.group().is_none() && Some(p.name.as_str()) == parameter.group())
+            {
+                return Err(invalid(
+                    "parameters",
+                    "a group name collides with a parameter name",
+                ));
             }
         }
         if let Some(key) = self.fixed.keys().find(|key| fields.contains(key.as_str())) {
@@ -1398,7 +1554,14 @@ impl PackDocument {
             .map_err(|reason| invalid("request.body", reason))?;
         for (name, transform) in &referenced {
             let parameter = self.parameters.iter().find(|p| &p.name == name);
-            if name != MODEL_PLACEHOLDER && parameter.is_none() {
+            let derived = matches!(
+                name.as_str(),
+                OUTPUT_WIDTH_PLACEHOLDER | OUTPUT_HEIGHT_PLACEHOLDER
+            ) && self
+                .parameters
+                .iter()
+                .any(|p| !p.output_dimensions.is_empty());
+            if name != MODEL_PLACEHOLDER && !derived && parameter.is_none() {
                 return Err(invalid(
                     "request.body",
                     format!("{{{{{name}}}}} names no declared parameter"),
@@ -1418,8 +1581,25 @@ impl PackDocument {
         // or what was asked: only a constant may stay out of the body.
         for (index, parameter) in self.parameters.iter().enumerate() {
             let constant = match parameter.kind {
-                ParameterKind::Integer => parameter.min.is_some() && parameter.min == parameter.max,
-                ParameterKind::Enum => parameter.values.len() == 1,
+                ParameterKind::Integer => {
+                    (parameter.min.is_some() && parameter.min == parameter.max)
+                        // A parameter tied to the certified size is sent as
+                        // that size, through {{output_width}} / {{output_height}}.
+                        || parameter.equals.is_some_and(|derived| {
+                            referenced.iter().any(|(name, _)| name == derived.placeholder())
+                        })
+                }
+                ParameterKind::Enum => {
+                    parameter.values.len() == 1
+                        // A size preset is sent as the size it certifies.
+                        || (!parameter.output_dimensions.is_empty()
+                            && referenced.iter().any(|(name, _)| {
+                                matches!(
+                                    name.as_str(),
+                                    OUTPUT_WIDTH_PLACEHOLDER | OUTPUT_HEIGHT_PLACEHOLDER
+                                )
+                            }))
+                }
                 _ => false,
             };
             if !constant && !referenced.iter().any(|(name, _)| name == &parameter.name) {
@@ -1837,7 +2017,7 @@ fn placeholder(text: &str) -> Option<(&str, Option<&str>)> {
         Some((name, transform)) => (name.trim(), Some(transform.trim())),
         None => (inner, None),
     };
-    valid_field_name(name).then_some((name, transform))
+    valid_parameter_name(name).then_some((name, transform))
 }
 
 fn collect_placeholders(
@@ -1987,7 +2167,9 @@ pub fn host_allowed(patterns: &[String], host: &str) -> bool {
                             .bytes()
                             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
                         && !got.starts_with('-')
-                        && !got.ends_with('-'))
+                        && !got.ends_with('-')
+                        // Never let a pattern match an internationalized label.
+                        && !got.starts_with("xn--"))
             })
     })
 }
@@ -2033,6 +2215,14 @@ fn valid_slug(value: &str) -> bool {
 
 fn valid_scope_tail(value: &str) -> bool {
     !value.is_empty() && value.len() <= 128 && value.split(':').all(valid_slug)
+}
+
+/// A parameter name: an identifier, or `group.member` with one level.
+fn valid_parameter_name(value: &str) -> bool {
+    match value.split_once('.') {
+        Some((group, member)) => valid_field_name(group) && valid_field_name(member),
+        None => valid_field_name(value),
+    }
 }
 
 fn valid_field_name(value: &str) -> bool {
@@ -2913,6 +3103,92 @@ mod tests {
                 &json!({"prompt": "a lighthouse", "model": "expensive-model"}),
             )
             .is_err());
+    }
+
+    #[test]
+    fn parameters_cannot_shadow_certified_output_dimensions() {
+        const INLINE: &str = include_str!("../../../../fixtures/packs/inline-image.toml");
+        const FLUX: &str = include_str!("../../../../packs/verified/bfl-flux-2.toml");
+        for source in [INLINE, FLUX] {
+            for name in [OUTPUT_WIDTH_PLACEHOLDER, OUTPUT_HEIGHT_PLACEHOLDER] {
+                for (required, default, alias) in [
+                    (true, None, None),
+                    (false, Some(json!(8192)), None),
+                    (true, None, Some("provider_dimension".to_owned())),
+                ] {
+                    let mut document: PackDocument = toml::from_str(source).unwrap();
+                    let parameter = &mut document.parameters[0];
+                    parameter.name = name.to_owned();
+                    parameter.kind = ParameterKind::Integer;
+                    parameter.max_length = None;
+                    parameter.min = Some(1);
+                    parameter.max = Some(8192);
+                    parameter.required = required;
+                    parameter.default = default;
+                    parameter.field = alias;
+                    let error =
+                        Pack::from_toml_str(&toml::to_string(&document).unwrap()).unwrap_err();
+                    match error {
+                        PackError::Invalid { field, reason } => {
+                            assert_eq!(field, "parameters[0].name");
+                            assert!(reason.starts_with(name));
+                            assert!(reason.contains("reserved"));
+                        }
+                        other => panic!("{other}"),
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn grouped_dimension_names_do_not_replace_certified_template_values() {
+        const FLUX: &str = include_str!("../../../../packs/verified/bfl-flux-2.toml");
+        for (name, field) in [
+            ("options.output_width", "width"),
+            ("options.output_height", "height"),
+        ] {
+            let mut document: PackDocument = toml::from_str(FLUX).unwrap();
+            let mut parameter = document
+                .parameters
+                .iter()
+                .find(|parameter| parameter.name == "options.width")
+                .unwrap()
+                .clone();
+            parameter.name = name.to_owned();
+            parameter.equals = None;
+            parameter.min = Some(1);
+            parameter.max = Some(8192);
+            document.parameters.push(parameter);
+            document
+                .request
+                .as_mut()
+                .unwrap()
+                .body
+                .as_mut()
+                .unwrap()
+                .insert(
+                    "caller_dimension".to_owned(),
+                    json!(format!("{{{{{name}}}}}")),
+                );
+            let pack = Pack::from_toml_str(&toml::to_string(&document).unwrap()).unwrap();
+            let mut input = json!({
+                "prompt": "a lighthouse", "image_count": 1, "image_size": "1k",
+                "options": {"width": 1024, "height": 1024},
+            });
+            let (_, member) = name.split_once('.').unwrap();
+            input["options"][member] = json!(7);
+            let prepared = pack.prepare("flux-2-pro", &input).unwrap();
+            assert_eq!(prepared.body[field], 1024);
+            assert_eq!(prepared.body["caller_dimension"], 7);
+            assert_eq!(
+                prepared.request.output_dimensions,
+                Some(OutputDimensions {
+                    width: 1024,
+                    height: 1024
+                })
+            );
+        }
     }
 
     #[test]

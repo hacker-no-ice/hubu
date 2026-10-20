@@ -39,6 +39,8 @@ pub struct AsyncPollEngine<T = ReqwestSyncTransport> {
     model: String,
     transport: T,
     max_artifact_bytes: usize,
+    #[cfg(test)]
+    poll_interval: Option<Duration>,
 }
 
 impl AsyncPollEngine<ReqwestSyncTransport> {
@@ -127,7 +129,16 @@ impl<T: SyncTransport> AsyncPollEngine<T> {
             model: model.to_owned(),
             transport,
             max_artifact_bytes: max_artifact_bytes as usize,
+            #[cfg(test)]
+            poll_interval: None,
         })
+    }
+
+    /// Poll faster than the pack declares, so tests of real packs stay quick.
+    #[cfg(test)]
+    pub(crate) fn with_poll_interval_for_tests(mut self, interval: Duration) -> Self {
+        self.poll_interval = Some(interval);
+        self
     }
 
     fn poll_spec(&self) -> &PollSpec {
@@ -500,6 +511,8 @@ impl<T: SyncTransport> AsyncPollEngine<T> {
             .auth(secret)
             .ok_or_else(|| processing("credential_invalid", &evidence))?;
         let interval = Duration::from_millis(self.poll_spec().interval_ms);
+        #[cfg(test)]
+        let interval = self.poll_interval.unwrap_or(interval);
         loop {
             let remaining = deadline
                 .remaining()
