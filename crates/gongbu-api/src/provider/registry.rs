@@ -10,6 +10,7 @@ use super::{
         GeminiDeveloperImageAdapter, ADAPTER_ID as GEMINI_DEVELOPER_ADAPTER_ID,
         PROVIDER_ID as GEMINI_DEVELOPER_PROVIDER_ID,
     },
+    pack::{Archetype, Pack},
     provider_contracts::{self, CatalogContract},
     targets::{AdapterSettings, ProviderConfigVersion, ProviderTargetConfig, TargetKey},
 };
@@ -25,6 +26,8 @@ use super::contract::{
 
 pub type BoundAdapter = Arc<dyn ProviderAdapter + Send + Sync>;
 type Factory = dyn Fn(&ProviderConfigVersion) -> Result<BoundAdapter, ContractError> + Send + Sync;
+type PackEngineFactory =
+    dyn Fn(&ProviderConfigVersion, &Arc<Pack>) -> Result<BoundAdapter, ContractError> + Send + Sync;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ExecutionTarget {
@@ -74,6 +77,10 @@ pub enum RegistryError {
 #[derive(Clone, Default)]
 pub struct ProviderRegistry {
     factories: BTreeMap<(String, String), Arc<Factory>>,
+    /// Archetype engines keyed by engine ID; they run pack targets.
+    pack_engines: BTreeMap<String, Arc<PackEngineFactory>>,
+    /// Validated packs keyed by pack ID.
+    packs: BTreeMap<String, Arc<Pack>>,
     require_shipped_contracts: bool,
 }
 
@@ -133,9 +140,54 @@ impl ProviderRegistry {
             .insert((provider.to_owned(), adapter.to_owned()), Arc::new(factory));
     }
 
-    fn factory(&self, target: &ProviderConfigVersion) -> Option<&Arc<Factory>> {
-        self.factories
-            .get(&(target.provider.clone(), target.adapter.clone()))
+    /// Make a validated pack available to targets that name it.
+    pub fn register_pack(&mut self, pack: Pack) {
+        self.packs.insert(pack.pack_id().to_owned(), Arc::new(pack));
+    }
+
+    /// Bind an archetype engine. Pack targets are bound by engine, never by a
+    /// per-provider factory.
+    pub fn register_pack_engine<F>(&mut self, archetype: Archetype, factory: F)
+    where
+        F: Fn(&ProviderConfigVersion, &Arc<Pack>) -> Result<BoundAdapter, ContractError>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.pack_engines
+            .insert(archetype.engine_id().to_owned(), Arc::new(factory));
+    }
+
+    fn bind_target(&self, target: &ProviderConfigVersion) -> Result<BoundAdapter, RegistryError> {
+        let canonical = || target.target_key().canonical_name();
+        let Some(config) = target.pack() else {
+            let factory = self
+                .factories
+                .get(&(target.provider.clone(), target.adapter.clone()))
+                .ok_or_else(|| RegistryError::MissingFactory(canonical()))?;
+            return factory(target).map_err(|_| RegistryError::BindingFailed(canonical()));
+        };
+        let pack = self
+            .packs
+            .get(&config.pack_id)
+            .ok_or_else(|| RegistryError::MissingFactory(canonical()))?;
+        // The revision pins one exact pack; any drift is a binding failure.
+        let model = pack.model(&target.model);
+        if pack.digest() != config.pack_digest
+            || pack.pack_version() != config.pack_version
+            || pack.archetype().engine_id() != config.archetype
+            || model.is_none_or(|model| {
+                pack.target_key(model) != target.target_key()
+                    || model.provider_config_version != target.provider_config_version
+            })
+        {
+            return Err(RegistryError::BindingFailed(canonical()));
+        }
+        let engine = self
+            .pack_engines
+            .get(&config.archetype)
+            .ok_or_else(|| RegistryError::MissingFactory(canonical()))?;
+        engine(target, pack).map_err(|_| RegistryError::BindingFailed(canonical()))
     }
 }
 
@@ -238,9 +290,6 @@ impl ValidatedProviderCatalog {
             .filter(|target| target.is_execution_enabled())
         {
             let canonical = target.target_key().canonical_name();
-            let factory = registry
-                .factory(target)
-                .ok_or_else(|| RegistryError::MissingFactory(canonical.clone()))?;
             if !pricing.supports_target(&target.target_key()) {
                 return Err(RegistryError::MissingPricing(canonical));
             }
@@ -253,8 +302,7 @@ impl ValidatedProviderCatalog {
             {
                 return Err(RegistryError::MissingPricing(canonical));
             }
-            let adapter = factory(target)
-                .map_err(|_| RegistryError::BindingFailed(target.target_key().canonical_name()))?;
+            let adapter = registry.bind_target(target)?;
             if adapter.adapter_id() != target.adapter {
                 return Err(RegistryError::BindingFailed(
                     target.target_key().canonical_name(),

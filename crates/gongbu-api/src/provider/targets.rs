@@ -129,6 +129,10 @@ impl TargetKey {
 pub enum AdapterSettings {
     GeminiDeveloperImage(GeminiDeveloperImageConfig),
     Flux2Api(Flux2ApiConfig),
+    /// A target run by an archetype engine from a provider pack. The pack's
+    /// content digest is part of the revision, so editing a pack is a new
+    /// revision, never a silent change to frozen work.
+    Pack(PackTargetConfig),
     /// Test/local adapters have no transport configuration or credential override.
     Fixture,
 }
@@ -163,6 +167,16 @@ pub struct Flux2ApiConfig {
     pub approved_artifact_hosts: Vec<String>,
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PackTargetConfig {
+    pub pack_id: String,
+    pub pack_version: String,
+    pub pack_digest: String,
+    /// The archetype engine that runs the pack (`sync_fixed`, `async_poll`, `metered`).
+    pub archetype: String,
 }
 
 fn default_poll_interval_ms() -> u64 {
@@ -214,6 +228,12 @@ impl ProviderConfigVersion {
     pub fn flux2_api(&self) -> Option<&Flux2ApiConfig> {
         match &self.settings {
             AdapterSettings::Flux2Api(v) => Some(v),
+            _ => None,
+        }
+    }
+    pub fn pack(&self) -> Option<&PackTargetConfig> {
+        match &self.settings {
+            AdapterSettings::Pack(v) => Some(v),
             _ => None,
         }
     }
@@ -602,6 +622,21 @@ fn validate_settings(key: &TargetKey, settings: &AdapterSettings) -> Result<()> 
         }
         (_, _, AdapterSettings::Fixture) if !matches!(key.provider.as_str(), "google" | "flux") => {
         }
+        (_, _, AdapterSettings::Pack(c)) => {
+            let digest = c.pack_digest.strip_prefix("sha256:");
+            if !valid_identifier(&c.pack_id)
+                || !valid_identifier(&c.pack_version)
+                || !matches!(
+                    c.archetype.as_str(),
+                    "sync_fixed" | "async_poll" | "metered"
+                )
+                || digest.is_none_or(|value| {
+                    value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+            {
+                return Err(Error::InvalidAdapterSettings);
+            }
+        }
         _ => return Err(Error::InvalidAdapterSettings),
     }
     Ok(())
@@ -638,7 +673,7 @@ fn normalize_settings(settings: &mut AdapterSettings) {
                 *name = name.to_ascii_lowercase();
             }
         }
-        AdapterSettings::Fixture => {}
+        AdapterSettings::Pack(_) | AdapterSettings::Fixture => {}
     }
 }
 
