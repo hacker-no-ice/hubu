@@ -17,7 +17,7 @@ use super::{
         read_bounded, shared_client, ArtifactDownloadPolicy, CredentialForwarding,
         InvocationDeadline,
     },
-    pack::{ArtifactFetchError, ArtifactSource, Pack, ProviderResponse},
+    pack::{ArtifactFetchError, ArtifactSource, Evidence, Pack, ProviderResponse},
     targets::ProviderConfigVersion,
 };
 use crate::secrets::ProviderSecret;
@@ -46,7 +46,7 @@ pub struct TransportResponse {
     pub body: Value,
 }
 
-/// The HTTP boundary of the sync engine, replaceable in tests.
+/// The HTTP boundary of the pack engines, replaceable in tests.
 pub trait SyncTransport: Send + Sync {
     /// POST `body` once. The credential goes only in `auth`.
     fn post_json(
@@ -57,6 +57,18 @@ pub trait SyncTransport: Send + Sync {
         body: &Value,
         timeout: Duration,
     ) -> Result<TransportResponse, TransportFailure>;
+
+    /// GET a read-only status resource once (the async engine's poll). The
+    /// default refuses before sending, for transports that never poll.
+    fn get_json(
+        &self,
+        _url: &Url,
+        _auth: (&str, &str),
+        _headers: &BTreeMap<String, String>,
+        _timeout: Duration,
+    ) -> Result<TransportResponse, TransportFailure> {
+        Err(TransportFailure::BeforeSend)
+    }
 
     /// Download an artifact from an allowlisted host without credentials.
     fn download(
@@ -86,42 +98,25 @@ impl SyncTransport for ReqwestSyncTransport {
         for (name, value) in headers {
             request = request.header(name, value);
         }
-        let mut response = request
-            .json(body)
-            .send()
-            .map_err(|_| TransportFailure::UnknownOutcome { request_id: None })?;
-        let status = response.status().as_u16();
-        let headers = response
-            .headers()
-            .iter()
-            .filter_map(|(name, value)| {
-                Some((
-                    name.as_str().to_ascii_lowercase(),
-                    value.to_str().ok()?.trim().to_owned(),
-                ))
-            })
-            .collect::<BTreeMap<_, _>>();
-        if (400..500).contains(&status) {
-            return Ok(TransportResponse {
-                status,
-                headers,
-                body: Value::Null,
-            });
+        read_response(request.json(body).send())
+    }
+
+    fn get_json(
+        &self,
+        url: &Url,
+        auth: (&str, &str),
+        headers: &BTreeMap<String, String>,
+        timeout: Duration,
+    ) -> Result<TransportResponse, TransportFailure> {
+        let client = shared_client().map_err(|_| TransportFailure::BeforeSend)?;
+        let mut request = client
+            .get(url.clone())
+            .timeout(timeout)
+            .header(auth.0, auth.1);
+        for (name, value) in headers {
+            request = request.header(name, value);
         }
-        let unknown = |headers: &BTreeMap<String, String>| TransportFailure::UnknownOutcome {
-            request_id: headers
-                .get("x-request-id")
-                .filter(|id| !id.is_empty() && id.len() <= 255)
-                .cloned(),
-        };
-        let bytes = read_bounded(&mut response, MAX_PROVIDER_RESPONSE_BYTES)
-            .map_err(|_| unknown(&headers))?;
-        let body = serde_json::from_slice(&bytes).map_err(|_| unknown(&headers))?;
-        Ok(TransportResponse {
-            status,
-            headers,
-            body,
-        })
+        read_response(request.send())
     }
 
     fn download(
@@ -139,6 +134,46 @@ impl SyncTransport for ReqwestSyncTransport {
             }
         })
     }
+}
+
+/// Read one provider response. Once anything may have been sent, every failure
+/// is an unknown outcome.
+fn read_response(
+    sent: reqwest::Result<reqwest::blocking::Response>,
+) -> Result<TransportResponse, TransportFailure> {
+    let mut response = sent.map_err(|_| TransportFailure::UnknownOutcome { request_id: None })?;
+    let status = response.status().as_u16();
+    let headers = response
+        .headers()
+        .iter()
+        .filter_map(|(name, value)| {
+            Some((
+                name.as_str().to_ascii_lowercase(),
+                value.to_str().ok()?.trim().to_owned(),
+            ))
+        })
+        .collect::<BTreeMap<_, _>>();
+    if (400..500).contains(&status) {
+        return Ok(TransportResponse {
+            status,
+            headers,
+            body: Value::Null,
+        });
+    }
+    let unknown = |headers: &BTreeMap<String, String>| TransportFailure::UnknownOutcome {
+        request_id: headers
+            .get("x-request-id")
+            .filter(|id| !id.is_empty() && id.len() <= 255)
+            .cloned(),
+    };
+    let bytes =
+        read_bounded(&mut response, MAX_PROVIDER_RESPONSE_BYTES).map_err(|_| unknown(&headers))?;
+    let body = serde_json::from_slice(&bytes).map_err(|_| unknown(&headers))?;
+    Ok(TransportResponse {
+        status,
+        headers,
+        body,
+    })
 }
 
 pub struct SyncFixedEngine<T = ReqwestSyncTransport> {
@@ -188,17 +223,28 @@ impl<T: SyncTransport> SyncFixedEngine<T> {
     }
 }
 
-struct EngineDownloads<'a, T> {
-    transport: &'a T,
-    policy: Option<ArtifactDownloadPolicy>,
-    deadline: InvocationDeadline,
+/// Artifact downloads for pack engines. The pack has already matched the URL
+/// host against its artifact host patterns; this scopes one download policy to
+/// that exact host, bounded and without credentials.
+pub(crate) struct EngineDownloads<'a, T> {
+    pub transport: &'a T,
+    pub max_bytes: u64,
+    pub deadline: InvocationDeadline,
+    pub observer: Option<&'a dyn super::contract::ProviderTransportObserver>,
 }
 
 impl<T: SyncTransport> ArtifactSource for EngineDownloads<'_, T> {
     fn fetch(&self, url: &Url, _max_bytes: usize) -> Result<Vec<u8>, ArtifactFetchError> {
-        // The policy already bounds the download at the engine's artifact limit.
-        let policy = self.policy.as_ref().ok_or(ArtifactFetchError::Failed)?;
-        self.transport.download(url, policy, self.deadline)
+        let host = url.host_str().ok_or(ArtifactFetchError::Failed)?.to_owned();
+        let policy =
+            ArtifactDownloadPolicy::new(&[host], self.max_bytes, CredentialForwarding::Prohibited)
+                .map_err(|_| ArtifactFetchError::Failed)?;
+        if self.observer.is_some_and(|observer| {
+            !observer.record(super::contract::ProviderTransportInteraction::ArtifactFetch)
+        }) {
+            return Err(ArtifactFetchError::Failed);
+        }
+        self.transport.download(url, &policy, self.deadline)
     }
 }
 
@@ -305,23 +351,19 @@ impl<T: SyncTransport> ProviderAdapter for SyncFixedEngine<T> {
                 .with_evidence(request_id, None))
             }
         }
-        let artifacts = self.pack.artifacts();
         let downloads = EngineDownloads {
             transport: &self.transport,
-            policy: (!artifacts.hosts.is_empty())
-                .then(|| {
-                    ArtifactDownloadPolicy::new(
-                        &artifacts.hosts,
-                        self.max_artifact_bytes as u64,
-                        CredentialForwarding::Prohibited,
-                    )
-                    .ok()
-                })
-                .flatten(),
+            max_bytes: self.max_artifact_bytes as u64,
             deadline,
+            observer: None,
         };
-        self.pack
-            .map_response(request, &response, &downloads, self.max_artifact_bytes)
+        self.pack.map_response(
+            request,
+            &response,
+            &Evidence::default(),
+            &downloads,
+            self.max_artifact_bytes,
+        )
     }
 }
 
@@ -695,12 +737,12 @@ mod tests {
         let pack = Arc::new(Pack::from_toml_str(URL_PACK).unwrap());
         assert!(SyncFixedEngine::new(pack.clone(), "image-v2", ReqwestSyncTransport, 1).is_err());
         assert!(SyncFixedEngine::new(pack.clone(), "image-v1", ReqwestSyncTransport, 0).is_err());
-        let async_pack = Pack::from_toml_str(
-            &URL_PACK.replace("archetype = \"sync_fixed\"", "archetype = \"async_poll\""),
+        let metered_pack = Pack::from_toml_str(
+            &URL_PACK.replace("archetype = \"sync_fixed\"", "archetype = \"metered\""),
         )
         .unwrap();
         assert!(
-            SyncFixedEngine::new(Arc::new(async_pack), "image-v1", ReqwestSyncTransport, 1)
+            SyncFixedEngine::new(Arc::new(metered_pack), "image-v1", ReqwestSyncTransport, 1)
                 .is_err()
         );
     }

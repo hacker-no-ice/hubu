@@ -5,8 +5,8 @@ that a reviewed Gongbu engine runs. Adding a provider, a model or a price
 becomes a pack change instead of Rust code and a release.
 
 > **Status.** Schema v1 is defined, Gongbu validates and loads packs, and the
-> `sync_fixed` engine runs them. The async engine, the verified FLUX and Gemini
-> packs, and the `hubu provider` commands that activate packs in a stack arrive
+> `sync_fixed` and `async_poll` engines run them. The verified FLUX and Gemini
+> packs and the `hubu provider` commands that activate packs in a stack arrive
 > in later releases. You can't activate a pack in a stack yet.
 
 ## What a pack declares and what engines own
@@ -150,7 +150,7 @@ With this pack, `{"prompt": "a red circle", "image_count": 2, "quality":
 | Field | Rules |
 | --- | --- |
 | `endpoint` | Required HTTPS origin with no port, path or query. |
-| `allowed_hosts` | Required. Bare host names that receive the credential, including the endpoint host. |
+| `allowed_hosts` | Required. Host names that receive the credential, including the endpoint host as an exact name. |
 | `api_version` | Required slug. |
 | `auth_header` | Required HTTP header name that carries the credential. |
 | `credential` | Required credential alias. The stack profile binds it to a Keychain item; the secret never appears in a pack. |
@@ -187,6 +187,53 @@ input = [{ type = "text", text = "{{prompt}}" }]
 response_format = { type = "image", image_size = "{{image_size|upper}}" }
 ```
 
+### `[poll]`
+
+Required for `async_poll` packs and rejected for the others. The engine
+submits once, checkpoints the job, and polls read-only until the job is ready,
+refused, or the transport deadline passes. Every poll URL is rebuilt from this
+declared shape; the engine never follows a provider-supplied URL as is.
+
+| Field | Rules |
+| --- | --- |
+| `job_id` | Required response path to the job ID in the submission response. |
+| `path` | Required poll path of plain segments; one segment may be exactly `{{job_id}}`. |
+| `query` | Optional poll query. Keys are lowercase tokens; a value is a plain token or exactly `{{job_id}}`. The job ID must appear in the path or the query. |
+| `url` | Optional response path to a polling URL the provider returns. Its host is adopted only when it matches `hosts` and its path and query equal the declared shape; otherwise the engine polls the endpoint host. Either way the checkpoint records why. |
+| `hosts` | Polling hosts (or patterns) a returned URL may name. They receive the credential, so each must also be in `transport.allowed_hosts`. Required with `url`. |
+| `interval_ms` | Required delay between polls, from 1 to `transport.timeout_ms`. |
+| `status` | Required response path to the job status, in submission and poll responses. |
+| `pending` / `ready` | Required lowercase status values meaning "keep polling" and "map the result". Statuses compare case-insensitively. |
+| `rejected` | Status values meaning the provider refused the job, each mapped to a `provider_<reason>` failure code. The claim is released. |
+| `ambiguous` | Status values whose outcome is unknown, each mapped to a failure code. The execution goes to reconciliation. |
+
+A submission response with no status is treated as pending once it carries a
+job ID; one already `ready` is mapped without polling. A poll response whose
+job ID differs from the checkpoint's goes to reconciliation.
+
+```toml
+[poll]
+job_id = "/id"
+path = "/v1/get_result"
+query = { id = "{{job_id}}" }
+url = "/polling_url"
+hosts = ["api.eu.example.com", "api.us.example.com"]
+interval_ms = 500
+status = "/status"
+pending = ["pending", "generating"]
+ready = ["ready"]
+rejected = { "content moderated" = "provider_content_moderated", "error" = "provider_error" }
+ambiguous = { "task not found" = "provider_task_not_found" }
+```
+
+### Host patterns
+
+`transport.allowed_hosts`, `poll.hosts` and `artifacts.hosts` accept exact
+names or patterns with one `*` label that matches exactly one DNS label, such
+as `delivery.*.example.com` for per-region delivery hosts. The `*` can't stand
+in the last two labels. An artifact host pattern that could name any
+credential-bearing host is rejected.
+
 ### `[[parameters]]`
 
 Parameters are the only values an agent can set. Input that names an
@@ -222,7 +269,8 @@ whose `type` is `model_output`, then the elements of their `content` whose
 | `request_id_headers` | Optional response headers that carry the provider request ID, checked in order. |
 | `provider_request_id` | Optional body path to the request ID, used when no header carries it. Set it, `request_id_headers`, or both. |
 | `usage` | Map of usage quantity (`images`, `input_tokens`, `output_tokens`, `results`, `pages`, `seconds`) to a path at an integer, at an array whose length counts, or at a filtered selection whose size counts. |
-| `reported_cost` | Optional. A decimal amount in major currency units, such as `"0.012"`. Ignored by `sync_fixed`, which settles from frozen prices and delivered usage. |
+| `reported_cost` | Optional. A decimal amount in USD, such as `"0.012"`. Ignored by `sync_fixed`, which settles from frozen prices and delivered usage. Other archetypes use the frozen price when the response omits it and send an unreadable reported cost to reconciliation. |
+| `reported_cost_scale` | Optional decimal places to shift the reported cost: `2` when the provider reports one-cent credits. Defaults to `0`. |
 | `artifact_items` | Required path to the artifacts: an array, or a filtered selection. |
 | `artifact_url` / `artifact_base64` | Exactly one: a path inside each item to a download URL or to inline base64 bytes. |
 
@@ -252,6 +300,25 @@ work, so the engine sends it to reconciliation and never releases the claim.
 | HTTP 5xx or any other non-2xx | Reconciliation (`provider_failure`) |
 | 2xx the mapping can't read, an artifact off the allowlist, too large, or of the wrong type | Reconciliation, keeping the request ID |
 | 2xx that maps cleanly | Settled from the frozen price |
+
+## How the `async_poll` engine classifies outcomes
+
+Submission follows the `sync_fixed` table, with 401, 402, 403 and 429 recorded
+as `provider_authentication_failed`, `provider_insufficient_credit`,
+`provider_permission_denied` and `provider_rate_limited`. Once the provider
+has accepted a job:
+
+| Outcome | Claim |
+| --- | --- |
+| A `rejected` status | Released with the pack's code, keeping the job ID |
+| An `ambiguous` or undeclared status, or a job ID mismatch | Reconciliation |
+| Any non-2xx poll response, including 4xx | Reconciliation |
+| Lost poll response, or the deadline passes | Reconciliation (`timeout_unknown_outcome`) |
+| A checkpoint naming a host the pack doesn't allow | Reconciliation (`polling_origin_rejected`) |
+| `ready` and the result maps cleanly | Settled from the frozen price, with the job ID as evidence |
+
+After a restart, the engine resumes from the checkpoint: it polls the
+checkpointed host under the original deadline and never resubmits.
 
 ### `[artifacts]`
 
