@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <meta name="theme-color" content="#181916">
+    <title>Break Hubu — Episode 01</title>
+    <link rel="stylesheet" href="episode.css">
+    <script src="episode.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#replay">Skip to replay</a>
+    <div class="page-shell">
+      <header class="masthead">
+        <a class="brand" href="https://github.com/hacker-no-ice/hubu" aria-label="Hubu on GitHub">
+          <span class="brand-mark" aria-hidden="true">h.</span>
+          <span>HUBU <span class="brand-divider">/</span> FIELD TESTS</span>
+        </a>
+        <span class="masthead-note"><span class="status-dot" aria-hidden="true"></span>LOCAL MOCK REPLAY</span>
+      </header>
+
+      <main id="replay">
+        <section class="episode-intro" aria-labelledby="episode-title">
+          <div class="intro-copy">
+            <p class="eyebrow"><span class="episode-number">01</span> BREAK HUBU</p>
+            <h1 id="episode-title">100 requests.<br><span>$1 budget.</span></h1>
+            <p class="intro-description">One agent. One simultaneous burst.<br>Does the budget hold?</p>
+          </div>
+          <div class="intro-aside">
+            <span class="aside-rule" aria-hidden="true"></span>
+            <p>THE TEST</p>
+            <p>One agent requests $0.03<br>100 times against a $1 limit.</p>
+            <span class="runtime-label">45 SECOND REPLAY</span>
+          </div>
+        </section>
+
+        <section class="replay-stage" aria-labelledby="stage-title">
+          <div class="stage-toolbar">
+            <div class="stage-heading">
+              <span class="chapter-indicator" id="chapter-number">00</span>
+              <h2 id="stage-title">The concurrency test</h2>
+            </div>
+            <span class="evidence-status" id="evidence-status"><span aria-hidden="true"></span>Evidence not loaded</span>
+          </div>
+
+          <div class="stage-body">
+            <div class="story-panel">
+              <p class="eyebrow story-kicker" id="phase-kicker">READY WHEN THE EVIDENCE IS</p>
+              <h3 id="phase-title">A small limit.<br>A crowded starting line.</h3>
+              <p class="phase-description" id="phase-description">Load a recorded test run to replay its decisions. Every dot represents a worker in that run.</p>
+              <div class="run-context">
+                <p><span class="context-label">IDENTITY</span>1 registered agent account</p>
+                <p><span class="context-label">LOAD</span>100 concurrent simulated workers</p>
+                <p><span class="context-label">EXECUTION</span>Local mock · no paid provider</p>
+              </div>
+              <div class="empty-state" id="empty-state">
+                <span class="empty-icon" aria-hidden="true">↳</span>
+                <div>
+                  <strong>Run evidence not loaded</strong>
+                  <p>Import <code>run.json</code> from the Episode 01 test harness.</p>
+                </div>
+              </div>
+              <div class="result-note" id="result-note" hidden>
+                <span class="result-symbol" aria-hidden="true">✓</span>
+                <div><strong id="result-title">Evidence loaded</strong><p id="result-description">Replay ready.</p></div>
+              </div>
+            </div>
+
+            <div class="simulation-panel">
+              <div class="grid-header"><span>ONE AGENT · 100 REQUESTS</span><span id="grid-progress">Awaiting evidence</span></div>
+              <div class="worker-grid" id="worker-grid" role="img" aria-label="100 workers, recorded decisions not loaded"></div>
+              <div class="grid-legend" aria-hidden="true">
+                <span><i class="legend-dot waiting"></i>Waiting</span>
+                <span><i class="legend-dot allowed"></i>Allowed</span>
+                <span><i class="legend-dot denied"></i>Denied</span>
+              </div>
+              <div class="budget-section">
+                <div class="budget-heading"><span id="budget-caption">ACCOUNT BUDGET</span><strong>$1.00 <span>USD</span></strong></div>
+                <div class="budget-track" role="img" id="budget-track" aria-label="Budget balances not loaded">
+                  <span class="budget-consumed" id="budget-consumed"></span>
+                  <span class="budget-reserved" id="budget-reserved"></span>
+                  <span class="budget-unloaded" id="budget-unloaded"></span>
+                </div>
+                <div class="budget-values">
+                  <div><span><i class="legend-dot consumed"></i>Settled</span><strong id="settled-value">—</strong></div>
+                  <div><span><i class="legend-dot reserved"></i>Reserved</span><strong id="reserved-value">—</strong></div>
+                  <div><span><i class="legend-dot available"></i>Available</span><strong id="available-value">—</strong></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="totals-strip">
+            <div class="total-item"><span>REQUESTED</span><strong id="requested-total">—<small> / $3.00</small></strong></div>
+            <div class="total-item allowed-total"><span>ALLOWED</span><strong id="allowed-total">—<small> requests</small></strong></div>
+            <div class="total-item denied-total"><span>DENIED</span><strong id="denied-total">—<small> requests</small></strong></div>
+            <div class="total-item"><span>BUDGET OVERRUN</span><strong id="overspend-total">—</strong></div>
+          </div>
+
+          <div class="player">
+            <div class="player-controls">
+              <button type="button" class="play-button" id="play-button" disabled aria-label="Play replay"><span id="play-icon" aria-hidden="true">▶</span><span id="play-label">Play replay</span></button>
+              <button type="button" class="icon-button" id="restart-button" disabled aria-label="Restart replay" title="Restart replay">↺</button>
+              <span class="playback-clock"><span id="playback-time">00:00</span><span> / 00:45</span></span>
+              <span class="playback-note" id="playback-note">Playback time, not request latency</span>
+              <button type="button" class="text-button focus-evidence-button" id="focus-evidence" disabled aria-controls="evidence-drawer">Inspect evidence ↗</button>
+              <button type="button" class="focus-button" id="focus-button" aria-pressed="false" aria-label="Enter focus view">Focus view <span aria-hidden="true">⤢</span></button>
+            </div>
+            <label class="sr-only" for="timeline">Replay position in seconds</label>
+            <input class="timeline" type="range" id="timeline" min="0" max="45" step="0.1" value="0" disabled aria-valuetext="0 seconds of 45 seconds">
+            <div class="timeline-chapters" aria-hidden="true"><span>01 · SET THE LIMIT</span><span>02 · THE BURST</span><span>03 · THE GATE</span><span>04 · SETTLE</span><span>05 · THE RECEIPT</span></div>
+          </div>
+        </section>
+
+        <div class="evidence-actions">
+          <p id="load-message" role="status">This preview contains no prefilled test results.</p>
+          <div class="action-buttons">
+            <button type="button" class="text-button" id="view-evidence" disabled>Inspect evidence <span aria-hidden="true">↗</span></button>
+            <label class="import-button" for="evidence-file">Load run.json <span aria-hidden="true">+</span></label>
+            <input type="file" id="evidence-file" accept=".json,application/json" class="file-input">
+          </div>
+        </div>
+
+        <details class="evidence-drawer" id="evidence-drawer">
+          <summary><span><span class="eyebrow">SHOW YOUR WORK</span><strong>The evidence receipt</strong></span><span class="drawer-toggle" aria-hidden="true">+</span></summary>
+          <div class="evidence-content">
+            <p class="evidence-explainer">The viewer checks the file's structure and arithmetic. One registered agent issues 100 concurrent requests through in-process API handlers, followed by synthetic executor settlement. This run does not measure production TCP throughput or a live provider bill.</p>
+            <div class="receipt-overview">
+              <div class="receipt-metadata">
+                <dl>
+                  <div><dt>Evidence</dt><dd id="receipt-file">Not loaded</dd></div>
+                  <div><dt>Source commit</dt><dd id="receipt-commit">—</dd></div>
+                  <div><dt>Captured elapsed time</dt><dd id="receipt-elapsed">—</dd></div>
+                  <div><dt>Test command</dt><dd><code id="receipt-command">—</code></dd></div>
+                </dl>
+                <a class="source-link" id="source-link" hidden target="_blank" rel="noopener noreferrer">Read the test at this commit <span aria-hidden="true">↗</span></a>
+              </div>
+              <div class="assertions-panel"><h3>Recorded assertions</h3><ul id="assertion-list"><li class="empty-assertion">No assertion evidence loaded.</li></ul></div>
+            </div>
+            <section class="ledger-receipt" aria-labelledby="ledger-title">
+              <div class="decision-table-heading"><h3 id="ledger-title">Canonical ledger reconciliation</h3><span id="ledger-count">No transactions loaded</span></div>
+              <dl class="ledger-totals">
+                <div><dt>Recorded charges</dt><dd id="ledger-charges">—</dd></div>
+                <div><dt>Budget consumed</dt><dd id="ledger-consumed">—</dd></div>
+                <div><dt>Unaccounted</dt><dd id="ledger-unaccounted">—</dd></div>
+                <div><dt>Pending holds</dt><dd id="ledger-pending">—</dd></div>
+              </dl>
+              <details class="ledger-transactions" id="ledger-transactions">
+                <summary>Inspect settlement transactions <span aria-hidden="true">+</span></summary>
+                <div class="table-scroll" tabindex="0" role="region" aria-label="Canonical settlement transactions">
+                  <table><thead><tr><th scope="col">Transaction ID</th><th scope="col">Authorization ID</th><th scope="col">Budget charge</th><th scope="col">Expense debit</th><th scope="col">Clearing credit</th></tr></thead><tbody id="ledger-table"><tr><td colspan="5" class="empty-table">Load a run to inspect its ledger.</td></tr></tbody></table>
+                </div>
+              </details>
+            </section>
+            <div class="decision-table-heading"><h3>Recorded decisions</h3><button type="button" class="text-button" id="download-evidence" disabled>Download evidence <span aria-hidden="true">↓</span></button></div>
+            <div class="table-scroll" tabindex="0" role="region" aria-label="Recorded worker decisions">
+              <table><thead><tr><th scope="col">Worker</th><th scope="col">Decision</th><th scope="col">Requested</th><th scope="col">Decision ID</th><th scope="col">Reason</th></tr></thead><tbody id="decision-table"><tr><td colspan="5" class="empty-table">Load a run to inspect all 100 decisions.</td></tr></tbody></table>
+            </div>
+            <p class="receipt-footnote" id="receipt-checks">A loaded file is not independently authenticated by this viewer.</p>
+          </div>
+        </details>
+
+        <p class="scope-note">This episode tests concurrent authorization and budget accounting in a local mock run. Worker animation is an editorial replay; its timing and order do not represent the captured execution.</p>
+        <p class="sr-only" id="phase-announcement" role="status" aria-live="polite"></p>
+      </main>
+      <footer><span>BREAK HUBU <span class="footer-divider">/</span> EPISODE 01</span><span>Small budgets. Hard questions.</span></footer>
+    </div>
+  </body>
+</html>

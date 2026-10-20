@@ -44,6 +44,21 @@ jobs:
       - name: Run all workspace tests
         run: cargo test --workspace --all-targets --locked
 
+      - name: Run Break Hubu Episode 01 and preserve evidence
+        id: break_hubu
+        run: |
+          python3 scripts/break-hubu-episode-01.py --output target/break-hubu/ci
+          HUBU_BREAK_TEST_EVIDENCE=target/break-hubu/ci/evidence/run.json node --test examples/break-hubu/episode.test.cjs
+
+      - name: Upload Break Hubu replay and test logs
+        if: always() && steps.break_hubu.outcome != 'skipped'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: break-hubu-episode-01
+          path: target/break-hubu/ci
+          if-no-files-found: warn
+          retention-days: 30
+
       - name: Build all production binaries with locked dependencies
         if: github.event_name == 'push'
         run: >-

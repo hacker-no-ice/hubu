@@ -6803,6 +6803,7 @@ fn write_response(
 #[cfg(test)]
 mod tests {
     mod authorization_void;
+    mod break_hubu;
     mod governance;
     mod history;
     use super::*;
