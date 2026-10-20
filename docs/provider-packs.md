@@ -213,8 +213,15 @@ work, so the engine sends it to reconciliation and never releases the claim.
 | `pricing_rules` | Required. Same rule format as [`providers.toml` pricing rules](configuration/local-stack/v1/providers-toml.md#pricing_rules), without `provider` and `model`, which come from the pack. |
 
 Every combination of selector parameter values must be priced by exactly one
-rule, and every priced unit must be set by a bounded parameter. A valid agent
-input can therefore never reach an unpriced or unbounded request.
+rule, and every priced unit must be set by a bounded parameter. Every explicit
+`quantity` binding must have a corresponding unit in every model's pricing
+rules, so it is retained in the frozen snapshot. A valid agent input can
+therefore never reach an unpriced or unbounded request.
+
+For a flat per-request bundle, use ordinary bounded integer parameters without
+`quantity` bindings. If a bundled quantity must also be frozen and checked at
+settlement, give its component a zero rate and put the bundle price in the
+`request` component.
 
 ## Integrity
 
@@ -223,6 +230,11 @@ file doesn't change it. Each model's target revision records the pack ID,
 version, digest and archetype. A target only binds to the exact pack it was
 frozen with, so editing a pack is a new revision, never a silent change to
 executions already in flight.
+
+Binding also requires the runtime catalog's normalized rules for each pack
+target to match the pinned pack's rules exactly. The pack digest covers each
+model's `pricing_version`; a combined catalog can retain its own aggregate
+version without changing those per-model rules.
 
 ## Related
 

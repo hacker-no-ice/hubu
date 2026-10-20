@@ -989,6 +989,20 @@ impl PackDocument {
                         }
                     }
                 }
+                for quantity in quantities {
+                    if !rule
+                        .components
+                        .iter()
+                        .any(|component| component.unit.quantity_name() == Some(*quantity))
+                    {
+                        return Err(invalid(
+                            format!("{rule_field}.components"),
+                            format!(
+                                "declares priced quantity {quantity}, but this rule has no component for it"
+                            ),
+                        ));
+                    }
+                }
             }
         }
         // Freeze the rules exactly as the catalog will, so every catalog rule
@@ -1551,6 +1565,97 @@ mod tests {
             Pack::from_toml_str(&edited("display_name", "unknown_field = 1\ndisplay_name")),
             Err(PackError::Parse(_))
         ));
+    }
+
+    #[test]
+    fn every_model_and_selector_rule_must_freeze_declared_quantities() {
+        for (model_index, rule_index) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
+            let mut document: PackDocument = toml::from_str(FIXTURE).unwrap();
+            let mut second_model = document.models[0].clone();
+            second_model.model = "image-v2".into();
+            second_model.provider_config_version = "sandbox-image-v2-2026-10-19".into();
+            for rule in &mut second_model.pricing_rules {
+                rule.rule_id.push_str("-v2");
+            }
+            document.models.push(second_model);
+            document.models[model_index].pricing_rules[rule_index]
+                .components
+                .retain(|component| component.unit != PricingUnit::Image);
+
+            let error = Pack::from_toml_str(&toml::to_string(&document).unwrap()).unwrap_err();
+            match error {
+                PackError::Invalid { field, reason } => {
+                    assert_eq!(
+                        field,
+                        format!("models[{model_index}].pricing_rules[{rule_index}].components")
+                    );
+                    assert!(reason.contains("declares priced quantity image_count"));
+                }
+                other => panic!("{other}"),
+            }
+        }
+    }
+
+    #[test]
+    fn flat_request_bundles_allow_bounded_parameters_and_zero_rate_quantities() {
+        for freeze_quantity in [false, true] {
+            let mut document: PackDocument = toml::from_str(FIXTURE).unwrap();
+            if !freeze_quantity {
+                document.parameters[1].quantity = None;
+            }
+            for rule in &mut document.models[0].pricing_rules {
+                if freeze_quantity {
+                    for component in &mut rule.components {
+                        if component.unit == PricingUnit::Image {
+                            component.rate_numerator_minor = 0;
+                        }
+                    }
+                } else {
+                    rule.components
+                        .retain(|component| component.unit != PricingUnit::Image);
+                }
+            }
+            let pack = Pack::from_toml_str(&toml::to_string(&document).unwrap()).unwrap();
+            let catalog = bind(&pack, &pack).unwrap();
+            for count in [1, 4] {
+                let prepared = pack
+                    .prepare(
+                        "image-v1",
+                        &json!({"prompt": "a red circle", "image_count": count}),
+                    )
+                    .unwrap();
+                assert_eq!(prepared.body["n"], count);
+                let snapshot = catalog.pricing().snapshot(&prepared.request).unwrap();
+                assert_eq!(snapshot.estimated_units, 1_000);
+                assert_eq!(
+                    snapshot.estimated_quantity(PricingUnit::Image),
+                    freeze_quantity.then_some(count)
+                );
+                let usage = NormalizedUsage {
+                    images: Some(count),
+                    ..Default::default()
+                };
+                assert_eq!(snapshot.settle(&usage, 1_000).unwrap(), 1_000);
+                if freeze_quantity {
+                    assert_eq!(
+                        snapshot.settle(
+                            &NormalizedUsage {
+                                images: Some(count + 1),
+                                ..Default::default()
+                            },
+                            1_000,
+                        ),
+                        Err(ContractError::SettlementOverage)
+                    );
+                }
+            }
+            assert!(pack
+                .prepare(
+                    "image-v1",
+                    &json!({"prompt": "a red circle", "image_count": 5}),
+                )
+                .is_err());
+        }
     }
 
     #[test]
