@@ -1,5 +1,10 @@
 //! Frozen operator pricing and the normalized provider billing boundary.
-use std::{collections::BTreeSet, fs, path::Path, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::Path,
+    sync::Arc,
+};
 
 use crate::{
     provider_targets::{ProviderConfigVersion, TargetKey},
@@ -317,10 +322,78 @@ pub struct PricingRule {
     pub components: Vec<PriceComponent>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(deny_unknown_fields)]
-pub struct PricingSelector {
-    pub image_size: String,
+/// Named dimensions that pick one pricing rule for a request, such as
+/// `image_size`, `aspect_ratio` or `mode`. A rule's selector must equal the
+/// request's selector exactly; a rule without one prices only requests that
+/// carry no selector. Single-key `image_size` selectors serialize exactly as
+/// the original struct did, so frozen catalogs and snapshots are unchanged.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(transparent)]
+pub struct PricingSelector(BTreeMap<String, String>);
+
+impl PricingSelector {
+    pub fn for_image_size(image_size: impl Into<String>) -> Self {
+        Self(BTreeMap::from([(
+            IMAGE_SIZE_SELECTOR.to_owned(),
+            image_size.into(),
+        )]))
+    }
+    pub fn get(&self, key: &str) -> Option<&str> {
+        self.0.get(key).map(String::as_str)
+    }
+    pub fn image_size(&self) -> Option<&str> {
+        self.get(IMAGE_SIZE_SELECTOR)
+    }
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+    pub fn entries(&self) -> &BTreeMap<String, String> {
+        &self.0
+    }
+    pub fn insert(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        self.0.insert(key.into(), value.into());
+    }
+    /// The canonical form: keys are lowercase identifiers, values are trimmed
+    /// and lowercased, and `image_size` names a supported preset.
+    pub fn normalized(&self) -> Result<Self> {
+        self.0
+            .iter()
+            .map(|(key, value)| {
+                if !valid_selector_key(key) {
+                    return Err(ContractError::Malformed("invalid pricing selector".into()));
+                }
+                let value = if key == IMAGE_SIZE_SELECTOR {
+                    normalize_image_size(value)?
+                } else {
+                    normalize_selector_value(value)?
+                };
+                Ok((key.clone(), value))
+            })
+            .collect::<Result<_>>()
+            .map(Self)
+    }
+}
+
+pub const IMAGE_SIZE_SELECTOR: &str = "image_size";
+
+fn valid_selector_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    key.len() <= 64
+        && chars.next().is_some_and(|c| c.is_ascii_lowercase())
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+fn normalize_selector_value(value: &str) -> Result<String> {
+    let value = value.trim().to_ascii_lowercase();
+    if value.is_empty()
+        || value.len() > 64
+        || !value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':'))
+    {
+        return Err(ContractError::Malformed("invalid pricing selector".into()));
+    }
+    Ok(value)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -337,7 +410,38 @@ pub enum PricingUnit {
     Image,
     InputToken,
     OutputToken,
+    /// One per provider call, whatever the call returns.
+    Request,
+    Result,
+    Page,
+    Second,
 }
+
+impl PricingUnit {
+    /// The named request quantity this unit is priced against. A `request`
+    /// component always prices exactly one call and has no named quantity.
+    pub fn quantity_name(self) -> Option<&'static str> {
+        match self {
+            Self::Image => Some("image_count"),
+            Self::InputToken => Some("input_tokens"),
+            Self::OutputToken => Some("max_output_tokens"),
+            Self::Request => None,
+            Self::Result => Some("results"),
+            Self::Page => Some("pages"),
+            Self::Second => Some("seconds"),
+        }
+    }
+}
+
+/// Every quantity a normalized request may carry.
+pub const REQUEST_QUANTITIES: &[&str] = &[
+    "image_count",
+    "input_tokens",
+    "max_output_tokens",
+    "results",
+    "pages",
+    "seconds",
+];
 
 #[derive(Clone, Debug)]
 pub struct PricingCatalog(Arc<FrozenCatalog>);
@@ -379,7 +483,10 @@ impl PricingCatalog {
             rule.model = normalized(&rule.model, "model")?;
             rule.currency = rule.currency.trim().to_ascii_uppercase();
             if let Some(selector) = &mut rule.selector {
-                selector.image_size = normalize_image_size(&selector.image_size)?;
+                if selector.is_empty() {
+                    return Err(ContractError::Malformed("empty pricing selector".into()));
+                }
+                *selector = selector.normalized()?;
             }
             rule.components.sort_by_key(|component| component.unit);
         }
@@ -409,7 +516,10 @@ impl PricingCatalog {
             if rule.components.iter().any(|c| !units.insert(c.unit)) {
                 return Err(ContractError::Malformed("duplicate price component".into()));
             }
-            if rule.selector.is_some()
+            if rule
+                .selector
+                .as_ref()
+                .is_some_and(|selector| selector.image_size().is_some())
                 && (rule.components.len() != 1 || rule.components[0].unit != PricingUnit::Image)
             {
                 return Err(ContractError::Malformed(
@@ -457,8 +567,8 @@ impl PricingCatalog {
                 rule.provider == request.provider
                     && rule.model == request.model
                     && match &rule.selector {
-                        Some(s) => request.image_size.as_ref() == Some(&s.image_size),
-                        None => request.image_size.is_none(),
+                        Some(selector) => *selector == request.selector,
+                        None => request.selector.is_empty(),
                     }
             })
             .collect();
@@ -537,7 +647,7 @@ impl PricingCatalog {
                 && rule
                     .selector
                     .as_ref()
-                    .is_some_and(|selector| selector.image_size == image_size)
+                    .is_some_and(|selector| selector.image_size() == Some(image_size))
         })
     }
 
@@ -577,16 +687,17 @@ fn normalized(value: &str, field: &str) -> Result<String> {
     Ok(value.to_owned())
 }
 
+/// The priced shape of one provider call: named, bounded quantities (see
+/// [`REQUEST_QUANTITIES`]) and the selector dimensions that pick a rule.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct NormalizedRequest {
     pub provider: String,
     pub model: String,
-    pub image_count: Option<i64>,
-    pub input_tokens: Option<i64>,
-    pub max_output_tokens: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub image_size: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub quantities: BTreeMap<String, i64>,
+    #[serde(default, skip_serializing_if = "PricingSelector::is_empty")]
+    pub selector: PricingSelector,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_dimensions: Option<OutputDimensions>,
 }
@@ -599,38 +710,73 @@ pub struct OutputDimensions {
 }
 
 impl NormalizedRequest {
+    pub fn new(provider: impl Into<String>, model: impl Into<String>) -> Self {
+        Self {
+            provider: provider.into(),
+            model: model.into(),
+            quantities: BTreeMap::new(),
+            selector: PricingSelector::default(),
+            output_dimensions: None,
+        }
+    }
+    pub fn with_quantity(mut self, name: &str, value: Option<i64>) -> Self {
+        self.set_quantity(name, value);
+        self
+    }
+    pub fn with_selector(mut self, key: &str, value: Option<String>) -> Self {
+        if let Some(value) = value {
+            self.selector.insert(key, value);
+        }
+        self
+    }
+    pub fn with_output_dimensions(mut self, dimensions: Option<OutputDimensions>) -> Self {
+        self.output_dimensions = dimensions;
+        self
+    }
+    pub fn set_quantity(&mut self, name: &str, value: Option<i64>) {
+        match value {
+            Some(value) => self.quantities.insert(name.to_owned(), value),
+            None => self.quantities.remove(name),
+        };
+    }
+    pub fn quantity(&self, name: &str) -> Option<i64> {
+        self.quantities.get(name).copied()
+    }
+    pub fn image_count(&self) -> Option<i64> {
+        self.quantity("image_count")
+    }
+    pub fn image_size(&self) -> Option<&str> {
+        self.selector.image_size()
+    }
     pub fn validate(&self) -> Result<()> {
         if self.provider.trim().is_empty() || self.model.trim().is_empty() {
             return Err(ContractError::IndeterminableCost);
         }
-        for value in [self.image_count, self.input_tokens, self.max_output_tokens]
-            .into_iter()
-            .flatten()
+        if self
+            .quantities
+            .iter()
+            .any(|(name, value)| !REQUEST_QUANTITIES.contains(&name.as_str()) || *value < 0)
         {
-            if value < 0 {
-                return Err(ContractError::IndeterminableCost);
-            }
+            return Err(ContractError::IndeterminableCost);
         }
-        if let Some(size) = &self.image_size {
-            if normalize_image_size(size).map_err(|_| ContractError::IndeterminableCost)? != *size {
-                return Err(ContractError::IndeterminableCost);
-            }
+        if self.selector.normalized().ok().as_ref() != Some(&self.selector) {
+            return Err(ContractError::IndeterminableCost);
         }
         if self.output_dimensions.as_ref().is_some_and(|dimensions| {
-            self.image_size.is_none() || dimensions.width == 0 || dimensions.height == 0
+            self.image_size().is_none() || dimensions.width == 0 || dimensions.height == 0
         }) {
             return Err(ContractError::IndeterminableCost);
         }
         Ok(())
     }
     fn quantity_for(&self, unit: PricingUnit) -> Result<i64> {
-        match unit {
-            PricingUnit::Image => self.image_count,
-            PricingUnit::InputToken => self.input_tokens,
-            PricingUnit::OutputToken => self.max_output_tokens,
+        match unit.quantity_name() {
+            None => Ok(1),
+            Some(name) => self
+                .quantity(name)
+                .filter(|v| *v > 0)
+                .ok_or(ContractError::IndeterminableCost),
         }
-        .filter(|v| *v > 0)
-        .ok_or(ContractError::IndeterminableCost)
     }
 }
 
@@ -639,7 +785,7 @@ pub fn validate_image_size_input(
     input: &serde_json::Value,
 ) -> Result<()> {
     let supplied = input.get("image_size").and_then(serde_json::Value::as_str);
-    if supplied != request.image_size.as_deref() {
+    if supplied != request.image_size() {
         return Err(ContractError::IndeterminableCost);
     }
     Ok(())
@@ -672,8 +818,8 @@ pub fn validate_image_input_versioned(
         || typed.prompt.len() > 32_000
         || typed
             .image_count
-            .is_some_and(|count| Some(count) != request.image_count)
-        || typed.image_size.as_deref() != request.image_size.as_deref()
+            .is_some_and(|count| Some(count) != request.image_count())
+        || typed.image_size.as_deref() != request.image_size()
     {
         return Err(ContractError::IndeterminableCost);
     }
@@ -946,12 +1092,13 @@ impl PricingSnapshot {
             return Err(ContractError::IndeterminableCost);
         }
         if self.selector.as_ref().is_some_and(|selector| {
-            normalize_image_size(&selector.image_size).ok().as_ref() != Some(&selector.image_size)
+            selector.is_empty() || selector.normalized().ok().as_ref() != Some(selector)
         }) {
             return Err(ContractError::IndeterminableCost);
         }
+        let image_size = self.selector.as_ref().and_then(PricingSelector::image_size);
         if self.output_dimensions.as_ref().is_some_and(|dimensions| {
-            self.selector.is_none() || dimensions.width == 0 || dimensions.height == 0
+            image_size.is_none() || dimensions.width == 0 || dimensions.height == 0
         }) {
             return Err(ContractError::IndeterminableCost);
         }
@@ -962,7 +1109,7 @@ impl PricingSnapshot {
                 || component.rate_denominator <= 0
                 || component.quantity <= 0
                 || !units.insert(component.unit)
-        }) || (self.selector.is_some()
+        }) || (image_size.is_some()
             && (components.len() != 1 || components[0].unit != PricingUnit::Image))
         {
             return Err(ContractError::IndeterminableCost);
@@ -1078,6 +1225,12 @@ pub struct NormalizedUsage {
     pub images: Option<i64>,
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub results: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pages: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seconds: Option<i64>,
 }
 impl NormalizedUsage {
     fn quantity_for(&self, unit: PricingUnit) -> Option<i64> {
@@ -1085,6 +1238,11 @@ impl NormalizedUsage {
             PricingUnit::Image => self.images,
             PricingUnit::InputToken => self.input_tokens,
             PricingUnit::OutputToken => self.output_tokens,
+            // A settled call is exactly one request.
+            PricingUnit::Request => Some(1),
+            PricingUnit::Result => self.results,
+            PricingUnit::Page => self.pages,
+            PricingUnit::Second => self.seconds,
         }
         .filter(|v| *v >= 0)
     }
@@ -1451,15 +1609,7 @@ mod tests {
     use serde_json::json;
     const CATALOG: &str = r#"{"schema_version":2,"catalog_version":"2026-08-05","rules":[{"rule_id":"image-standard","provider":"vendor","model":"image-v1","currency":"usd","components":[{"unit":"image","rate_numerator_minor":125,"rate_denominator":1}]}]}"#;
     fn request() -> NormalizedRequest {
-        NormalizedRequest {
-            provider: "vendor".into(),
-            model: "image-v1".into(),
-            image_count: Some(2),
-            input_tokens: None,
-            max_output_tokens: None,
-            image_size: None,
-            output_dimensions: None,
-        }
+        NormalizedRequest::new("vendor", "image-v1").with_quantity("image_count", Some(2))
     }
     #[test]
     fn exact_decimal_cost_converts_to_micro_units_and_rounds_only_beyond_scale_six() {
@@ -1634,11 +1784,11 @@ mod tests {
         let catalog = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"v2","rules":[{"rule_id":"1k","provider":"vendor","model":"image-v2","currency":"USD","selector":{"image_size":"1K"},"components":[{"unit":"image","rate_numerator_minor":10,"rate_denominator":1}]},{"rule_id":"2k","provider":"vendor","model":"image-v2","currency":"USD","selector":{"image_size":"2k"},"components":[{"unit":"image","rate_numerator_minor":20,"rate_denominator":1}]},{"rule_id":"4k","provider":"vendor","model":"image-v2","currency":"USD","selector":{"image_size":"4k"},"components":[{"unit":"image","rate_numerator_minor":40,"rate_denominator":1}]}]}"#).unwrap();
         let mut request = request();
         request.model = "image-v2".into();
-        request.image_size = Some("2k".into());
+        request.selector = PricingSelector::for_image_size("2k");
         let snapshot = catalog.snapshot(&request).unwrap();
-        assert_eq!(snapshot.selector.unwrap().image_size, "2k");
+        assert_eq!(snapshot.selector.unwrap().image_size(), Some("2k"));
         assert_eq!(snapshot.estimated_units, 40_0000);
-        request.image_size = None;
+        request.selector = PricingSelector::default();
         assert_eq!(
             catalog.snapshot(&request),
             Err(ContractError::UnsupportedTarget)
@@ -1646,7 +1796,7 @@ mod tests {
 
         let flat = PricingCatalog::from_json(CATALOG.as_bytes()).unwrap();
         request.model = "image-v1".into();
-        request.image_size = Some("4k".into());
+        request.selector = PricingSelector::for_image_size("4k");
         assert_eq!(
             flat.snapshot(&request),
             Err(ContractError::UnsupportedTarget)
@@ -1661,15 +1811,10 @@ mod tests {
             ("2k", 1920, 1088, "flux-2k", 20),
             ("4k", 2048, 2048, "flux-4k", 40),
         ] {
-            let request = NormalizedRequest {
-                provider: "flux".into(),
-                model: "flux-2-pro".into(),
-                image_count: Some(1),
-                input_tokens: None,
-                max_output_tokens: None,
-                image_size: Some(preset.into()),
-                output_dimensions: Some(OutputDimensions { width, height }),
-            };
+            let request = NormalizedRequest::new("flux", "flux-2-pro")
+                .with_quantity("image_count", Some(1))
+                .with_selector("image_size", Some(preset.into()))
+                .with_output_dimensions(Some(OutputDimensions { width, height }));
             let snapshot = catalog.snapshot(&request).unwrap();
             assert_eq!(snapshot.pricing_rule_id, rule_id);
             assert_eq!(snapshot.estimated_units, amount * 10_000);
@@ -1677,7 +1822,7 @@ mod tests {
                 snapshot
                     .selector
                     .as_ref()
-                    .map(|selector| selector.image_size.as_str()),
+                    .and_then(|selector| selector.image_size()),
                 Some(preset)
             );
             assert_eq!(
@@ -1694,18 +1839,13 @@ mod tests {
         }
 
         let incomplete = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"flux-incomplete","rules":[{"rule_id":"flux-1k","provider":"flux","model":"flux-2-pro","currency":"USD","selector":{"image_size":"1k"},"components":[{"unit":"image","rate_numerator_minor":10,"rate_denominator":1}]}]}"#).unwrap();
-        let missing_rule = NormalizedRequest {
-            provider: "flux".into(),
-            model: "flux-2-pro".into(),
-            image_count: Some(1),
-            input_tokens: None,
-            max_output_tokens: None,
-            image_size: Some("2k".into()),
-            output_dimensions: Some(OutputDimensions {
+        let missing_rule = NormalizedRequest::new("flux", "flux-2-pro")
+            .with_quantity("image_count", Some(1))
+            .with_selector("image_size", Some("2k".into()))
+            .with_output_dimensions(Some(OutputDimensions {
                 width: 1920,
                 height: 1088,
-            }),
-        };
+            }));
         assert_eq!(
             incomplete.snapshot(&missing_rule),
             Err(ContractError::UnsupportedTarget)
@@ -1749,15 +1889,9 @@ mod tests {
     #[test]
     fn compound_token_rates_are_exact_and_round_once() {
         let catalog = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"tokens","rules":[{"rule_id":"text","provider":"vendor","model":"text-v1","currency":"USD","components":[{"unit":"input_token","rate_numerator_minor":100,"rate_denominator":1000000},{"unit":"output_token","rate_numerator_minor":300,"rate_denominator":1000000}]}]}"#).unwrap();
-        let request = NormalizedRequest {
-            provider: "vendor".into(),
-            model: "text-v1".into(),
-            image_count: None,
-            input_tokens: Some(2_500),
-            max_output_tokens: Some(2_500),
-            image_size: None,
-            output_dimensions: None,
-        };
+        let request = NormalizedRequest::new("vendor", "text-v1")
+            .with_quantity("input_tokens", Some(2_500))
+            .with_quantity("max_output_tokens", Some(2_500));
         let snapshot = catalog.snapshot(&request).unwrap();
         assert_eq!(snapshot.exact_estimate_numerator, "1");
         assert_eq!(snapshot.exact_estimate_denominator, "1");
@@ -1766,6 +1900,7 @@ mod tests {
             images: None,
             input_tokens: Some(2_500),
             output_tokens: Some(2_500),
+            ..Default::default()
         };
         assert_eq!(snapshot.settle(&usage, 1_0000).unwrap(), 1_0000);
         let serialized = serde_json::to_vec(&snapshot).unwrap();
@@ -1776,15 +1911,9 @@ mod tests {
     #[test]
     fn fractional_cent_rates_quote_and_settle_exactly_in_micro_units() {
         let catalog = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"fractions","rules":[{"rule_id":"text","provider":"vendor","model":"text-v1","currency":"USD","components":[{"unit":"input_token","rate_numerator_minor":1,"rate_denominator":4},{"unit":"output_token","rate_numerator_minor":1,"rate_denominator":4}]}]}"#).unwrap();
-        let request = NormalizedRequest {
-            provider: "vendor".into(),
-            model: "text-v1".into(),
-            image_count: None,
-            input_tokens: Some(1),
-            max_output_tokens: Some(1),
-            image_size: None,
-            output_dimensions: None,
-        };
+        let request = NormalizedRequest::new("vendor", "text-v1")
+            .with_quantity("input_tokens", Some(1))
+            .with_quantity("max_output_tokens", Some(1));
         // Two quarter-cent tokens cost exactly half a cent: no whole-cent
         // over-reservation or over-charge.
         let snapshot = catalog.snapshot(&request).unwrap();
@@ -1795,7 +1924,8 @@ mod tests {
                     &NormalizedUsage {
                         images: None,
                         input_tokens: Some(1),
-                        output_tokens: Some(1)
+                        output_tokens: Some(1),
+                        ..Default::default()
                     },
                     5_000
                 )
@@ -1978,6 +2108,222 @@ mod tests {
         wrong_request.provider = "other".into();
         assert!(
             matches!(preflight_selected_secret(&adapter, &Secrets(true), target, &wrong_request), Err(ContractError::Provider { code }) if code == "target_mismatch")
+        );
+    }
+
+    #[test]
+    fn shipped_contract_pricing_is_byte_identical_to_the_pre_generalization_baseline() {
+        let baseline: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../fixtures/gongbu-pricing-parity-v1.json"
+        ))
+        .unwrap();
+        let contracts: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../contracts/provider-contracts-v1.json"
+        ))
+        .unwrap();
+        let mut rules = Vec::new();
+        for contract in contracts["contracts"].as_array().unwrap() {
+            rules.extend(
+                contract["pricing_rules"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .cloned(),
+            );
+        }
+        let catalog = PricingCatalog::from_json(
+            &serde_json::to_vec(&json!({
+                "schema_version": 2,
+                "catalog_version": baseline["catalog_version"],
+                "rules": rules,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            catalog.0.digest,
+            baseline["catalog_digest"].as_str().unwrap()
+        );
+        let mut checked = 0;
+        for contract in contracts["contracts"].as_array().unwrap() {
+            let provider = contract["target"]["provider"].as_str().unwrap();
+            let model = contract["target"]["model"].as_str().unwrap();
+            for preset in contract["capability"]["presets"].as_array().unwrap() {
+                let name = preset["name"].as_str().unwrap();
+                let request = NormalizedRequest::new(provider, model)
+                    .with_quantity("image_count", Some(1))
+                    .with_selector(IMAGE_SIZE_SELECTOR, Some(name.to_owned()))
+                    .with_output_dimensions(Some(OutputDimensions {
+                        width: preset["width"].as_u64().unwrap() as u32,
+                        height: preset["height"].as_u64().unwrap() as u32,
+                    }));
+                let expected = baseline["snapshots"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|entry| {
+                        entry["provider"] == provider
+                            && entry["model"] == model
+                            && entry["image_size"] == name
+                    })
+                    .unwrap()["snapshot"]
+                    .as_str()
+                    .unwrap();
+                let snapshot = catalog.snapshot(&request).unwrap();
+                assert_eq!(serde_json::to_string(&snapshot).unwrap(), expected);
+                // Frozen rows written before the change still read back and settle.
+                let frozen: PricingSnapshot = serde_json::from_str(expected).unwrap();
+                assert_eq!(frozen, snapshot);
+                let usage = NormalizedUsage {
+                    images: Some(1),
+                    ..Default::default()
+                };
+                assert_eq!(
+                    frozen.settle(&usage, frozen.estimated_units).unwrap(),
+                    frozen.estimated_units
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, baseline["snapshots"].as_array().unwrap().len());
+    }
+
+    #[test]
+    fn per_request_plus_per_result_target_settles_exactly() {
+        // A search-shaped target: $0.005 per call plus $0.001 per result,
+        // with a cheaper "fast" mode picked by a non-image selector.
+        let catalog = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"search-v1","rules":[
+            {"rule_id":"search-auto","provider":"search","model":"web-v1","currency":"USD","selector":{"mode":"auto"},"components":[{"unit":"request","rate_numerator_minor":5,"rate_denominator":10},{"unit":"result","rate_numerator_minor":1,"rate_denominator":10}]},
+            {"rule_id":"search-fast","provider":"search","model":"web-v1","currency":"USD","selector":{"mode":" FAST "},"components":[{"unit":"request","rate_numerator_minor":25,"rate_denominator":100},{"unit":"result","rate_numerator_minor":1,"rate_denominator":10}]}
+        ]}"#).unwrap();
+        let request = NormalizedRequest::new("search", "web-v1")
+            .with_quantity("results", Some(10))
+            .with_selector("mode", Some("auto".into()));
+        let snapshot = catalog.snapshot(&request).unwrap();
+        assert_eq!(snapshot.pricing_rule_id, "search-auto");
+        assert_eq!(
+            snapshot.selector.as_ref().unwrap().get("mode"),
+            Some("auto")
+        );
+        // 0.5¢ + 10 × 0.1¢ = 1.5¢ exactly, held as 15,000 micro-units.
+        assert_eq!(
+            (
+                snapshot.exact_estimate_numerator.as_str(),
+                snapshot.exact_estimate_denominator.as_str()
+            ),
+            ("3", "2")
+        );
+        assert_eq!(snapshot.estimated_units, 15_000);
+        assert_eq!(snapshot.estimated_quantity(PricingUnit::Request), Some(1));
+        assert_eq!(snapshot.estimated_quantity(PricingUnit::Result), Some(10));
+        snapshot.validate_integrity().unwrap();
+        // Seven delivered results settle 0.5¢ + 0.7¢ = 1.2¢, exactly.
+        let delivered = NormalizedUsage {
+            results: Some(7),
+            ..Default::default()
+        };
+        let settled = snapshot
+            .settle_precise(&delivered, None, snapshot.estimated_units)
+            .unwrap();
+        assert_eq!(settled.budget_units, 12_000);
+        assert_eq!(
+            settled.actual_vendor_cost,
+            ActualVendorCost::new(12, 3, "USD").unwrap()
+        );
+        // More results than were held is an overage, never a silent overcharge.
+        let overage = NormalizedUsage {
+            results: Some(11),
+            ..Default::default()
+        };
+        assert_eq!(
+            snapshot.settle(&overage, snapshot.estimated_units),
+            Err(ContractError::SettlementOverage)
+        );
+        // The mode selector is normalized in the catalog and must match exactly.
+        let fast = catalog
+            .snapshot(
+                &NormalizedRequest::new("search", "web-v1")
+                    .with_quantity("results", Some(1))
+                    .with_selector("mode", Some("fast".into())),
+            )
+            .unwrap();
+        assert_eq!(fast.pricing_rule_id, "search-fast");
+        assert_eq!(fast.estimated_units, 3_500);
+        for unmatched in [
+            NormalizedRequest::new("search", "web-v1").with_quantity("results", Some(1)),
+            NormalizedRequest::new("search", "web-v1")
+                .with_quantity("results", Some(1))
+                .with_selector("mode", Some("deep".into())),
+        ] {
+            assert!(catalog.snapshot(&unmatched).is_err());
+        }
+        // A result component without a results quantity cannot be priced.
+        assert_eq!(
+            catalog.snapshot(
+                &NormalizedRequest::new("search", "web-v1")
+                    .with_selector("mode", Some("auto".into()))
+            ),
+            Err(ContractError::IndeterminableCost)
+        );
+    }
+
+    #[test]
+    fn pricing_selectors_and_request_quantities_are_validated() {
+        let catalog = |selector: &str, unit: &str| {
+            PricingCatalog::from_json(
+                format!(
+                    r#"{{"schema_version":2,"catalog_version":"v","rules":[{{"rule_id":"r","provider":"p","model":"m","currency":"USD","selector":{selector},"components":[{{"unit":"{unit}","rate_numerator_minor":1,"rate_denominator":1}}]}}]}}"#
+                )
+                .as_bytes(),
+            )
+        };
+        let aspect = catalog(r#"{"image_size":"1K","aspect_ratio":" 16:9 "}"#, "image").unwrap();
+        let selector = aspect.rules()[0].selector.as_ref().unwrap();
+        assert_eq!(selector.image_size(), Some("1k"));
+        assert_eq!(selector.get("aspect_ratio"), Some("16:9"));
+        for (selector, unit) in [
+            ("{}", "image"),
+            (r#"{"Image_Size":"1k"}"#, "image"),
+            (r#"{"image_size":"8k"}"#, "image"),
+            (r#"{"mode":"two words"}"#, "request"),
+            (r#"{"mode":""}"#, "request"),
+            (r#"{"image_size":"1k"}"#, "request"),
+        ] {
+            assert!(
+                matches!(catalog(selector, unit), Err(ContractError::Malformed(_))),
+                "{selector} / {unit}"
+            );
+        }
+        assert!(catalog(r#"{"mode":"fast"}"#, "second").is_ok());
+
+        let mut request = NormalizedRequest::new("p", "m").with_quantity("image_count", Some(1));
+        request.validate().unwrap();
+        request.set_quantity("widgets", Some(1));
+        assert_eq!(request.validate(), Err(ContractError::IndeterminableCost));
+        request.set_quantity("widgets", None);
+        request.set_quantity("pages", Some(-1));
+        assert_eq!(request.validate(), Err(ContractError::IndeterminableCost));
+        request.set_quantity("pages", None);
+        request.selector.insert("mode", "FAST");
+        assert_eq!(request.validate(), Err(ContractError::IndeterminableCost));
+    }
+
+    #[test]
+    fn image_usage_serializes_without_the_new_quantities() {
+        let usage = NormalizedUsage {
+            images: Some(1),
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::to_string(&usage).unwrap(),
+            r#"{"images":1,"input_tokens":null,"output_tokens":null}"#
+        );
+        let request = NormalizedRequest::new("flux", "flux-2-pro")
+            .with_quantity("image_count", Some(1))
+            .with_selector(IMAGE_SIZE_SELECTOR, Some("1k".into()));
+        assert_eq!(
+            serde_json::to_value(&request.selector).unwrap(),
+            json!({"image_size": "1k"})
         );
     }
 }

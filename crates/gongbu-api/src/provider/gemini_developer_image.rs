@@ -217,7 +217,7 @@ impl<T: GeminiDeveloperTransport> ProviderAdapter for GeminiDeveloperImageAdapte
         request.validate()?;
         if request.provider != PROVIDER_ID
             || request.model != self.model
-            || request.image_count != Some(1)
+            || request.image_count() != Some(1)
         {
             return Err(provider_error("invalid_request"));
         }
@@ -257,7 +257,7 @@ impl<T: GeminiDeveloperTransport> ProviderAdapter for GeminiDeveloperImageAdapte
             "input": [{"type": "text", "text": prompt}],
             "response_format": {"type": "image"}
         });
-        if let Some(size) = &request.image_size {
+        if let Some(size) = request.image_size() {
             body["response_format"]["image_size"] = json!(size.to_ascii_uppercase());
         }
         let deadline =
@@ -315,6 +315,7 @@ impl<T: GeminiDeveloperTransport> ProviderAdapter for GeminiDeveloperImageAdapte
                 output_tokens: usage
                     .and_then(|v| v.get("output_tokens"))
                     .and_then(Value::as_i64),
+                ..Default::default()
             }),
             actual_vendor_cost: None,
             provider_request_id: request_id,
@@ -443,15 +444,8 @@ mod tests {
         }
     }
     fn request() -> NormalizedRequest {
-        NormalizedRequest {
-            provider: PROVIDER_ID.into(),
-            model: "gemini-3.1-flash-lite-image".into(),
-            image_count: Some(1),
-            input_tokens: None,
-            max_output_tokens: None,
-            image_size: None,
-            output_dimensions: None,
-        }
+        NormalizedRequest::new(PROVIDER_ID, "gemini-3.1-flash-lite-image")
+            .with_quantity("image_count", Some(1))
     }
     fn adapter(
         body: Value,
@@ -515,7 +509,7 @@ mod tests {
         .unwrap();
         let (sized_adapter, calls) = adapter(response.clone(), 200);
         let mut sized = request();
-        sized.image_size = Some("4k".into());
+        sized.selector = crate::provider_contract::PricingSelector::for_image_size("4k");
         sized_adapter
             .invoke(
                 &sized,
@@ -688,15 +682,9 @@ mod tests {
             })
             .expect("the selected enabled Developer API image target is required");
         let image_size = env::var("GONGBU_LIVE_GEMINI_DEVELOPER_IMAGE_SIZE").ok();
-        let request = NormalizedRequest {
-            provider: PROVIDER_ID.into(),
-            model: target.model.clone(),
-            image_count: Some(1),
-            input_tokens: None,
-            max_output_tokens: None,
-            image_size: image_size.clone(),
-            output_dimensions: None,
-        };
+        let request = NormalizedRequest::new(PROVIDER_ID, target.model.clone())
+            .with_quantity("image_count", Some(1))
+            .with_selector("image_size", image_size.clone());
         let snapshot = PricingCatalog::load(
             env::var("GONGBU_PRICING_CATALOG").expect("pricing catalog is required"),
         )

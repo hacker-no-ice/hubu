@@ -332,7 +332,7 @@ fn project(contract_definition: &ContractDefinition) -> Result<CatalogContract, 
                 .find(|rule| {
                     rule.selector
                         .as_ref()
-                        .is_some_and(|selector| selector.image_size == preset.name)
+                        .is_some_and(|selector| selector.image_size() == Some(preset.name.as_str()))
                 })
                 .ok_or(Error::InvalidDocument)?;
             let component = rule

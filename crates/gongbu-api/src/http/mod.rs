@@ -532,18 +532,25 @@ impl Api {
         }) {
             return Err(ApiError::validation());
         }
-        let pricing_request = NormalizedRequest {
-            provider: resolved.provider.clone(),
-            model: resolved.model.clone(),
-            image_count,
-            input_tokens: input_quantity(&normalized_input, "input_tokens")?,
-            max_output_tokens: input_quantity(&normalized_input, "max_output_tokens")?,
-            image_size: normalized_input
-                .get("image_size")
-                .and_then(|value| value.as_str())
-                .map(str::to_owned),
-            output_dimensions,
-        };
+        let pricing_request =
+            NormalizedRequest::new(resolved.provider.clone(), resolved.model.clone())
+                .with_quantity("image_count", image_count)
+                .with_quantity(
+                    "input_tokens",
+                    input_quantity(&normalized_input, "input_tokens")?,
+                )
+                .with_quantity(
+                    "max_output_tokens",
+                    input_quantity(&normalized_input, "max_output_tokens")?,
+                )
+                .with_selector(
+                    "image_size",
+                    normalized_input
+                        .get("image_size")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_owned),
+                )
+                .with_output_dimensions(output_dimensions);
         let pricing_snapshot = self
             .providers
             .pricing()
@@ -1857,6 +1864,7 @@ mod tests {
                         images: Some(1),
                         input_tokens: None,
                         output_tokens: None,
+                        ..Default::default()
                     })
                     .unwrap(),
                     usage_schema_version: 1,
@@ -2840,6 +2848,7 @@ mod tests {
                         images: Some(1),
                         input_tokens: None,
                         output_tokens: None,
+                        ..Default::default()
                     })
                     .unwrap(),
                     usage_schema_version: 1,
@@ -3399,7 +3408,7 @@ mod tests {
                 snapshot
                     .selector
                     .as_ref()
-                    .map(|selector| selector.image_size.as_str()),
+                    .and_then(|selector| selector.image_size()),
                 Some(preset)
             );
             assert_eq!(

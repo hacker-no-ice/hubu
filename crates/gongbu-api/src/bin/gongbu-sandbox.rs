@@ -481,18 +481,17 @@ mod tests {
         )
         .unwrap();
         let snapshot = catalog
-            .snapshot(&NormalizedRequest {
-                provider: "google".into(),
-                model: "image".into(),
-                image_count: input["image_count"].as_i64(),
-                input_tokens: None,
-                max_output_tokens: None,
-                image_size: input["image_size"].as_str().map(str::to_owned),
-                output_dimensions: None,
-            })
+            .snapshot(
+                &NormalizedRequest::new("google", "image")
+                    .with_quantity("image_count", input["image_count"].as_i64())
+                    .with_selector(
+                        "image_size",
+                        input["image_size"].as_str().map(str::to_owned),
+                    ),
+            )
             .unwrap();
 
-        assert_eq!(snapshot.selector.unwrap().image_size, "2k");
+        assert_eq!(snapshot.selector.unwrap().image_size(), Some("2k"));
         assert_eq!(snapshot.estimated_units, 101_000);
     }
 
