@@ -119,7 +119,10 @@ impl GenericProviderActivities {
             .map_err(|_| WorkflowActivityError::Proven("provider_target_unavailable".into()))?;
         let snapshot: PricingSnapshot = serde_json::from_value(execution.pricing_snapshot.clone())
             .map_err(|_| WorkflowActivityError::Proven("pricing_snapshot_invalid".into()))?;
-        if !snapshot.is_image_only()
+        // Multi-component pricing is safe only for pack targets: their engines
+        // re-derive every priced quantity from bounded, validated parameters
+        // and refuse a request that differs from the one rebuilt here.
+        if !(snapshot.is_image_only() || target.pack().is_some())
             || snapshot.provider != target.provider
             || snapshot.model != target.model
             || i64::from(snapshot.schema_version) != execution.pricing_schema_version
@@ -172,12 +175,23 @@ impl GenericProviderActivities {
 impl ProviderActivities for GenericProviderActivities {
     fn preflight(&self, execution: &Execution) -> Result<(), WorkflowActivityError> {
         let (target, adapter, request, normalized_input) = self.selected(execution)?;
-        crate::provider_contract::validate_image_input_versioned(
-            &request,
-            &normalized_input,
-            execution.input_schema_version,
-        )
-        .map_err(map_contract_error)?;
+        if target.pack().is_some() {
+            // A pack engine checks the input against the pack's own bounded
+            // parameters in `preflight_input`, which may go beyond the
+            // image-generation input shape.
+            if execution.input_schema_version != 1 {
+                return Err(map_contract_error(
+                    crate::provider_contract::ContractError::IndeterminableCost,
+                ));
+            }
+        } else {
+            crate::provider_contract::validate_image_input_versioned(
+                &request,
+                &normalized_input,
+                execution.input_schema_version,
+            )
+            .map_err(map_contract_error)?;
+        }
         adapter
             .preflight_input(&request, &normalized_input)
             .map_err(map_contract_error)?;
@@ -2477,6 +2491,272 @@ mod tests {
                 .unwrap()
                 .settlement_units,
             101_000
+        );
+        assert_eq!(
+            artifacts
+                .list_for_account(&delivered.execution_id, "account")
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(artifacts
+            .list_for_account(&lost.execution_id, "account")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn async_pack_engine_polls_settles_once_and_replay_never_resubmits() {
+        use crate::{
+            artifact::{ArtifactLimits, LocalFsStorage},
+            execution::{CreateExecutionParams, HubuTokenReference},
+            provider::{
+                http_kernel::{ArtifactDownloadPolicy, InvocationDeadline},
+                pack::{Archetype, ArtifactFetchError, Pack},
+                pack_async::AsyncPollEngine,
+                pack_sync::{SyncTransport, TransportFailure, TransportResponse},
+            },
+            secrets::{ProviderSecret, SecretError, SecretReference},
+        };
+        use image::{DynamicImage, ImageOutputFormat, RgbaImage};
+        use serde_json::json;
+        use std::{
+            collections::BTreeMap,
+            io::Cursor,
+            sync::{
+                atomic::{AtomicUsize, Ordering},
+                Mutex,
+            },
+            time::Duration,
+        };
+        use tempfile::tempdir;
+
+        struct Secrets;
+        impl SecretProvider for Secrets {
+            fn resolve(&self, _: &SecretReference) -> Result<ProviderSecret, SecretError> {
+                Ok(crate::secrets::secret_for_test("pack-secret"))
+            }
+        }
+
+        // Accepts "a lighthouse" as a job; loses the submission response for
+        // anything else. Polls report the job ready.
+        #[derive(Clone, Default)]
+        struct Transport {
+            posts: Arc<Mutex<Vec<String>>>,
+            polls: Arc<Mutex<Vec<String>>>,
+            png: Vec<u8>,
+        }
+        impl SyncTransport for Transport {
+            fn post_json(
+                &self,
+                _: &reqwest::Url,
+                _: (&str, &str),
+                _: &BTreeMap<String, String>,
+                body: &serde_json::Value,
+                _: Duration,
+            ) -> Result<TransportResponse, TransportFailure> {
+                let prompt = body["prompt"].as_str().unwrap().to_owned();
+                self.posts.lock().unwrap().push(prompt.clone());
+                if prompt != "a lighthouse" {
+                    return Err(TransportFailure::UnknownOutcome { request_id: None });
+                }
+                Ok(TransportResponse {
+                    status: 200,
+                    headers: BTreeMap::from([("x-request-id".into(), "req-ok".into())]),
+                    body: json!({"id": "job-1",
+                        "polling_url": "https://api.us.async-image.test/v1/get_result?id=job-1"}),
+                })
+            }
+            fn get_json(
+                &self,
+                url: &reqwest::Url,
+                _: (&str, &str),
+                _: &BTreeMap<String, String>,
+                _: Duration,
+            ) -> Result<TransportResponse, TransportFailure> {
+                self.polls.lock().unwrap().push(url.to_string());
+                Ok(TransportResponse {
+                    status: 200,
+                    headers: BTreeMap::from([("x-request-id".into(), "req-poll".into())]),
+                    body: json!({"id": "job-1", "status": "Ready",
+                        "result": {"sample": "https://delivery.us1.async-image.test/out.png"}}),
+                })
+            }
+            fn download(
+                &self,
+                url: &reqwest::Url,
+                policy: &ArtifactDownloadPolicy,
+                _: InvocationDeadline,
+            ) -> Result<Vec<u8>, ArtifactFetchError> {
+                policy
+                    .validate_url(url)
+                    .map_err(|_| ArtifactFetchError::Failed)?;
+                Ok(self.png.clone())
+            }
+        }
+
+        #[derive(Default)]
+        struct Hubu(AtomicUsize, Mutex<Vec<i64>>);
+        impl HubuActivities for Hubu {
+            fn preflight(&self, _: &Execution) -> Result<(), WorkflowActivityError> {
+                Ok(())
+            }
+            fn claim(&self, _: &Execution) -> Result<String, WorkflowActivityError> {
+                Ok("claim".into())
+            }
+            fn validate_claim(&self, _: &Execution) -> Result<(), WorkflowActivityError> {
+                Ok(())
+            }
+            fn settle(
+                &self,
+                _: &Execution,
+                _: &str,
+                units: i64,
+            ) -> Result<String, WorkflowActivityError> {
+                self.1.lock().unwrap().push(units);
+                Ok(format!(
+                    "settlement-{}",
+                    self.0.fetch_add(1, Ordering::SeqCst)
+                ))
+            }
+            fn release(&self, _: &Execution) -> Result<(), WorkflowActivityError> {
+                Ok(())
+            }
+        }
+
+        let pack =
+            Pack::from_toml_str(include_str!("../../../fixtures/packs/async-image.toml")).unwrap();
+        let secret = SecretReference::new("gongbu.async-image", "fixture").unwrap();
+        let targets: ProviderTargetConfig = serde_json::from_value(json!({
+            "schema_version": 2,
+            "provider_configs": pack.provider_configs(&secret),
+        }))
+        .unwrap();
+        let pricing = PricingCatalog::from_json(
+            &serde_json::to_vec(&json!({
+                "schema_version": 2,
+                "catalog_version": pack.models()[0].pricing_version,
+                "rules": pack.pricing_rules(),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut png = Vec::new();
+        DynamicImage::ImageRgba8(RgbaImage::new(1, 1))
+            .write_to(&mut Cursor::new(&mut png), ImageOutputFormat::Png)
+            .unwrap();
+        let transport = Transport {
+            png,
+            ..Default::default()
+        };
+        let mut registry = ProviderRegistry::new();
+        registry.register_pack(pack.clone());
+        let engine_transport = transport.clone();
+        registry.register_pack_engine(Archetype::AsyncPoll, move |target, pack| {
+            Ok(Arc::new(AsyncPollEngine::new(
+                pack.clone(),
+                &target.model,
+                engine_transport.clone(),
+                ArtifactLimits::default().max_encoded_bytes,
+            )?))
+        });
+        let providers =
+            ValidatedProviderCatalog::bind(targets.clone(), pricing.clone(), &registry).unwrap();
+        let repository = Repository::in_memory().unwrap();
+        let model = &pack.models()[0];
+        let target = targets
+            .resolve_active(&pack.target_key(model))
+            .unwrap()
+            .clone();
+        let create = |operation: &str, prompt: &str| {
+            // `output_format` is a pack parameter outside the image input shape;
+            // the pack engine, not the image schema, validates it.
+            let input = json!({"prompt": prompt, "output_format": "png"});
+            let request = pack.prepare(&model.model, &input).unwrap().request;
+            let snapshot = pricing
+                .snapshot_for_target(&target.target_key(), &request)
+                .unwrap();
+            repository
+                .create_execution(&CreateExecutionParams {
+                    account_id: "account".into(),
+                    operation_key: operation.into(),
+                    hubu_authorization_id: format!("token-{operation}"),
+                    hubu_claim_id: Some(format!("claim-{operation}")),
+                    hubu_token_reference: HubuTokenReference::new(format!("token-{operation}"))
+                        .unwrap(),
+                    authorized_units: snapshot.estimated_units,
+                    authorization_currency: "USD".into(),
+                    normalized_input: input,
+                    input_hash: format!("hash-{operation}"),
+                    input_schema_version: 1,
+                    target: target.target_key().canonical_name(),
+                    config_version: target.provider_config_version.clone(),
+                    workload_type: target.workload_type.clone(),
+                    provider: target.provider.clone(),
+                    adapter: target.adapter.clone(),
+                    model: target.model.clone(),
+                    provider_config_version: target.provider_config_version.clone(),
+                    provider_config_digest: target.digest().into(),
+                    pricing_snapshot: serde_json::to_value(&snapshot).unwrap(),
+                    pricing_schema_version: i64::from(snapshot.schema_version),
+                    execution_scope: None,
+                    created_at: "now".into(),
+                })
+                .unwrap()
+        };
+        let delivered = create("async-ok", "a lighthouse");
+        let lost = create("async-lost", "a storm");
+        let root = tempdir().unwrap();
+        let artifacts = ArtifactService::new(
+            repository.clone(),
+            LocalFsStorage::new(root.path()),
+            ArtifactLimits::default(),
+        );
+        let hubu = Arc::new(Hubu::default());
+        let runner = provider_execution_runner(
+            repository.clone(),
+            hubu.clone(),
+            artifacts.clone(),
+            providers,
+            Arc::new(Secrets),
+            || "now".into(),
+        );
+        for _ in 0..2 {
+            assert_eq!(
+                runner.run_execution(&delivered.execution_id, None).unwrap(),
+                "succeeded"
+            );
+            assert_eq!(
+                runner.run_execution(&lost.execution_id, None).unwrap(),
+                "reconciliation_required"
+            );
+        }
+        // One submission per execution and one poll for the accepted job,
+        // however often either execution is replayed.
+        assert_eq!(
+            transport.posts.lock().unwrap().as_slice(),
+            ["a lighthouse", "a storm"]
+        );
+        assert_eq!(
+            transport.polls.lock().unwrap().as_slice(),
+            ["https://api.us.async-image.test/v1/get_result?id=job-1"]
+        );
+        assert_eq!(
+            repository
+                .get_provider_attempt_for_execution(&delivered.execution_id)
+                .unwrap()
+                .provider_request_id
+                .as_deref(),
+            Some("req-ok")
+        );
+        // 0.5¢ per request + 3¢ per image, settled exactly once.
+        assert_eq!(hubu.1.lock().unwrap().as_slice(), [35_000]);
+        assert_eq!(
+            repository
+                .get_receipt_for_execution(&delivered.execution_id)
+                .unwrap()
+                .settlement_units,
+            35_000
         );
         assert_eq!(
             artifacts
