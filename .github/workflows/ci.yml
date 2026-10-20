@@ -2,6 +2,7 @@ name: CI
 
 on:
   pull_request:
+  workflow_dispatch:
   push:
     branches:
       - main
@@ -70,6 +71,18 @@ jobs:
       - name: Check ordinary CI cannot enable live provider spend
         run: python3 scripts/check-ci-provider-safety.py
 
+      - name: Check proactive security workflow boundaries
+        run: python3 scripts/check-security-advisory-workflow.py
+
+      - name: Test advisory detection and targeted remediation
+        run: python3 scripts/test-security-advisories.py
+
+      - name: Test advisory publication and duplicate suppression
+        run: node --test scripts/test-security-advisories-github.js
+
+      - name: Test lockfile publication and branch ownership
+        run: bash scripts/test-security-advisories-push.sh
+
       - name: Run core integration flow
         run: ./scripts/integration-core-flow.sh
 
@@ -111,14 +124,47 @@ jobs:
   security:
     name: Security policy
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Check Rust advisories, licenses, and sources
+        id: policy
+        continue-on-error: true
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
           command: check
-          arguments: --all-features
+          arguments: --all-features --locked
           command-arguments: advisories licenses sources
+
+      - name: Install matching diagnostic scanner
+        if: steps.policy.outcome == 'failure' && github.event_name == 'pull_request'
+        uses: ./.github/actions/install-cargo-deny
+
+      - name: Explain which advisories also affect main
+        if: steps.policy.outcome == 'failure' && github.event_name == 'pull_request'
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          report_dir="$RUNNER_TEMP/security-diagnostics"
+          baseline_dir="$RUNNER_TEMP/security-main"
+          mkdir -p "$report_dir"
+          python3 scripts/security-advisories.py scan --run \
+            --output "$report_dir/pr.json" --markdown "$report_dir/pr.md"
+          git fetch --no-tags --depth=1 origin "$DEFAULT_BRANCH"
+          git worktree add --detach "$baseline_dir" FETCH_HEAD
+          # Fetch baseline crate metadata first; --offline then reuses the exact
+          # RustSEC snapshot already used for the PR's structured scan.
+          cargo fetch --manifest-path "$baseline_dir/Cargo.toml" --locked
+          python3 scripts/security-advisories.py scan --run --offline --cwd "$baseline_dir" \
+            --output "$report_dir/main.json" --markdown "$report_dir/main.md"
+          python3 scripts/security-advisories.py scan --run --offline \
+            --baseline "$report_dir/main.json" \
+            --output "$report_dir/classified.json" --markdown "$report_dir/classified.md"
+          cat "$report_dir/classified.md" >> "$GITHUB_STEP_SUMMARY"
+          echo '::notice::Security policy remains required. See the job summary for advisories already affecting main and PR-specific findings.'
+
+      - name: Enforce security policy result
+        if: always() && steps.policy.outcome != 'success'
+        run: exit 1
