@@ -77,6 +77,22 @@ fn rejection_code(status: u16) -> &'static str {
     }
 }
 
+/// Omit credential-bearing provider identifiers instead of changing their
+/// identity. Check encoded renderings and ASCII case folds as well, because
+/// provider-controlled values may canonicalize the credential's case.
+fn secret_free_id(value: Option<String>, secret: &ProviderSecret) -> Option<String> {
+    let folded_secret = secret
+        .expose()
+        .iter()
+        .map(u8::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    let redactor = Redactor::new([secret.expose(), folded_secret.as_slice()]);
+    value.filter(|value| {
+        !redactor.contains_registered_secret(value)
+            && !redactor.contains_registered_secret(&value.to_ascii_lowercase())
+    })
+}
+
 fn safe_recovery_host(host: &str, redactor: &Redactor) -> bool {
     !host.is_empty()
         && host.len() <= 253
@@ -178,7 +194,7 @@ impl<T: SyncTransport> AsyncPollEngine<T> {
                     "timeout_unknown_outcome",
                     ProviderPhase::Submission,
                     &Evidence {
-                        request_id,
+                        request_id: secret_free_id(request_id, secret),
                         operation_id: None,
                     },
                 ),
@@ -190,7 +206,7 @@ impl<T: SyncTransport> AsyncPollEngine<T> {
         } = response;
         let response = ProviderResponse { headers, body };
         let mut evidence = Evidence {
-            request_id: self.pack.provider_request_id(&response),
+            request_id: secret_free_id(self.pack.provider_request_id(&response), secret),
             operation_id: None,
         };
         match status {
@@ -211,18 +227,26 @@ impl<T: SyncTransport> AsyncPollEngine<T> {
             }
         }
         // From here the provider has accepted the job.
-        evidence.operation_id = select_path(&response.body, &self.poll_spec().job_id)
+        let operation_id = select_path(&response.body, &self.poll_spec().job_id)
             .first()
             .and_then(|value| match value {
                 Value::String(text) => Some(text.trim().to_owned()),
                 Value::Number(number) => Some(number.to_string()),
                 _ => None,
-            })
-            .filter(|id| safe_job_id(id));
+            });
+        let clean_operation_id = secret_free_id(operation_id.clone(), secret);
+        if operation_id.is_some() && clean_operation_id.is_none() {
+            return Err(reconcile(
+                "malformed_response",
+                ProviderPhase::Processing,
+                &evidence,
+            ));
+        }
+        evidence.operation_id = clean_operation_id.filter(|id| safe_job_id(id));
         match self.state_of(&response.body) {
             Some(JobState::Ready) => {
                 return self
-                    .complete(request, &response, &evidence, deadline, observer)
+                    .complete(request, &response, &evidence, deadline, observer, secret)
                     .map(AdapterSubmission::Complete)
             }
             Some(JobState::Rejected(code)) => {
@@ -433,11 +457,16 @@ impl<T: SyncTransport> AsyncPollEngine<T> {
         observer: &dyn ProviderTransportObserver,
     ) -> Result<AdapterOutcome, ProviderFailure> {
         let mut evidence = Evidence {
-            request_id: operation.provider_request_id.clone(),
-            operation_id: Some(operation.provider_operation_id.clone()),
+            request_id: secret_free_id(operation.provider_request_id.clone(), secret),
+            operation_id: secret_free_id(Some(operation.provider_operation_id.clone()), secret),
         };
         let processing =
             |code: &str, evidence: &Evidence| reconcile(code, ProviderPhase::Processing, evidence);
+        if evidence.request_id != operation.provider_request_id
+            || evidence.operation_id.as_deref() != Some(operation.provider_operation_id.as_str())
+        {
+            return Err(processing("invalid_provider_operation", &evidence));
+        }
         self.preflight_input(request, input)
             .map_err(|_| processing("invalid_request", &evidence))?;
         operation
@@ -505,14 +534,18 @@ impl<T: SyncTransport> AsyncPollEngine<T> {
                     processing(
                         "timeout_unknown_outcome",
                         &Evidence {
-                            request_id: evidence.request_id.clone().or(request_id),
+                            request_id: evidence
+                                .request_id
+                                .clone()
+                                .or_else(|| secret_free_id(request_id, secret)),
                             operation_id: evidence.operation_id.clone(),
                         },
                     )
                 })?;
             let response = ProviderResponse { headers, body };
             if evidence.request_id.is_none() {
-                evidence.request_id = self.pack.provider_request_id(&response);
+                evidence.request_id =
+                    secret_free_id(self.pack.provider_request_id(&response), secret);
             }
             // The job was accepted, so even a 4xx on a poll is not proof of no charge.
             if !(200..300).contains(&status) {
@@ -538,7 +571,7 @@ impl<T: SyncTransport> AsyncPollEngine<T> {
             match self.state_of(&response.body) {
                 Some(JobState::Pending) => continue,
                 Some(JobState::Ready) => {
-                    return self.complete(request, &response, &evidence, deadline, observer)
+                    return self.complete(request, &response, &evidence, deadline, observer, secret)
                 }
                 Some(JobState::Rejected(code)) => {
                     return Err(release(&code, ProviderPhase::Processing, &evidence))
@@ -558,6 +591,7 @@ impl<T: SyncTransport> AsyncPollEngine<T> {
         evidence: &Evidence,
         deadline: InvocationDeadline,
         observer: &dyn ProviderTransportObserver,
+        secret: &ProviderSecret,
     ) -> Result<AdapterOutcome, ProviderFailure> {
         let downloads = EngineDownloads {
             transport: &self.transport,
@@ -565,13 +599,37 @@ impl<T: SyncTransport> AsyncPollEngine<T> {
             deadline,
             observer: Some(observer),
         };
-        self.pack.map_response(
+        // Mapping may fall back to the response's own ID when the submission
+        // had none. Filter both result paths so that fallback cannot reintroduce
+        // a credential-bearing value into success or reconciliation evidence.
+        match self.pack.map_response(
             request,
             response,
             evidence,
             &downloads,
             self.max_artifact_bytes,
-        )
+        ) {
+            Ok(mut outcome) => {
+                outcome.provider_request_id = secret_free_id(outcome.provider_request_id, secret);
+                outcome.provider_operation_id =
+                    secret_free_id(outcome.provider_operation_id, secret);
+                if outcome.provider_request_id.is_none() && outcome.provider_operation_id.is_none()
+                {
+                    return Err(reconcile(
+                        "pack_response_request_id_missing",
+                        ProviderPhase::Processing,
+                        evidence,
+                    ));
+                }
+                Ok(outcome)
+            }
+            Err(mut failure) => {
+                failure.evidence.request_id = secret_free_id(failure.evidence.request_id, secret);
+                failure.evidence.operation_id =
+                    secret_free_id(failure.evidence.operation_id, secret);
+                Err(failure)
+            }
+        }
     }
 }
 
@@ -837,6 +895,288 @@ mod tests {
             .prepare("image-v1", &input())
             .unwrap()
             .request
+    }
+
+    const ID_SECRET: &str = "SeCrEt-CaNaRy";
+
+    fn credential_bearing_ids() -> Vec<String> {
+        [ID_SECRET, "secret-canary", "SECRET-CANARY"]
+            .into_iter()
+            .flat_map(|value| [value.to_owned(), format!("provider-{value}-123")])
+            .collect()
+    }
+
+    fn assert_no_credential_metadata(value: &impl serde::Serialize) {
+        let serialized = serde_json::to_string(value).unwrap().to_ascii_lowercase();
+        assert!(!serialized.contains("secret-canary"), "{serialized}");
+    }
+
+    #[test]
+    fn submission_and_immediate_results_omit_credential_bearing_request_ids() {
+        for request_id in credential_bearing_ids() {
+            for body_id in [false, true] {
+                let source = if body_id {
+                    PACK.replace(
+                        "request_id_headers = [\"x-request-id\"]",
+                        "provider_request_id = \"/request_id\"",
+                    )
+                } else {
+                    PACK.to_owned()
+                };
+                for scenario in [
+                    "pending",
+                    "ready",
+                    "mapping_error",
+                    "rejected",
+                    "ambiguous",
+                    "4xx",
+                    "5xx",
+                ] {
+                    let mut body = if matches!(scenario, "ready" | "mapping_error") {
+                        ready()
+                    } else {
+                        accepted()
+                    };
+                    body["request_id"] = json!(request_id);
+                    match scenario {
+                        "mapping_error" => body["cost"] = json!("unreadable"),
+                        "rejected" => body["status"] = json!("Content Moderated"),
+                        "ambiguous" => body["status"] = json!("Task not found"),
+                        _ => {}
+                    }
+                    let mut fake = Fake::new(body, vec![ready()]);
+                    let response = fake.submit.as_mut().unwrap();
+                    response
+                        .headers
+                        .insert("x-request-id".into(), request_id.clone());
+                    response.status = match scenario {
+                        "4xx" => 400,
+                        "5xx" => 502,
+                        _ => 200,
+                    };
+                    let result = AsyncPollEngine::new(
+                        Arc::new(Pack::from_toml_str(&source).unwrap()),
+                        "image-v1",
+                        fake.clone(),
+                        MAX_ARTIFACT,
+                    )
+                    .unwrap()
+                    .submit(
+                        &request(),
+                        &input(),
+                        &secret_for_test(ID_SECRET),
+                        None,
+                    );
+                    assert_no_credential_metadata(&result);
+                    match result {
+                        Ok(AdapterSubmission::Pending(operation)) => {
+                            assert_eq!(scenario, "pending");
+                            assert_eq!(operation.provider_request_id, None);
+                            assert_eq!(operation.provider_operation_id, "job-1");
+                        }
+                        Ok(AdapterSubmission::Complete(outcome)) => {
+                            assert_eq!(scenario, "ready");
+                            assert_eq!(outcome.provider_request_id, None);
+                            assert_eq!(outcome.provider_operation_id.as_deref(), Some("job-1"));
+                            outcome.validate().unwrap();
+                        }
+                        Err(failure) => {
+                            assert!(!matches!(scenario, "pending" | "ready"));
+                            assert_eq!(failure.evidence.request_id, None);
+                        }
+                    }
+                    assert_eq!(*fake.posts.lock().unwrap(), 1);
+                    assert!(fake.poll_urls.lock().unwrap().is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn credential_bearing_job_ids_reconcile_without_checkpoint_or_polling() {
+        for job_id in credential_bearing_ids() {
+            for immediately_ready in [false, true] {
+                let mut body = if immediately_ready {
+                    ready()
+                } else {
+                    accepted()
+                };
+                body["id"] = json!(job_id);
+                let fake = Fake::new(body, vec![ready()]);
+                let failure = engine(fake.clone())
+                    .submit(&request(), &input(), &secret_for_test(ID_SECRET), None)
+                    .unwrap_err();
+                assert_eq!(failure.spend_disposition, SpendDisposition::Reconcile);
+                assert_eq!(failure.evidence.request_id.as_deref(), Some("req-1"));
+                assert_eq!(failure.evidence.operation_id, None);
+                assert_no_credential_metadata(&failure);
+                assert_eq!(*fake.posts.lock().unwrap(), 1);
+                assert!(fake.poll_urls.lock().unwrap().is_empty());
+                assert!(fake.artifact_urls.lock().unwrap().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn transport_failures_and_new_poll_ids_cannot_expose_credentials() {
+        for request_id in credential_bearing_ids() {
+            let fake = Fake {
+                submit: Err(TransportFailure::UnknownOutcome {
+                    request_id: Some(request_id.clone()),
+                }),
+                ..Fake::new(Value::Null, vec![])
+            };
+            let failure = engine(fake.clone())
+                .submit(&request(), &input(), &secret_for_test(ID_SECRET), None)
+                .unwrap_err();
+            assert_eq!(failure.evidence.request_id, None);
+            assert_no_credential_metadata(&failure);
+            assert!(fake.poll_urls.lock().unwrap().is_empty());
+
+            let mut initial = Fake::new(accepted(), vec![]);
+            initial.submit.as_mut().unwrap().headers.clear();
+            let AdapterSubmission::Pending(operation) = engine(initial)
+                .submit(&request(), &input(), &secret_for_test(ID_SECRET), None)
+                .unwrap()
+            else {
+                panic!("expected checkpoint")
+            };
+            assert_eq!(operation.provider_request_id, None);
+            for mapping_error in [false, true] {
+                let mut body = ready();
+                if mapping_error {
+                    body["cost"] = json!("unreadable");
+                }
+                let resumed = Fake::new(Value::Null, vec![body]);
+                resumed.polls.lock().unwrap()[0]
+                    .as_mut()
+                    .unwrap()
+                    .headers
+                    .insert("x-request-id".into(), request_id.clone());
+                let result = engine(resumed.clone()).poll(
+                    &request(),
+                    &input(),
+                    &secret_for_test(ID_SECRET),
+                    &operation,
+                );
+                assert_no_credential_metadata(&result);
+                if mapping_error {
+                    assert_eq!(result.unwrap_err().evidence.request_id, None);
+                } else {
+                    let outcome = result.unwrap();
+                    assert_eq!(outcome.provider_request_id, None);
+                    assert_eq!(outcome.provider_operation_id.as_deref(), Some("job-1"));
+                    outcome.validate().unwrap();
+                }
+                assert_eq!(*resumed.posts.lock().unwrap(), 0);
+                assert_eq!(resumed.poll_urls.lock().unwrap().len(), 1);
+            }
+            let resumed = Fake::new(Value::Null, vec![]);
+            resumed
+                .polls
+                .lock()
+                .unwrap()
+                .push_back(Err(TransportFailure::UnknownOutcome {
+                    request_id: Some(request_id),
+                }));
+            let failure = engine(resumed.clone())
+                .poll(
+                    &request(),
+                    &input(),
+                    &secret_for_test(ID_SECRET),
+                    &operation,
+                )
+                .unwrap_err();
+            assert_eq!(failure.evidence.request_id, None);
+            assert_eq!(failure.evidence.operation_id.as_deref(), Some("job-1"));
+            assert_no_credential_metadata(&failure);
+            assert_eq!(resumed.poll_urls.lock().unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn tainted_checkpoint_ids_are_rejected_before_restart_traffic() {
+        struct NoTraffic;
+        impl ProviderTransportObserver for NoTraffic {
+            fn record(&self, _: ProviderTransportInteraction) -> bool {
+                panic!("tainted checkpoint must fail before any transport boundary")
+            }
+        }
+        let first = Fake::new(accepted(), vec![]);
+        let AdapterSubmission::Pending(checkpoint) = engine(first)
+            .submit(&request(), &input(), &secret_for_test(ID_SECRET), None)
+            .unwrap()
+        else {
+            panic!("expected checkpoint")
+        };
+        for id in credential_bearing_ids() {
+            for taint_job in [false, true] {
+                let mut operation = checkpoint.clone();
+                if taint_job {
+                    operation.provider_operation_id = id.clone();
+                } else {
+                    operation.provider_request_id = Some(id.clone());
+                }
+                let stored =
+                    serde_json::from_str(&serde_json::to_string(&operation).unwrap()).unwrap();
+                let resumed = Fake::new(Value::Null, vec![ready()]);
+                let failure = engine(resumed.clone())
+                    .poll_observed(
+                        &request(),
+                        &input(),
+                        &secret_for_test(ID_SECRET),
+                        &stored,
+                        &NoTraffic,
+                    )
+                    .unwrap_err();
+                assert_eq!(failure.code, "invalid_provider_operation");
+                assert_eq!(failure.spend_disposition, SpendDisposition::Reconcile);
+                assert_no_credential_metadata(&failure);
+                assert_eq!(
+                    failure.evidence.request_id.as_deref(),
+                    if taint_job { Some("req-1") } else { None }
+                );
+                assert_eq!(
+                    failure.evidence.operation_id.as_deref(),
+                    if taint_job { None } else { Some("job-1") }
+                );
+                assert_eq!(*resumed.posts.lock().unwrap(), 0);
+                assert!(resumed.poll_urls.lock().unwrap().is_empty());
+                assert!(resumed.artifact_urls.lock().unwrap().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn encoded_credentials_are_omitted_without_restricting_clean_http_request_ids() {
+        let fake = Fake {
+            submit: Err(TransportFailure::UnknownOutcome {
+                request_id: Some("provider-Key%2FValue-123".into()),
+            }),
+            ..Fake::new(Value::Null, vec![])
+        };
+        let failure = engine(fake)
+            .submit(&request(), &input(), &secret_for_test("Key/Value"), None)
+            .unwrap_err();
+        assert_eq!(failure.evidence.request_id, None);
+
+        let mut fake = Fake::new(ready(), vec![]);
+        fake.submit
+            .as_mut()
+            .unwrap()
+            .headers
+            .insert("x-request-id".into(), "opaque/request+header".into());
+        let AdapterSubmission::Complete(outcome) = engine(fake)
+            .submit(&request(), &input(), &secret_for_test(ID_SECRET), None)
+            .unwrap()
+        else {
+            panic!("expected completed job");
+        };
+        assert_eq!(
+            outcome.provider_request_id.as_deref(),
+            Some("opaque/request+header")
+        );
+        outcome.validate().unwrap();
     }
 
     #[test]
