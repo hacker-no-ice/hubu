@@ -1,0 +1,79 @@
+# Fixture provider pack (schema v1) used by Gongbu's pack tests. It runs only
+# on the sandbox engine; api.sandbox-image.test is not a real provider.
+schema_version = 1
+pack_id = "sandbox-image"
+pack_version = "2026-10-19.1"
+provider = "sandbox-image"
+display_name = "Sandbox image provider"
+billing_merchant = "merchant:sandbox-image"
+capability = "capability:image:generate"
+workload_type = "image_generation"
+archetype = "sync_fixed"
+pricing_trust = "verified"
+
+[transport]
+endpoint = "https://api.sandbox-image.test"
+api_version = "v1"
+allowed_hosts = ["api.sandbox-image.test"]
+auth_header = "x-api-key"
+credential = "sandbox_image"
+timeout_ms = 30000
+
+[[parameters]]
+name = "prompt"
+type = "string"
+required = true
+max_length = 4000
+
+[[parameters]]
+name = "image_count"
+type = "integer"
+field = "n"
+min = 1
+max = 4
+default = 1
+quantity = "image_count"
+
+[[parameters]]
+name = "quality"
+type = "enum"
+values = ["draft", "final"]
+default = "draft"
+selector = "quality"
+
+[fixed]
+response_format = "url"
+
+[response]
+provider_request_id = "/id"
+usage = { images = "/data" }
+artifact_items = "/data"
+artifact_url = "/url"
+
+[artifacts]
+media_types = ["image/png"]
+hosts = ["cdn.sandbox-image.test"]
+
+[[models]]
+model = "image-v1"
+provider_config_version = "sandbox-image-v1-2026-10-19"
+pricing_version = "sandbox-image-v1-usd-2026-10-19-v1"
+pricing_reviewed_on = "2026-10-19"
+
+[[models.pricing_rules]]
+rule_id = "sandbox-image-v1-draft-2026-10-19"
+currency = "USD"
+selector = { quality = "draft" }
+components = [
+  { unit = "request", rate_numerator_minor = 1, rate_denominator = 10 },
+  { unit = "image", rate_numerator_minor = 15, rate_denominator = 10 },
+]
+
+[[models.pricing_rules]]
+rule_id = "sandbox-image-v1-final-2026-10-19"
+currency = "USD"
+selector = { quality = "final" }
+components = [
+  { unit = "request", rate_numerator_minor = 1, rate_denominator = 10 },
+  { unit = "image", rate_numerator_minor = 6, rate_denominator = 1 },
+]
