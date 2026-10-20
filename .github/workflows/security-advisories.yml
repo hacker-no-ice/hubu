@@ -33,9 +33,10 @@ jobs:
       source_sha: ${{ steps.source.outputs.sha }}
       report_sha: ${{ steps.candidate.outputs.report_sha || steps.healthy.outputs.report_sha || steps.source.outputs.report_sha }}
       lock_sha: ${{ steps.candidate.outputs.lock_sha }}
-    env:
-      REPORT_DIR: ${{ runner.temp }}/security-advisories
     steps:
+      - name: Set report directory
+        run: echo "REPORT_DIR=$RUNNER_TEMP/security-advisories" >> "$GITHUB_ENV"
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.repository.default_branch }}
@@ -203,11 +204,13 @@ jobs:
       issues: write
       actions: write
     env:
-      REPORT_DIR: ${{ runner.temp }}/security-advisories
       SECURITY_MAINTAINER: ${{ vars.SECURITY_MAINTAINER || github.repository_owner }}
       EXPECTED_REPORT_SHA: ${{ needs.scan.outputs.report_sha }}
       EXPECTED_LOCK_SHA: ${{ needs.scan.outputs.lock_sha }}
     steps:
+      - name: Set report directory
+        run: echo "REPORT_DIR=$RUNNER_TEMP/security-advisories" >> "$GITHUB_ENV"
+
       # Execute only trusted default-branch scripts; never code from a fix PR.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

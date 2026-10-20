@@ -90,8 +90,11 @@ if mapping(block(publish, "permissions", 4), 6) != expected_publish_permissions:
 if re.search(r"(?m)^\s*(?:run: ?)?cargo\s", publish):
     fail("publication must not resolve dependencies, build, or run Rust code")
 publisher_commands = re.findall(r"(?m)^\s+run:\s*(.+)$", publish)
-if publisher_commands != ["bash scripts/security-advisories-push.sh"]:
-    fail("publication may execute only the reviewed lockfile publication script")
+if publisher_commands != [
+    'echo "REPORT_DIR=$RUNNER_TEMP/security-advisories" >> "$GITHUB_ENV"',
+    "bash scripts/security-advisories-push.sh",
+]:
+    fail("publication may only initialize its report path and run the reviewed publication script")
 if "scripts/security-advisories-github.js" not in publish:
     fail("publication must use the trusted metadata publisher")
 if mapping(publish, 4).get("needs") != "scan":
