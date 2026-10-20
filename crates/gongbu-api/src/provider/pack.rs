@@ -379,7 +379,20 @@ pub struct Model {
     pub pricing_version: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pricing_reviewed_on: Option<String>,
+    /// Narrows an enum parameter to the values this model supports, such as
+    /// the size presets a smaller model offers.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub parameter_values: BTreeMap<String, Vec<String>>,
     pub pricing_rules: Vec<ModelPricingRule>,
+}
+
+impl Model {
+    /// The values `parameter` accepts for this model.
+    fn values_for<'a>(&'a self, parameter: &'a Parameter) -> &'a [String] {
+        self.parameter_values
+            .get(&parameter.name)
+            .map_or(parameter.values.as_slice(), Vec::as_slice)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -588,7 +601,13 @@ impl Pack {
                 None if parameter.required => return Err(indeterminable()),
                 None => continue,
             };
-            if parameter.check(&value).is_err() {
+            if parameter.check(&value).is_err()
+                || (parameter.kind == ParameterKind::Enum
+                    && !model
+                        .values_for(parameter)
+                        .iter()
+                        .any(|allowed| Some(allowed.as_str()) == value.as_str()))
+            {
                 return Err(indeterminable());
             }
             if let Some(quantity) = &parameter.quantity {
@@ -717,6 +736,13 @@ impl Pack {
             return Err(ambiguous("pack_response_artifacts_missing"));
         }
         let policy_failure = || fail("artifact_policy_failure", ProviderPhase::Artifact);
+        // More images than were asked for (and priced) is a contract breach.
+        if request
+            .image_count()
+            .is_some_and(|count| items.len() as u64 > count.max(0) as u64)
+        {
+            return Err(policy_failure());
+        }
         let mut artifacts = Vec::with_capacity(items.len());
         for item in items {
             let bytes = if let Some(path) = &mapping.artifact_base64 {
@@ -1458,6 +1484,26 @@ impl PackDocument {
                 }
                 _ => {}
             }
+            for (name, values) in &model.parameter_values {
+                let parameter = self
+                    .parameters
+                    .iter()
+                    .find(|p| &p.name == name && p.kind == ParameterKind::Enum);
+                let unique: BTreeSet<_> = values.iter().collect();
+                if parameter.is_none_or(|p| {
+                    values.is_empty()
+                        || unique.len() != values.len()
+                        || values.iter().any(|v| !p.values.contains(v))
+                        || p.default
+                            .as_ref()
+                            .is_some_and(|d| !values.iter().any(|v| Some(v.as_str()) == d.as_str()))
+                }) {
+                    return Err(invalid(
+                        format!("{field}.parameter_values.{name}"),
+                        "must narrow a declared enum parameter to a unique, non-empty subset that keeps its default",
+                    ));
+                }
+            }
             if model.pricing_rules.is_empty() {
                 return Err(invalid(
                     format!("{field}.pricing_rules"),
@@ -1507,9 +1553,8 @@ impl PackDocument {
         .map_err(|error| invalid("models.pricing_rules", error.to_string()))?;
         // Every combination of selector parameter values must price exactly one
         // rule, so no valid agent input can reach an unpriced request.
-        let combinations = selector_combinations(selectors);
         for model in &self.models {
-            for combination in &combinations {
+            for combination in &selector_combinations(selectors, model) {
                 let mut request = NormalizedRequest::new(&self.provider, &model.model);
                 request.selector = combination.clone();
                 for quantity in quantities {
@@ -1556,13 +1601,17 @@ impl PackDocument {
 
 /// Every selector a valid agent input can produce: the product of the enum
 /// parameters bound to selector keys (one empty selector when there are none).
-fn selector_combinations(selectors: &BTreeMap<&str, &Parameter>) -> Vec<PricingSelector> {
+fn selector_combinations(
+    selectors: &BTreeMap<&str, &Parameter>,
+    model: &Model,
+) -> Vec<PricingSelector> {
     let mut combinations = vec![PricingSelector::default()];
     for (key, parameter) in selectors {
+        let values = model.values_for(parameter);
         combinations = combinations
             .into_iter()
             .flat_map(|base| {
-                parameter.values.iter().map(move |value| {
+                values.iter().map(move |value| {
                     let mut next = base.clone();
                     next.insert(*key, value.as_str());
                     next

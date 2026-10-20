@@ -169,12 +169,13 @@ GONGBU_LIVE_GEMINI_DEVELOPER_CONFIRM=I_ACCEPT_GOOGLE_CHARGES \
 GONGBU_LIVE_GEMINI_DEVELOPER_PROMPT='Draw one small blue circle on white.' \
 GONGBU_LIVE_GEMINI_DEVELOPER_OUTPUT=/absolute/path/gemini-live-output.png \
 cargo test -p gongbu-api \
-  provider::gemini_developer_image::tests::live_developer_api_e2e_requires_explicit_spend_guard \
+  provider::verified_packs::tests::live_gemini_pack_e2e_requires_explicit_spend_guard \
   -- --ignored --exact
 ```
 
-Choose an `IMAGE_SIZE` the selected model supports (the Lite model is
-`1k`-only). A synchronous timeout or ambiguous response has no pollable Gongbu
+`IMAGE_SIZE` is required; choose one the selected model supports (the Lite
+model is `1k`-only). The provider target config must name the shipped Gemini
+pack, so render the stack from the current contracts first. A synchronous timeout or ambiguous response has no pollable Gongbu
 checkpoint, so reconcile rather than rerun.
 
 ## FLUX.2 Pro

@@ -79,6 +79,36 @@ pub trait SyncTransport: Send + Sync {
     ) -> Result<Vec<u8>, ArtifactFetchError>;
 }
 
+impl<T: SyncTransport + ?Sized> SyncTransport for Arc<T> {
+    fn post_json(
+        &self,
+        url: &Url,
+        auth: (&str, &str),
+        headers: &BTreeMap<String, String>,
+        body: &Value,
+        timeout: Duration,
+    ) -> Result<TransportResponse, TransportFailure> {
+        self.as_ref().post_json(url, auth, headers, body, timeout)
+    }
+    fn get_json(
+        &self,
+        url: &Url,
+        auth: (&str, &str),
+        headers: &BTreeMap<String, String>,
+        timeout: Duration,
+    ) -> Result<TransportResponse, TransportFailure> {
+        self.as_ref().get_json(url, auth, headers, timeout)
+    }
+    fn download(
+        &self,
+        url: &Url,
+        policy: &ArtifactDownloadPolicy,
+        deadline: InvocationDeadline,
+    ) -> Result<Vec<u8>, ArtifactFetchError> {
+        self.as_ref().download(url, policy, deadline)
+    }
+}
+
 pub struct ReqwestSyncTransport;
 
 impl SyncTransport for ReqwestSyncTransport {

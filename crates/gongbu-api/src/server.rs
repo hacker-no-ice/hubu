@@ -12,7 +12,7 @@ use crate::{
     provider::{
         contract::PricingCatalog,
         registry::{ProviderRegistry, ValidatedProviderCatalog},
-        targets::ProviderTargetConfig,
+        targets::{ProviderTargetConfig, TargetKey},
     },
     redaction::Redactor,
     secrets::{
@@ -236,6 +236,51 @@ pub enum ServerError {
 
 fn invalid(message: impl Into<String>) -> ServerError {
     ServerError::Invalid(message.into())
+}
+
+/// Refuse to start when an unfinished execution (including one waiting for
+/// reconciliation) was frozen against a provider target revision this
+/// configuration no longer has. Without its revision the execution could
+/// never be resumed or reconciled, so upgrades that replace provider targets
+/// must drain unfinished work first.
+fn refuse_orphaned_executions(
+    repository: &Repository,
+    targets: &ProviderTargetConfig,
+) -> Result<(), ServerError> {
+    let mut orphaned = Vec::new();
+    for id in repository
+        .list_nonterminal_execution_ids()
+        .map_err(|_| invalid("unfinished executions could not be listed"))?
+    {
+        let execution = repository
+            .get_execution(&id)
+            .map_err(|_| invalid("an unfinished execution could not be read"))?;
+        let key = TargetKey::new(
+            &execution.workload_type,
+            &execution.provider,
+            &execution.adapter,
+            &execution.model,
+        );
+        let present = key.is_ok_and(|key| {
+            targets.has_revision(
+                &key,
+                &execution.provider_config_version,
+                &execution.provider_config_digest,
+            )
+        });
+        if !present {
+            orphaned.push(execution.target);
+        }
+    }
+    match orphaned.first() {
+        None => Ok(()),
+        Some(example) => Err(invalid(format!(
+            "{} unfinished execution(s) reference provider target revisions this configuration \
+             no longer has (for example {example}); finish or reconcile them with the previous \
+             Gongbu version and provider configuration, then upgrade",
+            orphaned.len()
+        ))),
+    }
 }
 
 impl ServerConfig {
@@ -579,6 +624,7 @@ pub async fn serve_config(mut config: ServerConfig) -> Result<(), BoxError> {
         limits,
     );
     artifacts.preflight()?;
+    refuse_orphaned_executions(&repository, providers.targets())?;
 
     let hubu_client =
         HubuClient::new(&config.hubu.endpoint).with_bearer_token(hubu_secret.expose().to_vec());
@@ -1656,5 +1702,80 @@ mod tests {
 
         assert!(!hubu_is_compatible(&client, "0.1.0", "hubu-executor.v1"));
         server.join().unwrap();
+    }
+
+    #[test]
+    fn startup_refuses_unfinished_executions_whose_target_revision_is_gone() {
+        use crate::{
+            execution::{CreateExecutionParams, HubuTokenReference},
+            provider::verified_packs::verified_packs,
+        };
+        let pack = verified_packs().remove(0);
+        let secret = SecretReference::new("gongbu.google", "fixture").unwrap();
+        let targets: ProviderTargetConfig = serde_json::from_value(serde_json::json!({
+            "schema_version": 2,
+            "provider_configs": pack.provider_configs(&secret),
+        }))
+        .unwrap();
+        let model = pack.models()[0].clone();
+        let target = targets
+            .resolve_active(&pack.target_key(&model))
+            .unwrap()
+            .clone();
+        let input = serde_json::json!({"prompt": "x", "image_size": "1k"});
+        let pricing = PricingCatalog::from_json(
+            &serde_json::to_vec(&serde_json::json!({
+                "schema_version": 2, "catalog_version": "v", "rules": pack.pricing_rules()
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let snapshot = pricing
+            .snapshot(&pack.prepare(&model.model, &input).unwrap().request)
+            .unwrap();
+        let repository = Repository::in_memory().unwrap();
+        let create = |operation: &str, digest: &str| {
+            repository
+                .create_execution(&CreateExecutionParams {
+                    account_id: "account".into(),
+                    operation_key: operation.into(),
+                    hubu_authorization_id: format!("token-{operation}"),
+                    hubu_claim_id: None,
+                    hubu_token_reference: HubuTokenReference::new(format!("token-{operation}"))
+                        .unwrap(),
+                    authorized_units: snapshot.estimated_units,
+                    authorization_currency: "USD".into(),
+                    normalized_input: input.clone(),
+                    input_hash: "hash".into(),
+                    input_schema_version: 1,
+                    target: target.target_key().canonical_name(),
+                    config_version: target.provider_config_version.clone(),
+                    workload_type: target.workload_type.clone(),
+                    provider: target.provider.clone(),
+                    adapter: target.adapter.clone(),
+                    model: target.model.clone(),
+                    provider_config_version: target.provider_config_version.clone(),
+                    provider_config_digest: digest.into(),
+                    pricing_snapshot: serde_json::to_value(&snapshot).unwrap(),
+                    pricing_schema_version: 3,
+                    execution_scope: None,
+                    created_at: "now".into(),
+                })
+                .unwrap()
+        };
+        create("current", target.digest());
+        refuse_orphaned_executions(&repository, &targets).unwrap();
+
+        // Work frozen against the pre-upgrade revision blocks startup.
+        create("pre-upgrade", &format!("sha256:{}", "c".repeat(64)));
+        let error = refuse_orphaned_executions(&repository, &targets)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("1 unfinished execution(s)"), "{error}");
+        assert!(
+            error.contains(&target.target_key().canonical_name()),
+            "{error}"
+        );
+        assert!(error.contains("previous Gongbu version"), "{error}");
     }
 }

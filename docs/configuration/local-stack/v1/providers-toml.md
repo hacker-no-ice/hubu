@@ -175,7 +175,9 @@ Never reuse a version label with changed model, credential coordinates, activati
 
 **Defined by Gongbu's adapter registry.** Current adapter IDs include:
 
-- `gemini_developer_image` for the Gemini Developer API image path;
+- `gemini_developer_image` for the Gemini Developer API image targets, run
+  from the verified Gemini [provider pack](../../../provider-packs.md) (their
+  settings use `type = "pack"`);
 - `flux2_api` for the Flux 2 API adapter;
 - `fixture` for test/local fixture execution only.
 
@@ -218,13 +220,18 @@ Required tagged adapter settings. `settings.type` selects the service-owned sett
 
 ```toml
 [targets.settings]
-type = "gemini_developer_image"
+type = "flux2_api"
 
 [targets.settings.config]
-endpoint = "https://provider.example"
+endpoint = "https://api.bfl.ai"
 api_version = "v1"
 timeout_ms = 30000
 ```
+
+A target run from a [provider pack](../../../provider-packs.md) uses
+`type = "pack"` with the pack's ID, version, content digest and archetype. The
+shipped contracts supply these for you; a pack target binds only to the exact
+pack digest it names.
 
 Fixture settings use only `type = "fixture"` and no config table. Fixture execution is not a live provider substitute.
 
@@ -234,7 +241,7 @@ The selected `gongbu-server` production validator is authoritative. Unknown adap
 
 ### `targets.settings.type`
 
-Required tag. Allowed current values are `gemini_developer_image`, `flux2_api`, and `fixture`. It must match `targets.adapter`.
+Required tag. Allowed current values are `flux2_api`, `pack`, and `fixture`. Non-pack settings must match `targets.adapter`.
 
 ### `targets.settings.config.endpoint`
 

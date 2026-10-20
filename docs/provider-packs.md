@@ -5,9 +5,20 @@ that a reviewed Gongbu engine runs. Adding a provider, a model or a price
 becomes a pack change instead of Rust code and a release.
 
 > **Status.** Schema v1 is defined, Gongbu validates and loads packs, and the
-> `sync_fixed` and `async_poll` engines run them. The verified FLUX and Gemini
-> packs and the `hubu provider` commands that activate packs in a stack arrive
-> in later releases. You can't activate a pack in a stack yet.
+> `sync_fixed` and `async_poll` engines run them. The shipped Gemini contracts
+> run from the verified pack in `packs/verified/`. The verified FLUX pack and
+> the `hubu provider` commands that activate your own packs arrive in later
+> releases.
+
+## Verified packs
+
+Verified packs live in `packs/verified/` and are compiled into Gongbu. Each
+shipped contract in `contracts/provider-contracts-v1.json` whose target
+settings say `type = "pack"` is that pack's checked-in projection: the same
+`provider_config_version`, pricing version, review date and pricing rules,
+pinned to the pack's content digest. Gongbu's tests fail if a pack and its
+contract entries disagree, so a pack change ships with a matching contract
+update.
 
 ## What a pack declares and what engines own
 
@@ -366,3 +377,4 @@ version without changing those per-model rules.
 - [Spend executor contract](spend-executor-contract.md)
 - [Gongbu execution](gongbu-execution.md)
 - [`providers.toml` reference](configuration/local-stack/v1/providers-toml.md)
+- [Upgrading to v0.2.5](operations/upgrading-to-v0.2.5.md)

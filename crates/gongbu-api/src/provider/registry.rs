@@ -6,15 +6,12 @@ use super::{
         Flux2ApiAdapter, ADAPTER_ID as FLUX_ADAPTER_ID, MODEL_ID as FLUX_MODEL_ID,
         PROVIDER_ID as FLUX_PROVIDER_ID, SUPPORTED_PRESETS as FLUX_SUPPORTED_PRESETS,
     },
-    gemini_developer_image::{
-        GeminiDeveloperImageAdapter, ADAPTER_ID as GEMINI_DEVELOPER_ADAPTER_ID,
-        PROVIDER_ID as GEMINI_DEVELOPER_PROVIDER_ID,
-    },
     pack::{Archetype, Pack},
     pack_async::AsyncPollEngine,
     pack_sync::SyncFixedEngine,
     provider_contracts::{self, CatalogContract},
     targets::{AdapterSettings, ProviderConfigVersion, ProviderTargetConfig, TargetKey},
+    verified_packs::verified_packs,
 };
 use crate::{artifact::ArtifactLimits, execution_scope::for_target, secrets::ProviderSecret};
 use serde::Serialize;
@@ -95,18 +92,9 @@ impl ProviderRegistry {
         let max_artifact_bytes = artifact_limits.max_encoded_bytes;
         let mut registry = Self::new();
         registry.require_shipped_contracts = true;
-        registry.register(
-            GEMINI_DEVELOPER_PROVIDER_ID,
-            GEMINI_DEVELOPER_ADAPTER_ID,
-            move |target| {
-                Ok(Arc::new(
-                    GeminiDeveloperImageAdapter::from_target_with_artifact_limit(
-                        target,
-                        max_artifact_bytes,
-                    )?,
-                ))
-            },
-        );
+        for pack in verified_packs() {
+            registry.register_pack(pack);
+        }
         registry.register(FLUX_PROVIDER_ID, FLUX_ADAPTER_ID, move |target| {
             Ok(Arc::new(Flux2ApiAdapter::from_target_with_artifact_limit(
                 target,

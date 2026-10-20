@@ -23,6 +23,14 @@ provider behavior; field definitions live in the
 | Non-Lite standard prices | USD $0.067 (`67/10` cents) at 1K; $0.101 (`101/10` cents) at 2K; $0.151 (`151/10` cents) at 4K |
 | Retry and fallback | zero generation retries; no fallback |
 | Transport | synchronous inline response; no polling |
+| Implementation | verified [provider pack](../provider-packs.md) `packs/verified/google-gemini-developer-image.toml` on the `sync_fixed` engine |
+
+Since v0.2.5 both targets run from one verified provider pack instead of a
+dedicated Rust adapter. Contract IDs, `provider_config_version` values,
+pricing versions, prices and behavior are unchanged; the target settings now
+name the pack and its content digest, so their revision digest changed.
+Upgrade only with no unfinished Gemini work; see
+[upgrading to v0.2.5](upgrading-to-v0.2.5.md).
 
 The stable models, resolution limits, and standard output prices come from
 Google's [Lite model page](https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-lite-image),

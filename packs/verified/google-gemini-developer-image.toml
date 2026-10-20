@@ -1,0 +1,101 @@
+# Verified provider pack: Google Gemini Developer API image generation.
+#
+# Replaces the gemini_developer_image Rust adapter (HUB-307). The two models
+# keep their shipped contract IDs, provider_config_version values and pricing
+# versions; contracts/provider-contracts-v1.json carries this pack's checked-in
+# projection, and Gongbu's tests fail if the two ever disagree.
+schema_version = 1
+pack_id = "google-gemini-developer-image"
+pack_version = "2026-10-20.1"
+provider = "google"
+display_name = "Google Gemini Developer API"
+billing_merchant = "merchant:google"
+capability = "capability:image:generate"
+workload_type = "image_generation"
+archetype = "sync_fixed"
+adapter = "gemini_developer_image"
+pricing_trust = "verified"
+
+[transport]
+endpoint = "https://generativelanguage.googleapis.com"
+api_version = "v1beta"
+allowed_hosts = ["generativelanguage.googleapis.com"]
+auth_header = "x-goog-api-key"
+credential = "gemini"
+timeout_ms = 30000
+
+[request]
+path = "/v1beta/interactions"
+
+[request.body]
+model = "{{model}}"
+input = [{ type = "text", text = "{{prompt}}" }]
+response_format = { type = "image", image_size = "{{image_size|upper}}" }
+
+[[parameters]]
+name = "prompt"
+type = "string"
+required = true
+max_length = 32000
+
+[[parameters]]
+name = "image_count"
+type = "integer"
+min = 1
+max = 1
+default = 1
+quantity = "image_count"
+
+[[parameters]]
+name = "image_size"
+type = "enum"
+values = ["1k", "2k", "4k"]
+required = true
+selector = "image_size"
+
+[response]
+request_id_headers = ["x-goog-request-id", "x-request-id"]
+provider_request_id = "/id"
+usage = { images = "/steps[type=model_output]/content[type=image]", input_tokens = "/usage/input_tokens", output_tokens = "/usage/output_tokens" }
+artifact_items = "/steps[type=model_output]/content[type=image]"
+artifact_base64 = "/data"
+
+[artifacts]
+media_types = ["image/png", "image/jpeg"]
+
+[[models]]
+model = "gemini-3.1-flash-lite-image"
+provider_config_version = "hubu-gemini-3.1-flash-lite-image-t2i-2026-09-01-v1"
+pricing_version = "google-gemini-3.1-flash-lite-image-usd-2026-09-01-v1"
+pricing_reviewed_on = "2026-09-01"
+parameter_values = { image_size = ["1k"] }
+
+[[models.pricing_rules]]
+rule_id = "google-gemini-3.1-flash-lite-image-1k-2026-09-01-v1"
+currency = "USD"
+selector = { image_size = "1k" }
+components = [{ unit = "image", rate_numerator_minor = 336, rate_denominator = 100 }]
+
+[[models]]
+model = "gemini-3.1-flash-image"
+provider_config_version = "hubu-gemini-3.1-flash-image-t2i-2026-09-01-v1"
+pricing_version = "google-gemini-3.1-flash-image-usd-2026-09-01-v1"
+pricing_reviewed_on = "2026-09-01"
+
+[[models.pricing_rules]]
+rule_id = "google-gemini-3.1-flash-image-1k-2026-09-01-v1"
+currency = "USD"
+selector = { image_size = "1k" }
+components = [{ unit = "image", rate_numerator_minor = 67, rate_denominator = 10 }]
+
+[[models.pricing_rules]]
+rule_id = "google-gemini-3.1-flash-image-2k-2026-09-01-v1"
+currency = "USD"
+selector = { image_size = "2k" }
+components = [{ unit = "image", rate_numerator_minor = 101, rate_denominator = 10 }]
+
+[[models.pricing_rules]]
+rule_id = "google-gemini-3.1-flash-image-4k-2026-09-01-v1"
+currency = "USD"
+selector = { image_size = "4k" }
+components = [{ unit = "image", rate_numerator_minor = 151, rate_denominator = 10 }]

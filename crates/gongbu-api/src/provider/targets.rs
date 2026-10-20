@@ -127,7 +127,6 @@ impl TargetKey {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "type", content = "config", rename_all = "snake_case")]
 pub enum AdapterSettings {
-    GeminiDeveloperImage(GeminiDeveloperImageConfig),
     Flux2Api(Flux2ApiConfig),
     /// A target run by an archetype engine from a provider pack. The pack's
     /// content digest is part of the revision, so editing a pack is a new
@@ -135,19 +134,6 @@ pub enum AdapterSettings {
     Pack(PackTargetConfig),
     /// Test/local adapters have no transport configuration or credential override.
     Fixture,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct GeminiDeveloperImageConfig {
-    pub endpoint: String,
-    pub api_version: String,
-    /// Overall invocation budget for the complete inline-image request.
-    pub timeout_ms: u64,
-    #[serde(default)]
-    pub max_retries: u32,
-    #[serde(default)]
-    pub headers: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -218,12 +204,6 @@ impl ProviderConfigVersion {
     }
     pub fn settings(&self) -> &AdapterSettings {
         &self.settings
-    }
-    pub fn gemini_developer_image(&self) -> Option<&GeminiDeveloperImageConfig> {
-        match &self.settings {
-            AdapterSettings::GeminiDeveloperImage(v) => Some(v),
-            _ => None,
-        }
     }
     pub fn flux2_api(&self) -> Option<&Flux2ApiConfig> {
         match &self.settings {
@@ -347,6 +327,14 @@ impl ProviderTargetConfig {
         Ok(revision)
     }
 
+    /// Whether this configuration still has the exact revision a persisted
+    /// execution was frozen with, whatever its active or enabled state.
+    pub fn has_revision(&self, key: &TargetKey, version: &str, digest: &str) -> bool {
+        self.revisions
+            .get(&(key.clone(), version.to_owned()))
+            .is_some_and(|revision| digest == LEGACY_UNRESOLVED_DIGEST || revision.digest == digest)
+    }
+
     /// Resolve rows created before provider configuration digests were stored.
     /// This compatibility path is unreachable for newly validated executions.
     pub fn resolve_persisted_revision(
@@ -400,8 +388,6 @@ struct RawRevision {
     enabled: Option<bool>,
     #[serde(default)]
     settings: Option<AdapterSettings>,
-    #[serde(default)]
-    gemini_developer_image: Option<GeminiDeveloperImageConfig>,
     #[serde(default)]
     flux2_api: Option<Flux2ApiConfig>,
 }
@@ -496,7 +482,6 @@ impl Serialize for ProviderTargetConfig {
                 execution_enabled: Some(r.execution_enabled),
                 enabled: None,
                 settings: Some(r.settings.clone()),
-                gemini_developer_image: None,
                 flux2_api: None,
             })
             .collect();
@@ -522,13 +507,7 @@ fn validate_revision(schema: u32, raw: RawRevision) -> Result<ProviderConfigVers
     }
     SecretReference::new(raw.secret_service.clone(), raw.secret_account.clone())
         .map_err(|_| Error::InvalidSecretReference)?;
-    let legacy_settings = [
-        raw.gemini_developer_image.is_some(),
-        raw.flux2_api.is_some(),
-    ]
-    .into_iter()
-    .filter(|v| *v)
-    .count();
+    let legacy_settings = usize::from(raw.flux2_api.is_some());
     if raw.settings.is_some() && legacy_settings != 0 {
         return Err(Error::InvalidAdapterSettings);
     }
@@ -536,8 +515,6 @@ fn validate_revision(schema: u32, raw: RawRevision) -> Result<ProviderConfigVers
         settings
     } else if legacy_settings > 1 {
         return Err(Error::InvalidAdapterSettings);
-    } else if let Some(v) = raw.gemini_developer_image {
-        AdapterSettings::GeminiDeveloperImage(v)
     } else if let Some(v) = raw.flux2_api {
         AdapterSettings::Flux2Api(v)
     } else {
@@ -579,16 +556,6 @@ fn validate_revision(schema: u32, raw: RawRevision) -> Result<ProviderConfigVers
 
 fn validate_settings(key: &TargetKey, settings: &AdapterSettings) -> Result<()> {
     match (key.provider.as_str(), key.adapter.as_str(), settings) {
-        ("google", "gemini_developer_image", AdapterSettings::GeminiDeveloperImage(c)) => {
-            validate_transport(
-                &c.endpoint,
-                &c.api_version,
-                c.timeout_ms,
-                c.max_retries,
-                &c.headers,
-                &["authorization", "x-goog-api-key"],
-            )?
-        }
         ("flux", "flux2_api", AdapterSettings::Flux2Api(c)) => {
             validate_transport(
                 &c.endpoint,
@@ -660,9 +627,6 @@ fn normalize_settings(settings: &mut AdapterSettings) {
         }
     }
     match settings {
-        AdapterSettings::GeminiDeveloperImage(config) => {
-            transport(&mut config.endpoint, &mut config.headers, None)
-        }
         AdapterSettings::Flux2Api(config) => {
             transport(
                 &mut config.endpoint,
@@ -837,10 +801,10 @@ mod tests {
         );
 
         let ordered = catalog(
-            r#"{"schema_version":2,"provider_configs":[{"provider_config_version":"google-v1","workload_type":"image_generation","provider":"google","adapter":"gemini_developer_image","model":"m","secret_service":"svc","secret_account":"acct","settings":{"type":"gemini_developer_image","config":{"endpoint":"https://generativelanguage.googleapis.com","api_version":"v1beta","timeout_ms":1000,"headers":{"X-Client":"gongbu"}}}}]}"#,
+            r#"{"schema_version":2,"provider_configs":[{"provider_config_version":"flux-v1","workload_type":"image_generation","provider":"flux","adapter":"flux2_api","model":"m","secret_service":"svc","secret_account":"acct","settings":{"type":"flux2_api","config":{"endpoint":"https://api.bfl.ai","api_version":"v1","timeout_ms":1000,"headers":{"X-Client":"gongbu"}}}}]}"#,
         );
         let normalized = catalog(
-            r#"{"schema_version":2,"provider_configs":[{"provider_config_version":"google-v1","workload_type":"image_generation","provider":"google","adapter":"gemini_developer_image","model":"m","secret_service":"svc","secret_account":"acct","settings":{"type":"gemini_developer_image","config":{"endpoint":"https://generativelanguage.googleapis.com/","api_version":"v1beta","timeout_ms":1000,"headers":{"x-client":"gongbu"}}}}]}"#,
+            r#"{"schema_version":2,"provider_configs":[{"provider_config_version":"flux-v1","workload_type":"image_generation","provider":"flux","adapter":"flux2_api","model":"m","secret_service":"svc","secret_account":"acct","settings":{"type":"flux2_api","config":{"endpoint":"https://api.bfl.ai/","api_version":"v1","timeout_ms":1000,"headers":{"x-client":"gongbu"}}}}]}"#,
         );
         assert_eq!(
             ordered.revisions().next().unwrap().digest(),
@@ -931,12 +895,12 @@ mod tests {
 
     #[test]
     fn invalid_transport_values_never_build_a_catalog() {
-        let base = || serde_json::json!({"schema_version":2,"provider_configs":[{"provider_config_version":"v1","workload_type":"image_generation","provider":"google","adapter":"gemini_developer_image","model":"m","secret_service":"svc","secret_account":"acct","settings":{"type":"gemini_developer_image","config":{"endpoint":"https://example.com","api_version":"v1","timeout_ms":1000,"headers":{}}}}]});
+        let base = || serde_json::json!({"schema_version":2,"provider_configs":[{"provider_config_version":"v1","workload_type":"image_generation","provider":"flux","adapter":"flux2_api","model":"m","secret_service":"svc","secret_account":"acct","settings":{"type":"flux2_api","config":{"endpoint":"https://api.bfl.ai","api_version":"v1","timeout_ms":1000,"headers":{}}}}]});
         let mut invalid = Vec::new();
         for endpoint in [
-            "http://example.com",
-            "https://user@example.com",
-            "https://example.com/path",
+            "http://api.bfl.ai",
+            "https://user@api.bfl.ai",
+            "https://api.bfl.ai/path",
         ] {
             let mut value = base();
             value["provider_configs"][0]["settings"]["config"]["endpoint"] =
