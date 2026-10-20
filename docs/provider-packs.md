@@ -253,7 +253,7 @@ spend is reserved.
 
 | Field | Rules |
 | --- | --- |
-| `name` | Required lowercase identifier the agent uses. `model` is reserved for the selected target's model ID. |
+| `name` | Required lowercase identifier the agent uses. `model`, `output_width` and `output_height` are reserved for the selected target's model ID and certified output dimensions. |
 | `type` | Required: `string`, `integer`, `boolean` or `enum`. |
 | `field` | Optional provider request field. Defaults to `name`. |
 | `required` / `default` | A required parameter has no default. A default must satisfy the bounds. |
@@ -268,6 +268,8 @@ spend is reserved.
 A parameter name may sit in one input group, such as `options.seed`: the agent
 sends it as `{"options": {"seed": 7}}`, and the template refers to it as
 `{{options.seed}}`. Grouped parameters need a body template.
+Grouped names such as `options.output_width` remain separate from the reserved
+`output_width` placeholder and cannot replace its certified value.
 
 A priced parameter (`quantity` or `selector`) must be required or have a
 default. `[fixed]` fields are sent with every request and can't collide with a

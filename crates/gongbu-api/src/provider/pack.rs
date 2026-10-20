@@ -991,11 +991,18 @@ impl Parameter {
                 "must be a lowercase identifier, optionally in one group such as options.seed",
             ));
         }
-        if self.name == MODEL_PLACEHOLDER {
-            return Err(invalid(
-                format!("{field}.name"),
-                "model is reserved for the selected target's model ID",
-            ));
+        let reserved = match self.name.as_str() {
+            MODEL_PLACEHOLDER => Some("model is reserved for the selected target's model ID"),
+            OUTPUT_WIDTH_PLACEHOLDER => {
+                Some("output_width is reserved for the certified output width")
+            }
+            OUTPUT_HEIGHT_PLACEHOLDER => {
+                Some("output_height is reserved for the certified output height")
+            }
+            _ => None,
+        };
+        if let Some(reason) = reserved {
+            return Err(invalid(format!("{field}.name"), reason));
         }
         if self
             .field
@@ -3096,6 +3103,92 @@ mod tests {
                 &json!({"prompt": "a lighthouse", "model": "expensive-model"}),
             )
             .is_err());
+    }
+
+    #[test]
+    fn parameters_cannot_shadow_certified_output_dimensions() {
+        const INLINE: &str = include_str!("../../../../fixtures/packs/inline-image.toml");
+        const FLUX: &str = include_str!("../../../../packs/verified/bfl-flux-2.toml");
+        for source in [INLINE, FLUX] {
+            for name in [OUTPUT_WIDTH_PLACEHOLDER, OUTPUT_HEIGHT_PLACEHOLDER] {
+                for (required, default, alias) in [
+                    (true, None, None),
+                    (false, Some(json!(8192)), None),
+                    (true, None, Some("provider_dimension".to_owned())),
+                ] {
+                    let mut document: PackDocument = toml::from_str(source).unwrap();
+                    let parameter = &mut document.parameters[0];
+                    parameter.name = name.to_owned();
+                    parameter.kind = ParameterKind::Integer;
+                    parameter.max_length = None;
+                    parameter.min = Some(1);
+                    parameter.max = Some(8192);
+                    parameter.required = required;
+                    parameter.default = default;
+                    parameter.field = alias;
+                    let error =
+                        Pack::from_toml_str(&toml::to_string(&document).unwrap()).unwrap_err();
+                    match error {
+                        PackError::Invalid { field, reason } => {
+                            assert_eq!(field, "parameters[0].name");
+                            assert!(reason.starts_with(name));
+                            assert!(reason.contains("reserved"));
+                        }
+                        other => panic!("{other}"),
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn grouped_dimension_names_do_not_replace_certified_template_values() {
+        const FLUX: &str = include_str!("../../../../packs/verified/bfl-flux-2.toml");
+        for (name, field) in [
+            ("options.output_width", "width"),
+            ("options.output_height", "height"),
+        ] {
+            let mut document: PackDocument = toml::from_str(FLUX).unwrap();
+            let mut parameter = document
+                .parameters
+                .iter()
+                .find(|parameter| parameter.name == "options.width")
+                .unwrap()
+                .clone();
+            parameter.name = name.to_owned();
+            parameter.equals = None;
+            parameter.min = Some(1);
+            parameter.max = Some(8192);
+            document.parameters.push(parameter);
+            document
+                .request
+                .as_mut()
+                .unwrap()
+                .body
+                .as_mut()
+                .unwrap()
+                .insert(
+                    "caller_dimension".to_owned(),
+                    json!(format!("{{{{{name}}}}}")),
+                );
+            let pack = Pack::from_toml_str(&toml::to_string(&document).unwrap()).unwrap();
+            let mut input = json!({
+                "prompt": "a lighthouse", "image_count": 1, "image_size": "1k",
+                "options": {"width": 1024, "height": 1024},
+            });
+            let (_, member) = name.split_once('.').unwrap();
+            input["options"][member] = json!(7);
+            let prepared = pack.prepare("flux-2-pro", &input).unwrap();
+            assert_eq!(prepared.body[field], 1024);
+            assert_eq!(prepared.body["caller_dimension"], 7);
+            assert_eq!(
+                prepared.request.output_dimensions,
+                Some(OutputDimensions {
+                    width: 1024,
+                    height: 1024
+                })
+            );
+        }
     }
 
     #[test]

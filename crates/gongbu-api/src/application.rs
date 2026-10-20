@@ -1819,7 +1819,15 @@ mod tests {
             ),
         }))
         .unwrap();
-        let pricing = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"flux-v1","rules":[{"rule_id":"flux-1k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"1k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":45,"rate_denominator":1}]},{"rule_id":"flux-2k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"2k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":90,"rate_denominator":1}]},{"rule_id":"flux-4k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"4k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":180,"rate_denominator":1}]}]}"#).unwrap();
+        let pricing = PricingCatalog::from_json(
+            &serde_json::to_vec(&json!({
+                "schema_version": 2,
+                "catalog_version": flux.models()[0].pricing_version,
+                "rules": flux.pricing_rules(),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
         let request = NormalizedRequest::new("flux", "flux-2-pro")
             .with_quantity("image_count", Some(1))
             .with_selector("image_size", Some("1k".into()))
@@ -1839,7 +1847,7 @@ mod tests {
             hubu_claim_id: None,
             hubu_token_reference: HubuTokenReference::new(format!("token-{operation_key}"))
                 .unwrap(),
-            authorized_units: 45_0000,
+            authorized_units: 3_0000,
             authorization_currency: "USD".into(),
             normalized_input: input,
             input_hash: format!("hash-{operation_key}"),
