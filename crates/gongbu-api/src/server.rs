@@ -1705,10 +1705,10 @@ mod tests {
     }
 
     #[test]
-    fn startup_refuses_unfinished_executions_whose_target_revision_is_gone() {
+    fn startup_requires_exact_unfinished_revisions_and_ignores_completed_legacy_rows() {
         use crate::{
             execution::{CreateExecutionParams, HubuTokenReference},
-            provider::verified_packs::verified_packs,
+            provider::{targets::LEGACY_UNRESOLVED_DIGEST, verified_packs::verified_packs},
         };
         let pack = verified_packs().remove(0);
         let secret = SecretReference::new("gongbu.google", "fixture").unwrap();
@@ -1733,7 +1733,55 @@ mod tests {
         let snapshot = pricing
             .snapshot(&pack.prepare(&model.model, &input).unwrap().request)
             .unwrap();
-        let repository = Repository::in_memory().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("executions.sqlite");
+        // Match the historical schema used by the repository migration tests:
+        // resolved target fields existed, but configuration digests did not.
+        let legacy_schema = include_str!("../migrations/0001_execution_core.sql")
+            .replace(
+                ", provider_config_digest TEXT NOT NULL CHECK(provider_config_digest GLOB 'sha256:*' AND length(provider_config_digest)=71)",
+                "",
+            )
+            .replace(
+                " execution_scope_json TEXT CHECK(execution_scope_json IS NULL OR json_valid(execution_scope_json)),\n",
+                "",
+            );
+        assert!(!legacy_schema.contains("provider_config_digest"));
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection.execute_batch(&legacy_schema).unwrap();
+        for column in [
+            "workload_type",
+            "provider",
+            "adapter",
+            "model",
+            "provider_config_version",
+        ] {
+            connection
+                .execute(
+                    &format!("ALTER TABLE executions ADD COLUMN {column} TEXT NOT NULL DEFAULT 'legacy-unresolved' CHECK(trim({column})<>'')"),
+                    [],
+                )
+                .unwrap();
+        }
+        connection
+            .execute(
+                "INSERT INTO executions(execution_id,account_id,operation_key,hubu_authorization_id,hubu_token_reference,authorized_minor,authorization_currency,normalized_input_json,input_hash,input_schema_version,target,config_version,workload_type,provider,adapter,model,provider_config_version,pricing_snapshot_json,pricing_schema_version,status,created_at,updated_at,version) VALUES('legacy-execution','account','legacy-unresolved','legacy-token','legacy-token',100,'USD',?7,'hash',1,?1,?2,?3,?4,?5,?6,?2,?8,3,'pending','now','now',0)",
+                rusqlite::params![
+                    target.target_key().canonical_name(),
+                    target.provider_config_version,
+                    target.workload_type,
+                    target.provider,
+                    target.adapter,
+                    target.model,
+                    serde_json::to_string(&input).unwrap(),
+                    serde_json::to_string(&snapshot).unwrap(),
+                ],
+            )
+            .unwrap();
+        drop(connection);
+        // Opening through Repository performs the real migration, supplying
+        // the historical unresolved marker without bypassing current checks.
+        let repository = Repository::open(&path, Redactor::default()).unwrap();
         let create = |operation: &str, digest: &str| {
             repository
                 .create_execution(&CreateExecutionParams {
@@ -1764,7 +1812,45 @@ mod tests {
                 .unwrap()
         };
         create("current", target.digest());
-        refuse_orphaned_executions(&repository, &targets).unwrap();
+        assert!(targets.has_revision(
+            &target.target_key(),
+            &target.provider_config_version,
+            target.digest(),
+        ));
+
+        let legacy = repository.get_execution("legacy-execution").unwrap();
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        assert_eq!(
+            legacy.provider_config_version,
+            target.provider_config_version
+        );
+        assert_eq!(legacy.target, target.target_key().canonical_name());
+        assert_eq!(legacy.provider_config_digest, LEGACY_UNRESOLVED_DIGEST);
+        // The lower-level compatibility resolver still exists, but cannot
+        // establish the exact revision required by the startup migration gate.
+        assert!(targets
+            .resolve_persisted_revision(
+                &target.target_key(),
+                &legacy.provider_config_version,
+                LEGACY_UNRESOLVED_DIGEST,
+            )
+            .is_ok());
+        let error = refuse_orphaned_executions(&repository, &targets)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("1 unfinished execution(s)"), "{error}");
+        assert!(error.contains("previous Gongbu version"), "{error}");
+
+        // Completed historical work remains readable and never blocks startup.
+        for status in ["succeeded", "failed", "released"] {
+            connection
+                .execute(
+                    "UPDATE executions SET status=?1, completed_at='now' WHERE execution_id=?2",
+                    rusqlite::params![status, legacy.execution_id],
+                )
+                .unwrap();
+            refuse_orphaned_executions(&repository, &targets).unwrap();
+        }
 
         // Work frozen against the pre-upgrade revision blocks startup.
         create("pre-upgrade", &format!("sha256:{}", "c".repeat(64)));

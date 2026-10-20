@@ -329,10 +329,11 @@ impl ProviderTargetConfig {
 
     /// Whether this configuration still has the exact revision a persisted
     /// execution was frozen with, whatever its active or enabled state.
+    /// A legacy unresolved digest cannot prove that revision's identity.
     pub fn has_revision(&self, key: &TargetKey, version: &str, digest: &str) -> bool {
         self.revisions
             .get(&(key.clone(), version.to_owned()))
-            .is_some_and(|revision| digest == LEGACY_UNRESOLVED_DIGEST || revision.digest == digest)
+            .is_some_and(|revision| revision.digest == digest)
     }
 
     /// Resolve rows created before provider configuration digests were stored.

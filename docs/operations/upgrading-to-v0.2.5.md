@@ -12,6 +12,12 @@ Unfinished work frozen against the old digest can't resume or be reconciled
 after the upgrade, so **drain unfinished work before you upgrade**. Gongbu
 refuses to start until you do.
 
+This includes unfinished rows migrated from older databases without a known
+target digest (`legacy-unresolved`). A matching target name and version alone
+cannot prove the original revision. Finish or reconcile those rows with the
+previous version and configuration before upgrading; completed legacy rows
+do not block startup.
+
 ## Before you upgrade
 
 1. Stop sending new governed provider work to the stack.
