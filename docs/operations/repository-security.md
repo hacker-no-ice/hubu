@@ -62,6 +62,15 @@ checks run even when a bot-created PR does not automatically start them. Its
 Actions write permission is reserved for this dispatch. Human review and merge
 remain required.
 
+Before activating automatic fix PRs, verify **Settings → Actions → General →
+Workflow permissions → Allow GitHub Actions to create and approve pull
+requests** is enabled. Keep default workflow permissions restricted; only the
+publication job requests the writes it needs, and it never approves a PR.
+GitHub documents this separate prerequisite in its
+[repository Actions settings reference](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/enabling-features-for-your-repository/managing-github-actions-settings-for-a-repository).
+If PR creation is prohibited, publication fails visibly and creates an assigned
+tracking issue so a maintainer can open the prepared fix manually.
+
 Ordinary PR security failures must identify whether the committed default-branch
 lockfile also fails the advisory policy. This distinguishes a newly introduced
 dependency problem from an advisory published since the last successful run;
