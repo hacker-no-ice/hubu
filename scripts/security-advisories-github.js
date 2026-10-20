@@ -124,45 +124,26 @@ function pullBody(report, workflowUrl) {
   ].join('\n');
 }
 
-function lockVersions(text) {
-  const versions = new Map();
-  let current = {};
-  function save() {
-    if (current.name && current.version) {
-      const entries = versions.get(current.name) || new Set();
-      entries.add(current.version);
-      versions.set(current.name, entries);
-    }
+async function findDependabotFix({ github, repo, pulls, expectedSha, defaultBranch }) {
+  const candidates = pulls.filter(pull => (
+    ['dependabot[bot]', 'dependabot-preview[bot]'].includes(pull.user?.login)
+    && pull.base?.ref === defaultBranch
+    && pull.head?.repo?.full_name?.toLowerCase() === `${repo.owner}/${repo.repo}`.toLowerCase()
+  ));
+  if (!candidates.length) return null;
+  const { data: validated } = await github.rest.git.getCommit({ ...repo, commit_sha: expectedSha });
+  if (!/^[a-f\d]{40}$/i.test(validated.tree?.sha || '')) {
+    throw new Error('Cannot inspect the validated remediation commit tree; duplicate suppression is unresolved');
   }
-  for (const line of text.split(/\r?\n/)) {
-    if (line.trim() === '[[package]]') {
-      save();
-      current = {};
-    } else {
-      const match = line.match(/^(name|version)\s*=\s*"([^"\\]+)"\s*$/);
-      if (match) current[match[1]] = match[2];
+  for (const pull of candidates) {
+    // An identical complete Git tree proves that manifests, source, policy, and
+    // every lockfile entry match the candidate that passed validation. Reading
+    // immutable commit metadata never checks out or executes Dependabot code.
+    const { data: candidate } = await github.rest.git.getCommit({ ...repo, commit_sha: pull.head.sha });
+    if (!/^[a-f\d]{40}$/i.test(candidate.tree?.sha || '')) {
+      throw new Error(`Cannot inspect the commit tree for Dependabot PR #${pull.number}; duplicate suppression is unresolved`);
     }
-  }
-  save();
-  return versions;
-}
-
-async function findDependabotFix({ github, repo, pulls, report, defaultBranch }) {
-  for (const pull of pulls) {
-    if (!['dependabot[bot]', 'dependabot-preview[bot]'].includes(pull.user?.login)
-        || pull.base?.ref !== defaultBranch
-        || pull.head?.repo?.full_name?.toLowerCase() !== `${repo.owner}/${repo.repo}`.toLowerCase()) continue;
-    // Read data at the immutable PR SHA. Never check out or execute the PR.
-    const { data } = await github.rest.repos.getContent({
-      ...repo, path: 'Cargo.lock', ref: pull.head.sha,
-    });
-    if (Array.isArray(data) || data.encoding !== 'base64' || !data.content) {
-      throw new Error(`Cannot inspect Cargo.lock for Dependabot PR #${pull.number}; duplicate suppression is unresolved`);
-    }
-    const versions = lockVersions(Buffer.from(data.content, 'base64').toString('utf8'));
-    if (report.updates.every(update => (
-      versions.get(update.package)?.has(update.to) && !versions.get(update.package)?.has(update.from)
-    ))) return pull;
+    if (candidate.tree.sha === validated.tree.sha) return pull;
   }
   return null;
 }
@@ -245,8 +226,9 @@ async function publish({ github, context, core }, env = process.env) {
       });
       const managed = pulls.find(item => item.head?.ref === FIX_BRANCH
         && item.head?.repo?.full_name?.toLowerCase() === `${repo.owner}/${repo.repo}`.toLowerCase());
-      // Reuse Dependabot's compatible fix and retire our duplicate if it exists.
-      pull = await findDependabotFix({ github, repo, pulls, report, defaultBranch });
+      await verifyValidatedRef(github, repo, env.FIX_HEAD_SHA, managed);
+      // Reuse Dependabot's identical validated content and retire our duplicate.
+      pull = await findDependabotFix({ github, repo, pulls, expectedSha: env.FIX_HEAD_SHA, defaultBranch });
       if (pull) {
         if (managed?.body?.includes(PR_MARKER)) {
           await verifyValidatedRef(github, repo, env.FIX_HEAD_SHA, managed);

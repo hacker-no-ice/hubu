@@ -7,6 +7,7 @@ const test = require('node:test');
 const publish = require('./security-advisories-github.js');
 const { FIX_BRANCH, ISSUE_MARKER } = publish.constants;
 const VALIDATED_SHA = 'a'.repeat(40);
+const VALIDATED_TREE = '1'.repeat(40);
 
 function report(overrides = {}) {
   return {
@@ -28,7 +29,7 @@ function harness(t, initialReport = report()) {
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const reportPath = path.join(directory, 'report.json');
   fs.writeFileSync(reportPath, JSON.stringify(initialReport));
-  const state = { issues: [], pulls: [], writes: [], locks: new Map(), outputs: {}, runs: [], runReads: [], branchSha: VALIDATED_SHA, refReads: [] };
+  const state = { issues: [], pulls: [], writes: [], trees: new Map([[VALIDATED_SHA, VALIDATED_TREE]]), commitReads: [], outputs: {}, runs: [], runReads: [], branchSha: VALIDATED_SHA, refReads: [] };
   const repoName = 'hacker-no-ice/hubu';
   let nextNumber = 1;
   function create(kind, args) {
@@ -59,6 +60,13 @@ function harness(t, initialReport = report()) {
           state.refReads.push(args);
           return { data: { object: { sha: state.branchSha } } };
         },
+        getCommit: async args => {
+          state.commitReads.push(args.commit_sha);
+          const tree = state.trees.get(args.commit_sha);
+          if (tree instanceof Error) throw tree;
+          if (!tree) throw new Error(`Unexpected commit read: ${args.commit_sha}`);
+          return { data: { tree: { sha: tree } } };
+        },
       },
       actions: {
         createWorkflowDispatch: async args => {
@@ -87,15 +95,6 @@ function harness(t, initialReport = report()) {
         list: async () => ({ data: state.pulls.filter(pull => pull.state === 'open') }),
         create: async args => create('pulls', args),
         update: async args => update('pulls', args),
-      },
-      repos: {
-        getContent: async args => {
-          assert.equal(args.path, 'Cargo.lock');
-          const lock = state.locks.get(args.ref);
-          if (lock instanceof Error) throw lock;
-          if (!lock) throw new Error(`Unexpected lockfile read: ${args.ref}`);
-          return { data: { encoding: 'base64', content: Buffer.from(lock).toString('base64') } };
-        },
       },
     },
     paginate: async (method, args) => (await method(args)).data,
@@ -355,17 +354,18 @@ test('partial candidate errors never publish a fix even when validation claims s
   assert.match(h.state.issues[0].body, /Candidate generation timed out/);
 });
 
-test('compatible Dependabot PR is reused by exact lockfile versions without mutating it', async t => {
+test('a different Dependabot commit with the identical validated full tree is reused without mutation', async t => {
   const h = harness(t);
   h.state.pulls.push({
     number: 24, state: 'open', title: 'Bump vulnerable', body: 'Dependabot body without a RustSec ID',
     html_url: 'https://github.com/hacker-no-ice/hubu/pull/24', user: { login: 'dependabot[bot]' },
     base: { ref: 'main' }, head: { ref: 'dependabot/cargo/vulnerable-1.0.1', sha: 'dependabot-head', repo: { full_name: 'hacker-no-ice/hubu' } },
   });
-  h.state.locks.set('dependabot-head', 'version = 4\n[[package]]\nname = "vulnerable"\nversion = "1.0.1"\n');
+  h.state.trees.set('dependabot-head', VALIDATED_TREE);
   await h.run();
   assert.equal(h.state.outputs.pull_request, 'https://github.com/hacker-no-ice/hubu/pull/24');
   assert.deepEqual(h.state.writes, []);
+  assert.deepEqual(h.state.commitReads, [VALIDATED_SHA, 'dependabot-head']);
 });
 
 test('a managed duplicate is closed once when Dependabot provides the compatible fix', async t => {
@@ -377,7 +377,7 @@ test('a managed duplicate is closed once when Dependabot provides the compatible
     html_url: 'https://github.com/hacker-no-ice/hubu/pull/24', base: { ref: 'main' },
     head: { sha: 'dependabot-head', repo: { full_name: 'hacker-no-ice/hubu' } },
   });
-  h.state.locks.set('dependabot-head', '[[package]]\nname = "vulnerable"\nversion = "1.0.1"\n');
+  h.state.trees.set('dependabot-head', VALIDATED_TREE);
   await h.run();
   assert.equal(managed.state, 'closed');
   const count = h.state.writes.length;
@@ -386,15 +386,65 @@ test('a managed duplicate is closed once when Dependabot provides the compatible
   assert.equal(h.state.pulls.length, 2);
 });
 
-test('Dependabot PR retaining a vulnerable version cannot suppress remediation', async t => {
+test('Dependabot PR with a different lockfile tree cannot suppress remediation', async t => {
   const h = harness(t);
   h.state.pulls.push({
     number: 24, state: 'open', user: { login: 'dependabot[bot]' }, base: { ref: 'main' },
     head: { sha: 'dependabot-head', repo: { full_name: 'hacker-no-ice/hubu' } },
   });
-  h.state.locks.set('dependabot-head', '[[package]]\nname = "vulnerable"\nversion = "1.0.1"\n[[package]]\nname = "vulnerable"\nversion = "1.0.0"\n');
+  h.state.trees.set('dependabot-head', '2'.repeat(40));
   await h.run();
   assert.equal(h.state.writes[0].kind, 'pulls.create');
+});
+
+for (const [change, tree] of [
+  ['an extra unrelated incompatible dependency update', '2'.repeat(40)],
+  ['an extra Cargo.toml change', '3'.repeat(40)],
+  ['an extra source change', '4'.repeat(40)],
+]) {
+  test(`a broader Dependabot PR containing ${change} retains the validated managed PR`, async t => {
+    const h = harness(t);
+    await h.run();
+    const managed = h.state.pulls[0];
+    h.state.pulls.push({
+      number: 24, state: 'open', title: 'Grouped dependencies, including vulnerable 1.0.0 to 1.0.1',
+      body: 'The requested vulnerable update is included, along with additional changes.',
+      user: { login: 'dependabot[bot]' }, base: { ref: 'main' }, mergeable_state: 'blocked',
+      head: { sha: 'broader-dependabot-head', repo: { full_name: 'hacker-no-ice/hubu' } },
+    });
+    h.state.trees.set('broader-dependabot-head', tree);
+    const writes = h.state.writes.length;
+    await h.run();
+    assert.equal(managed.state, 'open');
+    assert.equal(h.state.pulls.length, 2);
+    assert.equal(h.state.outputs.pull_request, managed.html_url);
+    assert.equal(h.state.writes.length, writes);
+  });
+}
+
+test('Dependabot matching requires the validated branch identity before any commit inspection', async t => {
+  const h = harness(t);
+  h.state.pulls.push({
+    number: 24, state: 'open', user: { login: 'dependabot[bot]' }, base: { ref: 'main' },
+    head: { sha: 'dependabot-head', repo: { full_name: 'hacker-no-ice/hubu' } },
+  });
+  h.state.trees.set('dependabot-head', VALIDATED_TREE);
+  h.state.branchSha = 'b'.repeat(40);
+  await assert.rejects(h.run(), /branch moved after validation/);
+  assert.deepEqual(h.state.commitReads, []);
+  assert.equal(h.state.issues.length, 1);
+});
+
+test('unreadable validated commit metadata is owned and fails visibly', async t => {
+  const h = harness(t);
+  h.state.pulls.push({
+    number: 24, state: 'open', user: { login: 'dependabot[bot]' }, base: { ref: 'main' },
+    head: { sha: 'dependabot-head', repo: { full_name: 'hacker-no-ice/hubu' } },
+  });
+  h.state.trees.set(VALIDATED_SHA, new Error('Validated commit API 503'));
+  await assert.rejects(h.run(), /Validated commit API 503/);
+  assert.equal(h.state.issues.length, 1);
+  assert.equal(h.state.writes.filter(write => write.kind === 'pulls.create').length, 0);
 });
 
 test('foreign or non-default-branch PR data is never fetched', async t => {
@@ -416,7 +466,7 @@ test('GitHub API errors remain visible and owned without creating a duplicate PR
     number: 24, state: 'open', user: { login: 'dependabot[bot]' }, base: { ref: 'main' },
     head: { sha: 'unreadable', repo: { full_name: 'hacker-no-ice/hubu' } },
   });
-  h.state.locks.set('unreadable', new Error('GitHub API 503'));
+  h.state.trees.set('unreadable', new Error('GitHub API 503'));
   await assert.rejects(h.run(), /GitHub API 503/);
   assert.deepEqual(h.state.writes.map(write => write.kind), ['issues.create']);
   assert.equal(h.state.issues[0].assignees[0].login, 'hacker-no-ice');

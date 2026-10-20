@@ -40,6 +40,9 @@ It publishes the verified lockfile change to one reusable
 `codex/security-advisories` branch and PR. It never changes manifests, raises the
 MSRV, edits `deny.toml`, or merges the PR automatically. Existing exact-version
 license exceptions can therefore require a separately reviewed policy change.
+An existing Dependabot PR is reused only when its complete Git tree matches
+the validated candidate. Broader grouped updates keep the separate validated
+remediation PR available for review.
 
 If no compatible fix is available, or any validation fails, the workflow opens
 or updates one remediation issue instead. The issue records the advisory IDs,
