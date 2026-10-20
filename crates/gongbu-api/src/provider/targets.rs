@@ -129,7 +129,6 @@ impl TargetKey {
 pub enum AdapterSettings {
     GeminiDeveloperImage(GeminiDeveloperImageConfig),
     Flux2Api(Flux2ApiConfig),
-    IdeogramImage(IdeogramImageConfig),
     /// Test/local adapters have no transport configuration or credential override.
     Fixture,
 }
@@ -160,21 +159,6 @@ pub struct Flux2ApiConfig {
     pub max_retries: u32,
     #[serde(default)]
     pub idempotency_header: Option<String>,
-    #[serde(default)]
-    pub approved_artifact_hosts: Vec<String>,
-    #[serde(default)]
-    pub headers: BTreeMap<String, String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct IdeogramImageConfig {
-    pub endpoint: String,
-    pub api_version: String,
-    /// Overall invocation budget shared by submit and artifact fetch.
-    pub timeout_ms: u64,
-    #[serde(default)]
-    pub max_retries: u32,
     #[serde(default)]
     pub approved_artifact_hosts: Vec<String>,
     #[serde(default)]
@@ -230,12 +214,6 @@ impl ProviderConfigVersion {
     pub fn flux2_api(&self) -> Option<&Flux2ApiConfig> {
         match &self.settings {
             AdapterSettings::Flux2Api(v) => Some(v),
-            _ => None,
-        }
-    }
-    pub fn ideogram_image(&self) -> Option<&IdeogramImageConfig> {
-        match &self.settings {
-            AdapterSettings::IdeogramImage(v) => Some(v),
             _ => None,
         }
     }
@@ -406,8 +384,6 @@ struct RawRevision {
     gemini_developer_image: Option<GeminiDeveloperImageConfig>,
     #[serde(default)]
     flux2_api: Option<Flux2ApiConfig>,
-    #[serde(default)]
-    ideogram_image: Option<IdeogramImageConfig>,
 }
 
 impl TryFrom<RawCatalog> for ProviderTargetConfig {
@@ -502,7 +478,6 @@ impl Serialize for ProviderTargetConfig {
                 settings: Some(r.settings.clone()),
                 gemini_developer_image: None,
                 flux2_api: None,
-                ideogram_image: None,
             })
             .collect();
         RawCatalog {
@@ -530,7 +505,6 @@ fn validate_revision(schema: u32, raw: RawRevision) -> Result<ProviderConfigVers
     let legacy_settings = [
         raw.gemini_developer_image.is_some(),
         raw.flux2_api.is_some(),
-        raw.ideogram_image.is_some(),
     ]
     .into_iter()
     .filter(|v| *v)
@@ -546,8 +520,6 @@ fn validate_revision(schema: u32, raw: RawRevision) -> Result<ProviderConfigVers
         AdapterSettings::GeminiDeveloperImage(v)
     } else if let Some(v) = raw.flux2_api {
         AdapterSettings::Flux2Api(v)
-    } else if let Some(v) = raw.ideogram_image {
-        AdapterSettings::IdeogramImage(v)
     } else {
         AdapterSettings::Fixture
     };
@@ -628,21 +600,8 @@ fn validate_settings(key: &TargetKey, settings: &AdapterSettings) -> Result<()> 
                 }
             }
         }
-        ("ideogram", "ideogram_image", AdapterSettings::IdeogramImage(c)) => {
-            validate_transport(
-                &c.endpoint,
-                &c.api_version,
-                c.timeout_ms,
-                c.max_retries,
-                &c.headers,
-                &["authorization", "api-key"],
-            )?;
-            if !valid_artifact_hosts(&c.approved_artifact_hosts, true) {
-                return Err(Error::InvalidTransportSettings);
-            }
+        (_, _, AdapterSettings::Fixture) if !matches!(key.provider.as_str(), "google" | "flux") => {
         }
-        (_, _, AdapterSettings::Fixture)
-            if !matches!(key.provider.as_str(), "google" | "flux" | "ideogram") => {}
         _ => return Err(Error::InvalidAdapterSettings),
     }
     Ok(())
@@ -679,11 +638,6 @@ fn normalize_settings(settings: &mut AdapterSettings) {
                 *name = name.to_ascii_lowercase();
             }
         }
-        AdapterSettings::IdeogramImage(config) => transport(
-            &mut config.endpoint,
-            &mut config.headers,
-            Some(&mut config.approved_artifact_hosts),
-        ),
         AdapterSettings::Fixture => {}
     }
 }
@@ -716,29 +670,6 @@ fn valid_identifier(value: &str) -> bool {
         && value.trim() == value
         && value.len() <= 255
         && !value.chars().any(char::is_control)
-}
-
-pub(crate) fn valid_artifact_hosts(hosts: &[String], required: bool) -> bool {
-    if required && hosts.is_empty() {
-        return false;
-    }
-    let mut unique = BTreeSet::new();
-    hosts.iter().all(|host| {
-        if host.is_empty() || host.trim() != host || !unique.insert(host) {
-            return false;
-        }
-        let Ok(url) = Url::parse(&format!("https://{host}/")) else {
-            return false;
-        };
-        url.scheme() == "https"
-            && url.username().is_empty()
-            && url.password().is_none()
-            && url.port().is_none()
-            && url.host_str() == Some(host.as_str())
-            && url.path() == "/"
-            && url.query().is_none()
-            && url.fragment().is_none()
-    })
 }
 
 pub(crate) fn valid_bfl_submission_host(host: Option<&str>) -> bool {
