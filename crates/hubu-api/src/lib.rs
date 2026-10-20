@@ -26,7 +26,7 @@ use hubu_common::{
     },
     execution_scope::{
         resolve_execution_scope, ExecutionScope, ExecutionScopeSelector, ScopeIdentity,
-        EXECUTION_SCOPE_SCHEMA_VERSION,
+        EXECUTION_SCOPE_SCHEMA_VERSION, EXECUTION_SCOPE_TARGET_SCHEMA_VERSION,
     },
     ids::{
         AgentId, AgentSessionId, BudgetId, BudgetVersionId, SpendAuthTokenId, SpendDecisionId,
@@ -1391,6 +1391,11 @@ struct SpendScopeInputsHttpResponse {
     executor: SpendScopeInputHttpResponse<String>,
     capability: SpendScopeInputHttpResponse<String>,
     billing_merchant: SpendScopeInputHttpResponse<String>,
+    /// Present only for schema-v2 execution scopes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<SpendScopeInputHttpResponse<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    image_size: Option<SpendScopeInputHttpResponse<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2650,6 +2655,7 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
             "account_id, the exact amount and currency (or, for v4.4, its whole-cent projection), complete canonical execution_scope, and legacy merchant must match the original authorized spend",
             "typed execution_scope identifiers resolve against Hubu's trusted catalog; unknown or ambiguous identifiers are rejected",
             "provider, executor, capability, and billing_merchant are independently policy-addressable stable identities",
+            "execution_scope schema_version 2 adds the target model and requested image_size; both are policy-addressable and the executor rejects an authorization whose values differ from the execution it runs",
             "lease_profile is selected during authorization and cannot be changed by the executor",
             "the spend auth token must be unexpired, unused, unrevoked, and unclaimed when a new claim starts",
             "authorization retries with the same operation_key and claim retries with the same spend_auth_token_id return stored authorization record state, including terminal state",
@@ -2677,6 +2683,7 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
             "each reconciliation stores the provider reference, evidence, resolving user, outcome, and timestamp"
         ],
         "execution_scope_schema_version": EXECUTION_SCOPE_SCHEMA_VERSION,
+        "execution_scope_schema_versions": [EXECUTION_SCOPE_SCHEMA_VERSION, EXECUTION_SCOPE_TARGET_SCHEMA_VERSION],
         "execution_scope_catalog": trusted_execution_scope_catalog(),
         "legacy_merchant": "accepted for migration and normalized to an explicit legacy-unresolved scope; new clients should send execution_scope"
     })
@@ -4596,6 +4603,8 @@ fn scope_as_selector(scope: &ExecutionScope) -> ExecutionScopeSelector {
         executor: scope.executor.id.clone(),
         capability: scope.capability.id.clone(),
         billing_merchant: scope.billing_merchant.id.clone(),
+        model: scope.model.clone(),
+        image_size: scope.image_size.clone(),
     }
 }
 
@@ -4628,6 +4637,8 @@ fn legacy_execution_scope(merchant: &str) -> ExecutionScope {
             "Legacy unresolved capability",
         ),
         billing_merchant: scope_identity(&format!("merchant:legacy:{}", &digest[..16]), merchant),
+        model: None,
+        image_size: None,
     }
 }
 
@@ -5901,6 +5912,22 @@ fn spend_scope_inputs(
             scope_input(SpendScopeInputSource::Omitted, None),
         )
     };
+    let target_input = |supplied: Option<&String>, resolved: Option<&String>| {
+        supplied
+            .map(|value| scope_input(SpendScopeInputSource::Supplied, Some(value.clone())))
+            .or_else(|| {
+                resolved
+                    .map(|value| scope_input(SpendScopeInputSource::Inferred, Some(value.clone())))
+            })
+    };
+    let model = target_input(
+        selector.and_then(|selector| selector.model.as_ref()),
+        resolved_scope.and_then(|scope| scope.model.as_ref()),
+    );
+    let image_size = target_input(
+        selector.and_then(|selector| selector.image_size.as_ref()),
+        resolved_scope.and_then(|scope| scope.image_size.as_ref()),
+    );
     SpendScopeInputsHttpResponse {
         amount_minor: scope_input(SpendScopeInputSource::Supplied, Some(amount_minor)),
         currency: scope_input(
@@ -5923,6 +5950,8 @@ fn spend_scope_inputs(
         executor,
         capability,
         billing_merchant,
+        model,
+        image_size,
     }
 }
 
@@ -11352,6 +11381,134 @@ lease_profiles:
         assert_eq!(
             restored.spend.execution_scope.unwrap().provider.id,
             "provider:google:gemini-developer"
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn schema_v2_scope_lets_policy_tier_by_model_and_image_size() {
+        let path =
+            std::env::temp_dir().join(format!("hubu-api-creative-tiers-{}.sqlite", UserId::new()));
+        let state = ServerState::new_with_db_path(&path).unwrap();
+        init(
+            json!({"display_name":"Alice Example","email":"alice@example.com"}).to_string(),
+            &state,
+        )
+        .unwrap();
+        let agent = register_agent(
+            json!({"name":"creative-tier-agent","version":"v1"}).to_string(),
+            &state,
+        )
+        .unwrap();
+        add_policy(
+            json!({
+                "agent_id": agent.agent_id,
+                "policy_yaml": include_str!("../../../policies/creative-tiers.yaml"),
+            })
+            .to_string(),
+            &state,
+        )
+        .unwrap();
+        create_test_agent_budget(&state, &agent.agent_id, 500);
+        let scope = |model: &str, image_size: &str| {
+            json!({
+                "schema_version": 2,
+                "provider": "provider:google:gemini-developer",
+                "executor": "executor:gongbu:image",
+                "capability": "capability:image:generate",
+                "billing_merchant": "merchant:google",
+                "model": model,
+                "image_size": image_size
+            })
+        };
+        let authorize = |key: &str, amount: &str, scope: Value| {
+            authorize_spend(
+                json!({
+                    "operation_key": key,
+                    "account_id": agent.account_id,
+                    "amount": amount,
+                    "reason": "creative tier",
+                    "execution_scope": scope
+                })
+                .to_string(),
+                &state,
+            )
+        };
+
+        let draft = authorize(
+            "creative-draft",
+            "0.039",
+            scope("gemini-3.1-flash-image", "1k"),
+        )
+        .unwrap();
+        assert_eq!(draft.decision, "allow");
+        let draft_scope = draft.execution_scope.clone().unwrap();
+        assert_eq!(draft_scope.schema_version, 2);
+        assert_eq!(draft_scope.model.as_deref(), Some("gemini-3.1-flash-image"));
+        assert_eq!(draft_scope.image_size.as_deref(), Some("1k"));
+        let inputs = serde_json::to_value(&draft.scope_inputs).unwrap();
+        assert_eq!(inputs["image_size"]["value"], "1k");
+        assert_eq!(inputs["image_size"]["source"], "supplied");
+
+        // The same small amount at 4k is escalated by size, not amount.
+        let final_render = authorize(
+            "creative-final",
+            "0.039",
+            scope("gemini-3.1-flash-image", "4k"),
+        )
+        .unwrap();
+        assert_eq!(final_render.decision, "needs_approval");
+        assert_eq!(
+            final_render.reasons,
+            ["high-resolution finals need human approval"]
+        );
+        assert_eq!(
+            final_render
+                .approval
+                .unwrap()
+                .review
+                .execution_scope
+                .unwrap()
+                .image_size
+                .as_deref(),
+            Some("4k")
+        );
+
+        let denied = authorize("creative-denied", "0.039", scope("unlisted-model", "1k")).unwrap();
+        assert_eq!(denied.decision, "deny");
+
+        let rejected = authorize(
+            "creative-malformed",
+            "0.039",
+            scope("gemini-3.1-flash-image", "4K"),
+        )
+        .unwrap_err();
+        assert!(rejected
+            .to_string()
+            .contains("invalid execution scope image_size"));
+
+        // The executor must assert the complete v2 scope; a different size
+        // cannot claim the draft authorization.
+        let mut resized = draft_scope.clone();
+        resized.image_size = Some("4k".into());
+        let claim = |scope: &ExecutionScope| {
+            claim_executor_spend(
+                json!({
+                    "spend_auth_token_id": draft.auth_token_id,
+                    "account_id": agent.account_id,
+                    "contract_version": "hubu-spend-executor-v4.5",
+                    "amount": {"units": "39000", "scale": 6, "currency": "usd"},
+                    "execution_scope": scope
+                })
+                .to_string(),
+                &state,
+            )
+        };
+        assert!(claim(&resized).is_err());
+        let claimed = claim(&draft_scope).unwrap();
+        assert_eq!(
+            claimed.spend.execution_scope.unwrap().image_size.as_deref(),
+            Some("1k")
         );
         std::fs::remove_file(path).ok();
     }

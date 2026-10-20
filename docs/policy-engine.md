@@ -181,14 +181,26 @@ provider    -> string (stable provider id)
 executor    -> string (stable executor id)
 capability  -> string (stable capability id)
 billing_merchant -> string (stable billing merchant id)
+model       -> string (execution target model; schema-v2 scopes only)
+image_size  -> string (requested output size such as `1k`; schema-v2 scopes only)
 category    -> string
 ```
 
 `merchant` is retained only for legacy policies. New execution policies should
-target the four typed scope fields; see the
+target the typed scope fields; see the
 [trusted execution scope](spend-lifecycle.md#trusted-execution-scope).
 
-Ordered comparisons are currently only valid for `amount`.
+`model` and `image_size` are present only when the request carries a
+schema-version-2 execution scope. Gongbu rejects an authorization whose model
+or size differs from the execution it runs, so a draft-tier authorization
+cannot be spent on a final-size render. A missing field matches no `eq` or
+`in` condition: build allow rules on these fields and keep `needs_approval` as
+the default so requests without them fail closed. The
+[creative tiers cookbook](../policies/README.md#cookbook-draft--final--deny-tiers)
+shows draft, final, and deny tiers.
+
+Ordered comparisons are currently only valid for `amount`; match sizes with
+`eq` or `in`.
 
 ## Validation
 

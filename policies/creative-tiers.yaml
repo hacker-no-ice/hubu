@@ -1,0 +1,69 @@
+# Draft / final / deny tiers for creative image work.
+#
+# Requires schema-v2 execution scopes, which carry the execution target's
+# `model` and requested `image_size`. Gongbu rejects an authorization whose
+# model or size differs from the execution it runs, so these fields cannot be
+# understated to reach the draft tier. A request without them (a v1 scope or a
+# legacy merchant) matches no allow rule and falls to the default approval.
+id: creative_tiers
+version: 2026-10-19.1
+default_effect: needs_approval
+rules:
+  # Deny tier: models the operator has not approved for this account.
+  - id: deny_unapproved_image_model
+    effect: deny
+    reason: image work must use an approved model
+    when:
+      op: all
+      conditions:
+        - op: exists
+          field: model
+        - op: not
+          condition:
+            op: in
+            field: model
+            values:
+              - string: gemini-3.1-flash-lite-image
+              - string: gemini-3.1-flash-image
+              - string: flux-2-pro
+
+  # Deny tier: a hard per-request backstop, independent of size.
+  - id: deny_oversized_image_spend
+    effect: deny
+    reason: a single image request may not exceed USD 1.00
+    when:
+      op: gt
+      field: amount
+      value:
+        money: "1.00"
+
+  # Final tier: high-resolution renders always need a human.
+  - id: escalate_final_renders
+    effect: needs_approval
+    reason: high-resolution finals need human approval
+    when:
+      op: in
+      field: image_size
+      values:
+        - string: 2k
+        - string: 4k
+
+  # Draft tier: cheap 1k image drafts run without interruption.
+  - id: allow_draft_renders
+    effect: allow
+    reason: 1k image drafts are pre-approved
+    when:
+      op: all
+      conditions:
+        - op: eq
+          field: capability
+          value:
+            string: capability:image:generate
+        - op: eq
+          field: image_size
+          value:
+            string: 1k
+        - op: lte
+          field: amount
+          value:
+            money: "0.10"

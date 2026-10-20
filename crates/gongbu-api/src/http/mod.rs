@@ -5,7 +5,7 @@
 use crate::{
     artifacts::{ArtifactService, Error as ArtifactError},
     attestation::{AttestationError, RedactionAttestor},
-    execution_scope::{for_target, ExecutionScope},
+    execution_scope::{for_execution, for_target, ExecutionScope},
     hubu::{HttpClientError, SpendAuthorizationResolver},
     persistence::{
         Artifact, CreateExecutionParams, Error as PersistenceError, Execution,
@@ -567,8 +567,19 @@ impl Api {
             .ok_or_else(ApiError::internal)?
             .resolve_authorization(&spend_auth_token_id)
             .map_err(map_hubu_resolution)?;
-        let execution_scope =
-            for_target(&resolved.provider, &resolved.adapter).ok_or_else(ApiError::validation)?;
+        // A version-2 authorization also binds the model and image size Hubu
+        // policy evaluated; they must equal what this execution runs.
+        let execution_scope = for_execution(
+            authorization
+                .execution_scope
+                .as_ref()
+                .map(|scope| scope.schema_version),
+            &resolved.provider,
+            &resolved.adapter,
+            &resolved.model,
+            pricing_request.image_size.as_deref(),
+        )
+        .ok_or_else(ApiError::validation)?;
         let created_at = (self.now)();
         let authorization_expires_at = DateTime::parse_from_rfc3339(&authorization.expires_at)
             .map_err(|_| ApiError::validation())?;
@@ -1531,6 +1542,26 @@ mod tests {
                         _ => "30000",
                     }
                 }));
+            }
+            if spend_auth_token_id.starts_with("flux-v2-") {
+                // Hubu policy saw this model and size in a schema-v2 scope.
+                let image_size = if spend_auth_token_id.contains("-as-small") {
+                    "1k"
+                } else {
+                    "4k"
+                };
+                let model = if spend_auth_token_id.ends_with("-other-model") {
+                    "flux-2-dev"
+                } else {
+                    flux2_api::MODEL_ID
+                };
+                response.execution_scope = for_execution(
+                    Some(crate::execution_scope::EXECUTION_SCOPE_TARGET_SCHEMA_VERSION),
+                    "flux",
+                    "flux2_api",
+                    model,
+                    Some(image_size),
+                );
             }
             if spend_auth_token_id.starts_with("flux-managed-") {
                 response.amount = Some(exact("30000"));
@@ -3370,6 +3401,46 @@ mod tests {
             .get_execution_by_spend_auth_token(token)
             .is_err());
         assert!(fixture.scheduler.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn schema_v2_authorization_must_match_the_executed_model_and_image_size() {
+        let fixture = fixture();
+        let api = flux_api(&fixture, "flux-prices-v1");
+        for (token, preset, admitted) in [
+            ("flux-v2-1k-as-small", "1k", true),
+            ("flux-v2-4k-as-large", "4k", true),
+            // A draft-size authorization cannot run a final-size render.
+            ("flux-v2-4k-as-small", "4k", false),
+            ("flux-v2-1k-as-small-other-model", "1k", false),
+        ] {
+            let response = api.handle(
+                "POST",
+                "/v2/executions",
+                Some(&fixture.caller),
+                &serde_json::to_vec(&flux_request(token, Some(preset), None)).unwrap(),
+            );
+            if admitted {
+                assert_eq!(response.status, 200, "{token}");
+                let stored = fixture
+                    .repository
+                    .get_execution_by_spend_auth_token(token)
+                    .unwrap();
+                let scope = stored.execution_scope.unwrap();
+                assert_eq!(
+                    scope.schema_version,
+                    crate::execution_scope::EXECUTION_SCOPE_TARGET_SCHEMA_VERSION
+                );
+                assert_eq!(scope.model.as_deref(), Some(flux2_api::MODEL_ID));
+                assert_eq!(scope.image_size.as_deref(), Some(preset));
+            } else {
+                assert_eq!(response.status, 400, "{token}");
+                assert!(fixture
+                    .repository
+                    .get_execution_by_spend_auth_token(token)
+                    .is_err());
+            }
+        }
     }
 
     #[test]

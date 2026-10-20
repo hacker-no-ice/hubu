@@ -473,7 +473,7 @@ const components = {
       { id: "resource", label: "Policy resource", sub: "pol_ id + key + name", x: 390, y: 80, w: 218, h: 90, tone: "core", path: "crates/hubu-core/src/persistence.rs" },
       { id: "revisions", label: "Immutable revisions", sub: "number + SHA-256", x: 742, y: 80, w: 228, h: 90, tone: "data", path: "crates/hubu-core/src/persistence.rs" },
       { id: "assignments", label: "Assignments", sub: "default / agent override", x: 742, y: 238, w: 228, h: 90, tone: "data", path: "crates/hubu-core/src/persistence.rs" },
-      { id: "request", label: "Scope selector", sub: "provider/executor/capability/billing", x: 54, y: 412, w: 240, h: 90, tone: "agent", path: "crates/hubu-common/src/execution_scope.rs" },
+      { id: "request", label: "Scope selector", sub: "identities + v2 model/size", x: 54, y: 412, w: 240, h: 90, tone: "agent", path: "crates/hubu-common/src/execution_scope.rs" },
       { id: "validate", label: "Resolve + evaluate", sub: "canonical scope + typed rules", x: 390, y: 412, w: 218, h: 90, tone: "core" },
       { id: "decision", label: "Decision trace", sub: "allow/approval/deny", x: 742, y: 412, w: 228, h: 90, tone: "wallet" },
     ],

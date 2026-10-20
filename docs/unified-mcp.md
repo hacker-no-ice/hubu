@@ -343,6 +343,12 @@ runtime options, and copy the returned `execution_scope` into authorization:
 }
 ```
 
+To let policy tier the request by model and output size, send
+`"schema_version": 2` with the discovered target's `model` and the execution
+input's `image_size` added to `execution_scope`. Gongbu rejects the execution
+if either differs from what it runs; see the
+[trusted execution scope](spend-lifecycle.md#trusted-execution-scope).
+
 Discovery returns structured content containing only the opaque target ID,
 workload type, provider/model labels, authorization scope, supported
 `image_size` values, and exact configured price components. It omits adapter

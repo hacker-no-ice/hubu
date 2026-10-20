@@ -2,7 +2,7 @@
 //! Schema units and formats are documented in the migration.
 use crate::redaction::Redactor;
 use crate::{
-    execution_scope::{for_target, ExecutionScope},
+    execution_scope::{for_execution, ExecutionScope},
     provider_contract::{
         polling_deadline_allows_reinspect, units_to_minor_ceil, ActualVendorCost,
         AsyncProviderOperation, NormalizedUsage, PollingRecoveryContext, PricingSnapshot,
@@ -2099,10 +2099,19 @@ fn validate_execution(n: &CreateExecutionParams) -> Result<()> {
     }
     safe_json(&n.normalized_input)?;
     safe_json(&n.pricing_snapshot)?;
-    if n.execution_scope
+    if n.execution_scope.as_ref().is_some_and(|scope| {
+        for_execution(
+            Some(scope.schema_version),
+            &n.provider,
+            &n.adapter,
+            &n.model,
+            n.normalized_input
+                .get("image_size")
+                .and_then(|value| value.as_str()),
+        )
         .as_ref()
-        .is_some_and(|scope| for_target(&n.provider, &n.adapter).as_ref() != Some(scope))
-    {
+            != Some(scope)
+    }) {
         return Err(Error::Invalid("execution scope"));
     }
     let snapshot: PricingSnapshot = serde_json::from_value(n.pricing_snapshot.clone())
@@ -2231,6 +2240,7 @@ fn j(v: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::execution_scope::for_target;
     use serde_json::json;
     use std::{
         collections::BTreeSet,
