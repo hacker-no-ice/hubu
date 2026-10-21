@@ -6,8 +6,10 @@
 //! public, versioned adapter contracts without importing backend implementation
 //! crates.
 
+mod artifact_save;
 mod gallery;
 mod gongbu;
+pub use artifact_save::run_artifact_from_env;
 pub use gallery::run_gallery_from_env;
 mod governed_execution;
 mod hubu;
@@ -49,7 +51,7 @@ pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 pub const UNIFIED_CONTRACT_VERSION: &str = "hubu-gongbu-mcp-v1";
 pub const EXECUTOR_CONTRACT_VERSION: &str = "hubu-spend-executor-v4.5";
 pub const HUBU_ROUTING_CONTRACT_VERSION: &str = "hubu-mcp-routing-v1";
-pub const ROUTING_REVISION: u32 = 14;
+pub const ROUTING_REVISION: u32 = 15;
 
 const HUBU_ENDPOINT_ENV: &str = "HUBU_UNIFIED_HUBU_ENDPOINT";
 const HUBU_TOKEN_ENV: &str = "HUBU_UNIFIED_HUBU_BEARER_TOKEN";
@@ -62,6 +64,7 @@ const OPERATION_TICK_ENV: &str = "HUBU_UNIFIED_OPERATION_TICK_MS";
 const GOVERNED_EXECUTION_WAIT_ENV: &str = "HUBU_UNIFIED_GOVERNED_EXECUTION_WAIT_MS";
 const OPERATION_STATE_PATH_ENV: &str = "HUBU_UNIFIED_OPERATION_STATE_PATH";
 const OPERATION_KEY_DB_ENV: &str = "HUBU_UNIFIED_OPERATION_KEY_DB";
+const SAVE_FOLDERS_FILE_ENV: &str = "HUBU_UNIFIED_SAVE_FOLDERS_FILE";
 const META_SHAPE_DIAGNOSTICS_ENV: &str = "HUBU_UNIFIED_META_SHAPE_DIAGNOSTICS";
 const TRUST_CLIENT_APPROVAL_ENV: &str = "HUBU_MCP_TRUST_CLIENT_APPROVAL";
 const TRUST_SPEND_APPROVAL_ENV: &str = "HUBU_MCP_TRUST_SPEND_APPROVAL";
@@ -209,6 +212,8 @@ pub struct Config {
     pub governed_execution_wait: Duration,
     pub operation_state_path: Option<PathBuf>,
     pub preallocated_operation_key_path: Option<PathBuf>,
+    /// Human-managed allowlist of artifact save folders (`hubu folders`).
+    pub save_folders_path: Option<PathBuf>,
     /// Emits sanitized `tools/call` metadata shapes to stderr for client
     /// identity compatibility diagnosis. Never changes admission.
     pub meta_shape_diagnostics: bool,
@@ -225,6 +230,7 @@ impl Default for Config {
             governed_execution_wait: DEFAULT_GOVERNED_EXECUTION_WAIT,
             operation_state_path: None,
             preallocated_operation_key_path: None,
+            save_folders_path: None,
             meta_shape_diagnostics: false,
         }
     }
@@ -259,6 +265,15 @@ impl Config {
         {
             return Err(ConfigError::InvalidOperationKeyDbPath);
         }
+        let save_folders_path = lookup(SAVE_FOLDERS_FILE_ENV)
+            .filter(|value| !value.trim().is_empty())
+            .map(PathBuf::from);
+        if save_folders_path
+            .as_deref()
+            .is_some_and(|path| !path.is_absolute())
+        {
+            return Err(ConfigError::InvalidSaveFoldersPath);
+        }
         let mut hubu_routing = HubuRoutingConfig::new_with_spend_approval(
             lookup(TRUST_CLIENT_APPROVAL_ENV).is_some_and(|value| env_flag_value(&value)),
             lookup(TRUST_SPEND_APPROVAL_ENV).is_some_and(|value| env_flag_value(&value)),
@@ -286,6 +301,7 @@ impl Config {
             governed_execution_wait: governed_execution_wait(lookup(GOVERNED_EXECUTION_WAIT_ENV))?,
             operation_state_path,
             preallocated_operation_key_path,
+            save_folders_path,
             meta_shape_diagnostics: lookup(META_SHAPE_DIAGNOSTICS_ENV)
                 .is_some_and(|value| env_flag_value(&value)),
         })
@@ -390,6 +406,8 @@ pub enum ConfigError {
     InvalidGovernedExecutionWait,
     #[error("preallocated operation key database path must be absolute")]
     InvalidOperationKeyDbPath,
+    #[error("save folders file path must be absolute")]
+    InvalidSaveFoldersPath,
 }
 
 impl fmt::Display for BackendOwner {
@@ -514,6 +532,7 @@ pub struct Server {
     hubu_routing: HubuRoutingConfig,
     operation_registry: Arc<OperationRegistryCapability>,
     meta_shape_diagnostics: bool,
+    save_folders_path: Option<PathBuf>,
     #[cfg(test)]
     use_capability_snapshot_for_test: bool,
 }
@@ -619,6 +638,7 @@ impl Server {
         let operation_tick = config.operation_tick;
         let governed_execution_wait = config.governed_execution_wait;
         let meta_shape_diagnostics = config.meta_shape_diagnostics;
+        let save_folders_path = config.save_folders_path.clone();
         let backends = BackendClients::new(config)?;
         let snapshot = backends.probe();
         let probed_at = Instant::now();
@@ -655,6 +675,7 @@ impl Server {
             hubu_routing,
             operation_registry: Arc::new(operation_registry),
             meta_shape_diagnostics,
+            save_folders_path,
             #[cfg(test)]
             use_capability_snapshot_for_test: false,
         })
@@ -746,6 +767,17 @@ impl Server {
         if call.name == resume_operation::TOOL_NAME {
             return resume_operation::call_tool(self, id, call);
         }
+        if call.name == artifact_save::TOOL_NAME {
+            if !self.operation_registry_available() {
+                return error_response(
+                    id,
+                    -32000,
+                    "artifact save requires an available durable operation registry",
+                );
+            }
+            self.refresh_capabilities_if_stale();
+            return artifact_save::call_tool(self, id, call);
+        }
         if call.name == governed_execution::TOOL_NAME {
             let started = Instant::now();
             let deadline = started + self.governed_execution_wait;
@@ -816,6 +848,16 @@ impl Server {
         }
         if call.name == resume_operation::TOOL_NAME {
             return resume_operation::call_tool(self, id, call);
+        }
+        if call.name == artifact_save::TOOL_NAME {
+            if !self.operation_registry_available() {
+                return error_response(
+                    id,
+                    -32000,
+                    "artifact save requires an available durable operation registry",
+                );
+            }
+            return artifact_save::call_tool(self, id, call);
         }
         if call.name == governed_execution::TOOL_NAME {
             let started = Instant::now();
@@ -920,6 +962,11 @@ impl Server {
             if governed_execution::backend_availability(&snapshot).is_ok() {
                 tools.push(governed_execution::tool_definition());
             }
+            if let Ok(folders) = self.save_folders() {
+                if !folders.is_empty() && artifact_save::backend_availability(&snapshot).is_ok() {
+                    tools.push(artifact_save::tool_definition(&folders));
+                }
+            }
         }
         if tool_availability("hubu_show_policy", BackendOwner::Hubu, &snapshot).is_ok() {
             tools.extend(hubu::tool_definitions().into_iter().filter(|tool| {
@@ -960,6 +1007,17 @@ impl Server {
                 "available": available,
                 "reason_code": if available { None } else { Some("operation_registry_unavailable") }
             }));
+        let (save_available, save_reason) =
+            artifact_save::availability(available, &self.snapshot(), &self.save_folders());
+        capability["tools"]
+            .as_array_mut()
+            .expect("capability tools are an array")
+            .push(json!({
+                "name": artifact_save::TOOL_NAME,
+                "owner": "router",
+                "available": save_available,
+                "reason_code": save_reason
+            }));
         capability["tools"]
             .as_array_mut()
             .expect("capability tools are an array")
@@ -985,6 +1043,21 @@ impl Server {
             }
         }
         capability
+    }
+
+    fn save_folders(&self) -> anyhow::Result<Vec<artifact_save::SaveFolder>> {
+        artifact_save::folders_for(self.save_folders_path.as_deref())
+    }
+
+    fn saved_artifact_context(&self, operation_handle: &str) -> anyhow::Result<(String, String)> {
+        let OperationRegistryCapability::Available(registry) = self.operation_registry.as_ref()
+        else {
+            anyhow::bail!("artifact save requires an available operation registry");
+        };
+        registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .saved_artifact_context(operation_handle)
     }
 
     fn operation_registry_available(&self) -> bool {
@@ -2455,7 +2528,7 @@ mod tests {
 
         assert_eq!(capability["contract_version"], UNIFIED_CONTRACT_VERSION);
         assert_eq!(capability["routing_revision"], ROUTING_REVISION);
-        assert_eq!(capability["tools"].as_array().unwrap().len(), 42);
+        assert_eq!(capability["tools"].as_array().unwrap().len(), 43);
         assert_eq!(capability["backends"]["hubu"]["state"], "unavailable");
         assert!(!serialized.contains("hubu.test"));
         assert!(!serialized.contains("gongbu.test"));

@@ -82,6 +82,18 @@ impl McpProcess {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        // A human-allowlisted save folder so the full catalog is listed.
+        let state_dir = operation_state_path.parent().unwrap();
+        let save_folders = state_dir.join("save-folders.json");
+        std::fs::write(
+            &save_folders,
+            serde_json::to_vec(&json!({"schema_version":1,"folders":[
+                {"name":"project","path":state_dir.join("saved")}
+            ]}))
+            .unwrap(),
+        )
+        .unwrap();
+        command.env("HUBU_UNIFIED_SAVE_FOLDERS_FILE", &save_folders);
         if let Some(operation_key_db_path) = operation_key_db_path {
             command.env("HUBU_UNIFIED_OPERATION_KEY_DB", operation_key_db_path);
         }

@@ -2099,7 +2099,7 @@ fn governed_hubu_to_gongbu_execution_fails_closed_without_hubu() {
     let listed = mcp.list_tools();
     assert_eq!(
         tool_names(&listed).len(),
-        42,
+        43,
         "unexpected catalog {listed}; Hubu requests: {:?}; Gongbu requests: {:?}",
         hubu.requests(),
         gongbu.requests()

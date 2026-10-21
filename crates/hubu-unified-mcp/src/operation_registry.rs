@@ -354,7 +354,13 @@ pub(crate) fn gallery_context(path: &Path, handle: &str) -> Result<(String, Stri
     if application_id != APPLICATION_ID || !matches!(version, 6 | SCHEMA_VERSION) {
         bail!("gallery requires the current unified operation registry schema; it never migrates state");
     }
-    let context = connection
+    succeeded_governed_context(&connection, handle)
+}
+
+/// Returns the `(decision_id, gongbu_execution_id)` binding of a succeeded
+/// governed execution. Shared by gallery export and artifact save.
+fn succeeded_governed_context(connection: &Connection, handle: &str) -> Result<(String, String)> {
+    connection
         .query_row(
             "SELECT decision_id, gongbu_execution_id
          FROM harness_operations WHERE operation_handle = ?1 AND operation_state = 'succeeded'
@@ -363,10 +369,15 @@ pub(crate) fn gallery_context(path: &Path, handle: &str) -> Result<(String, Stri
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )
         .optional()?
-        .ok_or_else(|| {
-            anyhow!("gallery operation is unknown, incomplete, or not a governed execution")
-        })?;
-    Ok(context)
+        .ok_or_else(|| anyhow!("operation is unknown, incomplete, or not a governed execution"))
+}
+
+impl OperationRegistry {
+    /// Read-only binding lookup for saving a succeeded operation's artifact.
+    pub(crate) fn saved_artifact_context(&self, handle: &str) -> Result<(String, String)> {
+        validate_public_operation_handle(handle)?;
+        succeeded_governed_context(&self.connection, handle)
+    }
 }
 
 impl std::fmt::Debug for OperationRegistry {

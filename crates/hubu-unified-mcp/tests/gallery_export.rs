@@ -18,6 +18,8 @@ use std::{
 };
 
 const HANDLE: &str = "hubu:public-operation:v1:gallery-fixture";
+// Gongbu-internal location the save path must never surface.
+const STORAGE_PATH: &str = "/var/lib/gongbu/blobs/image-1";
 
 struct Fixture {
     root: tempfile::TempDir,
@@ -69,7 +71,7 @@ impl Fixture {
         let transaction = json!({"id":"ledger-1","authorization_id":"decision-1","settlement_id":"settlement-1","provider":identity,"effective_cost":cost,"cost_semantics":"original_total"});
         let mut artifacts = vec![
             json!({"artifact_id":"image-1","execution_id":"execution-1","kind":"image","media_type":media_type,"size_bytes":bytes.len(),"sha256":digest,
-                "metadata":{"width":2048,"height":2048}}),
+                "metadata":{"width":2048,"height":2048},"storage_path":STORAGE_PATH}),
         ];
         if fault == "foreign-artifact" {
             artifacts[0]["execution_id"] = json!("other-execution");
@@ -176,7 +178,44 @@ impl Fixture {
         }
     }
 
+    fn save(&self, extra: &[&str]) -> Output {
+        let folders = self.root.path().join("save-folders.json");
+        std::fs::write(
+            &folders,
+            serde_json::to_vec(&json!({"schema_version":1,"folders":[
+                {"name":"brand","path":self.root.path().join("brand")}
+            ]}))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut command = self.base_command();
+        command.env("HUBU_UNIFIED_SAVE_FOLDERS_FILE", folders);
+        command
+            .args(["artifact", "save", "--operation-handle", HANDLE])
+            .args(extra)
+            .output()
+            .unwrap()
+    }
+
     fn command(&self, handle: &str, size: &str) -> Output {
+        self.base_command()
+            .args([
+                "gallery",
+                "export",
+                "--operation-handle",
+                handle,
+                "--output",
+                self.root.path().join("gallery").to_str().unwrap(),
+                "--size",
+                size,
+                "--tier",
+                "draft",
+            ])
+            .output()
+            .unwrap()
+    }
+
+    fn base_command(&self) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_hubu-unified-mcp"));
         // Completely isolated environment: no real profile or secret files.
         command.env_clear().envs(HashMap::from([
@@ -194,20 +233,6 @@ impl Fixture {
             ),
         ]));
         command
-            .args([
-                "gallery",
-                "export",
-                "--operation-handle",
-                handle,
-                "--output",
-                self.root.path().join("gallery").to_str().unwrap(),
-                "--size",
-                size,
-                "--tier",
-                "draft",
-            ])
-            .output()
-            .unwrap()
     }
 }
 impl Drop for Fixture {
@@ -359,4 +384,126 @@ fn concurrent_native_replays_do_not_duplicate_manifest_or_sequences() {
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0]["sequence"], 1);
     assert_eq!(entries[1]["sequence"], 2);
+}
+
+#[test]
+fn native_save_writes_chosen_final_and_receipt_into_allowlisted_folder() {
+    let fixture = Fixture::new("flux", false, true);
+    let brand = fixture.root.path().join("brand");
+    std::fs::create_dir(&brand).unwrap();
+    let database_before = std::fs::read(fixture.root.path().join("operations.sqlite3")).unwrap();
+
+    // Two artifacts: the agent must pick one explicitly.
+    let ambiguous = fixture.save(&["--folder", "brand"]);
+    assert!(!ambiguous.status.success());
+    assert!(String::from_utf8_lossy(&ambiguous.stderr).contains("image-1, image-2"));
+
+    for expected in ["saved", "already_saved"] {
+        let result = fixture.save(&[
+            "--folder",
+            "brand",
+            "--artifact-id",
+            "image-2",
+            "--name",
+            "logo-final",
+        ]);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(
+            result.stdout.len() < 4096,
+            "model receives bytes, not paths"
+        );
+        let stdout = String::from_utf8_lossy(&result.stdout);
+        assert!(!stdout.contains(STORAGE_PATH) && !stdout.contains(&fixture.endpoint));
+        let value: Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(value["status"], expected);
+        assert_eq!(value["folder"], "brand");
+        assert_eq!(
+            Path::new(value["path"].as_str().unwrap()),
+            brand.join("logo-final.png")
+        );
+    }
+    assert_eq!(
+        std::fs::read(brand.join("logo-final.png")).unwrap(),
+        fixture.bytes
+    );
+    let raw_receipt = std::fs::read(brand.join("logo-final.png.receipt.json")).unwrap();
+    let receipt_text = String::from_utf8_lossy(&raw_receipt);
+    assert!(!receipt_text.contains(STORAGE_PATH) && !receipt_text.contains(&fixture.endpoint));
+    let receipt: Value = serde_json::from_slice(&raw_receipt).unwrap();
+    assert_eq!(receipt["artifact_id"], "image-2");
+    assert_eq!(
+        receipt["sha256"],
+        format!("{:x}", Sha256::digest(&fixture.bytes))
+    );
+    assert_eq!(
+        receipt["settled_cost"],
+        json!({"amount":"1","scale":3,"currency":"usd"})
+    );
+    assert_eq!(
+        receipt["cost_semantics"],
+        "operation_total_not_per_artifact"
+    );
+    assert_eq!(receipt["operation_artifact_count"], 2);
+    assert_eq!(receipt["provider"], "provider:black-forest-labs:flux");
+    let mut entries: Vec<_> = std::fs::read_dir(&brand)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    entries.sort();
+    assert_eq!(entries, ["logo-final.png", "logo-final.png.receipt.json"]);
+    assert_eq!(
+        std::fs::read(fixture.root.path().join("operations.sqlite3")).unwrap(),
+        database_before
+    );
+    assert!(fixture
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|r| r.starts_with("GET ") && !r.contains("/v1/artifacts/image-1")));
+
+    // A different existing file is never overwritten.
+    std::fs::write(brand.join("taken.png"), b"human work").unwrap();
+    let clobber = fixture.save(&[
+        "--folder",
+        "brand",
+        "--artifact-id",
+        "image-1",
+        "--name",
+        "taken",
+    ]);
+    assert!(!clobber.status.success());
+    assert!(String::from_utf8_lossy(&clobber.stderr).contains("different content"));
+    assert_eq!(
+        std::fs::read(brand.join("taken.png")).unwrap(),
+        b"human work"
+    );
+    assert!(!brand.join("taken.png.receipt.json").exists());
+}
+
+#[test]
+fn native_save_refuses_unlisted_folders_paths_and_unsettled_accounting_before_writing() {
+    let fixture = Fixture::new("gemini", true, false);
+    std::fs::create_dir(fixture.root.path().join("brand")).unwrap();
+    let outside = fixture.root.path().join("outside");
+    for folder in ["other", outside.to_str().unwrap()] {
+        let result = fixture.save(&["--folder", folder]);
+        assert!(!result.status.success());
+    }
+    assert!(fixture.requests.lock().unwrap().is_empty());
+    assert!(!outside.exists());
+    // A correction appearing during the fetch refuses the save with no file.
+    let result = fixture.save(&["--folder", "brand"]);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("accounting changed"));
+    assert_eq!(
+        std::fs::read_dir(fixture.root.path().join("brand"))
+            .unwrap()
+            .count(),
+        0
+    );
 }
