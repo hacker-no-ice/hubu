@@ -13,7 +13,7 @@ use crate::{
     },
     provider::{
         contract::{units_to_minor_ceil, PricingSnapshot, PricingUnit, UNITS_PER_MINOR},
-        flux2_api,
+        flux_contract,
         registry::ValidatedProviderCatalog,
     },
     provider_targets::TargetKey,
@@ -135,9 +135,9 @@ impl RedactionAttestor {
         execution: &Execution,
         public_projections: &[Value],
     ) -> Result<RedactionAttestation, AttestationError> {
-        if execution.provider != flux2_api::PROVIDER_ID
-            || execution.adapter != flux2_api::ADAPTER_ID
-            || execution.model != flux2_api::MODEL_ID
+        if execution.provider != flux_contract::PROVIDER_ID
+            || execution.adapter != flux_contract::ADAPTER_ID
+            || execution.model != flux_contract::MODEL_ID
         {
             return Err(AttestationError::UnsupportedTarget);
         }
@@ -315,9 +315,9 @@ fn exact_provider_contract(
     contract.contract == PROVIDER_CONTRACT_ID
         && contract.pricing_version == PRICING_VERSION
         && contract.target.workload_type == "image_generation"
-        && contract.target.provider == flux2_api::PROVIDER_ID
-        && contract.target.adapter == flux2_api::ADAPTER_ID
-        && contract.target.model == flux2_api::MODEL_ID
+        && contract.target.provider == flux_contract::PROVIDER_ID
+        && contract.target.adapter == flux_contract::ADAPTER_ID
+        && contract.target.model == flux_contract::MODEL_ID
         && contract.policies.generation_retries == 0
         && !contract.policies.fallback
         && contract.readiness.configured
@@ -336,8 +336,8 @@ fn exact_provider_contract(
 
 fn exact_frozen_pricing(pricing: &PricingSnapshot) -> bool {
     pricing.catalog_version == PRICING_VERSION
-        && pricing.provider == flux2_api::PROVIDER_ID
-        && pricing.model == flux2_api::MODEL_ID
+        && pricing.provider == flux_contract::PROVIDER_ID
+        && pricing.model == flux_contract::MODEL_ID
         && pricing.pricing_rule_id == PRICING_RULE_ID
         && pricing.exact_estimate_numerator == "3"
         && pricing.exact_estimate_denominator == "1"
@@ -346,7 +346,7 @@ fn exact_frozen_pricing(pricing: &PricingSnapshot) -> bool {
         && pricing
             .selector
             .as_ref()
-            .is_some_and(|selector| selector.image_size == "1k")
+            .is_some_and(|selector| selector.image_size() == Some("1k"))
         && pricing
             .output_dimensions
             .as_ref()
@@ -409,7 +409,7 @@ fn exact_qualification_tuple(
         && execution.failure_message_redacted.is_none()
         && execution.release_transmission_started_at.is_none()
         && attempt.execution_id == execution.execution_id
-        && attempt.provider == flux2_api::PROVIDER_ID
+        && attempt.provider == flux_contract::PROVIDER_ID
         && attempt.outcome == "succeeded"
         && attempt.transmission_started_at.is_some()
         && attempt.operation_checkpointed_at.is_some()

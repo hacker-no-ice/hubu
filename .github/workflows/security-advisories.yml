@@ -1,0 +1,243 @@
+name: Security advisory maintenance
+
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      exercise:
+        description: Also exercise real vulnerable-rustls detection and repair in an isolated fixture
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-advisory-maintenance
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  GONGBU_MCP_INTEGRATION: "0"
+  GONGBU_SANDBOX_HUBU_MODE: mock
+  GONGBU_SANDBOX_PROVIDER_MODE: mock
+
+jobs:
+  scan:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    name: Scan main and validate compatible fixes
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    outputs:
+      source_sha: ${{ steps.source.outputs.sha }}
+      report_sha: ${{ steps.candidate.outputs.report_sha || steps.healthy.outputs.report_sha || steps.source.outputs.report_sha }}
+      lock_sha: ${{ steps.candidate.outputs.lock_sha }}
+    steps:
+      - name: Set report directory
+        run: echo "REPORT_DIR=$RUNNER_TEMP/security-advisories" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Initialize fail-closed report
+        id: source
+        run: |
+          mkdir -p "$REPORT_DIR"
+          git rev-parse HEAD > "$REPORT_DIR/source-sha"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          report = {"schema_version": 1, "status": "error", "advisories": [], "updates": [],
+                    "errors": ["Scheduled advisory detection did not complete; inspect the workflow logs."]}
+          root = Path(os.environ["REPORT_DIR"])
+          (root / "report.json").write_text(json.dumps(report))
+          (root / "validation").write_text("not_run")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write("report_sha=" + hashlib.sha256((root / "report.json").read_bytes()).hexdigest() + "\n")
+          PY
+
+      - name: Check main for Rust advisories
+        id: advisories
+        continue-on-error: true
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+          arguments: --all-features --locked
+          command-arguments: advisories
+
+      - name: Record healthy main
+        if: steps.advisories.outcome == 'success'
+        id: healthy
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          report = {"schema_version": 1, "status": "healthy", "advisories": [], "updates": [], "errors": []}
+          path = Path(os.environ["REPORT_DIR"]) / "report.json"
+          path.write_text(json.dumps(report))
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write("report_sha=" + hashlib.sha256(path.read_bytes()).hexdigest() + "\n")
+          PY
+
+      - name: Install matching diagnostic scanner
+        if: steps.advisories.outcome == 'failure' || inputs.exercise == true
+        uses: ./.github/actions/install-cargo-deny
+
+      - name: Exercise real advisory detection and repair on request
+        if: github.event_name == 'workflow_dispatch' && inputs.exercise == true
+        id: exercise
+        continue-on-error: true
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal
+          bash scripts/test-security-advisory-flow.sh
+
+      - name: Collect structured findings and attempt targeted updates
+        if: steps.advisories.outcome == 'failure'
+        id: candidate
+        run: |
+          python3 scripts/security-advisories.py scan --run \
+            --diagnostics "$REPORT_DIR/diagnostics.jsonl" \
+            --output "$REPORT_DIR/scan.json" --markdown "$REPORT_DIR/scan.md"
+          cp "$REPORT_DIR/scan.json" "$REPORT_DIR/report.json"
+          python3 scripts/security-advisories.py remediate \
+            --report "$REPORT_DIR/scan.json" \
+            --output "$REPORT_DIR/report.json" --markdown "$REPORT_DIR/report.md"
+          python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          report_path = Path(os.environ["REPORT_DIR"]) / "report.json"
+          report = json.loads(report_path.read_text())
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write("ready=" + str(report["status"] == "fix_available").lower() + "\n")
+              output.write("lock_sha=" + hashlib.sha256(Path("Cargo.lock").read_bytes()).hexdigest() + "\n")
+              output.write("report_sha=" + hashlib.sha256(report_path.read_bytes()).hexdigest() + "\n")
+          PY
+
+      - name: Check candidate advisories, licenses, and sources
+        if: steps.candidate.outputs.ready == 'true'
+        id: policy
+        continue-on-error: true
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+          arguments: --all-features --locked
+          command-arguments: advisories licenses sources
+
+      - name: Validate candidate with MSRV, tests, lint, and production builds
+        if: steps.candidate.outputs.ready == 'true' && steps.policy.outcome == 'success'
+        id: validation
+        continue-on-error: true
+        run: |
+          sudo apt-get update && sudo apt-get install --yes protobuf-compiler
+          rustup toolchain install 1.88.0 --profile minimal
+          cargo +1.88.0 check --workspace --all-targets --all-features --locked
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+          cargo test --workspace --all-targets --locked
+          cargo build --release --locked --bin hubu --bin hubu-server --bin hubu-unified-mcp --bin gongbu-server
+          git diff --exit-code -- . ':!Cargo.lock'
+
+      - name: Package report and verified lockfile
+        if: always()
+        env:
+          CANDIDATE_READY: ${{ steps.candidate.outputs.ready }}
+          POLICY_OUTCOME: ${{ steps.policy.outcome }}
+          VALIDATION_OUTCOME: ${{ steps.validation.outcome }}
+          EXERCISE_OUTCOME: ${{ steps.exercise.outcome }}
+          CANDIDATE_LOCK_SHA: ${{ steps.candidate.outputs.lock_sha }}
+          CANDIDATE_REPORT_SHA: ${{ steps.candidate.outputs.report_sha }}
+        run: |
+          if [ "$CANDIDATE_READY" = true ]; then
+            lock_sha=$(sha256sum Cargo.lock | cut -d ' ' -f 1)
+            report_sha=$(sha256sum "$REPORT_DIR/report.json" | cut -d ' ' -f 1)
+            if [ "$POLICY_OUTCOME" = success ] && [ "$VALIDATION_OUTCOME" = success ] \
+              && [ "$lock_sha" = "$CANDIDATE_LOCK_SHA" ] && [ "$report_sha" = "$CANDIDATE_REPORT_SHA" ]; then
+              echo passed > "$REPORT_DIR/validation"
+              cp Cargo.lock "$REPORT_DIR/Cargo.lock"
+            else
+              echo failed > "$REPORT_DIR/validation"
+            fi
+          fi
+          if [ -f "$REPORT_DIR/report.md" ]; then
+            cat "$REPORT_DIR/report.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ "$EXERCISE_OUTCOME" = failure ]; then
+            python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          path = Path(os.environ["REPORT_DIR"]) / "report.json"
+          report = json.loads(path.read_text())
+          report["status"] = "error"
+          report["errors"].append("The requested live advisory exercise failed; inspect its workflow step.")
+          path.write_text(json.dumps(report))
+          PY
+            echo failed > "$REPORT_DIR/validation"
+            rm -f "$REPORT_DIR/Cargo.lock"
+          fi
+
+      - name: Retain detection and validation evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: security-advisories
+          path: ${{ runner.temp }}/security-advisories
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Keep existing main advisory failures visible
+        if: always() && (steps.advisories.outcome != 'success' || steps.exercise.outcome == 'failure')
+        run: exit 1
+
+  publish:
+    if: always() && !cancelled() && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    name: Publish remediation or notify maintainer
+    needs: scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      actions: write
+    env:
+      SECURITY_MAINTAINER: ${{ vars.SECURITY_MAINTAINER || github.repository_owner }}
+      EXPECTED_REPORT_SHA: ${{ needs.scan.outputs.report_sha }}
+      EXPECTED_LOCK_SHA: ${{ needs.scan.outputs.lock_sha }}
+    steps:
+      - name: Set report directory
+        run: echo "REPORT_DIR=$RUNNER_TEMP/security-advisories" >> "$GITHUB_ENV"
+
+      # Execute only trusted default-branch scripts; never code from a fix PR.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.scan.outputs.source_sha || github.event.repository.default_branch }}
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: security-advisories
+          path: ${{ runner.temp }}/security-advisories
+
+      - name: Publish only the validated Cargo.lock
+        id: branch
+        continue-on-error: true
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: bash scripts/security-advisories-push.sh
+
+      - name: Open or update the remediation PR or assigned tracking issue
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        env:
+          REPORT_PATH: ${{ runner.temp }}/security-advisories/report.json
+          FIX_VALIDATION_STATUS: ${{ steps.branch.outputs.validation || 'not_run' }}
+          FIX_CHANGED: ${{ steps.branch.outputs.changed || 'false' }}
+          FIX_BRANCH_PUSHED: ${{ steps.branch.outputs.pushed || 'false' }}
+          FIX_BRANCH_UPDATED: ${{ steps.branch.outputs.updated || 'false' }}
+          FIX_HEAD_SHA: ${{ steps.branch.outputs.verified_sha }}
+        with:
+          script: |
+            await require('./scripts/security-advisories-github.js')({github, context, core});

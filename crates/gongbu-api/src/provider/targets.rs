@@ -1,8 +1,4 @@
-use super::http_kernel::{
-    url_has_explicit_port, valid_provider_deadline_ms, validate_https_origin, validate_safe_headers,
-};
 use crate::secrets::{SecretError, SecretReference};
-use reqwest::{header::HeaderName, Url};
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -15,7 +11,6 @@ use thiserror::Error;
 
 const PROVIDER_CONFIG_ENV: &str = "GONGBU_PROVIDER_CONFIG";
 const CURRENT_SCHEMA_VERSION: u32 = 3;
-const BFL_SUBMISSION_HOSTS: &[&str] = &["api.bfl.ai", "api.eu.bfl.ai", "api.us.bfl.ai"];
 pub const LEGACY_UNRESOLVED_DIGEST: &str = "legacy-unresolved";
 
 #[derive(Debug, Error)]
@@ -44,8 +39,6 @@ pub enum Error {
     InvalidSecretReference,
     #[error("provider adapter settings do not match the target")]
     InvalidAdapterSettings,
-    #[error("provider endpoint, origin, headers, or deadline are invalid")]
-    InvalidTransportSettings,
     #[error("duplicate provider target revision")]
     DuplicateRevision,
     #[error("provider config version is reused with different content")]
@@ -127,62 +120,22 @@ impl TargetKey {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "type", content = "config", rename_all = "snake_case")]
 pub enum AdapterSettings {
-    GeminiDeveloperImage(GeminiDeveloperImageConfig),
-    Flux2Api(Flux2ApiConfig),
-    IdeogramImage(IdeogramImageConfig),
+    /// A target run by an archetype engine from a provider pack. The pack's
+    /// content digest is part of the revision, so editing a pack is a new
+    /// revision, never a silent change to frozen work.
+    Pack(PackTargetConfig),
     /// Test/local adapters have no transport configuration or credential override.
     Fixture,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct GeminiDeveloperImageConfig {
-    pub endpoint: String,
-    pub api_version: String,
-    /// Overall invocation budget for the complete inline-image request.
-    pub timeout_ms: u64,
-    #[serde(default)]
-    pub max_retries: u32,
-    #[serde(default)]
-    pub headers: BTreeMap<String, String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct Flux2ApiConfig {
-    pub endpoint: String,
-    pub api_version: String,
-    /// Overall invocation budget shared by submit, every poll, and artifact fetch.
-    pub timeout_ms: u64,
-    #[serde(default = "default_poll_interval_ms")]
-    pub poll_interval_ms: u64,
-    #[serde(default)]
-    pub max_retries: u32,
-    #[serde(default)]
-    pub idempotency_header: Option<String>,
-    #[serde(default)]
-    pub approved_artifact_hosts: Vec<String>,
-    #[serde(default)]
-    pub headers: BTreeMap<String, String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct IdeogramImageConfig {
-    pub endpoint: String,
-    pub api_version: String,
-    /// Overall invocation budget shared by submit and artifact fetch.
-    pub timeout_ms: u64,
-    #[serde(default)]
-    pub max_retries: u32,
-    #[serde(default)]
-    pub approved_artifact_hosts: Vec<String>,
-    #[serde(default)]
-    pub headers: BTreeMap<String, String>,
-}
-
-fn default_poll_interval_ms() -> u64 {
-    500
+pub struct PackTargetConfig {
+    pub pack_id: String,
+    pub pack_version: String,
+    pub pack_digest: String,
+    /// The archetype engine that runs the pack (`sync_fixed`, `async_poll`, `metered`).
+    pub archetype: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -221,21 +174,9 @@ impl ProviderConfigVersion {
     pub fn settings(&self) -> &AdapterSettings {
         &self.settings
     }
-    pub fn gemini_developer_image(&self) -> Option<&GeminiDeveloperImageConfig> {
+    pub fn pack(&self) -> Option<&PackTargetConfig> {
         match &self.settings {
-            AdapterSettings::GeminiDeveloperImage(v) => Some(v),
-            _ => None,
-        }
-    }
-    pub fn flux2_api(&self) -> Option<&Flux2ApiConfig> {
-        match &self.settings {
-            AdapterSettings::Flux2Api(v) => Some(v),
-            _ => None,
-        }
-    }
-    pub fn ideogram_image(&self) -> Option<&IdeogramImageConfig> {
-        match &self.settings {
-            AdapterSettings::IdeogramImage(v) => Some(v),
+            AdapterSettings::Pack(v) => Some(v),
             _ => None,
         }
     }
@@ -349,6 +290,15 @@ impl ProviderTargetConfig {
         Ok(revision)
     }
 
+    /// Whether this configuration still has the exact revision a persisted
+    /// execution was frozen with, whatever its active or enabled state.
+    /// A legacy unresolved digest cannot prove that revision's identity.
+    pub fn has_revision(&self, key: &TargetKey, version: &str, digest: &str) -> bool {
+        self.revisions
+            .get(&(key.clone(), version.to_owned()))
+            .is_some_and(|revision| revision.digest == digest)
+    }
+
     /// Resolve rows created before provider configuration digests were stored.
     /// This compatibility path is unreachable for newly validated executions.
     pub fn resolve_persisted_revision(
@@ -402,12 +352,6 @@ struct RawRevision {
     enabled: Option<bool>,
     #[serde(default)]
     settings: Option<AdapterSettings>,
-    #[serde(default)]
-    gemini_developer_image: Option<GeminiDeveloperImageConfig>,
-    #[serde(default)]
-    flux2_api: Option<Flux2ApiConfig>,
-    #[serde(default)]
-    ideogram_image: Option<IdeogramImageConfig>,
 }
 
 impl TryFrom<RawCatalog> for ProviderTargetConfig {
@@ -500,9 +444,6 @@ impl Serialize for ProviderTargetConfig {
                 execution_enabled: Some(r.execution_enabled),
                 enabled: None,
                 settings: Some(r.settings.clone()),
-                gemini_developer_image: None,
-                flux2_api: None,
-                ideogram_image: None,
             })
             .collect();
         RawCatalog {
@@ -527,32 +468,8 @@ fn validate_revision(schema: u32, raw: RawRevision) -> Result<ProviderConfigVers
     }
     SecretReference::new(raw.secret_service.clone(), raw.secret_account.clone())
         .map_err(|_| Error::InvalidSecretReference)?;
-    let legacy_settings = [
-        raw.gemini_developer_image.is_some(),
-        raw.flux2_api.is_some(),
-        raw.ideogram_image.is_some(),
-    ]
-    .into_iter()
-    .filter(|v| *v)
-    .count();
-    if raw.settings.is_some() && legacy_settings != 0 {
-        return Err(Error::InvalidAdapterSettings);
-    }
-    let mut settings = if let Some(settings) = raw.settings {
-        settings
-    } else if legacy_settings > 1 {
-        return Err(Error::InvalidAdapterSettings);
-    } else if let Some(v) = raw.gemini_developer_image {
-        AdapterSettings::GeminiDeveloperImage(v)
-    } else if let Some(v) = raw.flux2_api {
-        AdapterSettings::Flux2Api(v)
-    } else if let Some(v) = raw.ideogram_image {
-        AdapterSettings::IdeogramImage(v)
-    } else {
-        AdapterSettings::Fixture
-    };
+    let settings = raw.settings.unwrap_or(AdapterSettings::Fixture);
     validate_settings(&key, &settings)?;
-    normalize_settings(&mut settings);
     let legacy_enabled = raw.enabled.unwrap_or(true);
     let active = raw.active.unwrap_or(legacy_enabled);
     let execution_enabled = raw.execution_enabled.unwrap_or(legacy_enabled);
@@ -587,204 +504,33 @@ fn validate_revision(schema: u32, raw: RawRevision) -> Result<ProviderConfigVers
 
 fn validate_settings(key: &TargetKey, settings: &AdapterSettings) -> Result<()> {
     match (key.provider.as_str(), key.adapter.as_str(), settings) {
-        ("google", "gemini_developer_image", AdapterSettings::GeminiDeveloperImage(c)) => {
-            validate_transport(
-                &c.endpoint,
-                &c.api_version,
-                c.timeout_ms,
-                c.max_retries,
-                &c.headers,
-                &["authorization", "x-goog-api-key"],
-            )?
+        (_, _, AdapterSettings::Fixture) if !matches!(key.provider.as_str(), "google" | "flux") => {
         }
-        ("flux", "flux2_api", AdapterSettings::Flux2Api(c)) => {
-            validate_transport(
-                &c.endpoint,
-                &c.api_version,
-                c.timeout_ms,
-                c.max_retries,
-                &c.headers,
-                &["authorization", "x-key"],
-            )?;
-            if c.api_version != "v1"
-                || c.poll_interval_ms == 0
-                || c.poll_interval_ms > c.timeout_ms
-                || url_has_explicit_port(&c.endpoint)
-                || Url::parse(&c.endpoint)
-                    .ok()
-                    .is_none_or(|url| !valid_bfl_submission_host(url.host_str()))
-                || !c.approved_artifact_hosts.is_empty()
+        (_, _, AdapterSettings::Pack(c)) => {
+            let digest = c.pack_digest.strip_prefix("sha256:");
+            if !valid_identifier(&c.pack_id)
+                || !valid_identifier(&c.pack_version)
+                || !matches!(
+                    c.archetype.as_str(),
+                    "sync_fixed" | "async_poll" | "metered"
+                )
+                || digest.is_none_or(|value| {
+                    value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
             {
-                return Err(Error::InvalidTransportSettings);
-            }
-            if let Some(name) = &c.idempotency_header {
-                if !valid_header_name(name)
-                    || ["authorization", "x-key"]
-                        .iter()
-                        .any(|v| name.eq_ignore_ascii_case(v))
-                    || c.headers.keys().any(|v| name.eq_ignore_ascii_case(v))
-                {
-                    return Err(Error::InvalidTransportSettings);
-                }
+                return Err(Error::InvalidAdapterSettings);
             }
         }
-        ("ideogram", "ideogram_image", AdapterSettings::IdeogramImage(c)) => {
-            validate_transport(
-                &c.endpoint,
-                &c.api_version,
-                c.timeout_ms,
-                c.max_retries,
-                &c.headers,
-                &["authorization", "api-key"],
-            )?;
-            if !valid_artifact_hosts(&c.approved_artifact_hosts, true) {
-                return Err(Error::InvalidTransportSettings);
-            }
-        }
-        (_, _, AdapterSettings::Fixture)
-            if !matches!(key.provider.as_str(), "google" | "flux" | "ideogram") => {}
         _ => return Err(Error::InvalidAdapterSettings),
     }
     Ok(())
 }
 
-fn normalize_settings(settings: &mut AdapterSettings) {
-    fn transport(
-        endpoint: &mut String,
-        headers: &mut BTreeMap<String, String>,
-        hosts: Option<&mut Vec<String>>,
-    ) {
-        *endpoint = Url::parse(endpoint)
-            .expect("validated endpoint")
-            .to_string();
-        *headers = std::mem::take(headers)
-            .into_iter()
-            .map(|(name, value)| (name.to_ascii_lowercase(), value))
-            .collect();
-        if let Some(hosts) = hosts {
-            hosts.sort();
-        }
-    }
-    match settings {
-        AdapterSettings::GeminiDeveloperImage(config) => {
-            transport(&mut config.endpoint, &mut config.headers, None)
-        }
-        AdapterSettings::Flux2Api(config) => {
-            transport(
-                &mut config.endpoint,
-                &mut config.headers,
-                Some(&mut config.approved_artifact_hosts),
-            );
-            if let Some(name) = &mut config.idempotency_header {
-                *name = name.to_ascii_lowercase();
-            }
-        }
-        AdapterSettings::IdeogramImage(config) => transport(
-            &mut config.endpoint,
-            &mut config.headers,
-            Some(&mut config.approved_artifact_hosts),
-        ),
-        AdapterSettings::Fixture => {}
-    }
-}
-
-fn validate_transport(
-    endpoint: &str,
-    api_version: &str,
-    timeout_ms: u64,
-    max_retries: u32,
-    headers: &BTreeMap<String, String>,
-    forbidden: &[&str],
-) -> Result<()> {
-    let url = Url::parse(endpoint).map_err(|_| Error::InvalidTransportSettings)?;
-    if validate_https_origin(&url, None).is_err()
-        || !valid_identifier(api_version)
-        || !valid_provider_deadline_ms(timeout_ms)
-        || max_retries != 0
-        || validate_safe_headers(headers, forbidden).is_err()
-    {
-        return Err(Error::InvalidTransportSettings);
-    }
-    Ok(())
-}
-
-fn valid_header_name(name: &str) -> bool {
-    name.parse::<HeaderName>().is_ok()
-}
 fn valid_identifier(value: &str) -> bool {
     !value.is_empty()
         && value.trim() == value
         && value.len() <= 255
         && !value.chars().any(char::is_control)
-}
-
-pub(crate) fn valid_artifact_hosts(hosts: &[String], required: bool) -> bool {
-    if required && hosts.is_empty() {
-        return false;
-    }
-    let mut unique = BTreeSet::new();
-    hosts.iter().all(|host| {
-        if host.is_empty() || host.trim() != host || !unique.insert(host) {
-            return false;
-        }
-        let Ok(url) = Url::parse(&format!("https://{host}/")) else {
-            return false;
-        };
-        url.scheme() == "https"
-            && url.username().is_empty()
-            && url.password().is_none()
-            && url.port().is_none()
-            && url.host_str() == Some(host.as_str())
-            && url.path() == "/"
-            && url.query().is_none()
-            && url.fragment().is_none()
-    })
-}
-
-pub(crate) fn valid_bfl_submission_host(host: Option<&str>) -> bool {
-    host.is_some_and(|host| BFL_SUBMISSION_HOSTS.contains(&host))
-}
-
-pub(crate) fn valid_bfl_polling_host(host: Option<&str>) -> bool {
-    let Some(host) = host else {
-        return false;
-    };
-    if host == "api.bfl.ai" {
-        return true;
-    }
-    host.strip_prefix("api.")
-        .and_then(|value| value.strip_suffix(".bfl.ai"))
-        .is_some_and(valid_bfl_region_label)
-}
-
-/// FLUX artifacts use BFL's fixed provider-specific delivery family, not a
-/// configurable general-purpose wildcard. A region is exactly one DNS label.
-pub(crate) fn valid_bfl_delivery_host(host: &str) -> bool {
-    let Some(region) = host
-        .strip_prefix("delivery.")
-        .and_then(|value| value.strip_suffix(".bfl.ai"))
-    else {
-        return false;
-    };
-    valid_bfl_region_label(region)
-}
-
-fn valid_bfl_region_label(region: &str) -> bool {
-    !region.is_empty()
-        && region.len() <= 63
-        && !region.contains('.')
-        && !region.starts_with("xn--")
-        && region
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-        && region
-            .as_bytes()
-            .first()
-            .is_some_and(u8::is_ascii_alphanumeric)
-        && region
-            .as_bytes()
-            .last()
-            .is_some_and(u8::is_ascii_alphanumeric)
 }
 
 fn canonicalize(value: &Value) -> Value {
@@ -869,17 +615,46 @@ mod tests {
                 .unwrap()
                 .digest()
         );
+    }
 
-        let ordered = catalog(
-            r#"{"schema_version":2,"provider_configs":[{"provider_config_version":"google-v1","workload_type":"image_generation","provider":"google","adapter":"gemini_developer_image","model":"m","secret_service":"svc","secret_account":"acct","settings":{"type":"gemini_developer_image","config":{"endpoint":"https://generativelanguage.googleapis.com","api_version":"v1beta","timeout_ms":1000,"headers":{"X-Client":"gongbu"}}}}]}"#,
-        );
-        let normalized = catalog(
-            r#"{"schema_version":2,"provider_configs":[{"provider_config_version":"google-v1","workload_type":"image_generation","provider":"google","adapter":"gemini_developer_image","model":"m","secret_service":"svc","secret_account":"acct","settings":{"type":"gemini_developer_image","config":{"endpoint":"https://generativelanguage.googleapis.com/","api_version":"v1beta","timeout_ms":1000,"headers":{"x-client":"gongbu"}}}}]}"#,
-        );
-        assert_eq!(
-            ordered.revisions().next().unwrap().digest(),
-            normalized.revisions().next().unwrap().digest()
-        );
+    #[test]
+    fn shipped_providers_require_pack_settings_and_legacy_fields_are_rejected() {
+        let revision = |provider: &str, adapter: &str, settings: Value| {
+            serde_json::json!({"schema_version": 2, "provider_configs": [{
+                "provider_config_version": "v1", "workload_type": "image_generation",
+                "provider": provider, "adapter": adapter, "model": "image-v1",
+                "secret_service": "svc", "secret_account": "acct", "settings": settings
+            }]})
+        };
+        for (provider, adapter) in [("google", "gemini_developer_image"), ("flux", "flux2_api")] {
+            assert!(serde_json::from_value::<ProviderTargetConfig>(revision(
+                provider,
+                adapter,
+                serde_json::json!({"type": "fixture"}),
+            ))
+            .is_err());
+            assert!(serde_json::from_value::<ProviderTargetConfig>(revision(
+                provider,
+                adapter,
+                serde_json::json!({"type": "pack", "config": {
+                    "pack_id": "verified-pack", "pack_version": "v1",
+                    "pack_digest": format!("sha256:{}", "a".repeat(64)),
+                    "archetype": "sync_fixed"
+                }}),
+            ))
+            .is_ok());
+        }
+        for legacy in ["flux2_api", "gemini_developer_image", "ideogram_image"] {
+            assert!(serde_json::from_value::<ProviderTargetConfig>(revision(
+                "example",
+                "fixture",
+                serde_json::json!({"type": legacy, "config": {}}),
+            ))
+            .is_err());
+            let mut raw = revision("example", "fixture", serde_json::json!({"type": "fixture"}));
+            raw["provider_configs"][0][legacy] = serde_json::json!({});
+            assert!(serde_json::from_value::<ProviderTargetConfig>(raw).is_err());
+        }
     }
 
     #[test]
@@ -961,132 +736,5 @@ mod tests {
                 .provider_config_version,
             "v1"
         );
-    }
-
-    #[test]
-    fn invalid_transport_values_never_build_a_catalog() {
-        let base = || serde_json::json!({"schema_version":2,"provider_configs":[{"provider_config_version":"v1","workload_type":"image_generation","provider":"google","adapter":"gemini_developer_image","model":"m","secret_service":"svc","secret_account":"acct","settings":{"type":"gemini_developer_image","config":{"endpoint":"https://example.com","api_version":"v1","timeout_ms":1000,"headers":{}}}}]});
-        let mut invalid = Vec::new();
-        for endpoint in [
-            "http://example.com",
-            "https://user@example.com",
-            "https://example.com/path",
-        ] {
-            let mut value = base();
-            value["provider_configs"][0]["settings"]["config"]["endpoint"] =
-                Value::String(endpoint.into());
-            invalid.push(value);
-        }
-        for timeout in [0, 270_001] {
-            let mut value = base();
-            value["provider_configs"][0]["settings"]["config"]["timeout_ms"] = Value::from(timeout);
-            invalid.push(value);
-        }
-        let mut header = base();
-        header["provider_configs"][0]["settings"]["config"]["headers"] =
-            serde_json::json!({"Authorization":"secret"});
-        invalid.push(header);
-        for raw in invalid {
-            assert!(serde_json::from_value::<ProviderTargetConfig>(raw).is_err());
-        }
-        let mut maximum = base();
-        maximum["provider_configs"][0]["settings"]["config"]["timeout_ms"] = Value::from(270_000);
-        assert!(serde_json::from_value::<ProviderTargetConfig>(maximum).is_ok());
-    }
-
-    #[test]
-    fn flux_transport_origins_and_artifact_pins_are_provider_specific() {
-        let base = || {
-            serde_json::json!({"schema_version":2,"provider_configs":[{
-                "provider_config_version":"flux-v1",
-                "workload_type":"image_generation",
-                "provider":"flux",
-                "adapter":"flux2_api",
-                "model":"flux-2-pro",
-                "secret_service":"gongbu.flux",
-                "secret_account":"local",
-                "settings":{"type":"flux2_api","config":{
-                    "endpoint":"https://api.bfl.ai",
-                    "api_version":"v1",
-                    "timeout_ms":1000,
-                    "poll_interval_ms":10,
-                    "approved_artifact_hosts":[]
-                }}
-            }]})
-        };
-        // Submission endpoints remain literal routers. Provider-returned
-        // polling and delivery URLs use separate one-region-label families.
-        assert!(serde_json::from_value::<ProviderTargetConfig>(base()).is_ok());
-        for host in [
-            "api.bfl.ai",
-            "api.eu.bfl.ai",
-            "api.us.bfl.ai",
-            "api.us1.bfl.ai",
-            "api.us7.bfl.ai",
-            "api.eu-2.bfl.ai",
-        ] {
-            assert!(valid_bfl_polling_host(Some(host)), "{host}");
-        }
-        for host in [
-            "api.bfl.ai.evil.example",
-            "evil.api.us7.bfl.ai",
-            "api.us7.bfl.ai.",
-            "api.us7-bfl.ai",
-            "api.us.east.bfl.ai",
-            "api.-us7.bfl.ai",
-            "api.us7-.bfl.ai",
-            "api.xn--us7-9za.bfl.ai",
-            "delivery.us7.bfl.ai",
-        ] {
-            assert!(!valid_bfl_polling_host(Some(host)), "{host}");
-        }
-        assert!(!valid_bfl_polling_host(None));
-        for host in ["delivery.us2.bfl.ai", "delivery.us7.bfl.ai"] {
-            assert!(valid_bfl_delivery_host(host), "{host}");
-        }
-        for host in [
-            "delivery.us2.bfl.ai.evil.example",
-            "evil.delivery.us2.bfl.ai",
-            "delivery.us2-bfl.ai",
-            "delivery.us2.bfl.ai.",
-            "delivery.xn--us7-9za.bfl.ai",
-        ] {
-            assert!(!valid_bfl_delivery_host(host), "{host}");
-        }
-        for endpoint in [
-            "https://api.bfl.ai",
-            "https://api.eu.bfl.ai",
-            "https://api.us.bfl.ai",
-        ] {
-            let mut value = base();
-            value["provider_configs"][0]["settings"]["config"]["endpoint"] =
-                Value::String(endpoint.into());
-            assert!(serde_json::from_value::<ProviderTargetConfig>(value).is_ok());
-        }
-        for endpoint in [
-            "https://api.bfl.ai:443",
-            "https://api.us1.bfl.ai",
-            "https://api.us7.bfl.ai",
-            "https://api.bfl.ai.evil.example",
-            "https://evil.api.bfl.ai",
-        ] {
-            let mut value = base();
-            value["provider_configs"][0]["settings"]["config"]["endpoint"] =
-                Value::String(endpoint.into());
-            assert!(serde_json::from_value::<ProviderTargetConfig>(value).is_err());
-        }
-        for hosts in [
-            serde_json::json!(["delivery.us.bfl.ai"]),
-            serde_json::json!(["delivery.us2.bfl.ai"]),
-            serde_json::json!(["delivery.us7.bfl.ai"]),
-            serde_json::json!(["delivery.eu-2.bfl.ai"]),
-            serde_json::json!(["cdn.bfl.ai"]),
-            serde_json::json!(["delivery.us.east.bfl.ai"]),
-            serde_json::json!(["delivery.us.bfl.ai.evil.example"]),
-        ] {
-            let mut value = base();
-            value["provider_configs"][0]["settings"]["config"]["approved_artifact_hosts"] = hosts;
-            assert!(serde_json::from_value::<ProviderTargetConfig>(value).is_err());
-        }
     }
 }

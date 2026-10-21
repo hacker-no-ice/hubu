@@ -30,6 +30,17 @@ boundaries.
 | Generation retries / fallback | `0` / disabled |
 | Polling | the same submitted operation, every 500 ms, under its original 270-second deadline |
 | Recovery | durable async resume of that same operation; never a replacement submission |
+| Implementation | verified [provider pack](../provider-packs.md) `packs/verified/bfl-flux-2.toml` on the `async_poll` engine |
+
+Since v0.2.5 the target runs from a verified provider pack instead of a
+dedicated Rust adapter. The contract ID, `provider_config_version`, pricing
+version, prices, certified dimensions, options and polling behavior are
+unchanged; the target settings now name the pack and its content digest, so its
+revision digest changed. Upgrade only with no unfinished FLUX work, and expect
+redaction attestation of FLUX executions created before the upgrade to fail;
+see [upgrading to v0.2.5](upgrading-to-v0.2.5.md). Generation always submits
+to `https://api.bfl.ai`; BFL's regional `api.<region>.bfl.ai` hosts are used
+only when BFL returns one as the job's polling URL.
 
 The contract binds each normalized preset to exact dimensions and one exact
 USD rational rate:

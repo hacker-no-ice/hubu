@@ -175,12 +175,13 @@ Never reuse a version label with changed model, credential coordinates, activati
 
 **Defined by Gongbu's adapter registry.** Current adapter IDs include:
 
-- `gemini_developer_image` for the Gemini Developer API image path;
-- `flux2_api` for the Flux 2 API adapter;
-- `ideogram_image` for the Ideogram image adapter;
+- `gemini_developer_image` for the Gemini Developer API image targets and
+  `flux2_api` for the FLUX.2 targets, each run from a verified
+  [provider pack](../../../provider-packs.md) (their settings use
+  `type = "pack"`);
 - `fixture` for test/local fixture execution only.
 
-The adapter ID must agree with `targets.settings.type`. Do not infer one from provider marketing text.
+A non-pack adapter ID must agree with `targets.settings.type`. Do not infer one from provider marketing text.
 
 ### `targets.model`
 
@@ -215,88 +216,58 @@ Required boolean. `true` permits a selected active revision to execute new work.
 
 ### `targets.settings`
 
-Required tagged adapter settings. `settings.type` selects the service-owned settings schema and must agree with `targets.adapter`. `settings.config` contains the adapter-specific non-secret transport configuration.
+Required tagged adapter settings. `settings.type` selects the service-owned settings schema; non-pack settings must agree with `targets.adapter`. `settings.config` contains the adapter-specific non-secret configuration.
+
+A target run from a [provider pack](../../../provider-packs.md) uses
+`type = "pack"` with the pack's ID, version, content digest and archetype. The
+shipped contracts supply these for you; a pack target binds only to the exact
+pack digest it names:
 
 ```toml
 [targets.settings]
-type = "gemini_developer_image"
+type = "pack"
 
 [targets.settings.config]
-endpoint = "https://provider.example"
-api_version = "v1"
-timeout_ms = 30000
+pack_id = "bfl-flux-2"
+pack_version = "2026-10-20.1"
+pack_digest = "sha256:<the pack's content digest>"
+archetype = "async_poll"
 ```
 
 Fixture settings use only `type = "fixture"` and no config table. Fixture execution is not a live provider substitute.
 
 ## Adapter setting fields
 
-The selected `gongbu-server` production validator is authoritative. Unknown adapter-setting fields are rejected.
+The selected `gongbu-server` production validator is authoritative. Unknown
+adapter-setting fields are rejected. Provider transport, response mapping and
+pricing belong to the [provider pack](../../../provider-packs.md), rather than
+`targets.settings.config`.
 
 ### `targets.settings.type`
 
-Required tag. Allowed current values are `gemini_developer_image`, `flux2_api`, `ideogram_image`, and `fixture`. It must match `targets.adapter`.
+Required tag. Allowed current values are `pack` and `fixture`. Fixture settings
+have no config table and cannot stand in for the shipped Google or FLUX
+providers.
 
-### `targets.settings.config.endpoint`
+### `targets.settings.config.pack_id`
 
-Required for every non-fixture adapter. **Defined by the provider integration.** Use the expected HTTPS API origin or base endpoint, not a documentation page. Verify the exact path behavior in the adapter's operational guide.
+Required for `pack`. The exact ID of the registered provider pack.
 
-For `flux2_api`, the endpoint must be one of BFL's current documented API
-origins: `https://api.bfl.ai`, `https://api.eu.bfl.ai`, or
-`https://api.us.bfl.ai`. Paths, query strings, fragments, user information,
-explicit ports, and other origins are rejected before execution is enabled.
-This literal list governs configured generation POST endpoints. It is separate
-from provider-returned polling URLs, which may use `api.bfl.ai` or exactly
-`api.<region-or-shard>.bfl.ai` with one safe ASCII DNS label while retaining
-the fixed HTTPS path, query, operation-ID, port, fragment, and redirect checks.
+### `targets.settings.config.pack_version`
 
-### `targets.settings.config.api_version`
+Required for `pack`. The immutable version of that pack.
 
-Required for every non-fixture adapter. **Defined by the provider.** Use the exact API version supported by the selected adapter and model.
+### `targets.settings.config.pack_digest`
 
-### `targets.settings.config.timeout_ms`
+Required for `pack`. The exact `sha256:` content digest supplied by the pack's
+shipped contract. The target binds only to that pack content; changing the
+pack requires a matching contract and target revision.
 
-Required invocation budget in milliseconds for every non-fixture adapter. The
-accepted range is `1..=270000` (up to 270 seconds). It covers the complete
-adapter operation described by its schema, which may include submission,
-polling, and artifact retrieval. For asynchronous FLUX work, Gongbu checkpoints
-one absolute deadline after submit; activity recovery and worker restart resume
-the same operation under that deadline and never create a fresh timeout budget.
+### `targets.settings.config.archetype`
 
-### `targets.settings.config.max_retries`
-
-Optional unsigned integer; defaults to `0`. The only currently accepted value is `0`
-for every non-fixture adapter; Gongbu rejects nonzero values during
-provider-contract validation. Provider generation retries are not enabled even
-when an adapter exposes an idempotency header. Read-only polling of one durably
-checkpointed asynchronous operation is recovery, not a generation retry.
-
-### `targets.settings.config.headers`
-
-Optional map of non-secret HTTP headers, defaulting to empty. Header names are normalized by Gongbu. Do not place authorization values or provider secrets here; use `targets.credential` and the owning secret resolver.
-
-### `targets.settings.config.approved_artifact_hosts`
-
-Artifact-host allowlist for provider-referenced downloads. It defaults to empty
-when an adapter does not require it. It is required and must contain at least
-one host for `ideogram_image`.
-
-For `flux2_api`, this list must be empty. FLUX delivery regions are dynamic, so
-Gongbu always applies its built-in `delivery.<region>.bfl.ai` matcher with one
-safe ASCII DNS label instead of accepting static host pins or configurable
-wildcards. Extra labels, IDNA labels, lookalikes, URL syntax, and suffix matches
-are rejected. These artifact hosts never receive the BFL `x-key` credential.
-
-### `targets.settings.config.poll_interval_ms`
-
-Optional for `flux2_api`; defaults to `500`. It is the delay between GET status
-polls for one durably checkpointed provider operation and remains bounded by
-the original overall `timeout_ms`. It never authorizes another generation
-submission.
-
-### `targets.settings.config.idempotency_header`
-
-Optional for `flux2_api`. Name of the provider-supported idempotency header. Configure it only when the provider documents durable idempotency semantics for the selected operation; it is not an arbitrary client header.
+Required for `pack`. The pack's engine: `sync_fixed`, `async_poll` or `metered`.
+The selected engine must be registered by Gongbu. Packs cannot enable generation
+retries or change engine-owned settlement and recovery rules.
 
 ## `[[pricing_rules]]`
 
@@ -320,9 +291,11 @@ Required currency code. Schema version 2 currently supports `USD`; it is normali
 
 ### `pricing_rules.selector`
 
-Optional inline table used to distinguish prices for the same provider/model. Current image pricing supports `selector = { image_size = "1k" }`, with normalized `1k`, `2k`, or `4k` values.
+Optional inline table of named dimensions used to distinguish prices for the same provider/model, such as `selector = { image_size = "1k" }` or `selector = { mode = "fast" }`. A rule prices a request only when the request's selector equals the rule's selector exactly; a rule without a selector prices only requests that carry none.
 
-A selector-qualified rule must contain exactly one `image` price component. Define one unambiguous rule for every enabled image size. Two rules with the same provider, model, and selector are rejected.
+Selector keys are lowercase identifiers (`a`–`z`, digits and `_`, starting with a letter). Values are trimmed and lowercased and may contain letters, digits, `_`, `-`, `.` and `:` (for example `aspect_ratio = "16:9"`). An empty selector is rejected.
+
+A selector that includes `image_size` must contain exactly one `image` price component. Define one unambiguous rule for every enabled image size. Two rules with the same provider, model, and selector are rejected.
 
 ### `pricing_rules.selector.image_size`
 
@@ -344,9 +317,17 @@ Required non-empty array of price component tables. Each unit may appear at most
 
 Required. Allowed values:
 
-- `image` — quantity of generated images;
-- `input_token` — billable input-token quantity;
-- `output_token` — billable output-token quantity.
+- `image` — quantity of generated images (request quantity `image_count`);
+- `input_token` — billable input-token quantity (`input_tokens`);
+- `output_token` — billable output-token quantity (`max_output_tokens`);
+- `request` — one per provider call, whatever it returns;
+- `result` — quantity of returned results (`results`);
+- `page` — quantity of returned pages of content (`pages`);
+- `second` — billable seconds of generated or processed media (`seconds`).
+
+A component is priced against the named request quantity shown in brackets.
+The estimate uses the requested quantity and settlement uses the delivered
+quantity, which can never exceed what was held.
 
 ### `pricing_rules.components.rate_numerator_minor`
 
@@ -385,7 +366,7 @@ billable component.
 - Every selectable live target needs a pricing rule for its exact provider/model and request selector.
 - Rule IDs are globally unique within the catalog.
 - Provider/model/selector combinations are unambiguous.
-- Image selectors require one image component.
+- Selectors that include `image_size` require one image component.
 - Component units cannot repeat within one rule.
 - Rates cannot be negative and denominators must be positive.
 - Unsupported currencies, units, selectors, or old flat pricing shapes are rejected.

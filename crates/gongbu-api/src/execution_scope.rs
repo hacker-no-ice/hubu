@@ -41,12 +41,6 @@ pub fn for_target(provider: &str, adapter: &str) -> Option<ExecutionScope> {
             "merchant:black-forest-labs",
             "Black Forest Labs",
         ),
-        ("ideogram", "ideogram_image") => (
-            "provider:ideogram",
-            "Ideogram",
-            "merchant:ideogram",
-            "Ideogram",
-        ),
         ("local-mock", _)
         | ("mock", "deterministic")
         | ("sandbox", "fixture")
@@ -124,7 +118,6 @@ mod tests {
         for (provider, adapter) in [
             ("google", "gemini_developer_image"),
             ("flux", "flux2_api"),
-            ("ideogram", "ideogram_image"),
             ("mock", "deterministic"),
         ] {
             assert!(catalog.contains(&for_target(provider, adapter).unwrap()));

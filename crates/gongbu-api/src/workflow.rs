@@ -1371,7 +1371,8 @@ mod tests {
     }
 
     fn bfl_cost(raw_credits: &str) -> ActualVendorCost {
-        crate::provider::flux2_api::bfl_credit_cost_to_usd(raw_credits).unwrap()
+        // BFL reports credits; one credit is exactly USD 0.01.
+        ActualVendorCost::from_decimal_scaled_units(raw_credits, "USD", 2).unwrap()
     }
 
     fn execution_with_quantity(repo: &Repository, key: &str, quantity: i64) -> Execution {

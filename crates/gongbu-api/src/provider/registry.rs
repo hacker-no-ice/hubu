@@ -2,20 +2,16 @@
 
 use super::{
     contract::{ContractError, PriceComponent, PricingCatalog, PricingSelector, ProviderAdapter},
-    flux2_api::{
-        Flux2ApiAdapter, ADAPTER_ID as FLUX_ADAPTER_ID, MODEL_ID as FLUX_MODEL_ID,
-        PROVIDER_ID as FLUX_PROVIDER_ID, SUPPORTED_PRESETS as FLUX_SUPPORTED_PRESETS,
+    flux_contract::{
+        ADAPTER_ID as FLUX_ADAPTER_ID, MODEL_ID as FLUX_MODEL_ID, PROVIDER_ID as FLUX_PROVIDER_ID,
+        SUPPORTED_PRESETS as FLUX_SUPPORTED_PRESETS,
     },
-    gemini_developer_image::{
-        GeminiDeveloperImageAdapter, ADAPTER_ID as GEMINI_DEVELOPER_ADAPTER_ID,
-        PROVIDER_ID as GEMINI_DEVELOPER_PROVIDER_ID,
-    },
-    ideogram_image::{
-        IdeogramImageAdapter, ADAPTER_ID as IDEOGRAM_ADAPTER_ID,
-        PROVIDER_ID as IDEOGRAM_PROVIDER_ID,
-    },
+    pack::{Archetype, Pack},
+    pack_async::AsyncPollEngine,
+    pack_sync::SyncFixedEngine,
     provider_contracts::{self, CatalogContract},
     targets::{AdapterSettings, ProviderConfigVersion, ProviderTargetConfig, TargetKey},
+    verified_packs::verified_packs,
 };
 use crate::{artifact::ArtifactLimits, execution_scope::for_target, secrets::ProviderSecret};
 use serde::Serialize;
@@ -29,6 +25,8 @@ use super::contract::{
 
 pub type BoundAdapter = Arc<dyn ProviderAdapter + Send + Sync>;
 type Factory = dyn Fn(&ProviderConfigVersion) -> Result<BoundAdapter, ContractError> + Send + Sync;
+type PackEngineFactory =
+    dyn Fn(&ProviderConfigVersion, &Arc<Pack>) -> Result<BoundAdapter, ContractError> + Send + Sync;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ExecutionTarget {
@@ -78,6 +76,10 @@ pub enum RegistryError {
 #[derive(Clone, Default)]
 pub struct ProviderRegistry {
     factories: BTreeMap<(String, String), Arc<Factory>>,
+    /// Archetype engines keyed by engine ID; they run pack targets.
+    pack_engines: BTreeMap<String, Arc<PackEngineFactory>>,
+    /// Validated packs keyed by pack ID.
+    packs: BTreeMap<String, Arc<Pack>>,
     require_shipped_contracts: bool,
 }
 
@@ -90,26 +92,20 @@ impl ProviderRegistry {
         let max_artifact_bytes = artifact_limits.max_encoded_bytes;
         let mut registry = Self::new();
         registry.require_shipped_contracts = true;
-        registry.register(
-            GEMINI_DEVELOPER_PROVIDER_ID,
-            GEMINI_DEVELOPER_ADAPTER_ID,
-            move |target| {
-                Ok(Arc::new(
-                    GeminiDeveloperImageAdapter::from_target_with_artifact_limit(
-                        target,
-                        max_artifact_bytes,
-                    )?,
-                ))
-            },
-        );
-        registry.register(IDEOGRAM_PROVIDER_ID, IDEOGRAM_ADAPTER_ID, move |target| {
-            Ok(Arc::new(
-                IdeogramImageAdapter::from_target_with_artifact_limit(target, max_artifact_bytes)?,
-            ))
-        });
-        registry.register(FLUX_PROVIDER_ID, FLUX_ADAPTER_ID, move |target| {
-            Ok(Arc::new(Flux2ApiAdapter::from_target_with_artifact_limit(
+        for pack in verified_packs() {
+            registry.register_pack(pack);
+        }
+        registry.register_pack_engine(Archetype::AsyncPoll, move |target, pack| {
+            Ok(Arc::new(AsyncPollEngine::from_target(
                 target,
+                pack,
+                max_artifact_bytes,
+            )?))
+        });
+        registry.register_pack_engine(Archetype::SyncFixed, move |target, pack| {
+            Ok(Arc::new(SyncFixedEngine::from_target(
+                target,
+                pack,
                 max_artifact_bytes,
             )?))
         });
@@ -142,9 +138,75 @@ impl ProviderRegistry {
             .insert((provider.to_owned(), adapter.to_owned()), Arc::new(factory));
     }
 
-    fn factory(&self, target: &ProviderConfigVersion) -> Option<&Arc<Factory>> {
-        self.factories
-            .get(&(target.provider.clone(), target.adapter.clone()))
+    /// Make a validated pack available to targets that name it.
+    pub fn register_pack(&mut self, pack: Pack) {
+        self.packs.insert(pack.pack_id().to_owned(), Arc::new(pack));
+    }
+
+    /// Bind an archetype engine. Pack targets are bound by engine, never by a
+    /// per-provider factory.
+    pub fn register_pack_engine<F>(&mut self, archetype: Archetype, factory: F)
+    where
+        F: Fn(&ProviderConfigVersion, &Arc<Pack>) -> Result<BoundAdapter, ContractError>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.pack_engines
+            .insert(archetype.engine_id().to_owned(), Arc::new(factory));
+    }
+
+    fn bind_target(
+        &self,
+        target: &ProviderConfigVersion,
+        pricing: &PricingCatalog,
+    ) -> Result<BoundAdapter, RegistryError> {
+        let canonical = || target.target_key().canonical_name();
+        let Some(config) = target.pack() else {
+            let factory = self
+                .factories
+                .get(&(target.provider.clone(), target.adapter.clone()))
+                .ok_or_else(|| RegistryError::MissingFactory(canonical()))?;
+            return factory(target).map_err(|_| RegistryError::BindingFailed(canonical()));
+        };
+        let pack = self
+            .packs
+            .get(&config.pack_id)
+            .ok_or_else(|| RegistryError::MissingFactory(canonical()))?;
+        // The revision pins one exact pack; any drift is a binding failure.
+        let model = pack.model(&target.model);
+        if pack.digest() != config.pack_digest
+            || pack.pack_version() != config.pack_version
+            || pack.archetype().engine_id() != config.archetype
+            || model.is_none_or(|model| {
+                pack.target_key(model) != target.target_key()
+                    || model.provider_config_version != target.provider_config_version
+            })
+        {
+            return Err(RegistryError::BindingFailed(canonical()));
+        }
+        // The pack digest pins its per-model pricing version and rules. A
+        // separately supplied catalog must use those exact normalized rules;
+        // its aggregate version may also describe unrelated models/providers.
+        let pack_pricing = PricingCatalog::from_json(
+            &serde_json::to_vec(&serde_json::json!({
+                "schema_version": 2,
+                "catalog_version": "pinned-pack-validation",
+                "rules": pack.pricing_rules(),
+            }))
+            .expect("validated pack pricing serializes"),
+        )
+        .map_err(|_| RegistryError::BindingFailed(canonical()))?;
+        if pricing.rules_for_target(&target.target_key())
+            != pack_pricing.rules_for_target(&target.target_key())
+        {
+            return Err(RegistryError::BindingFailed(canonical()));
+        }
+        let engine = self
+            .pack_engines
+            .get(&config.archetype)
+            .ok_or_else(|| RegistryError::MissingFactory(canonical()))?;
+        engine(target, pack).map_err(|_| RegistryError::BindingFailed(canonical()))
     }
 }
 
@@ -181,7 +243,7 @@ impl ProviderAdapter for DeterministicFixtureAdapter {
                     ProviderPhase::Submission,
                 )
             })?;
-        let actual_cost_minor = local_fixture_cost_minor(request.image_size.as_deref())?;
+        let actual_cost_minor = local_fixture_cost_minor(request.image_size())?;
         Ok(AdapterOutcome {
             usage: Some(crate::provider_contract::NormalizedUsage {
                 images: Some(1),
@@ -247,9 +309,6 @@ impl ValidatedProviderCatalog {
             .filter(|target| target.is_execution_enabled())
         {
             let canonical = target.target_key().canonical_name();
-            let factory = registry
-                .factory(target)
-                .ok_or_else(|| RegistryError::MissingFactory(canonical.clone()))?;
             if !pricing.supports_target(&target.target_key()) {
                 return Err(RegistryError::MissingPricing(canonical));
             }
@@ -262,8 +321,7 @@ impl ValidatedProviderCatalog {
             {
                 return Err(RegistryError::MissingPricing(canonical));
             }
-            let adapter = factory(target)
-                .map_err(|_| RegistryError::BindingFailed(target.target_key().canonical_name()))?;
+            let adapter = registry.bind_target(target, &pricing)?;
             if adapter.adapter_id() != target.adapter {
                 return Err(RegistryError::BindingFailed(
                     target.target_key().canonical_name(),
@@ -336,7 +394,7 @@ impl ValidatedProviderCatalog {
                     .filter_map(|rule| {
                         rule.selector
                             .as_ref()
-                            .map(|selector| selector.image_size.clone())
+                            .and_then(|selector| selector.image_size().map(str::to_owned))
                     })
                     .collect::<Vec<_>>();
                 image_sizes.sort();
@@ -395,11 +453,7 @@ impl ValidatedProviderCatalog {
     }
 
     pub fn needs_stable_idempotency_key(target: &ProviderConfigVersion) -> bool {
-        match target.settings() {
-            AdapterSettings::Fixture => true,
-            AdapterSettings::Flux2Api(config) => config.idempotency_header.is_some(),
-            _ => false,
-        }
+        matches!(target.settings(), AdapterSettings::Fixture)
     }
 }
 
@@ -458,6 +512,123 @@ mod tests {
             .as_bytes(),
         )
         .unwrap()
+    }
+
+    fn bind_pack_pricing(
+        pack: &Pack,
+        rules: serde_json::Value,
+    ) -> Result<ValidatedProviderCatalog, RegistryError> {
+        let secret = crate::secrets::SecretReference::new("gongbu.pack", "fixture").unwrap();
+        let targets = serde_json::from_value(json!({
+            "schema_version": 2,
+            "provider_configs": pack.provider_configs(&secret),
+        }))
+        .unwrap();
+        let pricing = PricingCatalog::from_json(
+            &serde_json::to_vec(&json!({
+                "schema_version": 2,
+                "catalog_version": "operator-composite-v1",
+                "rules": rules,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut registry = ProviderRegistry::new();
+        registry.register_pack(pack.clone());
+        registry.register_pack_engine(Archetype::SyncFixed, |target, pack| {
+            Ok(Arc::new(super::super::pack::SandboxPackAdapter::new(
+                pack.clone(),
+                target.model.clone(),
+                json!({}),
+                BTreeMap::new(),
+            )))
+        });
+        ValidatedProviderCatalog::bind(targets, pricing, &registry)
+    }
+
+    #[test]
+    fn pack_binding_rejects_catalog_rules_outside_the_pinned_pack() {
+        let pack = Pack::from_toml_str(include_str!(
+            "../../../../fixtures/packs/sandbox-image.toml"
+        ))
+        .unwrap();
+        let rules = serde_json::to_value(pack.pricing_rules()).unwrap();
+        assert!(bind_pack_pricing(&pack, rules.clone()).is_ok());
+        for change in [
+            "rate",
+            "denominator",
+            "rule_id",
+            "unit",
+            "selector",
+            "missing",
+            "extra",
+        ] {
+            let mut changed = rules.clone();
+            match change {
+                "rate" => changed[0]["components"][0]["rate_numerator_minor"] = json!(99),
+                "denominator" => changed[0]["components"][0]["rate_denominator"] = json!(99),
+                "rule_id" => changed[0]["rule_id"] = json!("unreviewed-rule"),
+                "unit" => changed[0]["components"][1]["unit"] = json!("page"),
+                "selector" => changed[0]["selector"]["quality"] = json!("unreviewed"),
+                "missing" => {
+                    changed.as_array_mut().unwrap().remove(0);
+                }
+                "extra" => {
+                    let mut extra = changed[0].clone();
+                    extra["rule_id"] = json!("extra-rule");
+                    extra["selector"]["quality"] = json!("unreviewed");
+                    changed.as_array_mut().unwrap().push(extra);
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                matches!(
+                    bind_pack_pricing(&pack, changed),
+                    Err(RegistryError::BindingFailed(_))
+                ),
+                "catalog mutation {change} must fail before binding the engine"
+            );
+        }
+    }
+
+    #[test]
+    fn pack_binding_accepts_canonical_rules_in_a_multi_model_composite_catalog() {
+        let source = include_str!("../../../../fixtures/packs/sandbox-image.toml");
+        let second_model =
+            source[source.find("[[models]]").unwrap()..].replace("image-v1", "image-v2");
+        let pack = Pack::from_toml_str(&format!("{source}\n{second_model}")).unwrap();
+        assert_ne!(
+            pack.models()[0].pricing_version,
+            pack.models()[1].pricing_version
+        );
+        let mut rules = serde_json::to_value(pack.pricing_rules()).unwrap();
+        rules.as_array_mut().unwrap().reverse();
+        for rule in rules.as_array_mut().unwrap() {
+            rule["currency"] = json!("usd");
+            rule["components"].as_array_mut().unwrap().reverse();
+            let quality = rule["selector"]["quality"].as_str().unwrap().to_uppercase();
+            rule["selector"]["quality"] = json!(quality);
+        }
+        let mut unrelated = rules[0].clone();
+        unrelated["provider"] = json!("unrelated-provider");
+        unrelated["rule_id"] = json!("unrelated-rule");
+        rules.as_array_mut().unwrap().push(unrelated);
+        let catalog = bind_pack_pricing(&pack, rules.clone()).unwrap();
+        for model in pack.models() {
+            assert!(catalog.resolve_active(&pack.target_key(model)).is_ok());
+            let mut changed = rules.clone();
+            let rule = changed
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|rule| rule["provider"] == pack.provider() && rule["model"] == model.model)
+                .unwrap();
+            rule["components"][0]["rate_numerator_minor"] = json!(99);
+            assert!(matches!(
+                bind_pack_pricing(&pack, changed),
+                Err(RegistryError::BindingFailed(_))
+            ));
+        }
     }
 
     #[test]
@@ -519,7 +690,7 @@ mod tests {
     }
 
     #[test]
-    fn production_registry_binds_gemini_developer_ideogram_and_flux() {
+    fn production_registry_binds_gemini_developer_and_flux() {
         let document: serde_json::Value = serde_json::from_str(include_str!(
             "../../../../contracts/provider-contracts-v1.json"
         ))
@@ -529,7 +700,7 @@ mod tests {
             let policies = &contract["policies"];
             json!({"contract":contract["contract"],"pricing_version":contract["pricing_version"],"poll_policy":policies["poll"],"artifact_delivery_policy":policies["artifact_delivery"],"recovery_policy":policies["recovery"],"generation_retries":0,"fallback":false})
         }).collect::<Vec<_>>();
-        let mut provider_configs = contracts
+        let provider_configs = contracts
             .iter()
             .map(|contract| {
                 let mut target = contract["target"].clone();
@@ -539,13 +710,11 @@ mod tests {
                 target
             })
             .collect::<Vec<_>>();
-        provider_configs.push(json!({"provider_config_version":"i-v1","workload_type":"image_generation","provider":"ideogram","adapter":"ideogram_image","model":"ideogram-v3","secret_service":"gongbu.ideogram","secret_account":"one","active":true,"execution_enabled":true,"settings":{"type":"ideogram_image","config":{"endpoint":"https://ideogram.example","api_version":"v1","timeout_ms":1000,"approved_artifact_hosts":["ideogram.example"]}}}));
         let targets: ProviderTargetConfig = serde_json::from_value(json!({"schema_version":3,"contract_bindings":bindings,"provider_configs":provider_configs})).unwrap();
-        let mut rules = contracts
+        let rules = contracts
             .iter()
             .flat_map(|contract| contract["pricing_rules"].as_array().unwrap().clone())
             .collect::<Vec<_>>();
-        rules.push(json!({"rule_id":"i","provider":"ideogram","model":"ideogram-v3","currency":"USD","components":[{"unit":"image","rate_numerator_minor":1,"rate_denominator":1}]}));
         let pricing = PricingCatalog::from_json(&serde_json::to_vec(&json!({"schema_version":2,"catalog_version":"provider-composite-v1","rules":rules})).unwrap()).unwrap();
         let catalog = ValidatedProviderCatalog::bind(
             targets,
@@ -560,14 +729,13 @@ mod tests {
                 "gemini-3.1-flash-lite-image",
             ),
             ("google", "gemini_developer_image", "gemini-3.1-flash-image"),
-            ("ideogram", "ideogram_image", "ideogram-v3"),
             ("flux", "flux2_api", "flux-2-pro"),
         ] {
             let key = TargetKey::new("image_generation", provider, adapter, model).unwrap();
             assert_eq!(catalog.resolve_active(&key).unwrap().adapter, adapter);
         }
         let execution_targets = catalog.execution_targets();
-        assert_eq!(execution_targets.len(), 4);
+        assert_eq!(execution_targets.len(), 3);
         let gemini_full = execution_targets
             .iter()
             .find(|target| target.model == "gemini-3.1-flash-image")

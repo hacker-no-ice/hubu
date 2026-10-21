@@ -11346,7 +11346,7 @@ lease_profiles:
         );
 
         let mut broadened = authorization.execution_scope.clone().unwrap();
-        broadened.billing_merchant = scope_identity("merchant:ideogram", "Ideogram");
+        broadened.billing_merchant = scope_identity("merchant:unlisted", "Unlisted merchant");
         let rejected = claim_executor_spend(
             json!({
                 "spend_auth_token_id":authorization.auth_token_id,
