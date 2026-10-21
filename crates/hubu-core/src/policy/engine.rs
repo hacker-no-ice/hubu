@@ -386,4 +386,75 @@ mod tests {
             Err(PolicyValidationError::FieldValueMismatch { .. })
         ));
     }
+
+    #[test]
+    fn creative_tiers_cookbook_separates_draft_final_and_deny_without_amount_alone() {
+        use hubu_common::execution_scope::{ExecutionScope, ScopeIdentity};
+
+        let policy =
+            Policy::from_yaml_str(include_str!("../../../../policies/creative-tiers.yaml"))
+                .expect("cookbook policy should load");
+        let identity = |id: &str| ScopeIdentity {
+            id: id.into(),
+            display_name: id.into(),
+        };
+        let v1 = ExecutionScope {
+            schema_version: 1,
+            provider: identity("provider:google:gemini-developer"),
+            executor: identity("executor:gongbu:image"),
+            capability: identity("capability:image:generate"),
+            billing_merchant: identity("merchant:google"),
+            model: None,
+            image_size: None,
+        };
+        let request = |amount_cents: i64, scope: ExecutionScope| SpendRequest {
+            merchant: None,
+            execution_scope: Some(scope),
+            ..spend_request(amount_cents, None)
+        };
+        let v2 = |model: &str, size: &str| ExecutionScope {
+            schema_version: 2,
+            model: Some(model.into()),
+            image_size: Some(size.into()),
+            ..v1.clone()
+        };
+        let decide = |request: SpendRequest| {
+            let evaluation = evaluate_policy(&request, &policy).unwrap();
+            (evaluation.decision, evaluation.reasons)
+        };
+
+        let (draft, _) = decide(request(4, v2("gemini-3.1-flash-image", "1k")));
+        assert_eq!(draft, Effect::Allow);
+
+        // A cheap final is still escalated: size, not amount, decides.
+        let (cheap_final, reasons) = decide(request(4, v2("gemini-3.1-flash-image", "4k")));
+        assert_eq!(cheap_final, Effect::NeedsApproval);
+        assert_eq!(reasons, ["high-resolution finals need human approval"]);
+        assert_eq!(
+            decide(request(8, v2("flux-2-pro", "2k"))).0,
+            Effect::NeedsApproval
+        );
+
+        let (unapproved, reasons) = decide(request(4, v2("unlisted-image-model", "1k")));
+        assert_eq!(unapproved, Effect::Deny);
+        assert!(reasons.contains(&"image work must use an approved model".to_string()));
+        assert_eq!(
+            decide(request(150, v2("gemini-3.1-flash-image", "4k"))).0,
+            Effect::Deny
+        );
+
+        // Without target fields nothing reaches the draft tier.
+        assert_eq!(decide(request(4, v1.clone())).0, Effect::NeedsApproval);
+        assert_eq!(
+            decide(request(
+                4,
+                ExecutionScope {
+                    image_size: None,
+                    ..v2("flux-2-pro", "1k")
+                }
+            ))
+            .0,
+            Effect::NeedsApproval
+        );
+    }
 }

@@ -2,6 +2,13 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const EXECUTION_SCOPE_SCHEMA_VERSION: u32 = 1;
+/// Schema version 2 adds the execution target's `model` and requested
+/// `image_size`. The executor derives both from the target it runs and
+/// rejects an authorization whose values differ, so policies may rely on them.
+pub const EXECUTION_SCOPE_TARGET_SCHEMA_VERSION: u32 = 2;
+
+const MAX_MODEL_LEN: usize = 128;
+const MAX_IMAGE_SIZE_LEN: usize = 32;
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -12,6 +19,10 @@ pub struct ExecutionScopeSelector {
     pub executor: String,
     pub capability: String,
     pub billing_merchant: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_size: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -29,6 +40,23 @@ pub struct ExecutionScope {
     pub executor: ScopeIdentity,
     pub capability: ScopeIdentity,
     pub billing_merchant: ScopeIdentity,
+    /// Execution target model id (schema version 2 only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Requested output size selector such as `1k` (schema version 2 only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_size: Option<String>,
+}
+
+impl ExecutionScope {
+    /// Whether both scopes name the same trusted catalog entry, ignoring the
+    /// schema-v2 target fields that a catalog entry never carries.
+    pub fn same_catalog_entry(&self, other: &ExecutionScope) -> bool {
+        self.provider == other.provider
+            && self.executor == other.executor
+            && self.capability == other.capability
+            && self.billing_merchant == other.billing_merchant
+    }
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -39,16 +67,43 @@ pub enum ScopeResolutionError {
     Unknown,
     #[error("ambiguous execution scope identifier")]
     Ambiguous,
+    #[error("execution scope model and image_size require schema version 2")]
+    TargetFieldsRequireSchemaV2,
+    #[error("execution scope schema version 2 requires model")]
+    MissingModel,
+    #[error("invalid execution scope model")]
+    InvalidModel,
+    #[error("invalid execution scope image_size")]
+    InvalidImageSize,
 }
 
 pub fn resolve_execution_scope(
     selector: &ExecutionScopeSelector,
     catalog: &[ExecutionScope],
 ) -> Result<ExecutionScope, ScopeResolutionError> {
-    if selector.schema_version != EXECUTION_SCOPE_SCHEMA_VERSION {
-        return Err(ScopeResolutionError::UnsupportedSchema(
-            selector.schema_version,
-        ));
+    match selector.schema_version {
+        EXECUTION_SCOPE_SCHEMA_VERSION => {
+            if selector.model.is_some() || selector.image_size.is_some() {
+                return Err(ScopeResolutionError::TargetFieldsRequireSchemaV2);
+            }
+        }
+        EXECUTION_SCOPE_TARGET_SCHEMA_VERSION => {
+            let model = selector
+                .model
+                .as_deref()
+                .ok_or(ScopeResolutionError::MissingModel)?;
+            if !valid_model(model) {
+                return Err(ScopeResolutionError::InvalidModel);
+            }
+            if selector
+                .image_size
+                .as_deref()
+                .is_some_and(|size| !valid_image_size(size))
+            {
+                return Err(ScopeResolutionError::InvalidImageSize);
+            }
+        }
+        version => return Err(ScopeResolutionError::UnsupportedSchema(version)),
     }
     let matches = catalog
         .iter()
@@ -60,10 +115,31 @@ pub fn resolve_execution_scope(
         })
         .collect::<Vec<_>>();
     match matches.as_slice() {
-        [scope] => Ok((*scope).clone()),
+        [scope] => Ok(ExecutionScope {
+            schema_version: selector.schema_version,
+            model: selector.model.clone(),
+            image_size: selector.image_size.clone(),
+            ..(*scope).clone()
+        }),
         [] => Err(ScopeResolutionError::Unknown),
         _ => Err(ScopeResolutionError::Ambiguous),
     }
+}
+
+/// Target fields are matched exactly against the executor's derived values,
+/// so they are never trimmed or case-folded.
+fn valid_model(model: &str) -> bool {
+    (1..=MAX_MODEL_LEN).contains(&model.len())
+        && model
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-:/".contains(&byte))
+}
+
+fn valid_image_size(size: &str) -> bool {
+    (1..=MAX_IMAGE_SIZE_LEN).contains(&size.len())
+        && size.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"._-".contains(&byte)
+        })
 }
 
 fn identity_matches(identity: &ScopeIdentity, selector: &str) -> bool {
@@ -98,6 +174,20 @@ mod tests {
                 id: "merchant:google".into(),
                 display_name: "Google".into(),
             },
+            model: None,
+            image_size: None,
+        }
+    }
+
+    fn selector(schema_version: u32) -> ExecutionScopeSelector {
+        ExecutionScopeSelector {
+            schema_version,
+            provider: "provider:google:gemini".into(),
+            executor: "executor:gongbu:image".into(),
+            capability: "capability:image:generate".into(),
+            billing_merchant: "merchant:google".into(),
+            model: None,
+            image_size: None,
         }
     }
 
@@ -110,6 +200,8 @@ mod tests {
             executor: "executor:gongbu:image".into(),
             capability: "Generate image".into(),
             billing_merchant: "merchant:google".into(),
+            model: None,
+            image_size: None,
         };
         assert_eq!(
             resolve_execution_scope(&selector, &catalog).unwrap(),
@@ -126,6 +218,8 @@ mod tests {
             executor: "executor:gongbu:image".into(),
             capability: "capability:image:generate".into(),
             billing_merchant: "merchant:google".into(),
+            model: None,
+            image_size: None,
         };
         assert_eq!(
             resolve_execution_scope(&selector, std::slice::from_ref(&scope)),
@@ -166,6 +260,8 @@ mod tests {
                         executor: scope.executor.id.clone(),
                         capability: scope.capability.id.clone(),
                         billing_merchant: scope.billing_merchant.id.clone(),
+                        model: None,
+                        image_size: None,
                     },
                     &catalog
                 )
@@ -173,5 +269,83 @@ mod tests {
                 *scope
             );
         }
+    }
+
+    #[test]
+    fn schema_v2_carries_target_model_and_image_size() {
+        let catalog = [scope("provider:google:gemini", "Google Gemini")];
+        let mut v2 = selector(EXECUTION_SCOPE_TARGET_SCHEMA_VERSION);
+        v2.model = Some("gemini-3.1-flash-image".into());
+        v2.image_size = Some("4k".into());
+        let resolved = resolve_execution_scope(&v2, &catalog).unwrap();
+        assert_eq!(
+            resolved.schema_version,
+            EXECUTION_SCOPE_TARGET_SCHEMA_VERSION
+        );
+        assert_eq!(resolved.provider, catalog[0].provider);
+        assert_eq!(resolved.model.as_deref(), Some("gemini-3.1-flash-image"));
+        assert_eq!(resolved.image_size.as_deref(), Some("4k"));
+        assert_eq!(
+            serde_json::to_value(&resolved).unwrap()["image_size"],
+            serde_json::json!("4k")
+        );
+
+        v2.image_size = None;
+        assert_eq!(
+            resolve_execution_scope(&v2, &catalog).unwrap().image_size,
+            None
+        );
+    }
+
+    #[test]
+    fn schema_v1_serialization_is_unchanged() {
+        let value = serde_json::to_value(scope("provider:google:gemini", "Google Gemini")).unwrap();
+        assert!(value.get("model").is_none());
+        assert!(value.get("image_size").is_none());
+    }
+
+    #[test]
+    fn rejects_malformed_target_fields() {
+        let catalog = [scope("provider:google:gemini", "Google Gemini")];
+        let mut v1 = selector(EXECUTION_SCOPE_SCHEMA_VERSION);
+        v1.model = Some("gemini-3.1-flash-image".into());
+        assert_eq!(
+            resolve_execution_scope(&v1, &catalog),
+            Err(ScopeResolutionError::TargetFieldsRequireSchemaV2)
+        );
+        let mut v1 = selector(EXECUTION_SCOPE_SCHEMA_VERSION);
+        v1.image_size = Some("1k".into());
+        assert_eq!(
+            resolve_execution_scope(&v1, &catalog),
+            Err(ScopeResolutionError::TargetFieldsRequireSchemaV2)
+        );
+
+        let mut v2 = selector(EXECUTION_SCOPE_TARGET_SCHEMA_VERSION);
+        v2.image_size = Some("1k".into());
+        assert_eq!(
+            resolve_execution_scope(&v2, &catalog),
+            Err(ScopeResolutionError::MissingModel)
+        );
+        for model in ["", " gemini", "gemini image", &"m".repeat(129)] {
+            v2.model = Some(model.into());
+            assert_eq!(
+                resolve_execution_scope(&v2, &catalog),
+                Err(ScopeResolutionError::InvalidModel),
+                "{model:?}"
+            );
+        }
+        v2.model = Some("gemini-3.1-flash-image".into());
+        for size in ["", "4K", " 1k", "1k ", &"1".repeat(33)] {
+            v2.image_size = Some(size.into());
+            assert_eq!(
+                resolve_execution_scope(&v2, &catalog),
+                Err(ScopeResolutionError::InvalidImageSize),
+                "{size:?}"
+            );
+        }
+        assert_eq!(
+            resolve_execution_scope(&selector(3), &catalog),
+            Err(ScopeResolutionError::UnsupportedSchema(3))
+        );
     }
 }

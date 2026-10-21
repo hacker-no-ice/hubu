@@ -62,6 +62,10 @@ pub enum Field {
     Executor,
     Capability,
     BillingMerchant,
+    /// Execution target model id from a schema-v2 execution scope.
+    Model,
+    /// Requested output size selector from a schema-v2 execution scope.
+    ImageSize,
     Category,
 }
 
@@ -230,6 +234,8 @@ fn field_name(field: Field) -> &'static str {
         Field::Executor => "executor",
         Field::Capability => "capability",
         Field::BillingMerchant => "billing_merchant",
+        Field::Model => "model",
+        Field::ImageSize => "image_size",
         Field::Category => "category",
     }
 }
@@ -270,6 +276,16 @@ impl Field {
                 .execution_scope
                 .as_ref()
                 .map(|scope| PolicyValue::String(scope.billing_merchant.id.clone())),
+            Field::Model => request
+                .execution_scope
+                .as_ref()
+                .and_then(|scope| scope.model.clone())
+                .map(PolicyValue::String),
+            Field::ImageSize => request
+                .execution_scope
+                .as_ref()
+                .and_then(|scope| scope.image_size.clone())
+                .map(PolicyValue::String),
             Field::Category => request.category.clone().map(PolicyValue::String),
         }
     }
@@ -284,6 +300,8 @@ impl Field {
             | Field::Executor
             | Field::Capability
             | Field::BillingMerchant
+            | Field::Model
+            | Field::ImageSize
             | Field::Category => ValueKind::String,
         }
     }
@@ -441,6 +459,8 @@ impl fmt::Display for Field {
             Field::Executor => f.write_str("executor"),
             Field::Capability => f.write_str("capability"),
             Field::BillingMerchant => f.write_str("billing_merchant"),
+            Field::Model => f.write_str("model"),
+            Field::ImageSize => f.write_str("image_size"),
             Field::Category => f.write_str("category"),
         }
     }
@@ -587,6 +607,8 @@ mod tests {
             executor: identity("executor:gongbu:image"),
             capability: identity("capability:image:generate"),
             billing_merchant: identity("merchant:google"),
+            model: None,
+            image_size: None,
         });
         for (field, expected) in [
             (Field::Provider, "provider:google:gemini-developer"),
@@ -600,6 +622,79 @@ mod tests {
             }
             .eval(&request));
         }
+    }
+
+    #[test]
+    fn evaluates_execution_target_model_and_image_size() {
+        let mut request = spend_request();
+        let identity = |id: &str| ScopeIdentity {
+            id: id.into(),
+            display_name: id.into(),
+        };
+        let v1 = ExecutionScope {
+            schema_version: EXECUTION_SCOPE_SCHEMA_VERSION,
+            provider: identity("provider:google:gemini-developer"),
+            executor: identity("executor:gongbu:image"),
+            capability: identity("capability:image:generate"),
+            billing_merchant: identity("merchant:google"),
+            model: None,
+            image_size: None,
+        };
+        let is_draft = Condition::In {
+            field: Field::ImageSize,
+            values: vec![PolicyValue::String("1k".into())],
+        };
+        let is_flash = Condition::Eq {
+            field: Field::Model,
+            value: PolicyValue::String("gemini-3.1-flash-image".into()),
+        };
+
+        // A v1 scope carries no target fields, so target conditions never
+        // match and an allow rule built on them cannot fire.
+        request.execution_scope = Some(v1.clone());
+        assert!(!is_draft.eval(&request));
+        assert!(!is_flash.eval(&request));
+        assert!(!Condition::Exists {
+            field: Field::ImageSize
+        }
+        .eval(&request));
+
+        request.execution_scope = Some(ExecutionScope {
+            schema_version: 2,
+            model: Some("gemini-3.1-flash-image".into()),
+            image_size: Some("1k".into()),
+            ..v1
+        });
+        assert!(is_draft.eval(&request));
+        assert!(is_flash.eval(&request));
+        assert_eq!(is_draft.describe(), "image_size is one of `1k`");
+    }
+
+    #[test]
+    fn target_fields_are_strings_and_not_orderable() {
+        assert!(matches!(
+            Condition::Gt {
+                field: Field::ImageSize,
+                value: PolicyValue::String("1k".into()),
+            }
+            .validate("size"),
+            Err(PolicyValidationError::UnorderableField { .. })
+        ));
+        assert!(matches!(
+            Condition::Eq {
+                field: Field::Model,
+                value: PolicyValue::MoneyCents(1),
+            }
+            .validate("model"),
+            Err(PolicyValidationError::FieldValueMismatch { .. })
+        ));
+        let parsed: Condition = serde_json::from_value(serde_json::json!({
+            "op": "in",
+            "field": "image_size",
+            "values": [{"string": "2k"}, {"string": "4k"}]
+        }))
+        .unwrap();
+        parsed.validate("final").unwrap();
     }
 
     #[test]

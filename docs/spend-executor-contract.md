@@ -639,9 +639,12 @@ guidance.
    already been settled or released. Hubu derives the operation key from the
    stored decision; sending `operation_key` or `agent_id` is rejected.
 
-   The version-1 typed scope and legacy migration behavior are specified in
-   [trusted execution scope](spend-lifecycle.md#trusted-execution-scope). New
-   callers omit `merchant`.
+   The version-1 typed scope, the version-2 scope that adds `model` and
+   `image_size`, and legacy migration behavior are specified in
+   [trusted execution scope](spend-lifecycle.md#trusted-execution-scope). An
+   executor claims with the authorized scope in the version it was issued;
+   Gongbu admits a version-2 authorization only when its model and size equal
+   the execution's. New callers omit `merchant`.
 
    Claiming moves the hold to `claimed` and extends its expiry to
    `claim_expires_at`. The claim may remain active after the original

@@ -328,11 +328,25 @@ pub(crate) fn execution_scope_input_schema() -> Value {
         "type": "object",
         "additionalProperties": false,
         "properties": {
-            "schema_version": {"type":"integer","const":1},
+            "schema_version": {
+                "type":"integer",
+                "enum":[1,2],
+                "description":"1 for target identities only; 2 also binds the execution target's model and image_size so policy can tier by them"
+            },
             "provider": {"type":"string","minLength":1},
             "executor": {"type":"string","minLength":1},
             "capability": {"type":"string","minLength":1},
-            "billing_merchant": {"type":"string","minLength":1}
+            "billing_merchant": {"type":"string","minLength":1},
+            "model": {
+                "type":"string",
+                "pattern":"^[A-Za-z0-9._:/-]{1,128}$",
+                "description":"Schema version 2 only (required there): the selected execution target's model, exactly as listed by gongbu_list_execution_targets"
+            },
+            "image_size": {
+                "type":"string",
+                "pattern":"^[a-z0-9._-]{1,32}$",
+                "description":"Schema version 2 only: exactly the execution input's image_size; Gongbu rejects a mismatch"
+            }
         },
         "required": ["schema_version","provider","executor","capability","billing_merchant"]
     })

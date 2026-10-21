@@ -6500,6 +6500,8 @@ mod tests {
                 id: format!("merchant:legacy:{}", &digest[..16]),
                 display_name: merchant.into(),
             },
+            model: None,
+            image_size: None,
         }
     }
 

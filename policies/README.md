@@ -72,6 +72,24 @@ Callers may rely on Hubu's top-level errors (`failed to parse policy yaml` and
 `invalid policy`), but the parser's detailed source diagnostic is not a stable
 public contract and can change across dependency updates.
 
+## Cookbook: draft / final / deny tiers
+
+[`creative-tiers.yaml`](creative-tiers.yaml) gates creative image work by
+model and output size instead of amount alone:
+
+- **Draft:** 1k image generation up to USD 0.10 is allowed.
+- **Final:** any 2k or 4k render needs human approval, however cheap.
+- **Deny:** unapproved models and any request above USD 1.00 are denied.
+
+It relies on the `model` and `image_size` fields of a schema-version-2
+execution scope, which Gongbu binds to the execution it runs. Requests without
+those fields match no allow rule and fall to the `needs_approval` default.
+Replace the model list with the models your Gongbu targets list, then apply it:
+
+```sh
+hubu policy apply --path policies/creative-tiers.yaml --name "Creative tiers"
+```
+
 Policies are for single-request guardrails such as merchant allowlists,
 per-request amount caps, and approval rules. Use budgets for cumulative limits
 such as daily or monthly spend.
