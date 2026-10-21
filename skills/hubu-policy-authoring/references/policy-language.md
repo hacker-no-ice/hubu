@@ -96,6 +96,8 @@ to guess an id. Resolve the canonical tuple for the target environment.
 | `executor` | `{string: executor:...}` | Stable execution-plane adapter id |
 | `capability` | `{string: capability:...}` | Provider-independent requested outcome |
 | `billing_merchant` | `{string: merchant:...}` | Party expected to charge the account |
+| `model` | `{string: MODEL}` | Execution target model; present only on schema-v2 execution scopes, so allow rules on it fail closed |
+| `image_size` | `{string: 1k}` | Requested output size; schema-v2 only. Match with `eq`/`in`, not ordered operators. See `policies/creative-tiers.yaml` |
 | `category` | `{string: VALUE}` | Optional caller-supplied category |
 | `merchant` | `{string: VALUE}` | Legacy only; do not use for new execution policies |
 

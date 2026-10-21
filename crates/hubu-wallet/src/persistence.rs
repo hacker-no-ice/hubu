@@ -359,6 +359,8 @@ mod tests {
             executor: identity("executor:gongbu:image", "Gongbu image executor"),
             capability: identity("capability:image:generate", "Generate image"),
             billing_merchant: identity("merchant:google", "Google"),
+            model: None,
+            image_size: None,
         }
     }
 

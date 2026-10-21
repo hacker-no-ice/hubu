@@ -257,7 +257,7 @@ fn transaction(
         .and_then(|scope| {
             trusted_execution_scope_catalog()
                 .into_iter()
-                .find(|s| s == scope)
+                .find(|s| s.same_catalog_entry(scope))
         })
         .map(|s| {
             json!({"provider":s.provider,
@@ -497,7 +497,7 @@ fn authorization_record(
         .and_then(|scope| {
             trusted_execution_scope_catalog()
                 .into_iter()
-                .find(|s| s == scope)
+                .find(|s| s.same_catalog_entry(scope))
         })
         .map(|s| {
             json!({"provider":s.provider,

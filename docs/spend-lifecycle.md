@@ -68,6 +68,31 @@ Policies address these stable identities directly. Payment and executor
 validation exact-match the complete canonical scope; caller-supplied display
 names never grant authority.
 
+Schema version 2 adds two execution-target fields, `model` and the optional
+requested `image_size`, beside the four identities:
+
+```json
+{
+  "schema_version": 2,
+  "provider": "provider:google:gemini-developer",
+  "executor": "executor:gongbu:image",
+  "capability": "capability:image:generate",
+  "billing_merchant": "merchant:google",
+  "model": "gemini-3.1-flash-image",
+  "image_size": "1k"
+}
+```
+
+Hubu resolves the four identities against the same catalog and validates the
+target fields' syntax; values are case-sensitive and never trimmed. Policies
+can then tier work by `model` and `image_size`. The fields are trusted because
+the executor binds them, not because the agent supplied them: Gongbu derives
+the model from the selected target and the size from the execution input, and
+rejects the authorization unless the complete version-2 scope is equal. A
+version-1 authorization makes no model or size claim and is compared on the
+identities only. Version 1 stays supported; omitted target fields serialize
+exactly as before, so stored version-1 decisions are unchanged.
+
 Legacy requests that contain only `merchant` remain readable and normalize to
 a version-1 scope whose provider, executor, and capability are
 `legacy:unresolved`. New callers send `execution_scope` and omit `merchant`.

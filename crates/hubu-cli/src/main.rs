@@ -2374,6 +2374,8 @@ fn take_execution_scope(args: &mut Vec<String>) -> Result<(Option<String>, Optio
     let executor = take_value(args, "--executor");
     let capability = take_value(args, "--capability");
     let billing_merchant = take_value(args, "--billing-merchant");
+    let model = take_value(args, "--model");
+    let image_size = take_value(args, "--image-size");
     let typed_count = [
         provider.as_ref(),
         executor.as_ref(),
@@ -2389,21 +2391,35 @@ fn take_execution_scope(args: &mut Vec<String>) -> Result<(Option<String>, Optio
         ));
     }
     if typed_count == 0 {
+        if model.is_some() || image_size.is_some() {
+            return Err(anyhow!(
+                "--model and --image-size require the typed execution-scope flags"
+            ));
+        }
         return Ok((merchant, None));
     }
     if typed_count != 4 {
         return Err(anyhow!("--provider, --executor, --capability, and --billing-merchant must be supplied together"));
     }
-    Ok((
-        None,
-        Some(json!({
-            "schema_version": 1,
-            "provider": provider,
-            "executor": executor,
-            "capability": capability,
-            "billing_merchant": billing_merchant,
-        })),
-    ))
+    if image_size.is_some() && model.is_none() {
+        return Err(anyhow!("--image-size requires --model"));
+    }
+    let mut scope = json!({
+        "schema_version": 1,
+        "provider": provider,
+        "executor": executor,
+        "capability": capability,
+        "billing_merchant": billing_merchant,
+    });
+    // Schema version 2 binds the execution target's model and image size.
+    if let Some(model) = model {
+        scope["schema_version"] = json!(2);
+        scope["model"] = json!(model);
+        if let Some(image_size) = image_size {
+            scope["image_size"] = json!(image_size);
+        }
+    }
+    Ok((None, Some(scope)))
 }
 
 fn normalize_currency(value: &str) -> Result<Currency> {
@@ -2447,6 +2463,11 @@ fn print_spend_submission(
                 .and_then(Value::as_str)
                 .unwrap_or("<missing>");
             println!("  {field}: {value} (supplied)");
+        }
+        for field in ["model", "image_size"] {
+            if let Some(value) = scope.get(field).and_then(Value::as_str) {
+                println!("  {field}: {value} (supplied)");
+            }
         }
     } else {
         println!("  merchant: omitted (merchant policy conditions cannot match)");
@@ -2734,6 +2755,8 @@ fn print_spend_response(response: &Value) -> Result<()> {
             "executor",
             "capability",
             "billing_merchant",
+            "model",
+            "image_size",
         ] {
             let Some(input) = inputs.get(field).and_then(Value::as_object) else {
                 continue;
@@ -2901,6 +2924,11 @@ fn print_execution_scope(value: &Value) {
             .and_then(Value::as_str)
             .unwrap_or("<missing-id>");
         println!("  {field}: {name} [{id}]");
+    }
+    for field in ["model", "image_size"] {
+        if let Some(value) = scope.get(field).and_then(Value::as_str) {
+            println!("  {field}: {value}");
+        }
     }
 }
 
@@ -4114,8 +4142,8 @@ Statuses: authorized, unknown, needs_approval, claimed, settled, released, expir
         "Test an agent spend request
 
 Usage:
-  hubu spend --operation-key KEY --account-id ID --amount DECIMAL [--currency USD] --reason TEXT [--task-id ID] [--merchant NAME | --provider ID --executor ID --capability ID --billing-merchant ID] [--lease-profile NAME]
-  hubu spend authorize --operation-key KEY --account-id ID --amount DECIMAL [--currency USD] --reason TEXT [--task-id ID] [--merchant NAME | --provider ID --executor ID --capability ID --billing-merchant ID] [--lease-profile NAME]
+  hubu spend --operation-key KEY --account-id ID --amount DECIMAL [--currency USD] --reason TEXT [--task-id ID] [--merchant NAME | --provider ID --executor ID --capability ID --billing-merchant ID [--model ID [--image-size SIZE]]] [--lease-profile NAME]
+  hubu spend authorize --operation-key KEY --account-id ID --amount DECIMAL [--currency USD] --reason TEXT [--task-id ID] [--merchant NAME | --provider ID --executor ID --capability ID --billing-merchant ID [--model ID [--image-size SIZE]]] [--lease-profile NAME]
   hubu spend approval get --approval-request-id ID
   hubu spend approval approve --approval-request-id ID
   hubu spend approval deny --approval-request-id ID
@@ -4156,7 +4184,7 @@ fn print_spend_authorize_help() {
         "Authorize spend and reserve budget without executing payment
 
 Usage:
-  hubu spend authorize --operation-key KEY --account-id ID --amount DECIMAL [--currency USD] --reason TEXT [--task-id ID] [--merchant NAME | --provider ID --executor ID --capability ID --billing-merchant ID] [--lease-profile NAME]
+  hubu spend authorize --operation-key KEY --account-id ID --amount DECIMAL [--currency USD] --reason TEXT [--task-id ID] [--merchant NAME | --provider ID --executor ID --capability ID --billing-merchant ID [--model ID [--image-size SIZE]]] [--lease-profile NAME]
 
 Note:
   Supply one immutable agent-scoped operation key before the first request; do not generate a new key on retry.
@@ -4583,6 +4611,45 @@ mod tests {
             scope.unwrap()["provider"],
             "provider:google:gemini-developer"
         );
+    }
+
+    #[test]
+    fn model_and_image_size_flags_select_schema_v2() {
+        let typed = [
+            "--provider",
+            "provider:google:gemini-developer",
+            "--executor",
+            "executor:gongbu:image",
+            "--capability",
+            "capability:image:generate",
+            "--billing-merchant",
+            "merchant:google",
+        ];
+        let mut args = typed
+            .into_iter()
+            .chain(["--model", "gemini-3.1-flash-image", "--image-size", "4k"])
+            .map(str::to_string)
+            .collect();
+        let scope = take_execution_scope(&mut args).unwrap().1.unwrap();
+        assert_eq!(scope["schema_version"], 2);
+        assert_eq!(scope["model"], "gemini-3.1-flash-image");
+        assert_eq!(scope["image_size"], "4k");
+
+        let mut size_only = typed
+            .into_iter()
+            .chain(["--image-size", "4k"])
+            .map(str::to_string)
+            .collect();
+        assert!(take_execution_scope(&mut size_only)
+            .unwrap_err()
+            .to_string()
+            .contains("--image-size requires --model"));
+
+        let mut untyped = ["--model", "gemini-3.1-flash-image"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        assert!(take_execution_scope(&mut untyped).is_err());
     }
 
     #[test]
