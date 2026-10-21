@@ -44,11 +44,22 @@ jobs:
       - name: Run all workspace tests
         run: cargo test --workspace --all-targets --locked
 
+      # Keep workspace checks on the PR merge, but give public recordings a
+      # commit that a normal clone can fetch from the published task branch.
+      - name: Check out published source for the Break Hubu recording
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: target/break-hubu-source
+          persist-credentials: false
+
       - name: Run Break Hubu Episode 01 and preserve evidence
         id: break_hubu
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
         run: |
-          python3 scripts/break-hubu-episode-01.py --output target/break-hubu/ci
-          HUBU_BREAK_TEST_EVIDENCE=target/break-hubu/ci/evidence/run.json node --test examples/break-hubu/episode.test.cjs
+          python3 target/break-hubu-source/scripts/break-hubu-episode-01.py --output "$GITHUB_WORKSPACE/target/break-hubu/ci"
+          HUBU_BREAK_TEST_EVIDENCE=target/break-hubu/ci/evidence/run.json node --test target/break-hubu-source/examples/break-hubu/episode.test.cjs
 
       - name: Upload Break Hubu replay and test logs
         if: always() && steps.break_hubu.outcome != 'skipped'
