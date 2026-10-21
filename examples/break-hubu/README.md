@@ -2,100 +2,130 @@
 
 **One agent. 100 concurrent requests. $1 budget.**
 
-This 45-second visual replay is backed by an executable concurrency regression,
-not prerecorded outcomes. The test releases 100 threads from one barrier into
-Hubu's actual authorization route. Every request belongs to the same registered
-agent account and asks for $0.03. A permissive policy leaves the budget as the
-enforcement gate.
+This is a recorded walkthrough of an executable Hubu test. The main view shows
+what was configured, the code that ran, its actual output, and the resulting
+budget and ledger. Chapter timing is editorial; runtime milestones retain their
+captured elapsed times.
 
-## Run and preview
+## Watch a recording
 
-From the repository root, with the repository's pinned Rust toolchain, Python 3,
-and `protoc` installed:
+Unzip a generated recording bundle and open `index.html` in a current browser.
+The captured run is embedded in that generated page, so playback needs no
+account, provider keys, Rust installation, or local server. The source viewer in
+this directory has no prefilled passing results; generate a recording first or
+import a schema-v2 `evidence/run.json`.
+
+Use **Play walkthrough**, choose a chapter, or scrub the 75-second timeline.
+**Focus view** fits the stage to a desktop screen; Escape restores the full page.
+The recording shows:
+
+1. Actual agent/account/budget IDs, the applied policy, and the initial budget.
+2. Exact Rust source for the barrier and concurrent authorization requests.
+3. The actual Cargo command, captured stdout, and process exit status.
+4. One captured allow and deny, correlated to the complete decision list.
+5. Synthetic executor settlement and a matching canonical ledger posting.
+6. Initial, reserved, final, and reopened SQLite state, with persistence checks.
+
+The receipt includes all decisions and transactions, complete captured source
+files, source line references, and SHA-256 hashes. The viewer checks those
+hashes and reconciles the recorded facts before enabling playback. Hashes detect
+inconsistent bytes within a recording; they do not independently attest its
+origin. Inspect the source and rerun the test to verify the claim yourself.
+
+## Reproduce the test
+
+Anyone can reproduce the run from the public repository. The receipt supplies
+concrete clone/checkout commands for its full source SHA. For example, replace
+`FULL_COMMIT_FROM_RECORDING` with the SHA shown in that recording:
 
 ```sh
+git clone https://github.com/hacker-no-ice/hubu.git
+cd hubu
+git checkout FULL_COMMIT_FROM_RECORDING
 python3 scripts/break-hubu-episode-01.py --serve
 ```
 
-Open the loopback URL printed by the command. Press **Play replay** to watch,
-or scrub the timeline. **Focus view** fits the stage to a desktop screen for
-recording; Escape returns to the full page. The evidence drawer exposes all decisions and the
-canonical ledger. Animation time is editorial pacing, not request latency.
+Prerequisites for rerunning: Git, Python 3.9 or newer, and Rust through rustup
+(the repository pins its toolchain). Cargo downloads locked dependencies on the
+first run. `protoc` is needed if you also build the Gongbu/Temporal workspace
+components. No Hubu account, active profile, API keys, or paid provider is needed.
+The runner ignores active Hubu/Gongbu shell configuration and uses fresh
+SQLite storage and built-in test authentication.
 
-Each run creates a new directory under `target/break-hubu/`, containing the
-viewer, `scenario.json`, `evidence/run.json`, and `evidence/test.log`. Share the
-whole directory to preserve the evidence. Without a local server, open
-`index.html` and select `evidence/run.json` with the file picker. The source
-viewer starts without evidence and does not manufacture a passing result.
+The command prints a loopback preview URL, creates a new recording directory
+under `target/break-hubu/`, and creates an adjacent `.zip` for sharing. Existing
+recording directories and archives are refused. A failed test preserves its log
+and does not create a passing replay bundle.
 
-For an explicit new output directory:
+To save a recording without starting a server:
 
 ```sh
 python3 scripts/break-hubu-episode-01.py --output target/break-hubu/my-run
 ```
 
-Existing directories are refused so failed runs cannot inherit old passing
-evidence. A failed test preserves its log and does not package a passing replay.
-Development runs are marked as a dirty working tree; commit the implementation
-and rerun to link results to exact source. The runner records the source SHA,
-toolchain version, lockfile/scenario hashes, and UTC run time. Thread scheduling
-and generated IDs may differ between runs; the asserted totals must not.
+Share `target/break-hubu/my-run.zip`, or serve the generated directory on an
+HTTPS static host. It needs no backend. HTTPS, localhost, or a local file allows
+the browser to verify the recorded source and log hashes. The bundle contains the viewer, embedded
+recording, `scenario.json`, `evidence/run.json`, `evidence/test.log`, and the three
+captured source files. For a permanent public replay, retain that whole bundle;
+CI artifacts are retained for 30 days and GitHub may require sign-in to download
+those artifacts. The public repository and pinned source remain the independent
+reproduction path.
 
-The scenario lives in [scenario.json](./scenario.json); the regression reads it
-at compile time and validates this episode's fixed parameters. The exporter
-allowlists trace fields and omits bearer and authorization tokens. It uses a
-fresh temporary SQLite database and synthetic executor receipts, without an
-active profile, provider credentials, a network listener, or provider calls.
+Generated IDs and scheduling can differ between runs. The accounting invariant
+must remain the same. Clean committed captures link to exact GitHub source;
+working-tree captures are labeled and include the captured files, but checking
+out their base SHA alone will not reproduce uncommitted changes.
 
-## Exact claim and evidence
+## What the test proves
 
-The [regression](../../crates/hubu-api/src/tests/break_hubu.rs) checks:
+The [scenario](./scenario.json) configures one registered agent, 100 callers,
+a $1 budget, and $0.03 per request. The [regression](../../crates/hubu-api/src/tests/break_hubu.rs)
+uses real Hubu application functions for setup and releases 100 threads from one
+barrier into the real authenticated `/spend/authorize` route. A permissive policy
+leaves the budget as the enforcement gate. It then verifies:
 
-- 100 requests complete: 33 allowed and 67 denied for insufficient budget.
-- Before settlement, all 33 holds exist: $0.99 reserved, $0 consumed, $0.01 available.
-- Denied requests create no authorization token, budget hold, or executor claim.
-- Synthetic executor claims settle exactly $0.99; no funds are released.
-- 33 canonical transactions have balanced entries and account for every consumed unit.
-- Final state is $0.99 consumed, $0 reserved, $0.01 available, with zero unaccounted consumption.
-- The budget and ledger remain identical after SQLite is reopened.
+- Exactly 33 allows and 67 insufficient-budget denials.
+- Before settlement: $0.99 reserved, $0 consumed, and $0.01 available.
+- Denied requests have no authorization token, budget hold, or executor claim.
+- All 33 authorizations settle through synthetic executor receipts, with distinct claims and settlement IDs.
+- Exact $0.03 expense debits and clearing credits reconcile to $0.99 consumed, with zero unaccounted consumption.
+- Final state: $0.99 consumed, $0 reserved, $0.01 available, and no pending holds.
+- Reopening SQLite preserves the budget, all transactions, settled claims, and denied-attempt records.
 
-The remaining cent cannot fund another three-cent request. The tested ceiling
-is Hubu's authorization/reservation and internally recorded settlement amount.
-This is an in-process API route contention test. Production TCP serving currently
-serializes connections; this episode makes no HTTP throughput claim. Executor
-receipts are synthetic, so this is not evidence of an external provider bill,
-provider execution, or thread-bound identity enforcement. Direct provider access
-outside Hubu remains outside this claim.
+The remaining cent cannot fund another three-cent request. This is an isolated
+in-process API contention test, rather than the user's running stack. Production
+TCP serving currently serializes connections; no HTTP throughput claim is made.
+Executor receipts are synthetic, with no Gongbu/provider network call or actual
+invoice. The demonstrated ceiling covers Hubu's own authorizations, reservations,
+and internally recorded settlements. Direct provider access outside Hubu and
+thread-bound identity enforcement are outside this episode.
 
-The normal workspace test suite runs the regression even without evidence export:
+## Validation and CI
+
+The regression runs in the ordinary workspace test suite. To run only it:
 
 ```sh
 cargo test --lib -p hubu-api --locked break_hubu_episode_01
 ```
 
-With Node.js 18 or newer, validate the viewer's rejection of corrupted evidence
-against a generated run (replace the path with your run directory):
+With Node.js 18 or newer, test rejection of inconsistent or corrupted evidence
+against a generated recording:
 
 ```sh
 HUBU_BREAK_TEST_EVIDENCE=target/break-hubu/my-run/evidence/run.json node --test examples/break-hubu/episode.test.cjs
 ```
 
-The [CI workflow](../../.github/workflows/ci.yml) also packages a fresh replay and
-logs as the `break-hubu-episode-01` artifact on each CI run. It preserves failed
-test logs when the episode step fails. The artifact is run evidence, not an
-independent attestation; inspect the source and reproduce it.
+The [CI workflow](../../.github/workflows/ci.yml) runs the recording command and
+viewer evidence tests, and uploads the standalone replay plus underlying logs as
+`break-hubu-episode-01`. Failed episode steps retain their test logs when present.
+The capture schema is version 2; regenerate old version-1 recordings to include
+setup, source, stdout, representative responses, and persistence evidence.
 
-## Recording plan
+## Recording a narrated cut
 
-No recording is needed to preview this version. For a public cut, capture the
-generated viewer at 1920×1080 after a clean committed run. Enter **Focus view**,
-keep the mock label visible, press Play, and record the 45-second playback. Suggested narration:
-
-1. **0–8 seconds:** “One agent. One dollar. A hundred requests at once.”
-2. **8–22 seconds:** “Each request asks for three cents. Can they race past the budget?”
-3. **22–34 seconds:** “Thirty-three get through. Sixty-seven are denied. Ninety-nine cents reserved.”
-4. **34–45 seconds:** “The ledger reconciles to ninety-nine cents. One cent remains. Run the same test—or try to break it.”
-
-Voiceover is optional; the preview carries its own captions. A final recording
-should include the evidence view and exact source commit. No live paid-provider
-recording is needed for this episode.
+No human screen recording is needed to share or replay this version. An optional
+voiceover can follow the six chapters: setup → actual script → captured run →
+allow/deny evidence → synthetic settlement → reopened outcome. Keep the recorded
+run label and synthetic-settlement boundary visible. For a public cut, generate
+from a clean published commit and include the source and reproduction command.

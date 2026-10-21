@@ -1,7 +1,7 @@
 //! Episode 01 exercises concurrent authorization callers against one account.
 //! Settlement receipts are synthetic test fixtures; no provider is contacted.
 use super::*;
-use std::{collections::BTreeSet, sync::Barrier};
+use std::{collections::BTreeSet, sync::Barrier, time::Instant};
 
 fn read(state: &ServerState, path: &str) -> Value {
     let response = route(authenticated_get_request(path), state);
@@ -22,6 +22,8 @@ fn budget_snapshot(state: &ServerState) -> Value {
 
 #[test]
 fn break_hubu_episode_01_hundred_concurrent_callers_cannot_overdraw_one_dollar() {
+    let started = Instant::now();
+    let mut observations = Vec::new();
     let scenario: Value = serde_json::from_str(include_str!(
         "../../../../examples/break-hubu/scenario.json"
     ))
@@ -47,16 +49,18 @@ fn break_hubu_episode_01_hundred_concurrent_callers_cannot_overdraw_one_dollar()
         &state,
     )
     .unwrap();
+    // walkthrough:setup:start
     let agent = register_agent(
         json!({"name":"break-hubu-episode-01","version":"v1"}).to_string(),
         &state,
     )
     .unwrap();
     // Policy intentionally permits all requests: the shared budget is the gate.
+    let policy_yaml = "id: break_hubu_episode_01\nversion: v1\ndefault_effect: allow\nrules: []\n";
     add_policy(
         json!({
             "agent_id":agent.agent_id,
-            "policy_yaml":"id: break_hubu_episode_01\nversion: v1\ndefault_effect: allow\nrules: []\n"
+            "policy_yaml":policy_yaml
         })
         .to_string(),
         &state,
@@ -69,6 +73,15 @@ fn break_hubu_episode_01_hundred_concurrent_callers_cannot_overdraw_one_dollar()
         json!({"available_units":budget_units,"reserved_units":0,"consumed_units":0})
     );
 
+    // walkthrough:setup:end
+    observations.push(json!({
+        "id":"setup", "elapsed_ms":started.elapsed().as_millis(),
+        "data":{"agent_id":agent.agent_id,"account_id":agent.account_id,
+            "budget_id":budget.budget.budget_id,"snapshot":initial}
+    }));
+    println!("[setup] temporary SQLite episode-01.sqlite; one registered agent/account; budget={budget_units} USD units at scale 6; policy=allow");
+
+    // walkthrough:burst:start
     let state = Arc::new(state);
     let barrier = Arc::new(Barrier::new(workers_count + 1));
     let workers: Vec<_> = (0..workers_count)
@@ -80,41 +93,46 @@ fn break_hubu_episode_01_hundred_concurrent_callers_cannot_overdraw_one_dollar()
             std::thread::spawn(move || {
                 let operation_key = format!("break-hubu-episode-01-worker-{worker:03}");
                 barrier.wait();
+                let request = json!({
+                    "operation_key":operation_key,"account_id":account,
+                    "amount":amount,"currency":"usd",
+                    "merchant":"gongbu.image",
+                    "task_id":"break-hubu-episode-01",
+                    "reason":"Episode 01 synthetic three-cent request"
+                });
                 let response = route(
-                    authenticated_json_request(
-                        "/spend/authorize",
-                        json!({
-                            "operation_key":operation_key,"account_id":account,
-                            "amount":amount,"currency":"usd",
-                            "merchant":"gongbu.image",
-                            "task_id":"break-hubu-episode-01",
-                            "reason":"Episode 01 synthetic three-cent request"
-                        }),
-                    ),
+                    authenticated_json_request("/spend/authorize", request.clone()),
                     &state,
                 );
-                (worker, operation_key, response)
+                (worker, operation_key, request, response)
             })
         })
         .collect();
+    observations.push(json!({
+        "id":"burst", "elapsed_ms":started.elapsed().as_millis(),
+        "data":{"spawned_callers":workers.len(),"barrier_participants":workers_count + 1,
+            "request_units":request_units}
+    }));
+    println!("[burst] spawned {} caller threads; /spend/authorize dispatch starts at the {}-participant barrier", workers.len(), workers_count + 1);
     barrier.wait();
+    // walkthrough:burst:end
     let responses: Vec<_> = workers
         .into_iter()
         .map(|worker| worker.join().expect("authorization worker should finish"))
         .collect();
     assert_eq!(responses.len(), workers_count);
-    assert!(responses.iter().all(|(_, _, r)| r.status == 200));
+    assert!(responses.iter().all(|(_, _, _, r)| r.status == 200));
     let allowed: Vec<_> = responses
         .iter()
-        .filter(|(_, _, r)| r.body["decision"] == "allow")
+        .filter(|(_, _, _, r)| r.body["decision"] == "allow")
         .collect();
     let denied: Vec<_> = responses
         .iter()
-        .filter(|(_, _, r)| r.body["decision"] == "deny")
+        .filter(|(_, _, _, r)| r.body["decision"] == "deny")
         .collect();
     assert_eq!(allowed.len(), 33);
     assert_eq!(denied.len(), 67);
-    assert!(denied.iter().all(|(_, _, r)| {
+    assert!(denied.iter().all(|(_, _, _, r)| {
         r.body["auth_token_id"].is_null()
             && r.body["budget_hold"].is_null()
             && r.body["reasons"]
@@ -125,13 +143,13 @@ fn break_hubu_episode_01_hundred_concurrent_callers_cannot_overdraw_one_dollar()
     }));
     let allowed_decisions: BTreeSet<_> = allowed
         .iter()
-        .map(|(_, _, r)| r.body["decision_id"].as_str().unwrap().to_owned())
+        .map(|(_, _, _, r)| r.body["decision_id"].as_str().unwrap().to_owned())
         .collect();
     assert_eq!(allowed_decisions.len(), 33);
     assert_eq!(
         allowed
             .iter()
-            .map(|(_, _, r)| r.body["auth_token_id"].as_str().unwrap())
+            .map(|(_, _, _, r)| r.body["auth_token_id"].as_str().unwrap())
             .collect::<BTreeSet<_>>()
             .len(),
         33
@@ -173,7 +191,18 @@ fn break_hubu_episode_01_hundred_concurrent_callers_cannot_overdraw_one_dollar()
         .unwrap()
         .is_empty());
 
-    for (worker, _, response) in &allowed {
+    observations.push(json!({
+        "id":"authorized", "elapsed_ms":started.elapsed().as_millis(),
+        "data":{"allowed":allowed.len(),"denied":denied.len(),"holds":33,"tokens":33,
+            "claims":0,"transactions":0,"snapshot":reserved,
+            "decision_ids":allowed_decisions}
+    }));
+    println!("[authorized] callers={} allowed={} denied={}; holds=33 tokens=33 claims=0; available=10000 reserved=990000 consumed=0", responses.len(), allowed.len(), denied.len());
+
+    // walkthrough:settlement:start
+    let mut claim_ids = BTreeSet::new();
+    let mut settlement_ids = BTreeSet::new();
+    for (worker, _, _, response) in &allowed {
         let claim = claim_executor_spend(
             json!({
                 "contract_version":"hubu-spend-executor-v4.5",
@@ -186,7 +215,8 @@ fn break_hubu_episode_01_hundred_concurrent_callers_cannot_overdraw_one_dollar()
             &state,
         )
         .unwrap();
-        finalize_executor_spend(
+        assert!(claim_ids.insert(claim.claim_id.clone()));
+        let settlement = finalize_executor_spend(
             json!({
                 "claim_id":claim.claim_id,
                 "receipt":{
@@ -206,7 +236,9 @@ fn break_hubu_episode_01_hundred_concurrent_callers_cannot_overdraw_one_dollar()
             None,
         )
         .unwrap();
+        assert!(settlement_ids.insert(settlement["settlement_id"].as_str().unwrap().to_owned()));
     }
+    // walkthrough:settlement:end
     let final_snapshot = budget_snapshot(&state);
     assert_eq!(
         final_snapshot,
@@ -230,7 +262,15 @@ fn break_hubu_episode_01_hundred_concurrent_callers_cannot_overdraw_one_dollar()
             .collect::<BTreeSet<_>>(),
         allowed_decisions
     );
+    assert_eq!(
+        transactions
+            .iter()
+            .map(|transaction| transaction["settlement_id"].as_str().unwrap().to_owned())
+            .collect::<BTreeSet<_>>(),
+        settlement_ids
+    );
     for transaction in transactions {
+        assert_eq!(transaction["kind"], "external_provider");
         assert_eq!(transaction["budget_charge_delta"]["units"], "30000");
         assert_eq!(transaction["budget_charge_delta"]["scale"], 6);
         assert_eq!(
@@ -252,18 +292,42 @@ fn break_hubu_episode_01_hundred_concurrent_callers_cannot_overdraw_one_dollar()
             entry["direction"] == "credit" && entry["account_kind"] == "ExternallyBilledClearing"
         }));
     }
+    observations.push(json!({
+        "id":"settled", "elapsed_ms":started.elapsed().as_millis(),
+        "data":{"transaction_count":transactions.len(),"claim_ids":claim_ids,
+            "settlement_ids":settlement_ids,"snapshot":final_snapshot,
+            "coverage":ledger["coverage"]}
+    }));
+    println!("[settled] 33 synthetic executor receipts; 33 external_provider transactions; available=10000 reserved=0 consumed=990000; unaccounted=0");
+
+    // walkthrough:persistence:start
     // Reopen durable state rather than trusting only the live manager balance.
     drop(state);
     let reopened = ServerState::new_with_db_path(&database).unwrap();
-    assert_eq!(budget_snapshot(&reopened), final_snapshot);
-    assert_eq!(
-        read(&reopened, &ledger_path)["transactions"],
-        ledger["transactions"]
-    );
+    let reopened_snapshot = budget_snapshot(&reopened);
+    let reopened_ledger = read(&reopened, &ledger_path);
+    let transactions_match = reopened_ledger["transactions"] == ledger["transactions"];
+    assert_eq!(reopened_snapshot, final_snapshot);
+    assert!(transactions_match);
+    // walkthrough:persistence:end
     {
         let repository = reopened.governance.lock().unwrap();
         let claims = repository.load_executor_claims().unwrap();
         assert_eq!(claims.len(), 33);
+        assert_eq!(
+            claims
+                .iter()
+                .map(|claim| claim.id.to_string())
+                .collect::<BTreeSet<_>>(),
+            claim_ids
+        );
+        assert_eq!(
+            claims
+                .iter()
+                .map(|claim| claim.settlement_id.as_ref().unwrap().to_string())
+                .collect::<BTreeSet<_>>(),
+            settlement_ids
+        );
         assert!(claims
             .iter()
             .all(|claim| claim.status == SpendExecutorClaimStatus::Settled));
@@ -274,7 +338,7 @@ fn break_hubu_episode_01_hundred_concurrent_callers_cannot_overdraw_one_dollar()
                 .collect::<BTreeSet<_>>(),
             allowed
                 .iter()
-                .map(|(_, key, _)| key.as_str())
+                .map(|(_, key, _, _)| key.as_str())
                 .collect::<BTreeSet<_>>()
         );
         assert_eq!(
@@ -297,10 +361,18 @@ fn break_hubu_episode_01_hundred_concurrent_callers_cannot_overdraw_one_dollar()
     assert_eq!(governance["summary"]["distinct_attempts"], 67);
     assert_eq!(governance["summary"]["distinct_operations"], 67);
 
+    observations.push(json!({
+        "id":"reopened", "elapsed_ms":started.elapsed().as_millis(),
+        "data":{"snapshot":reopened_snapshot,"transactions_match":transactions_match,
+            "transaction_count":reopened_ledger["transactions"].as_array().unwrap().len(),
+            "settled_claims":33,"denied_attempts":governance["summary"]["distinct_attempts"]}
+    }));
+    println!("[reopened] fresh SQLite connection: same budget; all 33 transactions and settled claims persisted; 67 distinct denied attempts");
+
     if let Some(destination) = env::var_os("HUBU_BREAK_EVIDENCE_DIR") {
         let requests: Vec<_> = responses
             .iter()
-            .map(|(worker, key, response)| {
+            .map(|(worker, key, _, response)| {
                 json!({
                     "worker":worker,"operation_key":key,"decision":response.body["decision"],
                     "decision_id":response.body["decision_id"],"reason":response.body["reasons"],
@@ -308,8 +380,31 @@ fn break_hubu_episode_01_hundred_concurrent_callers_cannot_overdraw_one_dollar()
                 })
             })
             .collect();
+        let example = |row: &(usize, String, Value, HttpResponse)| {
+            let (_, _, request, response) = row;
+            json!({"request":request,"response":{
+                "status":response.status,"decision":response.body["decision"],
+                "decision_id":response.body["decision_id"],"reasons":response.body["reasons"],
+                "has_authorization_token":!response.body["auth_token_id"].is_null(),
+                "has_budget_hold":!response.body["budget_hold"].is_null()
+            }})
+        };
         let evidence = json!({
-            "schema_version":1,
+            "schema_version":2,
+            "setup":{
+                "agent":{"name":"break-hubu-episode-01","version":"v1",
+                    "agent_id":agent.agent_id,"account_id":agent.account_id},
+                "budget":{"budget_id":budget.budget.budget_id,"limit_units":budget_units,
+                    "currency":"USD","scale":6},
+                "policy":{"id":"break_hubu_episode_01","version":"v1","yaml":policy_yaml},
+                "storage":{"kind":"temporary_sqlite","database_name":"episode-01.sqlite"},
+                "authorization_path":"/spend/authorize","dispatch":"in_process_route",
+                "authentication":"test_fixture","barrier_participants":workers_count + 1
+            },
+            "observations":observations,
+            "persistence":{"reopened_snapshot":reopened_snapshot,"transactions_match":transactions_match,
+                "transaction_count":reopened_ledger["transactions"].as_array().unwrap().len()},
+            "examples":{"allowed":example(allowed[0]),"denied":example(denied[0])},
             "scenario":{
                 "workers":workers_count,"registered_accounts":1,"budget_units":budget_units,
                 "request_units":request_units,"currency":"USD","scale":6,
@@ -325,18 +420,18 @@ fn break_hubu_episode_01_hundred_concurrent_callers_cannot_overdraw_one_dollar()
             "snapshots":{"initial":initial,"reserved":reserved,"final":final_snapshot},
             "ledger":ledger,"governance":governance,
             "assertions":[
-                {"name":"100 concurrent callers returned decisions","passed":true},
-                {"name":"33 requests allowed and 67 denied by remaining budget","passed":true},
-                {"name":"all successful holds existed before settlement","passed":true},
-                {"name":"denied attempts received no token, hold or executor claim","passed":true},
-                {"name":"33 distinct authorizations settled with balanced ledger entries","passed":true},
-                {"name":"exact ledger charges reconcile to 990000 units with no unaccounted consumption","passed":true},
-                {"name":"10000 units remain, insufficient for the next 30000-unit request","passed":true},
-                {"name":"budget and ledger survive reopening SQLite","passed":true}
+                {"id":"callers_completed","name":"100 concurrent callers returned decisions","passed":true},
+                {"id":"budget_decisions","name":"33 requests allowed and 67 denied by remaining budget","passed":true},
+                {"id":"holds_before_settlement","name":"all successful holds existed before settlement","passed":true},
+                {"id":"denied_no_authority","name":"denied attempts received no token, hold or executor claim","passed":true},
+                {"id":"balanced_settlements","name":"33 distinct authorizations settled with balanced ledger entries","passed":true},
+                {"id":"ledger_reconciled","name":"exact ledger charges reconcile to 990000 units with no unaccounted consumption","passed":true},
+                {"id":"remaining_below_request","name":"10000 units remain, insufficient for the next 30000-unit request","passed":true},
+                {"id":"durable_reopen","name":"budget and ledger survive reopening SQLite","passed":true}
             ]
         });
         let serialized = serde_json::to_string_pretty(&evidence).unwrap();
-        for (_, _, response) in &allowed {
+        for (_, _, _, response) in &allowed {
             assert!(!serialized.contains(response.body["auth_token_id"].as_str().unwrap()));
         }
         assert!(!serialized.contains(TEST_AUTH_TOKEN));

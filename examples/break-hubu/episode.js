@@ -1,222 +1,67 @@
 "use strict";
 
-/* Kept independent of the DOM so the same evidence checks can run in Node. */
-function validateEvidence(data) {
-  const checks = [];
-  const require = (condition, message) => {
-    if (!condition) throw new Error(message);
-  };
-  const object = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
-  const safeUnits = (value) => Number.isSafeInteger(value) && value >= 0;
-  const nonempty = (value) => typeof value === "string" && value.length > 0 && value.length <= 500;
-  require(object(data) && data.schema_version === 1, "Expected Episode 01 evidence with schema_version 1.");
-  const scenario = data.scenario;
-  require(object(scenario), "The scenario is missing.");
-  require(scenario.workers === 100 && scenario.budget_units === 1000000 && scenario.request_units === 30000 && scenario.currency === "USD" && scenario.scale === 6, "This replay requires 100 requests of $0.03 against a $1 USD budget at scale 6.");
-  require(scenario.registered_accounts === 1 && scenario.provider_mode === "synthetic_executor_settlement", "Expected one registered account and synthetic executor settlement.");
-  for (const field of ["agent_id", "account_id", "budget_id"]) require(nonempty(scenario[field]), `The scenario ${field} is missing.`);
-  require(nonempty(scenario.scope), "The scenario scope is missing.");
-  checks.push("Episode scenario and one registered account");
-
-  require(Array.isArray(data.requests) && data.requests.length === 100, "Expected exactly 100 recorded decisions.");
-  const workers = new Set();
-  const operations = new Set();
-  const decisions = new Set();
-  const allowed = [];
-  const denied = [];
-  for (const request of data.requests) {
-    require(object(request), "A recorded request is malformed.");
-    require(Number.isSafeInteger(request.worker) && request.worker >= 0 && request.worker < 100 && !workers.has(request.worker), "Worker IDs must be unique integers from 0 through 99.");
-    require(nonempty(request.operation_key) && !operations.has(request.operation_key), "Every request needs a distinct operation key.");
-    require(nonempty(request.decision_id) && !decisions.has(request.decision_id), "Every request needs a distinct decision ID.");
-    require(request.decision === "allow" || request.decision === "deny", "Every request must record allow or deny.");
-    require(request.amount_units === 30000, "A request amount differs from the episode's $0.03 scenario.");
-    require(Array.isArray(request.reason) && request.reason.length <= 20 && request.reason.every((reason) => typeof reason === "string" && reason.length <= 1000), "Decision reasons must be an array of text.");
-    require(request.decision !== "deny" || request.reason.includes("budget does not have enough remaining balance"), "A denied request does not record an insufficient budget reason.");
-    workers.add(request.worker);
-    operations.add(request.operation_key);
-    decisions.add(request.decision_id);
-    (request.decision === "allow" ? allowed : denied).push(request);
-  }
-  require(allowed.length === 33 && denied.length === 67, "This recording does not contain the expected 33 allowed and 67 denied decisions.");
-  checks.push("100 distinct workers, operations, and decisions");
-
-  const summary = data.summary;
-  require(object(summary), "The run summary is missing.");
-  require(summary.allowed === allowed.length && summary.denied === denied.length && summary.errors === 0 && summary.settled === allowed.length, "Summary counts do not reconcile with the recorded decisions.");
-  require(summary.authorized_units === 990000 && summary.settled_units === 990000 && summary.released_units === 0, "Authorized, settled, or released units do not reconcile.");
-  require(object(data.snapshots), "Recorded budget snapshots are missing.");
-  const expected = {
-    initial: { available_units: 1000000, reserved_units: 0, consumed_units: 0 },
-    reserved: { available_units: 10000, reserved_units: 990000, consumed_units: 0 },
-    final: { available_units: 10000, reserved_units: 0, consumed_units: 990000 }
-  };
-  for (const [name, values] of Object.entries(expected)) {
-    const snapshot = data.snapshots[name];
-    require(object(snapshot), `The ${name} budget snapshot is missing.`);
-    for (const [field, value] of Object.entries(values)) require(safeUnits(snapshot[field]) && snapshot[field] === value, `The ${name} snapshot has inconsistent ${field}.`);
-    require(snapshot.available_units + snapshot.reserved_units + snapshot.consumed_units === scenario.budget_units, `The ${name} snapshot does not conserve the budget.`);
-  }
-  checks.push("Summary and all three budget snapshots reconcile");
-
-  const ledger = data.ledger;
-  require(object(ledger) && Array.isArray(ledger.transactions) && ledger.transactions.length === 33 && ledger.next_cursor === null, "Expected the complete ledger of 33 settlements.");
-  const coverage = ledger.coverage;
-  require(object(coverage), "Ledger coverage is missing.");
-  const amount = (value, units) => object(value) && value.units === String(units) && value.scale === 6 && value.currency === "usd";
-  require(amount(coverage.consumed_amount, 990000) && amount(coverage.recorded_budget_charges, 990000) && amount(coverage.unaccounted_consumption, 0) && coverage.pending_hold_count === 0, "Ledger coverage does not reconcile to $0.99 settled with no pending holds.");
-  require(coverage.agent_id === scenario.agent_id && coverage.budget_id === scenario.budget_id, "Ledger coverage belongs to a different agent or budget.");
-  const authorizations = new Set(allowed.map((request) => request.decision_id));
-  const transactions = new Set();
-  const settlements = new Set();
-  const entryAmount = (entry) => {
-    require(object(entry) && object(entry.amount), "A ledger entry is malformed.");
-    const value = entry.amount;
-    require(typeof value.amount === "string" && /^\d{1,40}$/.test(value.amount) && Number.isInteger(value.scale) && value.scale >= 0 && value.scale <= 18 && value.currency === "usd", "A ledger entry amount is malformed.");
-    return BigInt(value.amount) * (10n ** BigInt(18 - value.scale));
-  };
-  for (const transaction of ledger.transactions) {
-    require(object(transaction) && nonempty(transaction.id) && !transactions.has(transaction.id), "Every ledger transaction needs a distinct ID.");
-    require(nonempty(transaction.settlement_id) && !settlements.has(transaction.settlement_id), "Every ledger settlement needs a distinct ID.");
-    require(authorizations.has(transaction.authorization_id), "A settlement is duplicated or does not match an allowed decision.");
-    require(transaction.agent_id === scenario.agent_id && transaction.account_id === scenario.account_id && transaction.budget_id === scenario.budget_id, "A settlement belongs to a different agent, account, or budget.");
-    require(object(transaction.budget_charge_delta) && transaction.budget_charge_delta.units === "30000" && transaction.budget_charge_delta.scale === 6, "A settlement's budget charge is not $0.03.");
-    require(object(transaction.effective_cost) && transaction.effective_cost.amount === "3" && transaction.effective_cost.scale === 2 && transaction.effective_cost.currency === "usd", "A settlement's effective cost is not $0.03 USD.");
-    require(Array.isArray(transaction.entries) && transaction.entries.length === 2, "A settlement must have two balanced ledger entries.");
-    const [first, second] = transaction.entries;
-    const firstAmount = entryAmount(first);
-    const secondAmount = entryAmount(second);
-    require(firstAmount === 30000000000000000n && secondAmount === firstAmount && [first.direction, second.direction].sort().join(",") === "credit,debit", "A settlement's ledger entries do not balance to $0.03.");
-    require(transaction.entries.some((entry) => entry.account_kind === "AgentSpendExpense" && entry.direction === "debit") && transaction.entries.some((entry) => entry.account_kind === "ExternallyBilledClearing" && entry.direction === "credit"), "A settlement does not debit agent expense and credit externally billed clearing.");
-    transactions.add(transaction.id);
-    settlements.add(transaction.settlement_id);
-    authorizations.delete(transaction.authorization_id);
-  }
-  require(authorizations.size === 0, "An allowed authorization has no ledger settlement.");
-  checks.push("All 33 allowed decisions match balanced $0.03 ledger settlements");
-
-  require(Array.isArray(data.assertions) && data.assertions.length > 0 && data.assertions.length <= 50, "Recorded test assertions are missing.");
-  require(data.assertions.every((assertion) => object(assertion) && nonempty(assertion.name) && assertion.passed === true), "A recorded test assertion failed or is malformed; passing playback is unavailable.");
-  checks.push(`${data.assertions.length} recorded test assertions passed`);
-  if (data.provenance !== undefined) {
-    require(object(data.provenance), "Run provenance is malformed.");
-    const provenance = data.provenance;
-    require(typeof provenance.commit === "string" && /^[a-f0-9]{40}$/.test(provenance.commit) && typeof provenance.dirty === "boolean", "Run provenance needs a full commit SHA and a working-tree status.");
-    require(provenance.repository_url === "https://github.com/hacker-no-ice/hubu" && provenance.test_file === "crates/hubu-api/src/tests/break_hubu.rs" && nonempty(provenance.test_command), "Run provenance must identify the Episode 01 source test and command.");
-    require(provenance.elapsed_ms === undefined || (Number.isFinite(provenance.elapsed_ms) && provenance.elapsed_ms >= 0), "Captured elapsed time is malformed.");
-  }
-  return { run: data, checks, allowed: allowed.length, denied: denied.length };
-}
-
-if (typeof module !== "undefined" && module.exports) module.exports = { validateEvidence };
-
+/* The validator and digest checks live in evidence.js, shared with the capture tests. */
 if (typeof document !== "undefined") {
   (() => {
     const $ = (id) => document.getElementById(id);
-    const duration = 45;
-    const money = (units) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(units / 1000000);
+    const duration = 75;
+    const maxFileSize = 3000000;
+    const money = (units) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 2 }).format(units / 1000000);
+    const json = (value) => JSON.stringify(value, null, 2);
+    const elapsed = (value) => `${value.toLocaleString("en-US", { maximumFractionDigits: 1 })} ms`;
+    const clock = (value) => `${String(Math.floor(value / 60)).padStart(2, "0")}:${String(Math.floor(value % 60)).padStart(2, "0")}`;
     const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
-    const phases = [
-      { start: 0, number: "01", kicker: "SET THE LIMIT", title: "One agent.\nOne dollar.", description: "One registered agent account starts with $1 available. Each of its 100 concurrent requests asks to authorize $0.03." },
-      { start: 6, number: "02", kicker: "RELEASE THE BURST", title: "100 requests.\nAll at once.", description: "The local test releases 100 worker tasks through the API handlers. Together, they request $3 of authorization from a $1 budget." },
-      { start: 14, number: "03", kicker: "CHECK EVERY REQUEST", title: "33 get through.\n67 hit the limit.", description: "Recorded decisions allow 33 requests and deny 67. The captured hold snapshot has $0.99 reserved, with $0.01 still available." },
-      { start: 28, number: "04", kicker: "FOLLOW THE MONEY", title: "Every allowed request\ngets a receipt.", description: "The test synthetically settles all 33 authorizations. Each has a balanced $0.03 ledger transaction. No external provider is called." },
-      { start: 38, number: "05", kicker: "THE RECEIPT", title: "$0.99 settled.\n$0.01 left.", description: "The final snapshot reconciles to the $1 limit. No holds remain, and the recorded assertions include reopening SQLite to check persistence." }
+    const chapters = [
+      { start: 0, label: "01 / THE SETUP", title: "Here is what we tested.", description: "The test creates one agent, a $1 budget, and an allow policy in an isolated SQLite database. These are the IDs and policy captured from that setup.", excerpt: "setup", observation: "setup", caption: "Setup calls real Hubu registration, policy, and storage functions. Authentication is a test fixture." },
+      { start: 12, label: "02 / THE TEST SCRIPT", title: "One agent. One shared starting line.", description: "100 worker tasks wait at one barrier. Each then requests $0.03 through Hubu's /spend/authorize route using the same agent account.", excerpt: "burst", observation: "burst", caption: "This is concurrent in-process route dispatch, using the real Hubu handler. The test does not send HTTP over a network." },
+      { start: 25, label: "03 / THE CAPTURED RUN", title: "The command. The actual output.", description: "This is the exact command and Cargo output saved by the capture script. Read the runner alongside it to see how the recording was made.", source: "runner", caption: "Output is displayed as captured. Playback pacing is editorial; nothing here is a live terminal." },
+      { start: 35, label: "04 / HUBU'S DECISIONS", title: "33 allowed. 67 denied.", description: "Inspect actual request and response examples. The denied request records insufficient budget; the captured snapshot has $0.99 held and $0.01 available.", excerpt: "burst", observation: "authorized", caption: "The file includes all 100 decisions. No per-request ordering or timing is inferred from the walkthrough." },
+      { start: 50, label: "05 / SETTLE AND RECONCILE", title: "Follow an authorization into the ledger.", description: "The test feeds synthetic executor settlement events to Hubu. All 33 allowed authorizations produce balanced $0.03 ledger transactions.", excerpt: "settlement", observation: "settled", caption: "Settlement inputs are synthetic. The Hubu settlement and ledger code is real; no provider executes or bills a request." },
+      { start: 65, label: "06 / REOPEN THE DATABASE", title: "Does the result survive reopening?", description: "The harness closes and reopens SQLite, then checks the budget and ledger again. Compare the captured snapshots and inspect the persistence assertion.", excerpt: "persistence", observation: "reopened", caption: "These are snapshots and transactions read from the reopened database, alongside the exact test code that checks them." }
     ];
-    const dots = [];
-    for (let index = 0; index < 100; index += 1) {
-      const dot = document.createElement("span");
-      dot.className = "worker";
-      dot.setAttribute("aria-hidden", "true");
-      $("worker-grid").append(dot);
-      dots.push(dot);
-    }
     let evidence = null;
-    let sourceText = "";
+    let rawRecording = "";
     let position = 0;
     let playing = false;
     let frame = 0;
     let lastFrame = 0;
-    let phaseIndex = -1;
+    let chapterIndex = -1;
     let loadVersion = 0;
     let focused = false;
     let savedScroll = 0;
+    let fullSource = false;
+    let activeSource = null;
+    let activeExcerpt = null;
+    let captureOptions = [];
+    const objectUrls = [];
     const put = (id, value) => { $(id).textContent = value; };
+    const controls = ["play-button", "previous-button", "next-button", "restart-button", "timeline", "view-evidence", "view-reproduce", "focus-evidence", "download-evidence", "capture-select", "source-mode"];
+    const chapterButtons = [...$("chapter-nav").querySelectorAll("button")];
+
+    function recordingUrl(content, type = "text/plain") {
+      const url = URL.createObjectURL(new Blob([content], { type }));
+      objectUrls.push(url);
+      return url;
+    }
     function setFocused(value, restoreScroll = true) {
-      if (value === focused) return;
+      if (focused === value) return;
       if (value) savedScroll = window.scrollY;
       focused = value;
-      document.body.classList.toggle("is-focused", focused);
-      $("focus-button").setAttribute("aria-pressed", String(focused));
-      $("focus-button").setAttribute("aria-label", focused ? "Exit focus view" : "Enter focus view");
-      $("focus-button").replaceChildren(document.createTextNode(focused ? "Exit focus " : "Focus view "), Object.assign(document.createElement("span"), { textContent: focused ? "↙" : "⤢", ariaHidden: "true" }));
-      put("stage-title", focused ? "BREAK HUBU / EPISODE 01" : "The concurrency test");
-      if (focused || restoreScroll) window.scrollTo({ top: focused ? 0 : savedScroll, behavior: "instant" });
+      document.body.classList.toggle("is-focused", value);
+      $("focus-button").setAttribute("aria-pressed", String(value));
+      put("focus-button", value ? "Exit focus ↙" : "Focus view ⤢");
+      if (value || restoreScroll) window.scrollTo({ top: value ? 0 : savedScroll, behavior: "instant" });
     }
-    const withSmall = (id, value, suffix) => {
-      const small = document.createElement("small");
-      small.textContent = suffix;
-      $(id).replaceChildren(document.createTextNode(value), small);
-    };
     function setPlaying(value) {
       playing = Boolean(value && evidence);
-      put("play-label", playing ? "Pause" : position >= duration ? "Replay" : "Play replay");
+      put("play-label", playing ? "Pause" : position >= duration ? "Replay" : "Play walkthrough");
       put("play-icon", playing ? "Ⅱ" : "▶");
-      $("play-button").setAttribute("aria-label", playing ? "Pause replay" : position >= duration ? "Replay from beginning" : "Play replay");
+      $("play-button").setAttribute("aria-label", playing ? "Pause walkthrough" : position >= duration ? "Replay from beginning" : "Play walkthrough");
+      cancelAnimationFrame(frame);
       if (playing) {
         lastFrame = performance.now();
-        cancelAnimationFrame(frame);
         frame = requestAnimationFrame(tick);
-      } else cancelAnimationFrame(frame);
-    }
-    function render() {
-      $("timeline").value = String(position);
-      $("timeline").setAttribute("aria-valuetext", `${Math.floor(position)} seconds of 45 seconds`);
-      $("timeline").style.background = `linear-gradient(to right, var(--orange) ${position / duration * 100}%, var(--line) ${position / duration * 100}%)`;
-      put("playback-time", `00:${String(Math.floor(position)).padStart(2, "0")}`);
-      if (!evidence) return;
-      const run = evidence.run;
-      const nextPhase = phases.findLastIndex((phase) => position >= phase.start);
-      if (nextPhase !== phaseIndex) {
-        phaseIndex = nextPhase;
-        const phase = phases[phaseIndex];
-        put("chapter-number", phase.number);
-        put("phase-kicker", phase.kicker);
-        put("phase-title", phase.title);
-        $("phase-title").style.whiteSpace = "pre-line";
-        put("phase-description", phase.description);
-        put("phase-announcement", `${phase.kicker}. ${phase.title.replace("\n", " ")}`);
       }
-      const requested = position < 6 ? 0 : Math.min(100, Math.floor((position - 6) / 8 * 100));
-      const revealed = position < 14 ? 0 : Math.min(100, Math.floor((position - 14) / 14 * 100));
-      let allowCount = 0;
-      let denyCount = 0;
-      run.requests.forEach((request, index) => {
-        const shown = index < revealed;
-        const dot = dots[request.worker];
-        dot.className = `worker${shown ? ` ${request.decision === "allow" ? "allowed" : "denied"}` : ""}${!reducedMotion.matches && position >= 6 && position < 14 && index < requested ? " active" : ""}`;
-        dot.title = `Worker ${String(request.worker).padStart(3, "0")}${shown ? ` · ${request.decision === "allow" ? "allowed" : "denied"}` : " · awaiting replay reveal"}`;
-        if (shown && request.decision === "allow") allowCount += 1;
-        if (shown && request.decision === "deny") denyCount += 1;
-      });
-      put("grid-progress", position < 6 ? "Ready · one agent account" : position < 14 ? `${requested} / 100 requests in replay` : `${revealed} / 100 decisions revealed`);
-      $("worker-grid").setAttribute("aria-label", `Illustrative reveal of recorded results: ${allowCount} allowed, ${denyCount} denied, ${100 - revealed} not yet revealed.`);
-      withSmall("requested-total", money(requested * run.scenario.request_units), " / $3.00");
-      withSmall("allowed-total", String(allowCount), " requests");
-      withSmall("denied-total", String(denyCount), " requests");
-      const snapshotKey = position < 14 ? "initial" : position < 34 ? "reserved" : "final";
-      const snapshot = run.snapshots[snapshotKey];
-      put("budget-caption", `CAPTURED · ${snapshotKey === "initial" ? "INITIAL BUDGET" : snapshotKey === "reserved" ? "ALL HOLDS" : "FINAL BUDGET"}`);
-      $("budget-unloaded").hidden = true;
-      $("budget-consumed").style.width = `${snapshot.consumed_units / 10000}%`;
-      $("budget-reserved").style.width = `${snapshot.reserved_units / 10000}%`;
-      put("settled-value", money(snapshot.consumed_units));
-      put("reserved-value", money(snapshot.reserved_units));
-      put("available-value", money(snapshot.available_units));
-      $("budget-track").setAttribute("aria-label", `Recorded ${snapshotKey} snapshot: ${money(snapshot.consumed_units)} settled, ${money(snapshot.reserved_units)} reserved, ${money(snapshot.available_units)} available.`);
-      put("overspend-total", position >= 38 ? money(Math.max(0, snapshot.consumed_units - run.scenario.budget_units)) : "—");
-      put("result-title", position >= 38 ? "The recorded budget held." : "Evidence ready to replay");
-      put("result-description", position >= 38 ? "$0.99 settled · $0.01 available · $0.00 released" : `${run.assertions.length} recorded assertions · 100 decisions · 33 ledger settlements`);
     }
     function tick(now) {
       if (!playing) return;
@@ -226,80 +71,227 @@ if (typeof document !== "undefined") {
       if (position >= duration) setPlaying(false);
       else frame = requestAnimationFrame(tick);
     }
+    function facts(entries) {
+      $("chapter-facts").replaceChildren(...entries.map(([label, value]) => {
+        const row = document.createElement("div");
+        const term = document.createElement("dt");
+        const detail = document.createElement("dd");
+        term.textContent = label;
+        detail.textContent = value;
+        row.append(term, detail);
+        return row;
+      }));
+    }
+    function snapshotsText(run) {
+      const lines = ["CAPTURED USD BUDGET SNAPSHOTS", "", "                 Available   Reserved    Consumed", "                 ─────────   ────────    ────────"];
+      for (const [label, snapshot] of [["Initial", run.snapshots.initial], ["After burst", run.snapshots.reserved], ["After settle", run.snapshots.final], ["Reopened", run.persistence.reopened_snapshot]]) {
+        lines.push(`${label.padEnd(17)}${money(snapshot.available_units).padEnd(12)}${money(snapshot.reserved_units).padEnd(12)}${money(snapshot.consumed_units)}`);
+      }
+      lines.push("", `Persisted transactions: ${run.persistence.transaction_count}`, `Transactions match before / after reopen: ${run.persistence.transactions_match}`, "", "Exact reopened snapshot:", json(run.persistence.reopened_snapshot));
+      return lines.join("\n");
+    }
+    function chapterArtifacts(index, run) {
+      const setup = run.setup;
+      const option = (label, title, context, content, log = false) => ({ label, title, context, content: typeof content === "string" ? content : json(content), log });
+      switch (index) {
+        case 0:
+          facts([["Identity", `${setup.agent.name} · ${setup.agent.version}`], ["Budget", `${money(setup.budget.limit_units)} ${setup.budget.currency} · scale ${setup.budget.scale}`], ["Database", setup.storage.database_name], ["Policy", `${setup.policy.id} · ${setup.policy.version}`]]);
+          return [option("Setup + initial balance", "Actual setup", "Temporary SQLite · one agent account", { agent: setup.agent, budget: setup.budget, storage: setup.storage, initial_snapshot: run.snapshots.initial }), option("Policy YAML", "Installed policy", `${setup.policy.id} / ${setup.policy.version}`, setup.policy.yaml)];
+        case 1:
+          facts([["Agent accounts", String(run.scenario.registered_accounts)], ["Concurrent tasks", String(run.scenario.workers)], ["Per request", money(run.scenario.request_units)], ["Barrier participants", String(setup.barrier_participants)]]);
+          return [option("Burst configuration", "Actual dispatch", "One agent · 100 independent operation keys", { authorization_path: setup.authorization_path, dispatch: setup.dispatch, authentication: setup.authentication, barrier_participants: setup.barrier_participants, concurrent_requests: run.scenario.workers, request_units: run.scenario.request_units, requested_total_units: run.scenario.workers * run.scenario.request_units }), option("Example request", "Captured request", setup.authorization_path, run.examples.allowed.request)];
+        case 2:
+          facts([["Cargo exit code", String(run.recording.exit_code)], ["Output integrity", "SHA-256 checked"], ["Source files", String(run.recording.sources.length)], ["Source tree", run.provenance.dirty ? "Captured working tree" : "Clean commit"]]);
+          return [option("Actual Cargo output", "Captured run output", "Complete saved output · result shown; scroll up for build", run.recording.log, true), option("Recording provenance", "Source provenance", "Captured checkout and exact command", run.provenance)];
+        case 3:
+          facts([["Allowed", `${run.summary.allowed} × ${money(run.scenario.request_units)}`], ["Denied", String(run.summary.denied)], ["Reserved", money(run.snapshots.reserved.reserved_units)], ["Available", money(run.snapshots.reserved.available_units)]]);
+          return [option("Denied request + response", "A real denied response", "Captured example · no inferred request order", run.examples.denied), option("Allowed request + response", "A real allowed response", "Token and hold presence recorded as booleans", run.examples.allowed), option("Budget after authorization", "Captured hold snapshot", "Read after all 100 requests complete", run.snapshots.reserved)];
+        case 4: {
+          const transaction = run.ledger.transactions.find((entry) => entry.authorization_id === run.examples.allowed.response.decision_id);
+          const correlation = { operation_key: run.examples.allowed.request.operation_key, decision_id: run.examples.allowed.response.decision_id, ledger_authorization_id: transaction.authorization_id, claim_id: transaction.claim_id, settlement_id: transaction.settlement_id, transaction_id: transaction.id };
+          facts([["Settlement input", "Synthetic executor events"], ["Settled", `${run.summary.settled} transactions`], ["Ledger charges", money(Number(run.ledger.coverage.recorded_budget_charges.units))], ["Unaccounted", money(Number(run.ledger.coverage.unaccounted_consumption.units))]]);
+          return [option("Follow the allowed request", "Authorization → ledger", "The allowed example from chapter 04 · matching IDs", { correlation, ledger_transaction: transaction }), option("Ledger reconciliation", "Actual ledger coverage", "Charges, consumed budget, and pending holds", run.ledger.coverage), option("Final budget", "Captured final balance", "Read after synthetic settlement completes", run.snapshots.final)];
+        }
+        default:
+          facts([["Consumed", money(run.persistence.reopened_snapshot.consumed_units)], ["Available", money(run.persistence.reopened_snapshot.available_units)], ["Pending holds", String(run.ledger.coverage.pending_hold_count)], ["Transactions match", String(run.persistence.transactions_match)]]);
+          return [option("Snapshot comparison", "Before and after reopening", "Actual reads from the temporary SQLite database", snapshotsText(run)), option("Persistence evidence", "Reopened database", "Persisted budget and transaction count", run.persistence)];
+      }
+    }
+    function renderCapture() {
+      const selected = captureOptions[Number($("capture-select").value) || 0];
+      if (!selected) return;
+      put("capture-title", selected.title);
+      put("capture-context", selected.context);
+      put("capture-content", selected.content);
+      $("capture-content").scrollTop = 0;
+      $("capture-content").scrollLeft = 0;
+      $("capture-content").classList.toggle("log-output", selected.log);
+      $("command-box").hidden = !selected.log;
+      if (selected.log) {
+        put("run-command", evidence.run.recording.command);
+        put("command-exit", `exit ${evidence.run.recording.exit_code}`);
+        /* Start with the captured outcome visible; the complete output remains scrollable. */
+        $("capture-content").scrollTop = $("capture-content").scrollHeight;
+      }
+    }
+    function sourceWindow(source, startNeedle, endNeedle) {
+      const lines = source.content.replace(/\n$/, "").split("\n");
+      const start = lines.findIndex((line) => line.includes(startNeedle));
+      const end = lines.findIndex((line, index) => index >= start && line.includes(endNeedle));
+      if (start < 0 || end < start) return source;
+      return { path: source.path, start_line: (source.start_line || 1) + start, end_line: (source.start_line || 1) + end, content: lines.slice(start, end + 1).join("\n") };
+    }
+    function renderSource() {
+      if (!activeSource) return;
+      const showExcerpt = activeExcerpt && !fullSource;
+      const text = showExcerpt ? activeExcerpt.content : activeSource.content;
+      const start = showExcerpt ? activeExcerpt.start_line : 1;
+      put("source-title", showExcerpt ? activeSource.id === "runner" ? "Capture script excerpt" : "Relevant test code" : activeSource.id === "runner" ? "Capture script" : "Full captured source");
+      put("source-mode", showExcerpt ? "Full source ↗" : activeExcerpt ? "Relevant excerpt ↙" : "Full source shown");
+      $("source-mode").disabled = !activeExcerpt;
+      put("source-path", `${activeSource.path}${showExcerpt ? ` : ${activeExcerpt.start_line}–${activeExcerpt.end_line}` : ""}`);
+      const lines = text.replace(/\n$/, "").split("\n");
+      const padding = String(start + lines.length - 1).length;
+      put("source-content", lines.map((line, index) => `${String(start + index).padStart(padding)} │ ${line}`).join("\n"));
+      $("source-content").scrollTop = 0;
+      $("source-content").scrollLeft = 0;
+      put("source-digest", `SHA-256 ${activeSource.sha256.slice(0, 12)}…`);
+      $("source-digest").title = activeSource.sha256;
+      const link = $("download-source");
+      link.href = activeSource.downloadUrl;
+      link.download = activeSource.path.split("/").pop();
+      link.hidden = false;
+    }
+    function renderChapter(index) {
+      const chapter = chapters[index];
+      const run = evidence.run;
+      put("phase-kicker", chapter.label);
+      put("phase-title", chapter.title);
+      put("phase-description", chapter.description);
+      put("scope-caption", chapter.caption);
+      const observation = run.observations.find((item) => item.id === chapter.observation);
+      put("observation-time", observation ? `Captured observation: ${observation.id} · +${elapsed(observation.elapsed_ms)}` : `Full harness elapsed: ${elapsed(run.provenance.elapsed_ms)}`);
+      captureOptions = chapterArtifacts(index, run);
+      $("capture-select").replaceChildren(...captureOptions.map((entry, optionIndex) => {
+        const node = document.createElement("option");
+        node.value = String(optionIndex);
+        node.textContent = entry.label;
+        return node;
+      }));
+      renderCapture();
+      activeExcerpt = chapter.excerpt ? run.recording.excerpts.find((excerpt) => excerpt.id === chapter.excerpt) : null;
+      activeSource = chapter.source ? run.recording.sources.find((source) => source.id === chapter.source) : run.recording.sources.find((source) => source.path === activeExcerpt.path);
+      if (chapter.excerpt === "burst") {
+        activeExcerpt = sourceWindow(activeExcerpt, "std::thread::spawn", "(worker, operation_key, request, response)");
+      } else if (chapter.source === "runner") {
+        activeExcerpt = sourceWindow(activeSource, 'with (evidence_dir / "test.log").open', "returncode = process.wait()");
+        /* If an older capture has no recognized window, leave its full source available. */
+        if (activeExcerpt === activeSource) activeExcerpt = null;
+      }
+      fullSource = false;
+      renderSource();
+      chapterButtons.forEach((button, buttonIndex) => {
+        button.classList.toggle("active", buttonIndex === index);
+        if (buttonIndex === index) button.setAttribute("aria-current", "step");
+        else button.removeAttribute("aria-current");
+      });
+      $("previous-button").disabled = index === 0;
+      $("next-button").disabled = index === chapters.length - 1;
+      put("phase-announcement", `${chapter.label}. ${chapter.title}`);
+      put("requested-total", `${run.scenario.workers} × ${money(run.scenario.request_units)}`);
+      put("decisions-total", index >= 3 ? `${run.summary.allowed} / ${run.summary.denied}` : "Inspect in chapter 04");
+      const snapshot = index >= 4 ? run.snapshots.final : index >= 3 ? run.snapshots.reserved : run.snapshots.initial;
+      put("balance-label", index >= 4 ? "SETTLED / AVAILABLE" : index >= 3 ? "RESERVED / AVAILABLE" : "INITIAL AVAILABLE");
+      put("balance-total", index >= 3 ? `${money(index >= 4 ? snapshot.consumed_units : snapshot.reserved_units)} / ${money(snapshot.available_units)}` : money(snapshot.available_units));
+      put("result-label", index >= 5 ? "PERSISTENCE" : index >= 4 ? "LEDGER" : index >= 2 ? "CARGO RUN" : "RECORDED SOURCE");
+      put("result-total", index >= 5 ? `${run.persistence.transaction_count} txns match` : index >= 4 ? `${run.ledger.transactions.length} balanced txns` : index >= 2 ? `Exit ${run.recording.exit_code}` : `${run.recording.sources.length} files captured`);
+    }
+    function render() {
+      $("timeline").value = String(position);
+      $("timeline").setAttribute("aria-valuetext", `${Math.floor(position)} seconds of 75 seconds`);
+      $("timeline").style.background = `linear-gradient(to right, var(--orange) ${position / duration * 100}%, var(--line) ${position / duration * 100}%)`;
+      put("playback-time", clock(position));
+      if (!evidence) return;
+      const nextChapter = chapters.findLastIndex((chapter) => position >= chapter.start);
+      if (nextChapter !== chapterIndex) {
+        chapterIndex = nextChapter;
+        renderChapter(chapterIndex);
+      }
+    }
+    function tableRows(id, rows) {
+      $(id).replaceChildren(...rows.map((values) => {
+        const row = document.createElement("tr");
+        values.forEach((value) => {
+          const cell = document.createElement("td");
+          cell.textContent = String(value);
+          row.append(cell);
+        });
+        return row;
+      }));
+    }
     function reset() {
       setPlaying(false);
       evidence = null;
-      sourceText = "";
+      rawRecording = "";
       position = 0;
-      phaseIndex = -1;
-      setPlaying(false);
-      for (const id of ["play-button", "restart-button", "timeline", "view-evidence", "focus-evidence", "download-evidence"]) $(id).disabled = true;
+      chapterIndex = -1;
+      activeSource = null;
+      activeExcerpt = null;
+      captureOptions = [];
+      objectUrls.splice(0).forEach((url) => URL.revokeObjectURL(url));
+      controls.forEach((id) => { $(id).disabled = true; });
+      chapterButtons.forEach((button) => { button.disabled = true; button.classList.remove("active"); button.removeAttribute("aria-current"); });
       $("evidence-status").classList.remove("loaded");
-      $("evidence-status").replaceChildren(Object.assign(document.createElement("span"), { ariaHidden: "true" }), document.createTextNode("Evidence not loaded"));
-      $("empty-state").hidden = false;
-      $("result-note").hidden = true;
-      $("budget-unloaded").hidden = false;
-      $("budget-consumed").style.width = "0";
-      $("budget-reserved").style.width = "0";
-      $("worker-grid").setAttribute("aria-label", "100 workers, recorded decisions not loaded");
-      $("budget-track").setAttribute("aria-label", "Budget balances not loaded");
-      dots.forEach((dot) => { dot.className = "worker"; dot.removeAttribute("title"); });
-      put("chapter-number", "00");
-      put("phase-kicker", "READY WHEN THE EVIDENCE IS");
-      put("phase-title", "A small limit.\nA crowded starting line.");
-      $("phase-title").style.whiteSpace = "pre-line";
-      put("phase-description", "Load a recorded test run to replay its decisions. Every dot represents a worker in that run.");
-      put("grid-progress", "Awaiting evidence");
-      put("budget-caption", "ACCOUNT BUDGET");
-      for (const id of ["settled-value", "reserved-value", "available-value", "overspend-total"]) put(id, "—");
-      withSmall("requested-total", "—", " / $3.00");
-      withSmall("allowed-total", "—", " requests");
-      withSmall("denied-total", "—", " requests");
-      for (const id of ["receipt-commit", "receipt-elapsed", "receipt-command"]) put(id, "—");
+      put("evidence-status", "Evidence not loaded");
+      put("phase-kicker", "WAITING FOR A RECORDING");
+      put("phase-title", "Show the test. Then the result.");
+      put("phase-description", "This walkthrough needs a captured run with its setup, source code, output, and persisted results.");
+      $("chapter-facts").replaceChildren();
+      put("observation-time", "No execution evidence loaded.");
+      put("scope-caption", "The harness exercises Hubu routes in process with test authentication and a temporary SQLite database.");
+      put("capture-title", "Captured evidence");
+      put("capture-context", "No recorded artifacts loaded");
+      $("capture-select").replaceChildren(Object.assign(document.createElement("option"), { textContent: "Awaiting run" }));
+      $("command-box").hidden = true;
+      put("capture-content", "Run the Episode 01 harness, then load evidence/run.json.\n\nThe recording must include actual setup, source excerpts, Cargo output, request and response examples, and reopened database evidence.");
+      put("source-title", "Test source");
+      put("source-mode", "Full source ↗");
+      put("source-path", "Source not loaded");
+      put("source-content", "Exact source captured with this run will appear here.");
+      put("source-digest", "No source hash loaded");
+      $("download-source").hidden = true;
+      $("download-source").removeAttribute("href");
+      for (const id of ["requested-total", "decisions-total", "balance-total", "receipt-commit", "receipt-elapsed", "receipt-command", "receipt-log-digest", "ledger-charges", "ledger-consumed", "ledger-unaccounted", "ledger-pending"]) put(id, "—");
+      put("balance-label", "CAPTURED BALANCE");
+      put("result-label", "RECORDING");
+      put("result-total", "Not loaded");
       put("receipt-file", "Not loaded");
-      $("source-link").hidden = true;
-      $("source-link").removeAttribute("href");
-      const noAssertions = document.createElement("li");
-      noAssertions.className = "empty-assertion";
-      noAssertions.textContent = "No assertion evidence loaded.";
-      $("assertion-list").replaceChildren(noAssertions);
-      const row = document.createElement("tr");
-      const cell = document.createElement("td");
-      cell.colSpan = 5;
-      cell.className = "empty-table";
-      cell.textContent = "Load a run to inspect all 100 decisions.";
-      row.append(cell);
-      $("decision-table").replaceChildren(row);
-      put("receipt-checks", "A loaded file is not independently authenticated by this viewer.");
+      put("reproduce-commit", "Load a recording to see its source commit.");
+      put("reproduce-commands", "Load a recording to see its checkout and rerun commands.");
+      put("reproduce-caveat", "The recording contains the exact source files used by its harness.");
+      $("reproduce-repository").href = "https://github.com/hacker-no-ice/hubu";
       put("ledger-count", "No transactions loaded");
-      for (const id of ["ledger-charges", "ledger-consumed", "ledger-unaccounted", "ledger-pending"]) put(id, "—");
-      const ledgerRow = document.createElement("tr");
-      const ledgerCell = document.createElement("td");
-      ledgerCell.colSpan = 5;
-      ledgerCell.className = "empty-table";
-      ledgerCell.textContent = "Load a run to inspect its ledger.";
-      ledgerRow.append(ledgerCell);
-      $("ledger-table").replaceChildren(ledgerRow);
+      put("receipt-checks", "A loaded file is not independently authenticated by this viewer.");
+      $("recorded-source-links").replaceChildren();
+      $("assertion-list").replaceChildren(Object.assign(document.createElement("li"), { textContent: "No assertion evidence loaded." }));
+      tableRows("observation-table", [["No observations loaded.", "—", "—"]]);
+      tableRows("ledger-table", [["No transactions loaded.", "—", "—", "—", "—"]]);
+      tableRows("decision-table", [["No decisions loaded.", "—", "—", "—", "—"]]);
       render();
     }
     function populateReceipt(name) {
       const run = evidence.run;
       const provenance = run.provenance;
       put("receipt-file", name);
-      if (provenance) {
-        put("receipt-commit", `${provenance.commit}${provenance.dirty ? " · working tree run" : " · clean tree"}`);
-        put("receipt-command", provenance.test_command);
-        put("receipt-elapsed", provenance.elapsed_ms === undefined ? "Not recorded" : `${provenance.elapsed_ms.toLocaleString("en-US", { maximumFractionDigits: 1 })} ms · full harness elapsed time`);
-        if (!provenance.dirty) {
-          $("source-link").href = `${provenance.repository_url}/blob/${provenance.commit}/${provenance.test_file.split("/").map(encodeURIComponent).join("/")}`;
-          $("source-link").hidden = false;
-        }
-      } else {
-        put("receipt-commit", "Source commit not recorded");
-        put("receipt-elapsed", "Not recorded");
-        put("receipt-command", "Not recorded");
-      }
-      const assertions = run.assertions.map((assertion) => {
+      put("reproduce-commit", provenance.commit);
+      put("reproduce-commands", `git clone ${provenance.repository_url}.git\ncd hubu\ngit checkout ${provenance.commit}\npython3 scripts/break-hubu-episode-01.py --serve`);
+      $("reproduce-repository").href = `${provenance.repository_url}/tree/${provenance.commit}`;
+      put("reproduce-caveat", provenance.dirty ? "This recording used a working tree with changes. Download the captured source files below to inspect the exact test and runner; the commit alone may not reproduce those changes." : "This recording used a clean source tree at the commit above. The exact test, runner, and scenario files are also included below.");
+      put("receipt-commit", `${provenance.commit}${provenance.dirty ? " · captured working tree" : " · clean tree"}`);
+      put("receipt-command", run.recording.command);
+      put("receipt-elapsed", elapsed(provenance.elapsed_ms));
+      put("receipt-log-digest", run.recording.log_sha256);
+      $("assertion-list").replaceChildren(...run.assertions.map((assertion) => {
         const item = document.createElement("li");
         const mark = document.createElement("span");
         mark.className = "assertion-mark";
@@ -307,114 +299,119 @@ if (typeof document !== "undefined") {
         mark.setAttribute("aria-label", "Passed:");
         item.append(mark, document.createTextNode(assertion.name));
         return item;
+      }));
+      const links = $("recorded-source-links");
+      run.recording.sources.forEach((source) => {
+        source.downloadUrl = recordingUrl(source.content);
+        const link = document.createElement("a");
+        link.href = source.downloadUrl;
+        link.download = source.path.split("/").pop();
+        link.textContent = `Download captured ${source.path}`;
+        links.append(link);
       });
-      $("assertion-list").replaceChildren(...assertions);
-      const rows = [...run.requests].sort((a, b) => a.worker - b.worker).map((request) => {
-        const row = document.createElement("tr");
-        const values = [String(request.worker).padStart(3, "0"), request.decision === "allow" ? "Allowed" : "Denied", money(request.amount_units), request.decision_id, request.reason.join("; ") || "—"];
-        values.forEach((value, index) => {
-          const cell = document.createElement("td");
-          cell.textContent = value;
-          if (index === 1) cell.className = `decision-${request.decision}`;
-          row.append(cell);
-        });
-        return row;
-      });
-      $("decision-table").replaceChildren(...rows);
+      tableRows("observation-table", run.observations.map((observation) => [observation.id, `+${elapsed(observation.elapsed_ms)}`, json(observation.data)]));
+      tableRows("decision-table", [...run.requests].sort((a, b) => a.worker - b.worker).map((request) => [String(request.worker).padStart(3, "0"), request.decision, money(request.amount_units), request.decision_id, request.reason.join("; ") || "—"]));
       put("ledger-count", `${run.ledger.transactions.length} canonical transactions`);
       put("ledger-charges", money(Number(run.ledger.coverage.recorded_budget_charges.units)));
       put("ledger-consumed", money(Number(run.ledger.coverage.consumed_amount.units)));
       put("ledger-unaccounted", money(Number(run.ledger.coverage.unaccounted_consumption.units)));
       put("ledger-pending", String(run.ledger.coverage.pending_hold_count));
-      const ledgerRows = run.ledger.transactions.map((transaction) => {
-        const row = document.createElement("tr");
-        const values = [transaction.id, transaction.authorization_id, money(Number(transaction.budget_charge_delta.units)), money(Number(transaction.budget_charge_delta.units)), money(Number(transaction.budget_charge_delta.units))];
-        values.forEach((value) => {
-          const cell = document.createElement("td");
-          cell.textContent = value;
-          row.append(cell);
-        });
-        return row;
-      });
-      $("ledger-table").replaceChildren(...ledgerRows);
-      put("receipt-checks", `${evidence.checks.length} viewer checks passed: ${evidence.checks.join("; ")}. Source authenticity is not independently verified by this viewer.`);
+      tableRows("ledger-table", run.ledger.transactions.map((transaction) => [transaction.id, transaction.authorization_id, money(Number(transaction.budget_charge_delta.units)), money(Number(transaction.budget_charge_delta.units)), money(Number(transaction.budget_charge_delta.units))]));
+      put("receipt-checks", `${evidence.checks.length} viewer checks passed: ${evidence.checks.join("; ")}. Captured source and log SHA-256 digests verified. Hashes check integrity; the viewer does not independently authenticate the recording.`);
     }
-    function loadText(raw, name) {
+    async function loadText(raw, name, version) {
+      if (version !== loadVersion) return;
       reset();
       try {
-        if (raw.length > 3000000) throw new Error("The evidence file exceeds the 3 MB limit.");
-        evidence = validateEvidence(JSON.parse(raw));
-        sourceText = raw;
-        for (const id of ["play-button", "restart-button", "timeline", "view-evidence", "focus-evidence", "download-evidence"]) $(id).disabled = false;
+        if (raw.length > maxFileSize) throw new Error("The evidence file exceeds the 3 MB limit.");
+        const checked = validateEvidence(JSON.parse(raw));
+        await verifyRecordingDigests(checked.run);
+        if (version !== loadVersion) return;
+        evidence = checked;
+        rawRecording = raw;
+        controls.forEach((id) => { $(id).disabled = false; });
+        chapterButtons.forEach((button) => { button.disabled = false; });
         $("evidence-status").classList.add("loaded");
-        $("evidence-status").replaceChildren(Object.assign(document.createElement("span"), { ariaHidden: "true" }), document.createTextNode("Recorded evidence loaded"));
-        $("empty-state").hidden = true;
-        $("result-note").hidden = false;
+        put("evidence-status", "Captured evidence loaded");
         $("load-message").classList.remove("error");
-        put("load-message", `${name} loaded. Decision reveal order is editorial; use the receipt to inspect the recorded results.`);
+        put("load-message", `${name} · source and log integrity checked · inspect or replay all six chapters.`);
         populateReceipt(name);
         render();
       } catch (error) {
+        if (version !== loadVersion) return;
         reset();
         $("load-message").classList.add("error");
-        put("load-message", `Evidence not loaded: ${error instanceof Error ? error.message : "The file could not be read."}`);
+        put("load-message", `Evidence not loaded: ${error instanceof Error ? error.message : "The file could not be read."} Rerun the Episode 01 capture harness to create a complete recording.`);
       }
     }
+    function jump(index) {
+      if (!evidence) return;
+      position = chapters[Math.max(0, Math.min(chapters.length - 1, index))].start;
+      render();
+    }
+    chapterButtons.forEach((button) => button.addEventListener("click", () => { setPlaying(false); jump(Number(button.dataset.chapter)); }));
+    $("previous-button").addEventListener("click", () => { setPlaying(false); jump(chapterIndex - 1); });
+    $("next-button").addEventListener("click", () => { setPlaying(false); jump(chapterIndex + 1); });
     $("play-button").addEventListener("click", () => {
-      if (position >= duration) { position = 0; phaseIndex = -1; render(); }
+      if (position >= duration) { position = 0; chapterIndex = -1; render(); }
       setPlaying(!playing);
     });
-    $("restart-button").addEventListener("click", () => { position = 0; phaseIndex = -1; render(); setPlaying(false); });
+    $("restart-button").addEventListener("click", () => { setPlaying(false); position = 0; chapterIndex = -1; render(); });
     $("timeline").addEventListener("input", (event) => { position = Number(event.target.value); render(); if (position >= duration) setPlaying(false); });
+    $("capture-select").addEventListener("change", () => { setPlaying(false); renderCapture(); });
+    $("source-mode").addEventListener("click", () => { setPlaying(false); fullSource = !fullSource; renderSource(); });
+    $("focus-button").addEventListener("click", () => setFocused(!focused));
     document.addEventListener("visibilitychange", () => { if (document.hidden) setPlaying(false); });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && focused) { setFocused(false); $("focus-button").focus({ preventScroll: true }); }
+    });
     function inspectEvidence() {
+      setPlaying(false);
       setFocused(false, false);
       $("evidence-drawer").open = true;
       $("evidence-drawer").scrollIntoView({ behavior: reducedMotion.matches ? "instant" : "smooth", block: "start" });
       $("evidence-drawer").querySelector("summary").focus({ preventScroll: true });
     }
     $("view-evidence").addEventListener("click", inspectEvidence);
+    $("view-reproduce").addEventListener("click", () => { inspectEvidence(); $("reproduce-title").scrollIntoView({ behavior: reducedMotion.matches ? "instant" : "smooth", block: "start" }); });
     $("focus-evidence").addEventListener("click", inspectEvidence);
-    $("focus-button").addEventListener("click", () => setFocused(!focused));
-    document.addEventListener("keydown", (event) => {
-      if (event.key === "Escape" && focused) {
-        setFocused(false);
-        $("focus-button").focus({ preventScroll: true });
-      }
-    });
     $("download-evidence").addEventListener("click", () => {
       if (!evidence) return;
-      const url = URL.createObjectURL(new Blob([sourceText], { type: "application/json" }));
       const link = document.createElement("a");
-      link.href = url;
+      link.href = recordingUrl(rawRecording, "application/json");
       link.download = "episode-01-evidence.json";
       link.click();
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
     });
     $("evidence-file").addEventListener("change", async (event) => {
       const file = event.target.files[0];
       if (!file) return;
-      loadVersion += 1;
-      const version = loadVersion;
-      if (file.size > 3000000) { reset(); $("load-message").classList.add("error"); put("load-message", "Evidence not loaded: the evidence file exceeds the 3 MB limit."); return; }
-      try {
-        const raw = await file.text();
-        if (version === loadVersion) loadText(raw, file.name);
-      } catch {
-        if (version === loadVersion) { reset(); $("load-message").classList.add("error"); put("load-message", "Evidence not loaded: the selected file could not be read."); }
+      const version = ++loadVersion;
+      if (file.size > maxFileSize) {
+        reset();
+        $("load-message").classList.add("error");
+        put("load-message", "Evidence not loaded: the evidence file exceeds the 3 MB limit.");
+      } else {
+        try { await loadText(await file.text(), file.name, version); }
+        catch { if (version === loadVersion) { reset(); $("load-message").classList.add("error"); put("load-message", "Evidence not loaded: the selected file could not be read."); } }
       }
       event.target.value = "";
     });
-    /* A file opened directly remains usable via the picker without CORS setup. */
-    if (location.protocol === "http:" || location.protocol === "https:") {
+    reset();
+    const embedded = $("recorded-run");
+    if (embedded) {
+      loadText(embedded.textContent, "Embedded recorded run", loadVersion);
+    } else if (location.protocol === "http:" || location.protocol === "https:") {
       const version = loadVersion;
       fetch("evidence/run.json", { cache: "no-store" }).then(async (response) => {
         if (!response.ok || version !== loadVersion) return;
-        const contentLength = Number(response.headers.get("content-length"));
-        if (contentLength > 3000000) throw new Error("Evidence exceeds 3 MB.");
-        const raw = await response.text();
-        if (version === loadVersion) loadText(raw, "evidence/run.json");
-      }).catch(() => { /* Missing optional evidence leaves the honest preview state intact. */ });
+        const length = Number(response.headers.get("content-length"));
+        if (length > maxFileSize) throw new Error("Evidence exceeds 3 MB.");
+        await loadText(await response.text(), "evidence/run.json", version);
+      }).catch((error) => {
+        if (version !== loadVersion) return;
+        $("load-message").classList.add("error");
+        put("load-message", `Evidence not loaded: ${error instanceof Error ? error.message : "The recording could not be fetched."} Run the Episode 01 capture harness or load a recording.`);
+      });
     }
   })();
 }

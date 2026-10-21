@@ -3,7 +3,8 @@
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
-const { validateEvidence } = require("./episode.js");
+const paths = require("node:path");
+const { validateEvidence, verifyRecordingDigests } = require("./evidence.js");
 
 // Use an actual harness result, never a prefilled passing viewer fixture.
 const path = process.env.HUBU_BREAK_TEST_EVIDENCE;
@@ -15,10 +16,22 @@ const changed = (mutate) => {
   return run;
 };
 
-test("accepts the real run and reconciles all decisions", () => {
+test("accepts the real run, reconciles decisions, and verifies captured bytes", async () => {
   const result = validateEvidence(recorded);
   assert.equal(result.allowed, 33);
   assert.equal(result.denied, 67);
+  assert.equal(await verifyRecordingDigests(recorded), true);
+});
+
+test("standalone HTML embeds the same captured run as inert JSON", async () => {
+  const html = fs.readFileSync(paths.resolve(paths.dirname(path), "../index.html"), "utf8");
+  const embedded = html.match(/<script id="recorded-run" type="application\/json">([\s\S]*?)<\/script>/);
+  assert.ok(embedded, "Generated HTML must carry its recording for offline replay");
+  assert.equal(embedded[1].includes("<"), false);
+  const run = JSON.parse(embedded[1]);
+  assert.deepEqual(run, recorded);
+  validateEvidence(run);
+  assert.equal(await verifyRecordingDigests(run), true);
 });
 
 test("rejects truncated and duplicated decisions", () => {
@@ -63,4 +76,38 @@ test("rejects a balanced posting to the wrong ledger account kind", () => {
 test("rejects failed assertions and forged source destinations", () => {
   assert.throws(() => validateEvidence(changed((r) => { r.assertions[0].passed = false; })));
   assert.throws(() => validateEvidence(changed((r) => { r.provenance.repository_url = "https://example.com"; })));
+});
+
+test("rejects an unrelated passing assertion replacing the persistence proof", () => {
+  assert.throws(() => validateEvidence(changed((r) => { r.assertions = [{ id: "other", name: "Other test", passed: true }]; })));
+});
+
+test("rejects adjustment rows presented as executor settlements", () => {
+  assert.throws(() => validateEvidence(changed((r) => {
+    for (const transaction of r.ledger.transactions) transaction.kind = "adjustment";
+  })));
+});
+
+test("rejects setup and representative responses from another account", () => {
+  assert.throws(() => validateEvidence(changed((r) => { r.setup.agent.account_id = "unrelated"; })));
+  assert.throws(() => validateEvidence(changed((r) => { r.examples.denied.request.account_id = "unrelated"; })));
+});
+
+test("rejects a persistence snapshot that differs from the final database", () => {
+  assert.throws(() => validateEvidence(changed((r) => { r.persistence.reopened_snapshot.consumed_units = 0; })));
+});
+
+test("rejects runtime milestones that contradict the recorded results", () => {
+  assert.throws(() => validateEvidence(changed((r) => { r.observations[2].data.allowed = 34; })));
+  assert.throws(() => validateEvidence(changed((r) => { r.observations[3].data.claim_ids.pop(); })));
+});
+
+test("rejects invented excerpts and nonzero command exit status", () => {
+  assert.throws(() => validateEvidence(changed((r) => { r.recording.excerpts[0].content = "pretend setup"; })));
+  assert.throws(() => validateEvidence(changed((r) => { r.recording.exit_code = 1; })));
+});
+
+test("detects changed captured output and source bytes", async () => {
+  await assert.rejects(verifyRecordingDigests(changed((r) => { r.recording.log += "tampered"; })));
+  await assert.rejects(verifyRecordingDigests(changed((r) => { r.recording.sources[0].content += "tampered"; })));
 });
