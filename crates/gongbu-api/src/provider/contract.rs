@@ -415,6 +415,13 @@ pub enum PricingUnit {
     Result,
     Page,
     Second,
+    /// Every billed megapixel of every output image, as the pack's declared
+    /// rounding derives it from the output dimensions.
+    Megapixel,
+    /// Billed megapixels beyond the first of each output image. With an
+    /// `image` component for the first, it prices "first megapixel, then each
+    /// additional one". It is the one unit whose quantity may be zero.
+    AdditionalMegapixel,
 }
 
 impl PricingUnit {
@@ -429,7 +436,15 @@ impl PricingUnit {
             Self::Result => Some("results"),
             Self::Page => Some("pages"),
             Self::Second => Some("seconds"),
+            Self::Megapixel => Some("megapixels"),
+            Self::AdditionalMegapixel => Some("additional_megapixels"),
         }
+    }
+
+    /// Whether a frozen quantity of zero is a real price. Only additional
+    /// megapixels may be: a one-megapixel image has none.
+    pub fn allows_zero(self) -> bool {
+        self == Self::AdditionalMegapixel
     }
 }
 
@@ -441,7 +456,13 @@ pub const REQUEST_QUANTITIES: &[&str] = &[
     "results",
     "pages",
     "seconds",
+    "megapixels",
+    "additional_megapixels",
 ];
+
+/// Request quantities a pack derives from the output dimensions; no input
+/// parameter may set them.
+pub const DERIVED_QUANTITIES: &[&str] = &["megapixels", "additional_megapixels"];
 
 #[derive(Clone, Debug)]
 pub struct PricingCatalog(Arc<FrozenCatalog>);
@@ -762,9 +783,11 @@ impl NormalizedRequest {
         if self.selector.normalized().ok().as_ref() != Some(&self.selector) {
             return Err(ContractError::IndeterminableCost);
         }
-        if self.output_dimensions.as_ref().is_some_and(|dimensions| {
-            self.image_size().is_none() || dimensions.width == 0 || dimensions.height == 0
-        }) {
+        if self
+            .output_dimensions
+            .as_ref()
+            .is_some_and(|dimensions| dimensions.width == 0 || dimensions.height == 0)
+        {
             return Err(ContractError::IndeterminableCost);
         }
         Ok(())
@@ -774,7 +797,7 @@ impl NormalizedRequest {
             None => Ok(1),
             Some(name) => self
                 .quantity(name)
-                .filter(|v| *v > 0)
+                .filter(|v| *v > 0 || (*v == 0 && unit.allows_zero()))
                 .ok_or(ContractError::IndeterminableCost),
         }
     }
@@ -1097,9 +1120,11 @@ impl PricingSnapshot {
             return Err(ContractError::IndeterminableCost);
         }
         let image_size = self.selector.as_ref().and_then(PricingSelector::image_size);
-        if self.output_dimensions.as_ref().is_some_and(|dimensions| {
-            image_size.is_none() || dimensions.width == 0 || dimensions.height == 0
-        }) {
+        if self
+            .output_dimensions
+            .as_ref()
+            .is_some_and(|dimensions| dimensions.width == 0 || dimensions.height == 0)
+        {
             return Err(ContractError::IndeterminableCost);
         }
         let components = self.effective_components()?;
@@ -1107,7 +1132,8 @@ impl PricingSnapshot {
         if components.iter().any(|component| {
             component.rate_numerator_minor < 0
                 || component.rate_denominator <= 0
-                || component.quantity <= 0
+                || component.quantity < 0
+                || (component.quantity == 0 && !component.unit.allows_zero())
                 || !units.insert(component.unit)
         }) || (image_size.is_some()
             && (components.len() != 1 || components[0].unit != PricingUnit::Image))
@@ -1231,6 +1257,11 @@ pub struct NormalizedUsage {
     pub pages: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seconds: Option<i64>,
+    /// Billed megapixels of the delivered images, from their decoded size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub megapixels: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additional_megapixels: Option<i64>,
 }
 impl NormalizedUsage {
     fn quantity_for(&self, unit: PricingUnit) -> Option<i64> {
@@ -1243,6 +1274,8 @@ impl NormalizedUsage {
             PricingUnit::Result => self.results,
             PricingUnit::Page => self.pages,
             PricingUnit::Second => self.seconds,
+            PricingUnit::Megapixel => self.megapixels,
+            PricingUnit::AdditionalMegapixel => self.additional_megapixels,
         }
         .filter(|v| *v >= 0)
     }

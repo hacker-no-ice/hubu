@@ -2557,6 +2557,217 @@ mod tests {
     }
 
     #[test]
+    fn megapixel_pack_settles_from_the_delivered_image_size() {
+        use crate::{
+            artifact::{ArtifactLimits, LocalFsStorage},
+            execution::{CreateExecutionParams, HubuTokenReference},
+            provider::{
+                http_kernel::{ArtifactDownloadPolicy, InvocationDeadline},
+                pack::{Archetype, ArtifactFetchError, Pack},
+                pack_sync::{SyncFixedEngine, SyncTransport, TransportFailure, TransportResponse},
+            },
+            secrets::{ProviderSecret, SecretError, SecretReference},
+        };
+        use base64::Engine as _;
+        use image::{GrayImage, ImageOutputFormat};
+        use serde_json::json;
+        use std::{collections::BTreeMap, io::Cursor, sync::Mutex, time::Duration};
+        use tempfile::tempdir;
+
+        struct Secrets;
+        impl SecretProvider for Secrets {
+            fn resolve(&self, _: &SecretReference) -> Result<ProviderSecret, SecretError> {
+                Ok(crate::secrets::secret_for_test("pack-secret"))
+            }
+        }
+
+        // Delivers the requested size, or half of it for "a small banner".
+        #[derive(Clone, Default)]
+        struct Transport(Arc<Mutex<Vec<(u64, u64)>>>);
+        impl SyncTransport for Transport {
+            fn post_json(
+                &self,
+                _: &reqwest::Url,
+                _: (&str, &str),
+                _: &BTreeMap<String, String>,
+                body: &serde_json::Value,
+                _: Duration,
+            ) -> Result<TransportResponse, TransportFailure> {
+                let (width, height) = (
+                    body["width"].as_u64().unwrap(),
+                    body["height"].as_u64().unwrap(),
+                );
+                self.0.lock().unwrap().push((width, height));
+                let shrink = if body["prompt"] == "a small banner" {
+                    2
+                } else {
+                    1
+                };
+                let mut png = Vec::new();
+                GrayImage::new((width / shrink) as u32, (height / shrink) as u32)
+                    .write_to(&mut Cursor::new(&mut png), ImageOutputFormat::Png)
+                    .unwrap();
+                Ok(TransportResponse {
+                    status: 200,
+                    headers: BTreeMap::from([("x-request-id".into(), format!("mp-req-{shrink}"))]),
+                    body: json!({"images": [
+                        {"b64": base64::engine::general_purpose::STANDARD.encode(&png)}
+                    ]}),
+                })
+            }
+            fn download(
+                &self,
+                _: &reqwest::Url,
+                _: &ArtifactDownloadPolicy,
+                _: InvocationDeadline,
+            ) -> Result<Vec<u8>, ArtifactFetchError> {
+                Err(ArtifactFetchError::Failed)
+            }
+        }
+
+        #[derive(Default)]
+        struct Hubu(Mutex<Vec<i64>>);
+        impl HubuActivities for Hubu {
+            fn preflight(&self, _: &Execution) -> Result<(), WorkflowActivityError> {
+                Ok(())
+            }
+            fn claim(&self, _: &Execution) -> Result<String, WorkflowActivityError> {
+                Ok("claim".into())
+            }
+            fn validate_claim(&self, _: &Execution) -> Result<(), WorkflowActivityError> {
+                Ok(())
+            }
+            fn settle(
+                &self,
+                _: &Execution,
+                _: &str,
+                units: i64,
+            ) -> Result<String, WorkflowActivityError> {
+                let mut settled = self.0.lock().unwrap();
+                settled.push(units);
+                Ok(format!("settlement-{}", settled.len()))
+            }
+            fn release(&self, _: &Execution) -> Result<(), WorkflowActivityError> {
+                Ok(())
+            }
+        }
+
+        let pack =
+            Pack::from_toml_str(include_str!("../../../fixtures/packs/megapixel-image.toml"))
+                .unwrap();
+        let secret = SecretReference::new("gongbu.megapixel-image", "fixture").unwrap();
+        let targets: ProviderTargetConfig = serde_json::from_value(json!({
+            "schema_version": 2,
+            "provider_configs": pack.provider_configs(&secret),
+        }))
+        .unwrap();
+        let pricing = PricingCatalog::from_json(
+            &serde_json::to_vec(&json!({
+                "schema_version": 2,
+                "catalog_version": pack.models()[0].pricing_version,
+                "rules": pack.pricing_rules(),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let transport = Transport::default();
+        let mut registry = ProviderRegistry::new();
+        registry.register_pack(pack.clone());
+        let engine_transport = transport.clone();
+        registry.register_pack_engine(Archetype::SyncFixed, move |target, pack| {
+            Ok(Arc::new(SyncFixedEngine::new(
+                pack.clone(),
+                &target.model,
+                engine_transport.clone(),
+                ArtifactLimits::default().max_encoded_bytes,
+            )?))
+        });
+        let providers =
+            ValidatedProviderCatalog::bind(targets.clone(), pricing.clone(), &registry).unwrap();
+        let repository = Repository::in_memory().unwrap();
+        let model = &pack.models()[0];
+        let target = targets
+            .resolve_active(&pack.target_key(model))
+            .unwrap()
+            .clone();
+        let create = |operation: &str, prompt: &str| {
+            let input = json!({"prompt": prompt, "image_size": "2k", "aspect_ratio": "16:9"});
+            let request = pack.prepare(&model.model, &input).unwrap().request;
+            let snapshot = pricing
+                .snapshot_for_target(&target.target_key(), &request)
+                .unwrap();
+            assert_eq!(snapshot.estimated_units, 75_000);
+            repository
+                .create_execution(&CreateExecutionParams {
+                    account_id: "account".into(),
+                    operation_key: operation.into(),
+                    hubu_authorization_id: format!("token-{operation}"),
+                    hubu_claim_id: Some(format!("claim-{operation}")),
+                    hubu_token_reference: HubuTokenReference::new(format!("token-{operation}"))
+                        .unwrap(),
+                    authorized_units: snapshot.estimated_units,
+                    authorization_currency: "USD".into(),
+                    normalized_input: input,
+                    input_hash: format!("hash-{operation}"),
+                    input_schema_version: 1,
+                    target: target.target_key().canonical_name(),
+                    config_version: target.provider_config_version.clone(),
+                    workload_type: target.workload_type.clone(),
+                    provider: target.provider.clone(),
+                    adapter: target.adapter.clone(),
+                    model: target.model.clone(),
+                    provider_config_version: target.provider_config_version.clone(),
+                    provider_config_digest: target.digest().into(),
+                    pricing_snapshot: serde_json::to_value(&snapshot).unwrap(),
+                    pricing_schema_version: i64::from(snapshot.schema_version),
+                    execution_scope: None,
+                    created_at: "now".into(),
+                })
+                .unwrap()
+        };
+        let full = create("mp-full", "a banner");
+        let small = create("mp-small", "a small banner");
+        let root = tempdir().unwrap();
+        let artifacts = ArtifactService::new(
+            repository.clone(),
+            LocalFsStorage::new(root.path()),
+            ArtifactLimits::default(),
+        );
+        let hubu = Arc::new(Hubu::default());
+        let runner = provider_execution_runner(
+            repository.clone(),
+            hubu.clone(),
+            artifacts,
+            providers,
+            Arc::new(Secrets),
+            || "now".into(),
+        );
+        for execution in [&full, &small] {
+            assert_eq!(
+                runner.run_execution(&execution.execution_id, None).unwrap(),
+                "succeeded"
+            );
+        }
+        // Both asked for the certified 2k 16:9 size.
+        assert_eq!(
+            transport.0.lock().unwrap().as_slice(),
+            [(2688, 1536), (2688, 1536)]
+        );
+        // 7.5¢ for 4 billed megapixels; 3¢ for the 1344 × 768 image that
+        // came back instead, which is one megapixel.
+        assert_eq!(hubu.0.lock().unwrap().as_slice(), [75_000, 30_000]);
+        for (execution, units) in [(&full, 75_000), (&small, 30_000)] {
+            assert_eq!(
+                repository
+                    .get_receipt_for_execution(&execution.execution_id)
+                    .unwrap()
+                    .settlement_units,
+                units
+            );
+        }
+    }
+
+    #[test]
     fn async_pack_engine_polls_settles_once_and_replay_never_resubmits() {
         use crate::{
             artifact::{ArtifactLimits, LocalFsStorage},

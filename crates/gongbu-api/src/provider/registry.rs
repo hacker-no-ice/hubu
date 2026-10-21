@@ -6,7 +6,7 @@ use super::{
         ADAPTER_ID as FLUX_ADAPTER_ID, MODEL_ID as FLUX_MODEL_ID, PROVIDER_ID as FLUX_PROVIDER_ID,
         SUPPORTED_PRESETS as FLUX_SUPPORTED_PRESETS,
     },
-    pack::{Archetype, Pack},
+    pack::{Archetype, MegapixelRule, OutputSize, Pack},
     pack_async::AsyncPollEngine,
     pack_sync::SyncFixedEngine,
     provider_contracts::{self, CatalogContract},
@@ -37,6 +37,13 @@ pub struct ExecutionTarget {
     pub execution_scope: ExecutionTargetScope,
     pub image_sizes: Vec<String>,
     pub pricing: Vec<ExecutionTargetPricing>,
+    /// Certified output sizes by parameter values, for pack targets that
+    /// certify sizes beyond `image_sizes` (aspect ratios, for example).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub output_sizes: Vec<OutputSize>,
+    /// How billed megapixels are counted, when the target prices them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub megapixels: Option<MegapixelRule>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -285,6 +292,8 @@ pub struct ValidatedProviderCatalog {
     targets: ProviderTargetConfig,
     pricing: PricingCatalog,
     adapters: BTreeMap<(TargetKey, String), BoundAdapter>,
+    /// The pinned pack of each bound pack target revision.
+    packs: BTreeMap<(TargetKey, String), Arc<Pack>>,
     provider_contracts: Vec<CatalogContract>,
 }
 
@@ -294,6 +303,7 @@ impl ValidatedProviderCatalog {
             targets: ProviderTargetConfig::disabled(),
             pricing: PricingCatalog::disabled(),
             adapters: BTreeMap::new(),
+            packs: BTreeMap::new(),
             provider_contracts: Vec::new(),
         }
     }
@@ -304,6 +314,7 @@ impl ValidatedProviderCatalog {
         registry: &ProviderRegistry,
     ) -> Result<Self, RegistryError> {
         let mut adapters = BTreeMap::new();
+        let mut packs = BTreeMap::new();
         for target in targets
             .revisions()
             .filter(|target| target.is_execution_enabled())
@@ -327,10 +338,14 @@ impl ValidatedProviderCatalog {
                     target.target_key().canonical_name(),
                 ));
             }
-            adapters.insert(
-                (target.target_key(), target.provider_config_version.clone()),
-                adapter,
-            );
+            let revision = (target.target_key(), target.provider_config_version.clone());
+            if let Some(pack) = target
+                .pack()
+                .and_then(|config| registry.packs.get(&config.pack_id))
+            {
+                packs.insert(revision.clone(), Arc::clone(pack));
+            }
+            adapters.insert(revision, adapter);
         }
         let provider_contracts = if registry.require_shipped_contracts {
             provider_contracts::validate_and_project(&targets, &pricing)
@@ -342,6 +357,7 @@ impl ValidatedProviderCatalog {
             targets,
             pricing,
             adapters,
+            packs,
             provider_contracts,
         })
     }
@@ -399,6 +415,11 @@ impl ValidatedProviderCatalog {
                     .collect::<Vec<_>>();
                 image_sizes.sort();
                 image_sizes.dedup();
+                let pack = self.pack(target);
+                let output_sizes = pack
+                    .filter(|pack| pack.megapixel_rule().is_some() || pack.has_size_presets())
+                    .map(|pack| pack.output_sizes(&key.model))
+                    .unwrap_or_default();
                 Some(ExecutionTarget {
                     target_id: key.public_id(),
                     workload_type: key.workload_type,
@@ -407,6 +428,8 @@ impl ValidatedProviderCatalog {
                     execution_scope,
                     image_sizes,
                     pricing,
+                    output_sizes,
+                    megapixels: pack.and_then(|pack| pack.megapixel_rule().cloned()),
                 })
             })
             .collect()
@@ -444,6 +467,12 @@ impl ValidatedProviderCatalog {
             .resolve_persisted_revision(key, version, digest)
             .map_err(|_| RegistryError::TargetUnavailable)?;
         Ok((target, self.bound(target)?))
+    }
+
+    /// The pinned pack a bound pack target revision runs.
+    pub fn pack(&self, target: &ProviderConfigVersion) -> Option<&Arc<Pack>> {
+        self.packs
+            .get(&(target.target_key(), target.provider_config_version.clone()))
     }
 
     fn bound(&self, target: &ProviderConfigVersion) -> Result<&BoundAdapter, RegistryError> {

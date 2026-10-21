@@ -169,7 +169,10 @@ Provider availability is an operator decision; selection among the available
 targets is a per-request caller decision. `GET /v2/execution-targets` projects
 only active, execution-enabled targets with an opaque stable `target_id`, safe
 provider/model labels, the Hubu authorization scope, supported image-size
-selectors, and exact configured price components. It never returns adapter
+selectors, and exact configured price components. A pack target that certifies
+sizes by parameter combination, such as aspect ratio, also lists
+`output_sizes`; one priced per megapixel also lists its `megapixels` rounding
+rule, so the caller can compute the exact estimate. It never returns adapter
 settings, credential references, endpoints, headers, configuration revisions,
 or configuration digests.
 

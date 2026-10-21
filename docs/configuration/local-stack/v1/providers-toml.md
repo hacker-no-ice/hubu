@@ -323,7 +323,15 @@ Required. Allowed values:
 - `request` — one per provider call, whatever it returns;
 - `result` — quantity of returned results (`results`);
 - `page` — quantity of returned pages of content (`pages`);
-- `second` — billable seconds of generated or processed media (`seconds`).
+- `second` — billable seconds of generated or processed media (`seconds`);
+- `megapixel` — billed megapixels of every output image (`megapixels`);
+- `additional_megapixel` — billed megapixels beyond the first of each output
+  image (`additional_megapixels`). Pair it with an `image` component to price
+  "first megapixel, then each additional one". Its quantity may be zero.
+
+The two megapixel units are available only to [provider packs](../../../provider-packs.md#megapixels),
+which derive them from certified output sizes and settle them from the
+delivered images.
 
 A component is priced against the named request quantity shown in brackets.
 The estimate uses the requested quantity and settlement uses the delivered

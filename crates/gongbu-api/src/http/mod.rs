@@ -532,8 +532,17 @@ impl Api {
         }) {
             return Err(ApiError::validation());
         }
-        let pricing_request =
-            NormalizedRequest::new(resolved.provider.clone(), resolved.model.clone())
+        // A pack target prices exactly as its engine will: from the pack's
+        // bounded parameters and certified sizes, including derived
+        // megapixels. Other targets price from the image input shape.
+        let pack = self.providers.pack(resolved);
+        let pricing_request = match pack {
+            Some(pack) => {
+                pack.prepare(&resolved.model, &normalized_input)
+                    .map_err(map_pricing_error)?
+                    .request
+            }
+            None => NormalizedRequest::new(resolved.provider.clone(), resolved.model.clone())
                 .with_quantity("image_count", image_count)
                 .with_quantity(
                     "input_tokens",
@@ -550,7 +559,8 @@ impl Api {
                         .and_then(|value| value.as_str())
                         .map(str::to_owned),
                 )
-                .with_output_dimensions(output_dimensions);
+                .with_output_dimensions(output_dimensions),
+        };
         let pricing_snapshot = self
             .providers
             .pricing()
@@ -565,7 +575,8 @@ impl Api {
         // Tokenization belongs to provider-bound request normalization, which is
         // not part of this HTTP/persistence milestone. Fail closed rather than
         // accepting a caller-asserted token count that could underfund execution.
-        if !pricing_snapshot.is_image_only() {
+        // Pack engines re-derive every priced quantity from bounded input.
+        if !(pricing_snapshot.is_image_only() || pack.is_some()) {
             return Err(ApiError::validation());
         }
         let authorization = self
@@ -584,7 +595,12 @@ impl Api {
             &resolved.provider,
             &resolved.adapter,
             &resolved.model,
-            pricing_request.image_size(),
+            // A megapixel-priced pack may not select its rule by size, but
+            // the policy Hubu evaluated still binds the size the agent chose.
+            pricing_request.image_size().or_else(|| {
+                pack.and(normalized_input.get("image_size"))
+                    .and_then(Value::as_str)
+            }),
         )
         .ok_or_else(ApiError::validation)?;
         let created_at = (self.now)();
@@ -1586,6 +1602,24 @@ mod tests {
                 response.agent_id = "agt_wk3q33h3j6w8".into();
                 response.task_id = None;
             }
+            if let Some(rest) = spend_auth_token_id.strip_prefix("megapixel-") {
+                // The megapixel fixture pack: a 2k 16:9 header is exactly 7.5¢.
+                response.execution_scope = if rest.starts_with("v2-") {
+                    for_execution(
+                        Some(crate::execution_scope::EXECUTION_SCOPE_TARGET_SCHEMA_VERSION),
+                        "local-mock",
+                        "sync_fixed",
+                        "megapixel-image-v1",
+                        Some("2k"),
+                    )
+                } else {
+                    for_target("local-mock", "sync_fixed")
+                };
+                response.amount_cents = 8;
+                response.budget_hold.amount_cents = 8;
+                response.budget_hold.frozen_amount_cents = 8;
+                response.amount = Some(exact("75000"));
+            }
             // A v4.5 Hubu reports the exact authorization beside its cents.
             if response.amount.is_none() {
                 response.amount = Some(crate::hubu::ExactAmount::from_units(
@@ -2379,6 +2413,116 @@ mod tests {
         assert_eq!(response.status, 404);
         assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), 0);
         assert!(fixture.scheduler.0.lock().unwrap().is_empty());
+    }
+
+    fn megapixel_fixture() -> (Fixture, Value) {
+        let pack = crate::provider::pack::Pack::from_toml_str(include_str!(
+            "../../../../fixtures/packs/megapixel-image.toml"
+        ))
+        .unwrap();
+        let secret = SecretReference::new("gongbu.megapixel-image", "fixture").unwrap();
+        let targets: ProviderTargetConfig = serde_json::from_value(json!({
+            "schema_version": 2,
+            "provider_configs": pack.provider_configs(&secret),
+        }))
+        .unwrap();
+        let pricing = PricingCatalog::from_json(
+            &serde_json::to_vec(&json!({
+                "schema_version": 2,
+                "catalog_version": pack.models()[0].pricing_version,
+                "rules": pack.pricing_rules(),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let target_id = pack.target_key(&pack.models()[0]).public_id();
+        let mut registry = ProviderRegistry::new();
+        registry.register_pack(pack);
+        registry.register_pack_engine(
+            crate::provider::pack::Archetype::SyncFixed,
+            |target, pack| {
+                Ok(Arc::new(
+                    crate::provider::pack_sync::SyncFixedEngine::from_target(
+                        target,
+                        pack,
+                        1 << 20,
+                    )?,
+                ))
+            },
+        );
+        let mut fixture = fixture();
+        fixture.api = Api::new_with_authorization_resolver(
+            fixture.repository.clone(),
+            fixture.artifacts.clone(),
+            ValidatedProviderCatalog::bind(targets, pricing, &registry).unwrap(),
+            fixture.scheduler.clone(),
+            i64::MAX,
+            fixture.resolver.clone(),
+            || "2026-08-05T20:00:00Z".into(),
+        );
+        (fixture, json!(target_id))
+    }
+
+    #[test]
+    fn a_16_9_header_from_a_megapixel_priced_target_freezes_its_exact_estimate() {
+        let (fixture, target_id) = megapixel_fixture();
+        let catalog: Value = serde_json::from_slice(
+            &fixture
+                .api
+                .handle("GET", "/v2/execution-targets", Some(&fixture.caller), &[])
+                .body,
+        )
+        .unwrap();
+        let target = &catalog["targets"][0];
+        assert_eq!(target["target_id"], target_id);
+        assert_eq!(target["output_sizes"].as_array().unwrap().len(), 6);
+        assert_eq!(target["megapixels"]["rounding"], "floor");
+        assert_eq!(
+            target["pricing"][0]["components"][1]["unit"],
+            "additional_megapixel"
+        );
+
+        let header = |token: &str, image_size: &str| {
+            json!({
+                "schema_version": 2,
+                "spend_auth_token_id": token,
+                "input": {"prompt": "a banner", "image_size": image_size, "aspect_ratio": "16:9"},
+                "input_schema_version": 1,
+                "target_id": target_id,
+            })
+        };
+        for token in ["megapixel-header", "megapixel-v2-header"] {
+            let created = call_create(&fixture, &header(token, "2k"));
+            assert_eq!(
+                created.status,
+                200,
+                "{}",
+                String::from_utf8_lossy(&created.body)
+            );
+            let stored = fixture
+                .repository
+                .get_execution(&execution(&created).execution_id)
+                .unwrap();
+            let snapshot: crate::provider_contract::PricingSnapshot =
+                serde_json::from_value(stored.pricing_snapshot).unwrap();
+            // 3¢ + 3 additional megapixels × 1.5¢, authorized exactly.
+            assert_eq!(snapshot.estimated_units, 75_000);
+            assert_eq!(stored.authorized_units, 75_000);
+            assert_eq!(
+                snapshot.output_dimensions,
+                Some(OutputDimensions {
+                    width: 2688,
+                    height: 1536
+                })
+            );
+        }
+        // A 1k header prices 3¢, so the 7.5¢ authorization does not match it.
+        let mismatch = call_create(&fixture, &header("megapixel-small", "1k"));
+        assert_eq!(mismatch.status, 400);
+        // A ratio the target does not certify is refused at admission.
+        let mut uncertified = header("megapixel-uncertified", "2k");
+        uncertified["input"]["aspect_ratio"] = json!("4:3");
+        assert_eq!(call_create(&fixture, &uncertified).status, 400);
     }
 
     fn call_create(fixture: &Fixture, request: &Value) -> HttpResponse {
