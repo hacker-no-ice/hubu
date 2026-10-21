@@ -13,7 +13,9 @@ use super::{
     targets::{AdapterSettings, ProviderConfigVersion, ProviderTargetConfig, TargetKey},
     verified_packs::verified_packs,
 };
-use crate::{artifact::ArtifactLimits, execution_scope::for_target, secrets::ProviderSecret};
+use crate::{
+    artifact::ArtifactLimits, execution_scope::for_workload_target, secrets::ProviderSecret,
+};
 use serde::Serialize;
 use std::{collections::BTreeMap, sync::Arc};
 use thiserror::Error;
@@ -44,6 +46,19 @@ pub struct ExecutionTarget {
     /// How billed megapixels are counted, when the target prices them.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub megapixels: Option<MegapixelRule>,
+    /// The input parameter that takes artifact IDs to edit, for image-edit
+    /// targets.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_images: Option<InputImagesParameter>,
+}
+
+/// Where an edit target takes its input images: artifact IDs of images the
+/// same account's earlier governed executions delivered.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct InputImagesParameter {
+    pub parameter: String,
+    pub min: i64,
+    pub max: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -386,7 +401,7 @@ impl ValidatedProviderCatalog {
             .filter(|target| target.is_active() && target.is_execution_enabled())
             .filter_map(|target| {
                 let key = target.target_key();
-                let scope = for_target(&key.provider, &key.adapter)?;
+                let scope = for_workload_target(&key.workload_type, &key.provider, &key.adapter)?;
                 let execution_scope = ExecutionTargetScope {
                     schema_version: scope.schema_version,
                     provider: scope.provider.id,
@@ -430,6 +445,7 @@ impl ValidatedProviderCatalog {
                     pricing,
                     output_sizes,
                     megapixels: pack.and_then(|pack| pack.megapixel_rule().cloned()),
+                    input_images: pack.and_then(|pack| pack.input_images_parameter()),
                 })
             })
             .collect()
@@ -764,11 +780,33 @@ mod tests {
             assert_eq!(catalog.resolve_active(&key).unwrap().adapter, adapter);
         }
         let execution_targets = catalog.execution_targets();
-        assert_eq!(execution_targets.len(), 3);
+        assert_eq!(execution_targets.len(), 5);
         let gemini_full = execution_targets
             .iter()
-            .find(|target| target.model == "gemini-3.1-flash-image")
+            .find(|target| {
+                target.model == "gemini-3.1-flash-image"
+                    && target.workload_type == "image_generation"
+            })
             .unwrap();
+        let gemini_edit = execution_targets
+            .iter()
+            .find(|target| {
+                target.model == "gemini-3.1-flash-image" && target.workload_type == "image_edit"
+            })
+            .unwrap();
+        assert_eq!(
+            gemini_edit.execution_scope.capability,
+            "capability:image:edit"
+        );
+        assert_eq!(
+            gemini_full.execution_scope.capability,
+            "capability:image:generate"
+        );
+        assert_ne!(gemini_edit.target_id, gemini_full.target_id);
+        assert!(gemini_edit
+            .pricing
+            .iter()
+            .all(|rule| rule.components.len() == 2));
         assert_eq!(gemini_full.image_sizes, ["1k", "2k", "4k"]);
         let flux = execution_targets
             .iter()

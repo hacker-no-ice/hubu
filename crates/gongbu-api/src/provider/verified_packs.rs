@@ -8,14 +8,20 @@ use super::pack::Pack;
 
 const GOOGLE_GEMINI_DEVELOPER_IMAGE: &str =
     include_str!("../../../../packs/verified/google-gemini-developer-image.toml");
+const GOOGLE_GEMINI_DEVELOPER_IMAGE_EDIT: &str =
+    include_str!("../../../../packs/verified/google-gemini-developer-image-edit.toml");
 const BFL_FLUX_2: &str = include_str!("../../../../packs/verified/bfl-flux-2.toml");
 
 /// Every verified pack, validated.
 pub fn verified_packs() -> Vec<Pack> {
-    [GOOGLE_GEMINI_DEVELOPER_IMAGE, BFL_FLUX_2]
-        .into_iter()
-        .map(|source| Pack::from_toml_str(source).expect("verified packs are valid"))
-        .collect()
+    [
+        GOOGLE_GEMINI_DEVELOPER_IMAGE,
+        GOOGLE_GEMINI_DEVELOPER_IMAGE_EDIT,
+        BFL_FLUX_2,
+    ]
+    .into_iter()
+    .map(|source| Pack::from_toml_str(source).expect("verified packs are valid"))
+    .collect()
 }
 
 #[cfg(test)]
@@ -89,6 +95,9 @@ mod tests {
             // Every advertised preset is a value the pack accepts for this model.
             for preset in contract["capability"]["presets"].as_array().unwrap() {
                 let mut input = json!({"prompt": "x", "image_size": preset["name"]});
+                if pack.parameters().iter().any(|p| p.name == "input_images") {
+                    input["input_images"] = json!(["0f5c2a64-3f0e-4c9b-9a51-2b7d1c4e8a10"]);
+                }
                 if pack.parameters().iter().any(|p| p.name == "options.width") {
                     input["options"] =
                         json!({"width": preset["width"], "height": preset["height"]});
@@ -98,7 +107,7 @@ mod tests {
             projected += 1;
         }
         assert_eq!(
-            projected, 3,
+            projected, 5,
             "every shipped contract comes from a verified pack"
         );
     }

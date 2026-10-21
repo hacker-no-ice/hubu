@@ -425,3 +425,37 @@ fn megapixel_targets_publish_certified_sizes_and_rounding() {
     .result;
     assert_eq!(result["isError"], true);
 }
+
+#[test]
+fn edit_targets_publish_their_input_image_parameter_and_price() {
+    const CATALOG: &str = r#"{"schema_version":2,"targets":[{"target_id":"gongbu:target:v1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","workload_type":"image_edit","provider":"google","model":"gemini-3.1-flash-image","execution_scope":{"schema_version":1,"provider":"provider:google:gemini-developer","executor":"executor:gongbu:image","capability":"capability:image:edit","billing_merchant":"merchant:google"},"image_sizes":["1k"],"pricing":[{"rule_id":"edit-1k","selector":{"image_size":"1k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":67,"rate_denominator":10},{"unit":"input_image","rate_numerator_minor":56,"rate_denominator":1000}]}],"input_images":{"parameter":"input_images","min":1,"max":4}}]}"#;
+    let (endpoint, _) = mock_server(vec![("200 OK", "application/json", CATALOG)]);
+    let result = call_tool(
+        &client(&endpoint, "secret"),
+        "gongbu_list_execution_targets",
+        json!({}),
+        None,
+    )
+    .result;
+    assert_eq!(result["isError"], false, "{result}");
+    let target = &result["structuredContent"]["targets"][0];
+    assert_eq!(target["input_images"]["parameter"], "input_images");
+    assert_eq!(target["input_images"]["max"], 4);
+    assert_eq!(target["pricing"][0]["components"][1]["unit"], "input_image");
+
+    // An input image range an agent can't satisfy is not a usable target.
+    let empty: &'static str = Box::leak(
+        CATALOG
+            .replace(r#""min":1,"max":4"#, r#""min":2,"max":1"#)
+            .into_boxed_str(),
+    );
+    let (endpoint, _) = mock_server(vec![("200 OK", "application/json", empty)]);
+    let result = call_tool(
+        &client(&endpoint, "secret"),
+        "gongbu_list_execution_targets",
+        json!({}),
+        None,
+    )
+    .result;
+    assert_eq!(result["isError"], true, "{result}");
+}

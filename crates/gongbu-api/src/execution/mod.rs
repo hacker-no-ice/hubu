@@ -2102,6 +2102,7 @@ fn validate_execution(n: &CreateExecutionParams) -> Result<()> {
     if n.execution_scope.as_ref().is_some_and(|scope| {
         for_execution(
             Some(scope.schema_version),
+            &n.workload_type,
             &n.provider,
             &n.adapter,
             &n.model,

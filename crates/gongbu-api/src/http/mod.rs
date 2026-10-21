@@ -5,7 +5,7 @@
 use crate::{
     artifacts::{ArtifactService, Error as ArtifactError},
     attestation::{AttestationError, RedactionAttestor},
-    execution_scope::{for_execution, for_target, ExecutionScope},
+    execution_scope::{for_execution, for_workload_target, ExecutionScope},
     hubu::{HttpClientError, SpendAuthorizationResolver},
     persistence::{
         Artifact, CreateExecutionParams, Error as PersistenceError, Execution,
@@ -14,8 +14,8 @@ use crate::{
     provider::{
         contract::{
             polling_deadline_allows_reinspect, units_to_minor_ceil, ContractError,
-            NormalizedRequest, OutputDimensions, PollingRecoveryContext, PricingSnapshot,
-            UNITS_PER_MINOR,
+            InputImageSource, NormalizedRequest, OutputDimensions, PollingRecoveryContext,
+            PricingSnapshot, INPUT_ARTIFACT_UNAVAILABLE, UNITS_PER_MINOR,
         },
         flux_contract,
         registry::{ExecutionTarget, ValidatedProviderCatalog},
@@ -543,6 +543,7 @@ impl Api {
                     .request
             }
             None => NormalizedRequest::new(resolved.provider.clone(), resolved.model.clone())
+                .with_workload(&resolved.workload_type)
                 .with_quantity("image_count", image_count)
                 .with_quantity(
                     "input_tokens",
@@ -592,6 +593,7 @@ impl Api {
                 .execution_scope
                 .as_ref()
                 .map(|scope| scope.schema_version),
+            &resolved.workload_type,
             &resolved.provider,
             &resolved.adapter,
             &resolved.model,
@@ -603,6 +605,21 @@ impl Api {
             }),
         )
         .ok_or_else(ApiError::validation)?;
+        // An edit names its input images by artifact ID: each must be one
+        // this account's earlier governed executions delivered.
+        if let Some(pack) = pack {
+            let images = self.artifacts.input_images(&authorization.account_id);
+            if pack
+                .input_artifact_ids(&normalized_input)
+                .iter()
+                .any(|id| images.load(id).is_err())
+            {
+                return Err(ApiError::validation_with_diagnostics(
+                    INPUT_ARTIFACT_UNAVAILABLE,
+                    &["input.input_images"],
+                ));
+            }
+        }
         let created_at = (self.now)();
         let authorization_expires_at = DateTime::parse_from_rfc3339(&authorization.expires_at)
             .map_err(|_| ApiError::validation())?;
@@ -1089,7 +1106,11 @@ fn immutable_hash(
         "input_schema_version": request.input_schema_version,
         "workload_type": resolved.workload_type,
         "provider": resolved.provider,
-        "execution_scope": for_target(&resolved.provider, &resolved.adapter),
+        "execution_scope": for_workload_target(
+            &resolved.workload_type,
+            &resolved.provider,
+            &resolved.adapter,
+        ),
         "adapter": resolved.adapter,
         "model": resolved.model,
         "provider_config_version": resolved.provider_config_version,
@@ -1368,6 +1389,7 @@ fn json_response(status: u16, body: &impl Serialize) -> HttpResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::execution_scope::for_target;
     use crate::{
         artifacts::{ArtifactLimits, LocalFsStorage},
         execution::{AttemptResult, CreateReceiptParams, ExecutionUpdate, LifecycleOutcome},
@@ -1583,6 +1605,7 @@ mod tests {
                 };
                 response.execution_scope = for_execution(
                     Some(crate::execution_scope::EXECUTION_SCOPE_TARGET_SCHEMA_VERSION),
+                    "image_generation",
                     "flux",
                     "flux2_api",
                     model,
@@ -1607,6 +1630,7 @@ mod tests {
                 response.execution_scope = if rest.starts_with("v2-") {
                     for_execution(
                         Some(crate::execution_scope::EXECUTION_SCOPE_TARGET_SCHEMA_VERSION),
+                        "image_generation",
                         "local-mock",
                         "sync_fixed",
                         "megapixel-image-v1",
@@ -1619,6 +1643,20 @@ mod tests {
                 response.budget_hold.amount_cents = 8;
                 response.budget_hold.frozen_amount_cents = 8;
                 response.amount = Some(exact("75000"));
+            }
+            if let Some(rest) = spend_auth_token_id.strip_prefix("edit-") {
+                // A 1k Flash edit of one input image is exactly 6.756¢.
+                if !rest.starts_with("draft") {
+                    response.execution_scope = if rest.starts_with("generate-scope") {
+                        for_target("google", "gemini_developer_image")
+                    } else {
+                        for_workload_target("image_edit", "google", "gemini_developer_image")
+                    };
+                    response.amount_cents = 7;
+                    response.budget_hold.amount_cents = 7;
+                    response.budget_hold.frozen_amount_cents = 7;
+                    response.amount = Some(exact("67560"));
+                }
             }
             // A v4.5 Hubu reports the exact authorization beside its cents.
             if response.amount.is_none() {
@@ -2330,6 +2368,8 @@ mod tests {
             ids,
             std::collections::BTreeSet::from([
                 "hubu.flux-2-pro.text-to-image/v1",
+                "hubu.gemini-3.1-flash-image.image-edit/v1",
+                "hubu.gemini-3.1-flash-lite-image.image-edit/v1",
                 "hubu.gemini-3.1-flash-image.text-to-image/v1",
                 "hubu.gemini-3.1-flash-lite-image.text-to-image/v1"
             ])
@@ -2523,6 +2563,130 @@ mod tests {
         let mut uncertified = header("megapixel-uncertified", "2k");
         uncertified["input"]["aspect_ratio"] = json!("4:3");
         assert_eq!(call_create(&fixture, &uncertified).status, 400);
+    }
+
+    #[test]
+    fn an_edit_admits_only_this_accounts_artifacts_under_an_edit_scope() {
+        let mut fixture = fixture();
+        // A draft this account's earlier execution delivered.
+        let draft = execution(&call_create(&fixture, &request("edit-draft-source")));
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            1,
+            1,
+            image::Rgba([1, 2, 3, 255]),
+        ))
+        .write_to(
+            &mut std::io::Cursor::new(&mut png),
+            image::ImageOutputFormat::Png,
+        )
+        .unwrap();
+        let artifact = fixture
+            .artifacts
+            .store_image(
+                &draft.execution_id,
+                None,
+                "image/png",
+                &png,
+                "2026-08-05T20:00:00Z",
+            )
+            .unwrap();
+
+        let pack = crate::provider::verified_packs::verified_packs()
+            .into_iter()
+            .find(|pack| pack.workload_type() == "image_edit")
+            .unwrap();
+        let secret = SecretReference::new("gongbu.google", "fixture").unwrap();
+        let targets: ProviderTargetConfig = serde_json::from_value(json!({
+            "schema_version": 2,
+            "provider_configs": pack.provider_configs(&secret),
+        }))
+        .unwrap();
+        let pricing = PricingCatalog::from_json(
+            &serde_json::to_vec(&json!({
+                "schema_version": 2,
+                "catalog_version": "gemini-edit-http-test",
+                "rules": pack.pricing_rules(),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let target_id = pack
+            .target_key(pack.model("gemini-3.1-flash-image").unwrap())
+            .public_id();
+        let mut registry = ProviderRegistry::new();
+        registry.register_pack(pack);
+        registry.register_pack_engine(
+            crate::provider::pack::Archetype::SyncFixed,
+            |target, pack| {
+                Ok(Arc::new(
+                    crate::provider::pack_sync::SyncFixedEngine::from_target(
+                        target,
+                        pack,
+                        1 << 20,
+                    )?,
+                ))
+            },
+        );
+        fixture.api = Api::new_with_authorization_resolver(
+            fixture.repository.clone(),
+            fixture.artifacts.clone(),
+            ValidatedProviderCatalog::bind(targets, pricing, &registry).unwrap(),
+            fixture.scheduler.clone(),
+            i64::MAX,
+            fixture.resolver.clone(),
+            || "2026-08-05T20:00:00Z".into(),
+        );
+        let edit = |token: &str, artifact_id: &str| {
+            json!({
+                "schema_version": 2,
+                "spend_auth_token_id": token,
+                "input": {"prompt": "make it blue", "image_size": "1k", "input_images": [artifact_id]},
+                "input_schema_version": 1,
+                "target_id": target_id,
+            })
+        };
+
+        let created = call_create(&fixture, &edit("edit-by-id", &artifact.artifact_id));
+        assert_eq!(
+            created.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&created.body)
+        );
+        let stored = fixture
+            .repository
+            .get_execution(&execution(&created).execution_id)
+            .unwrap();
+        assert_eq!(stored.workload_type, "image_edit");
+        // 6.7¢ for the output image plus 0.056¢ for the one input image.
+        assert_eq!(stored.authorized_units, 67_560);
+        assert_eq!(
+            stored.execution_scope.unwrap().capability.id,
+            "capability:image:edit"
+        );
+
+        // An ID no execution of this account delivered is refused by name.
+        let unknown = call_create(
+            &fixture,
+            &edit("edit-unknown", "00000000-0000-4000-8000-000000000000"),
+        );
+        assert_eq!(unknown.status, 400);
+        let body = error(&unknown);
+        assert_eq!(
+            body.error.reason_code.as_deref(),
+            Some("input_artifact_unavailable")
+        );
+        assert_eq!(body.error.fields, Some(vec!["input.input_images".into()]));
+        // A generation approval does not authorize an edit.
+        assert_eq!(
+            call_create(
+                &fixture,
+                &edit("edit-generate-scope", &artifact.artifact_id)
+            )
+            .status,
+            400
+        );
     }
 
     fn call_create(fixture: &Fixture, request: &Value) -> HttpResponse {

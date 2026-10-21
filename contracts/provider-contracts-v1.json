@@ -122,6 +122,134 @@
       ]
     },
     {
+      "contract": "hubu.gemini-3.1-flash-lite-image.image-edit/v1",
+      "pricing_version": "google-gemini-3.1-flash-lite-image-edit-usd-2026-10-21-v1",
+      "pricing_reviewed_on": "2026-10-21",
+      "target": {
+        "provider_config_version": "hubu-gemini-3.1-flash-lite-image-edit-2026-10-21-v1",
+        "workload_type": "image_edit",
+        "provider": "google",
+        "adapter": "gemini_developer_image",
+        "model": "gemini-3.1-flash-lite-image",
+        "active": true,
+        "execution_enabled": true,
+        "settings": {
+          "type": "pack",
+          "config": {
+            "pack_id": "google-gemini-developer-image-edit",
+            "pack_version": "2026-10-21.1",
+            "pack_digest": "sha256:f68d0de50ff3ccf344521eb3abd248169504baa12098dac4f83d3d4f6d0ff2fc",
+            "archetype": "sync_fixed"
+          }
+        }
+      },
+      "capability": {
+        "image_count": 1,
+        "output_formats": ["png", "jpeg"],
+        "presets": [
+          {"name": "1k", "width": 1024, "height": 1024}
+        ]
+      },
+      "policies": {
+        "generation_retries": 0,
+        "fallback": false,
+        "poll": "synchronous-response-v1",
+        "artifact_delivery": "google-inline-image-v1",
+        "recovery": "hubu-durable-synchronous-replay-v1"
+      },
+      "pricing_rules": [
+        {
+          "rule_id": "google-gemini-3.1-flash-lite-image-edit-1k-2026-10-21-v1",
+          "provider": "google",
+          "model": "gemini-3.1-flash-lite-image",
+          "workload_type": "image_edit",
+          "currency": "USD",
+          "selector": {"image_size": "1k"},
+          "components": [
+            {"unit": "image", "rate_numerator_minor": 336, "rate_denominator": 100},
+            {"unit": "input_image", "rate_numerator_minor": 28, "rate_denominator": 1000}
+          ]
+        }
+      ]
+    },
+    {
+      "contract": "hubu.gemini-3.1-flash-image.image-edit/v1",
+      "pricing_version": "google-gemini-3.1-flash-image-edit-usd-2026-10-21-v1",
+      "pricing_reviewed_on": "2026-10-21",
+      "target": {
+        "provider_config_version": "hubu-gemini-3.1-flash-image-edit-2026-10-21-v1",
+        "workload_type": "image_edit",
+        "provider": "google",
+        "adapter": "gemini_developer_image",
+        "model": "gemini-3.1-flash-image",
+        "active": true,
+        "execution_enabled": true,
+        "settings": {
+          "type": "pack",
+          "config": {
+            "pack_id": "google-gemini-developer-image-edit",
+            "pack_version": "2026-10-21.1",
+            "pack_digest": "sha256:f68d0de50ff3ccf344521eb3abd248169504baa12098dac4f83d3d4f6d0ff2fc",
+            "archetype": "sync_fixed"
+          }
+        }
+      },
+      "capability": {
+        "image_count": 1,
+        "output_formats": ["png", "jpeg"],
+        "presets": [
+          {"name": "1k", "width": 1024, "height": 1024},
+          {"name": "2k", "width": 2048, "height": 2048},
+          {"name": "4k", "width": 4096, "height": 4096}
+        ]
+      },
+      "policies": {
+        "generation_retries": 0,
+        "fallback": false,
+        "poll": "synchronous-response-v1",
+        "artifact_delivery": "google-inline-image-v1",
+        "recovery": "hubu-durable-synchronous-replay-v1"
+      },
+      "pricing_rules": [
+        {
+          "rule_id": "google-gemini-3.1-flash-image-edit-1k-2026-10-21-v1",
+          "provider": "google",
+          "model": "gemini-3.1-flash-image",
+          "workload_type": "image_edit",
+          "currency": "USD",
+          "selector": {"image_size": "1k"},
+          "components": [
+            {"unit": "image", "rate_numerator_minor": 67, "rate_denominator": 10},
+            {"unit": "input_image", "rate_numerator_minor": 56, "rate_denominator": 1000}
+          ]
+        },
+        {
+          "rule_id": "google-gemini-3.1-flash-image-edit-2k-2026-10-21-v1",
+          "provider": "google",
+          "model": "gemini-3.1-flash-image",
+          "workload_type": "image_edit",
+          "currency": "USD",
+          "selector": {"image_size": "2k"},
+          "components": [
+            {"unit": "image", "rate_numerator_minor": 101, "rate_denominator": 10},
+            {"unit": "input_image", "rate_numerator_minor": 56, "rate_denominator": 1000}
+          ]
+        },
+        {
+          "rule_id": "google-gemini-3.1-flash-image-edit-4k-2026-10-21-v1",
+          "provider": "google",
+          "model": "gemini-3.1-flash-image",
+          "workload_type": "image_edit",
+          "currency": "USD",
+          "selector": {"image_size": "4k"},
+          "components": [
+            {"unit": "image", "rate_numerator_minor": 151, "rate_denominator": 10},
+            {"unit": "input_image", "rate_numerator_minor": 56, "rate_denominator": 1000}
+          ]
+        }
+      ]
+    },
+    {
       "contract": "hubu.flux-2-pro.text-to-image/v1",
       "pricing_version": "bfl-flux-2-pro-usd-2026-08-28-v1",
       "pricing_reviewed_on": "2026-08-28",

@@ -278,6 +278,7 @@ mod tests {
         for diagnostic in [
             gongbu::AdmissionDiagnostic::TargetIdNotSelectable,
             gongbu::AdmissionDiagnostic::PricingSelectorNotMatched,
+            gongbu::AdmissionDiagnostic::InputArtifactUnavailable,
         ] {
             assert_eq!(
                 durable_failure_code("invalid_request", Some(diagnostic)),

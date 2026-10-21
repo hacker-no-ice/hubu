@@ -10,12 +10,14 @@
 
 use super::{
     contract::{
-        ActualVendorCost, AdapterCapabilities, AdapterOutcome, ContractError, NormalizedArtifact,
-        NormalizedRequest, NormalizedUsage, OutputDimensions, PriceComponent, PricingCatalog,
-        PricingRule, PricingSelector, PricingUnit, ProviderAdapter, ProviderFailure, ProviderPhase,
-        DERIVED_QUANTITIES, MAX_VENDOR_COST_SCALE, REQUEST_QUANTITIES,
+        ActualVendorCost, AdapterCapabilities, AdapterOutcome, ContractError, InputImageSource,
+        NormalizedArtifact, NormalizedRequest, NormalizedUsage, OutputDimensions, PriceComponent,
+        PricingCatalog, PricingRule, PricingSelector, PricingUnit, ProviderAdapter,
+        ProviderFailure, ProviderPhase, DEFAULT_WORKLOAD_TYPE, DERIVED_QUANTITIES,
+        MAX_VENDOR_COST_SCALE, REQUEST_QUANTITIES,
     },
     http_kernel::{valid_provider_deadline_ms, validate_https_origin, validate_safe_headers},
+    registry::InputImagesParameter,
     targets::{PackTargetConfig, TargetKey},
 };
 use crate::secrets::{ProviderSecret, SecretReference};
@@ -51,7 +53,16 @@ const USAGE_QUANTITIES: &[(&str, &str)] = &[
     ("results", "results"),
     ("pages", "pages"),
     ("seconds", "seconds"),
+    ("input_images", "input_images"),
 ];
+
+/// The request quantity only an `images` parameter sets.
+const INPUT_IMAGES_QUANTITY: &str = "input_images";
+/// Placeholders an `images` parameter's `item` template may use.
+const IMAGE_MEDIA_TYPE_PLACEHOLDER: &str = "image.media_type";
+const IMAGE_DATA_PLACEHOLDER: &str = "image.data";
+/// The most input images one request may send.
+const MAX_INPUT_IMAGES: i64 = 16;
 
 /// Artifact media types the Gongbu artifact store accepts today.
 const PACK_ARTIFACT_MEDIA_TYPES: &[&str] = &["image/png", "image/jpeg"];
@@ -412,6 +423,10 @@ pub struct Parameter {
     /// it must equal the size the preset certifies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub equals: Option<Derived>,
+    /// `images` only: the provider's shape for one input image, using
+    /// `{{image.media_type}}` and `{{image.data}}` (base64 bytes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item: Option<Map<String, Value>>,
 }
 
 /// A value derived from another parameter rather than chosen freely.
@@ -438,6 +453,9 @@ pub enum ParameterKind {
     Integer,
     Boolean,
     Enum,
+    /// Artifact IDs of images earlier governed executions delivered to the
+    /// same account. The engine loads and sends their verified bytes.
+    Images,
 }
 
 /// Response paths into the provider's JSON body. A path is a JSON Pointer
@@ -654,6 +672,8 @@ impl Pack {
                     rule_id: rule.rule_id.clone(),
                     provider: self.document.provider.clone(),
                     model: model.model.clone(),
+                    workload_type: (self.document.workload_type != DEFAULT_WORKLOAD_TYPE)
+                        .then(|| self.document.workload_type.clone()),
                     currency: rule.currency.clone(),
                     selector: rule.selector.clone(),
                     components: rule.components.clone(),
@@ -695,8 +715,58 @@ impl Pack {
     }
 
     /// Validate agent input against the declared parameters and build both the
-    /// priced request and the provider request body.
+    /// priced request and the provider request body. A request that sends
+    /// input images has a `Null` body here: only the engine, holding the
+    /// images, renders it with [`Pack::prepare_with_images`].
     pub fn prepare(&self, model: &str, input: &Value) -> Result<PreparedRequest, ContractError> {
+        self.prepare_inner(model, input, None)
+    }
+
+    /// [`Pack::prepare`], loading the input images the request references
+    /// from `images` and rendering the body that sends them.
+    pub fn prepare_with_images(
+        &self,
+        model: &str,
+        input: &Value,
+        images: &dyn InputImageSource,
+    ) -> Result<PreparedRequest, ContractError> {
+        self.prepare_inner(model, input, Some(images))
+    }
+
+    /// The parameter that takes input images, for discovery.
+    pub fn input_images_parameter(&self) -> Option<InputImagesParameter> {
+        self.document
+            .parameters
+            .iter()
+            .find(|p| p.kind == ParameterKind::Images)
+            .map(|p| InputImagesParameter {
+                parameter: p.name.clone(),
+                min: p.min.unwrap_or(1),
+                max: p.max.unwrap_or(1),
+            })
+    }
+
+    /// The artifact IDs `input` names in its images parameters, in order.
+    pub fn input_artifact_ids(&self, input: &Value) -> Vec<String> {
+        let Some(input) = input.as_object() else {
+            return Vec::new();
+        };
+        self.document
+            .parameters
+            .iter()
+            .filter(|p| p.kind == ParameterKind::Images)
+            .filter_map(|p| p.input_value(input)?.as_array())
+            .flatten()
+            .filter_map(|id| id.as_str().map(str::to_owned))
+            .collect()
+    }
+
+    fn prepare_inner(
+        &self,
+        model: &str,
+        input: &Value,
+        images: Option<&dyn InputImageSource>,
+    ) -> Result<PreparedRequest, ContractError> {
         let indeterminable = || ContractError::IndeterminableCost;
         let model = self.model(model).ok_or(ContractError::UnsupportedTarget)?;
         let input = input.as_object().ok_or_else(indeterminable)?;
@@ -725,8 +795,11 @@ impl Pack {
         // The certified output size comes from the preset parameters, so it
         // is known before any parameter tied to it is checked.
         let dimensions = self.output_size(input);
-        let mut request = NormalizedRequest::new(&self.document.provider, &model.model);
+        let mut request = NormalizedRequest::new(&self.document.provider, &model.model)
+            .with_workload(&self.document.workload_type);
         let mut values = BTreeMap::from([(MODEL_PLACEHOLDER.to_owned(), json!(model.model))]);
+        let mut spliced = BTreeSet::new();
+        let mut unrendered = false;
         if let Some(dimensions) = &dimensions {
             values.insert(OUTPUT_WIDTH_PLACEHOLDER.to_owned(), json!(dimensions.width));
             values.insert(
@@ -759,6 +832,38 @@ impl Pack {
                     return Err(indeterminable());
                 }
             }
+            if parameter.kind == ParameterKind::Images {
+                let ids = value.as_array().ok_or_else(indeterminable)?;
+                if let Some(quantity) = &parameter.quantity {
+                    request.set_quantity(quantity, Some(ids.len() as i64));
+                }
+                let Some(images) = images else {
+                    unrendered = true;
+                    continue;
+                };
+                let item = parameter.item.as_ref().ok_or_else(indeterminable)?;
+                let mut items = Vec::with_capacity(ids.len());
+                for id in ids {
+                    let image = images.load(id.as_str().ok_or_else(indeterminable)?)?;
+                    let fields = BTreeMap::from([
+                        (
+                            IMAGE_MEDIA_TYPE_PLACEHOLDER.to_owned(),
+                            json!(image.media_type),
+                        ),
+                        (
+                            IMAGE_DATA_PLACEHOLDER.to_owned(),
+                            json!(base64::engine::general_purpose::STANDARD.encode(&image.bytes)),
+                        ),
+                    ]);
+                    items.push(
+                        render_template(&Value::Object(item.clone()), &fields, &BTreeSet::new())
+                            .ok_or_else(indeterminable)?,
+                    );
+                }
+                spliced.insert(parameter.name.clone());
+                values.insert(parameter.name.clone(), Value::Array(items));
+                continue;
+            }
             if let Some(quantity) = &parameter.quantity {
                 request.set_quantity(quantity, value.as_i64());
             }
@@ -789,7 +894,8 @@ impl Pack {
         request.output_dimensions = dimensions;
         request.validate()?;
         let body = match self.document.request.as_ref().and_then(|r| r.body.as_ref()) {
-            Some(template) => render_template(&Value::Object(template.clone()), &values)
+            Some(_) if unrendered => Value::Null,
+            Some(template) => render_template(&Value::Object(template.clone()), &values, &spliced)
                 .ok_or_else(indeterminable)?,
             None => Value::Object(flat),
         };
@@ -1157,6 +1263,17 @@ impl Parameter {
                     return Err("is not one of values".into());
                 }
             }
+            ParameterKind::Images => {
+                let ids = value.as_array().ok_or("must be an array of artifact IDs")?;
+                let unique: BTreeSet<_> = ids.iter().filter_map(Value::as_str).collect();
+                if unique.len() != ids.len() || !unique.iter().all(|id| valid_artifact_id(id)) {
+                    return Err("must name distinct artifact IDs".into());
+                }
+                let count = ids.len() as i64;
+                if count < self.min.unwrap_or(1) || self.max.is_some_and(|max| count > max) {
+                    return Err("is outside min..=max images".into());
+                }
+            }
         }
         Ok(())
     }
@@ -1216,14 +1333,26 @@ impl Parameter {
         };
         let integer = self.kind == ParameterKind::Integer;
         let enumeration = self.kind == ParameterKind::Enum;
+        let images = self.kind == ParameterKind::Images;
         if self.min.is_some() {
-            only(integer, "min")?;
+            only(integer || images, "min")?;
         }
         if self.max.is_some() {
-            only(integer, "max")?;
+            only(integer || images, "max")?;
         }
         if self.quantity.is_some() {
-            only(integer, "quantity")?;
+            only(integer || images, "quantity")?;
+        }
+        if self.item.is_some() {
+            only(images, "item")?;
+        }
+        if images {
+            self.validate_images(field)?;
+        } else if self.quantity.as_deref() == Some(INPUT_IMAGES_QUANTITY) {
+            return Err(invalid(
+                format!("{field}.quantity"),
+                "input_images is set only by an images parameter",
+            ));
         }
         if self.max_length.is_some() {
             only(self.kind == ParameterKind::String, "max_length")?;
@@ -1284,7 +1413,12 @@ impl Parameter {
                     format!("must be one of {}", REQUEST_QUANTITIES.join(", ")),
                 ));
             }
-            if self.min.is_none_or(|min| min < 0) || self.max.is_none() {
+            let min = if images {
+                Some(self.min.unwrap_or(1))
+            } else {
+                self.min
+            };
+            if min.is_none_or(|min| min < 0) || self.max.is_none() {
                 return Err(invalid(
                     format!("{field}.quantity"),
                     "priced quantities need min >= 0 and a max, so every hold is bounded",
@@ -1318,6 +1452,65 @@ impl Parameter {
             return Err(invalid(
                 format!("{field}.default"),
                 "a priced parameter must be required or have a default",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl Parameter {
+    /// An `images` parameter is required, bounded, and declares how the
+    /// provider receives one image.
+    fn validate_images(&self, field: &str) -> Result<(), PackError> {
+        if !self.required || self.default.is_some() {
+            return Err(invalid(
+                format!("{field}.required"),
+                "an images parameter is required and has no default",
+            ));
+        }
+        let min = self.min.unwrap_or(1);
+        if min < 1
+            || self
+                .max
+                .is_none_or(|max| max < min || max > MAX_INPUT_IMAGES)
+        {
+            return Err(invalid(
+                format!("{field}.max"),
+                format!("an images parameter takes 1 to {MAX_INPUT_IMAGES} images, min <= max"),
+            ));
+        }
+        if self
+            .quantity
+            .as_deref()
+            .is_some_and(|quantity| quantity != INPUT_IMAGES_QUANTITY)
+        {
+            return Err(invalid(
+                format!("{field}.quantity"),
+                "an images parameter sets only input_images",
+            ));
+        }
+        let item = self.item.as_ref().ok_or_else(|| {
+            invalid(
+                format!("{field}.item"),
+                "an images parameter declares the provider's shape for one image",
+            )
+        })?;
+        let mut referenced = BTreeSet::new();
+        collect_placeholders(&Value::Object(item.clone()), &mut referenced)
+            .map_err(|reason| invalid(format!("{field}.item"), reason))?;
+        if referenced.iter().any(|(name, transform)| {
+            transform.is_some()
+                || !matches!(
+                    name.as_str(),
+                    IMAGE_MEDIA_TYPE_PLACEHOLDER | IMAGE_DATA_PLACEHOLDER
+                )
+        }) || !referenced
+            .iter()
+            .any(|(name, _)| name == IMAGE_DATA_PLACEHOLDER)
+        {
+            return Err(invalid(
+                format!("{field}.item"),
+                "must send {{image.data}} and may use only {{image.media_type}} besides",
             ));
         }
         Ok(())
@@ -1424,6 +1617,33 @@ impl PackDocument {
         }
         self.validate_megapixels()?;
         quantities.extend(self.derived_quantities());
+        if let Some(parameter) = self
+            .parameters
+            .iter()
+            .find(|p| p.kind == ParameterKind::Images)
+        {
+            // Only the sync_fixed engine loads input images today.
+            if self.archetype != Archetype::SyncFixed {
+                return Err(invalid(
+                    "archetype",
+                    format!(
+                        "images parameter {} needs the sync_fixed engine",
+                        parameter.name
+                    ),
+                ));
+            }
+            if self
+                .request
+                .as_ref()
+                .and_then(|r| r.body.as_ref())
+                .is_none()
+            {
+                return Err(invalid(
+                    "request.body",
+                    format!("images parameter {} needs a body template", parameter.name),
+                ));
+            }
+        }
         if let Some(parameter) = self.parameters.iter().find(|p| p.group().is_some()) {
             if self
                 .request
@@ -1757,6 +1977,18 @@ impl PackDocument {
         let mut referenced = BTreeSet::new();
         collect_placeholders(&Value::Object(body.clone()), &mut referenced)
             .map_err(|reason| invalid("request.body", reason))?;
+        let images: BTreeSet<_> = self
+            .parameters
+            .iter()
+            .filter(|p| p.kind == ParameterKind::Images)
+            .map(|p| p.name.as_str())
+            .collect();
+        if !images_spliced_only(&Value::Object(body.clone()), &images, false) {
+            return Err(invalid(
+                "request.body",
+                "an images placeholder must be a whole element of an array",
+            ));
+        }
         for (name, transform) in &referenced {
             let parameter = self.parameters.iter().find(|p| &p.name == name);
             let derived = matches!(
@@ -2140,7 +2372,8 @@ impl PackDocument {
         // rule, so no valid agent input can reach an unpriced request.
         for model in &self.models {
             for combination in &selector_combinations(selectors, model) {
-                let mut request = NormalizedRequest::new(&self.provider, &model.model);
+                let mut request = NormalizedRequest::new(&self.provider, &model.model)
+                    .with_workload(&self.workload_type);
                 request.selector = combination.clone();
                 for quantity in quantities {
                     request.set_quantity(quantity, Some(1));
@@ -2168,6 +2401,7 @@ impl PackDocument {
                         "rule_id": rule.rule_id,
                         "provider": self.provider,
                         "model": model.model,
+                        "workload_type": self.workload_type,
                         "currency": rule.currency,
                         "selector": rule.selector,
                         "components": rule.components,
@@ -2243,6 +2477,7 @@ fn usage_slot<'a>(usage: &'a mut NormalizedUsage, quantity: &str) -> Option<&'a 
         "results" => &mut usage.results,
         "pages" => &mut usage.pages,
         "seconds" => &mut usage.seconds,
+        "input_images" => &mut usage.input_images,
         _ => return None,
     })
 }
@@ -2428,9 +2663,18 @@ fn collect_placeholders(
 }
 
 /// Render a validated body template. `None` means "leave this value out";
-/// the top-level object always renders.
-fn render_template(template: &Value, values: &BTreeMap<String, Value>) -> Option<Value> {
-    fn render(template: &Value, values: &BTreeMap<String, Value>) -> Option<Value> {
+/// the top-level object always renders. A `spliced` placeholder is an array
+/// element that expands to the elements of its value.
+fn render_template(
+    template: &Value,
+    values: &BTreeMap<String, Value>,
+    spliced: &BTreeSet<String>,
+) -> Option<Value> {
+    fn render(
+        template: &Value,
+        values: &BTreeMap<String, Value>,
+        spliced: &BTreeSet<String>,
+    ) -> Option<Value> {
         match template {
             Value::String(text) => match placeholder(text) {
                 Some((name, transform)) => {
@@ -2445,19 +2689,29 @@ fn render_template(template: &Value, values: &BTreeMap<String, Value>) -> Option
             },
             Value::Object(map) => Some(Value::Object(
                 map.iter()
-                    .filter_map(|(key, value)| Some((key.clone(), render(value, values)?)))
+                    .filter_map(|(key, value)| Some((key.clone(), render(value, values, spliced)?)))
                     .collect(),
             )),
-            Value::Array(items) => Some(Value::Array(
-                items
-                    .iter()
-                    .filter_map(|item| render(item, values))
-                    .collect(),
-            )),
+            Value::Array(items) => {
+                let mut rendered = Vec::with_capacity(items.len());
+                for item in items {
+                    let splice = item
+                        .as_str()
+                        .and_then(placeholder)
+                        .filter(|(name, _)| spliced.contains(*name));
+                    match splice {
+                        Some((name, _)) => {
+                            rendered.extend(values.get(name)?.as_array()?.iter().cloned())
+                        }
+                        None => rendered.extend(render(item, values, spliced)),
+                    }
+                }
+                Some(Value::Array(rendered))
+            }
             other => Some(other.clone()),
         }
     }
-    render(template, values).filter(Value::is_object)
+    render(template, values, spliced).filter(Value::is_object)
 }
 
 /// A provider-reported decimal amount in USD, shifted right by `scale`
@@ -2601,6 +2855,32 @@ fn valid_slug(value: &str) -> bool {
 
 fn valid_scope_tail(value: &str) -> bool {
     !value.is_empty() && value.len() <= 128 && value.split(':').all(valid_slug)
+}
+
+/// An artifact ID as Gongbu issues it: a lowercase hyphenated UUID.
+fn valid_artifact_id(value: &str) -> bool {
+    value.len() == 36
+        && value.char_indices().all(|(index, c)| match index {
+            8 | 13 | 18 | 23 => c == '-',
+            _ => c.is_ascii_digit() || ('a'..='f').contains(&c),
+        })
+}
+
+/// Whether every `images` placeholder in `template` is a whole element of
+/// an array, where the engine splices in one rendered item per image.
+fn images_spliced_only(template: &Value, images: &BTreeSet<&str>, in_array: bool) -> bool {
+    match template {
+        Value::String(text) => {
+            placeholder(text).is_none_or(|(name, _)| !images.contains(name) || in_array)
+        }
+        Value::Object(map) => map
+            .values()
+            .all(|value| images_spliced_only(value, images, false)),
+        Value::Array(items) => items
+            .iter()
+            .all(|item| images_spliced_only(item, images, true)),
+        _ => true,
+    }
 }
 
 /// A parameter name: an identifier, or `group.member` with one level.
@@ -4118,5 +4398,166 @@ mod tests {
         plain.megapixels = None;
         let value = serde_json::to_value(&plain).unwrap();
         assert!(value.get("output_sizes").is_none() && value.get("megapixels").is_none());
+    }
+
+    const EDIT: &str =
+        include_str!("../../../../packs/verified/google-gemini-developer-image-edit.toml");
+    const DRAFT: &str = "0f5c2a64-3f0e-4c9b-9a51-2b7d1c4e8a10";
+    const SKETCH: &str = "6b1e9d2c-8a47-4f3e-b5c0-91d2e7a4f638";
+
+    fn edit_pack(from: &str, to: &str) -> Result<Pack, PackError> {
+        assert_eq!(EDIT.matches(from).count(), 1, "{from}");
+        Pack::from_toml_str(&EDIT.replace(from, to))
+    }
+
+    use crate::provider::contract::InputImage;
+
+    struct Images(BTreeMap<&'static str, InputImage>);
+    impl InputImageSource for Images {
+        fn load(&self, artifact_id: &str) -> Result<InputImage, ContractError> {
+            self.0
+                .get(artifact_id)
+                .cloned()
+                .ok_or(ContractError::Provider {
+                    code: "input_artifact_unavailable".into(),
+                })
+        }
+    }
+
+    #[test]
+    fn edit_packs_send_each_loaded_input_image_and_price_it() {
+        let pack = Pack::from_toml_str(EDIT).unwrap();
+        let input =
+            json!({"prompt": "blend them", "image_size": "1k", "input_images": [DRAFT, SKETCH]});
+        // Pricing never needs the bytes: the body stays unrendered.
+        let priced = pack.prepare("gemini-3.1-flash-image", &input).unwrap();
+        assert_eq!(priced.body, Value::Null);
+        assert_eq!(priced.request.workload(), "image_edit");
+        assert_eq!(priced.request.quantity("input_images"), Some(2));
+        let catalog = PricingCatalog::from_json(
+            &serde_json::to_vec(&json!({
+                "schema_version": 2,
+                "catalog_version": "edit",
+                "rules": pack.pricing_rules(),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        // 6.7¢ for the output image and 0.056¢ for each input image.
+        assert_eq!(
+            catalog.snapshot(&priced.request).unwrap().estimated_units,
+            68_120
+        );
+        assert_eq!(pack.input_artifact_ids(&input), [DRAFT, SKETCH]);
+
+        let images = Images(BTreeMap::from([
+            (
+                DRAFT,
+                InputImage {
+                    media_type: "image/png".into(),
+                    bytes: PNG.to_vec(),
+                },
+            ),
+            (
+                SKETCH,
+                InputImage {
+                    media_type: "image/jpeg".into(),
+                    bytes: vec![0xff, 0xd8],
+                },
+            ),
+        ]));
+        let sent = pack
+            .prepare_with_images("gemini-3.1-flash-image", &input, &images)
+            .unwrap();
+        assert_eq!(sent.request, priced.request);
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        assert_eq!(
+            sent.body,
+            json!({
+                "model": "gemini-3.1-flash-image",
+                "input": [
+                    {"type": "text", "text": "blend them"},
+                    {"type": "image", "mime_type": "image/png", "data": encode(PNG)},
+                    {"type": "image", "mime_type": "image/jpeg", "data": encode(&[0xff, 0xd8])},
+                ],
+                "response_format": {"type": "image", "image_size": "1K"},
+            })
+        );
+        // An image that can't be loaded stops the request by name.
+        let only_draft = Images(BTreeMap::from([(
+            DRAFT,
+            InputImage {
+                media_type: "image/png".into(),
+                bytes: PNG.to_vec(),
+            },
+        )]));
+        assert_eq!(
+            pack.prepare_with_images("gemini-3.1-flash-image", &input, &only_draft),
+            Err(ContractError::Provider {
+                code: "input_artifact_unavailable".into()
+            })
+        );
+
+        for invalid in [
+            json!({"prompt": "x", "image_size": "1k"}),
+            json!({"prompt": "x", "image_size": "1k", "input_images": []}),
+            json!({"prompt": "x", "image_size": "1k", "input_images": [DRAFT, DRAFT]}),
+            json!({"prompt": "x", "image_size": "1k", "input_images": ["../executions/x.png"]}),
+            json!({"prompt": "x", "image_size": "1k", "input_images": [DRAFT.to_uppercase()]}),
+            json!({"prompt": "x", "image_size": "1k", "input_images": DRAFT}),
+            json!({"prompt": "x", "image_size": "1k", "input_images": [DRAFT, SKETCH,
+                "1b1e9d2c-8a47-4f3e-b5c0-91d2e7a4f638", "2b1e9d2c-8a47-4f3e-b5c0-91d2e7a4f638",
+                "3b1e9d2c-8a47-4f3e-b5c0-91d2e7a4f638"]}),
+        ] {
+            assert!(
+                pack.prepare("gemini-3.1-flash-image", &invalid).is_err(),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn images_parameters_are_required_bounded_and_spliced_into_an_array() {
+        let item = r#"item = { type = "image", mime_type = "{{image.media_type}}", data = "{{image.data}}" }"#;
+        for (from, to, field) in [
+            (item, "", "parameters[1].item"),
+            (
+                item,
+                r#"item = { type = "image", mime_type = "{{image.media_type}}" }"#,
+                "parameters[1].item",
+            ),
+            (
+                item,
+                r#"item = { type = "image", data = "{{image.data}}", uri = "{{prompt}}" }"#,
+                "parameters[1].item",
+            ),
+            ("max = 4\nquantity = \"input_images\"", "max = 17\nquantity = \"input_images\"", "parameters[1].max"),
+            ("min = 1\nmax = 4\nquantity = \"input_images\"", "min = 0\nmax = 4\nquantity = \"input_images\"", "parameters[1].max"),
+            ("type = \"images\"\nrequired = true", "type = \"images\"\nrequired = false", "parameters[1].required"),
+            ("quantity = \"input_images\"\nitem", "quantity = \"image_count\"\nitem", "parameters[1].quantity"),
+            (
+                "max = 1\ndefault = 1\nquantity = \"image_count\"",
+                "max = 1\ndefault = 1\nquantity = \"input_images\"",
+                "parameters[2].quantity",
+            ),
+            (
+                r#"input = [{ type = "text", text = "{{prompt}}" }, "{{input_images}}"]"#,
+                "input = [{ type = \"text\", text = \"{{prompt}}\" }]\nimages = \"{{input_images}}\"",
+                "request.body",
+            ),
+        ] {
+            let error = edit_pack(from, to).unwrap_err();
+            assert!(
+                matches!(&error, PackError::Invalid { field: f, .. } if f == field),
+                "{from} -> {to}: {error}"
+            );
+        }
+        // Every rule must price the input images an edit sends.
+        let error = edit_pack(
+            r#"  { unit = "input_image", rate_numerator_minor = 28, rate_denominator = 1000 },"#,
+            "",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("input_images"), "{error}");
     }
 }

@@ -11,7 +11,7 @@ use thiserror::Error;
 
 const CONTRACT_DOCUMENT: &str = include_str!("../../../../contracts/provider-contracts-v1.json");
 const CONTRACT_DOCUMENT_SHA256: &str =
-    "f016d273c246807bc2b1dfdb75e71965ad18fc1343fe736cc2ae6c7056aa71f5";
+    "bf1831b25f8e9b91b1880148e4bacc825cce474dc6580788490c2c12e8801666";
 
 #[derive(Debug, Error)]
 pub(crate) enum Error {
@@ -191,7 +191,9 @@ fn validate_and_project_with_mode(
     }
     for definition in &document.contracts {
         let known_pricing_present = pricing.rules().iter().any(|rule| {
-            rule.provider == definition.target.provider && rule.model == definition.target.model
+            rule.provider == definition.target.provider
+                && rule.model == definition.target.model
+                && rule.workload() == definition.target.workload_type
         });
         if require_shipped_bindings
             && known_pricing_present
@@ -305,6 +307,7 @@ fn validate_pricing(
         .filter(|rule| {
             rule.provider == contract_definition.target.provider
                 && rule.model == contract_definition.target.model
+                && rule.workload() == contract_definition.target.workload_type
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -335,11 +338,16 @@ fn project(contract_definition: &ContractDefinition) -> Result<CatalogContract, 
                         .is_some_and(|selector| selector.image_size() == Some(preset.name.as_str()))
                 })
                 .ok_or(Error::InvalidDocument)?;
+            // A preset's rate is the output image's; an edit also prices
+            // its input images.
             let component = rule
                 .components
                 .first()
                 .filter(|component| {
-                    rule.components.len() == 1 && component.unit == PricingUnit::Image
+                    component.unit == PricingUnit::Image
+                        && rule.components[1..]
+                            .iter()
+                            .all(|other| other.unit == PricingUnit::InputImage)
                 })
                 .ok_or(Error::InvalidDocument)?;
             Ok(CatalogPreset {
@@ -512,7 +520,13 @@ mod tests {
     fn mixed_contracts_are_order_independent_and_credentials_are_isolated() {
         let (targets, pricing) = mixed_contract_inputs(false);
         let projected = validate_and_project(&targets, &pricing).unwrap();
-        assert_eq!(projected.len(), 3);
+        assert_eq!(projected.len(), 5);
+        // An edit contract on the same model keeps its own prices.
+        assert!(projected.iter().any(|contract| {
+            contract.contract == "hubu.gemini-3.1-flash-image.image-edit/v1"
+                && contract.target.workload_type == "image_edit"
+                && contract.capability.presets[0].rate_numerator_minor == 67
+        }));
         assert!(projected.iter().any(|contract| {
             contract.contract == "hubu.gemini-3.1-flash-lite-image.text-to-image/v1"
                 && contract.capability.presets[0].rate_numerator_minor == 336
