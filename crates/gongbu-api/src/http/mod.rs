@@ -584,7 +584,7 @@ impl Api {
             &resolved.provider,
             &resolved.adapter,
             &resolved.model,
-            pricing_request.image_size.as_deref(),
+            pricing_request.image_size(),
         )
         .ok_or_else(ApiError::validation)?;
         let created_at = (self.now)();
@@ -1563,7 +1563,7 @@ mod tests {
                 let model = if spend_auth_token_id.ends_with("-other-model") {
                     "flux-2-dev"
                 } else {
-                    flux2_api::MODEL_ID
+                    flux_contract::MODEL_ID
                 };
                 response.execution_scope = for_execution(
                     Some(crate::execution_scope::EXECUTION_SCOPE_TARGET_SCHEMA_VERSION),
@@ -3443,7 +3443,7 @@ mod tests {
                     scope.schema_version,
                     crate::execution_scope::EXECUTION_SCOPE_TARGET_SCHEMA_VERSION
                 );
-                assert_eq!(scope.model.as_deref(), Some(flux2_api::MODEL_ID));
+                assert_eq!(scope.model.as_deref(), Some(flux_contract::MODEL_ID));
                 assert_eq!(scope.image_size.as_deref(), Some(preset));
             } else {
                 assert_eq!(response.status, 400, "{token}");
