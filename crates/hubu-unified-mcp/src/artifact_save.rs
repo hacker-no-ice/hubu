@@ -338,8 +338,46 @@ fn file_name(stem: &str, extension: &str) -> String {
     }
 }
 
-/// Never overwrites a different file. Re-saving identical bytes is idempotent
-/// and refreshes the receipt.
+/// What may happen to the receipt sidecar of a save.
+enum ReceiptSlot {
+    /// No receipt exists yet; write one without replacing anything.
+    Absent,
+    /// This saved artifact's own receipt; refreshing it loses nothing.
+    Ours,
+}
+
+/// A receipt may only be refreshed when it demonstrably describes this same
+/// saved artifact: a Hubu receipt for the same file, artifact ID and digest.
+/// Anything else at that path belongs to someone else and is never replaced.
+fn receipt_slot(receipt_path: &Path, receipt: &Value) -> Result<ReceiptSlot> {
+    let existing = match fs::read(receipt_path) {
+        Ok(existing) => existing,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ReceiptSlot::Absent)
+        }
+        Err(_) => bail!("existing receipt could not be read"),
+    };
+    let ours = serde_json::from_slice::<Value>(&existing).is_ok_and(|existing| {
+        existing["kind"] == "hubu_saved_artifact_receipt"
+            && ["file", "artifact_id", "sha256"]
+                .iter()
+                .all(|field| existing[*field] == receipt[*field] && !receipt[*field].is_null())
+    });
+    ensure!(
+        ours,
+        "`{}` already exists and is not this artifact's receipt; choose another name",
+        receipt_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("receipt")
+    );
+    Ok(ReceiptSlot::Ours)
+}
+
+/// Never overwrites a different file: not the artifact, and not a receipt
+/// that belongs to another file or artifact. Every check runs before anything
+/// is written. Re-saving identical bytes is idempotent and refreshes this
+/// artifact's own receipt.
 fn write_files(
     folder: &SaveFolder,
     filename: &str,
@@ -354,6 +392,7 @@ fn write_files(
     let receipt_path = folder.path.join(format!("{filename}.receipt.json"));
     reject_symlink(&path)?;
     reject_symlink(&receipt_path)?;
+    let slot = receipt_slot(&receipt_path, receipt)?;
     let mut temporary = tempfile::NamedTempFile::new_in(&folder.path)
         .map_err(|_| anyhow!("allowlisted folder `{}` is not writable", folder.name))?;
     temporary.write_all(bytes)?;
@@ -372,7 +411,26 @@ fn write_files(
         }
         Err(_) => bail!("atomic artifact write failed"),
     };
-    atomic_write(&receipt_path, &serde_json::to_vec_pretty(receipt)?)?;
+    let receipt_bytes = serde_json::to_vec_pretty(receipt)?;
+    match slot {
+        ReceiptSlot::Ours => atomic_write(&receipt_path, &receipt_bytes)?,
+        ReceiptSlot::Absent => {
+            // A receipt that appeared since the check is never replaced.
+            let mut temporary = tempfile::NamedTempFile::new_in(&folder.path)?;
+            temporary.write_all(&receipt_bytes)?;
+            temporary.as_file().sync_all()?;
+            match temporary.persist_noclobber(&receipt_path) {
+                Ok(_) => {}
+                Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    reject_symlink(&receipt_path)?;
+                    if let ReceiptSlot::Ours = receipt_slot(&receipt_path, receipt)? {
+                        atomic_write(&receipt_path, &receipt_bytes)?;
+                    }
+                }
+                Err(_) => bail!("atomic receipt write failed"),
+            }
+        }
+    }
     Ok((path, receipt_path, already_saved))
 }
 
@@ -589,7 +647,12 @@ mod tests {
             path: root.path().into(),
         };
         let bytes = b"\x89PNG\r\n\x1a\nlocal";
-        let receipt = json!({"sha256": format!("{:x}", Sha256::digest(bytes))});
+        let receipt = json!({
+            "kind": "hubu_saved_artifact_receipt",
+            "file": "logo.png",
+            "artifact_id": "artifact-1",
+            "sha256": format!("{:x}", Sha256::digest(bytes)),
+        });
         let (path, receipt_path, again) =
             write_files(&folder, "logo.png", bytes, &receipt).unwrap();
         assert!(!again);
@@ -599,5 +662,52 @@ mod tests {
         fs::write(&path, b"human edit").unwrap();
         assert!(write_files(&folder, "logo.png", bytes, &receipt).is_err());
         assert_eq!(fs::read(&path).unwrap(), b"human edit");
+    }
+
+    #[test]
+    fn writes_never_clobber_another_receipt() {
+        let root = tempfile::tempdir().unwrap();
+        let folder = SaveFolder {
+            name: "brand".into(),
+            path: root.path().into(),
+        };
+        let bytes = b"\x89PNG\r\n\x1a\nlocal";
+        let receipt = json!({
+            "kind": "hubu_saved_artifact_receipt",
+            "file": "logo.png",
+            "artifact_id": "artifact-1",
+            "sha256": format!("{:x}", Sha256::digest(bytes)),
+        });
+
+        // An unrelated file already sits where the receipt would go: nothing
+        // is written, not even the artifact.
+        let receipt_path = root.path().join("logo.png.receipt.json");
+        fs::write(&receipt_path, b"human notes").unwrap();
+        assert!(write_files(&folder, "logo.png", bytes, &receipt)
+            .unwrap_err()
+            .to_string()
+            .contains("is not this artifact's receipt"));
+        assert_eq!(fs::read(&receipt_path).unwrap(), b"human notes");
+        assert!(!root.path().join("logo.png").exists());
+
+        // Its own receipt is refreshed on an identical re-save.
+        fs::remove_file(&receipt_path).unwrap();
+        write_files(&folder, "logo.png", bytes, &receipt).unwrap();
+        let mut refreshed = receipt.clone();
+        refreshed["ledger_transaction_id"] = json!("txn-2");
+        assert!(
+            write_files(&folder, "logo.png", bytes, &refreshed)
+                .unwrap()
+                .2
+        );
+        let stored: Value = serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+        assert_eq!(stored["ledger_transaction_id"], "txn-2");
+
+        // Same bytes from another artifact must not take over its provenance.
+        let mut other = receipt.clone();
+        other["artifact_id"] = json!("artifact-2");
+        assert!(write_files(&folder, "logo.png", bytes, &other).is_err());
+        let stored: Value = serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+        assert_eq!(stored["artifact_id"], "artifact-1");
     }
 }

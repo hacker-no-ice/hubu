@@ -45,9 +45,11 @@ pass through the model.
 
 `artifact_id` may be omitted only when the operation produced exactly one
 artifact; otherwise the error lists the candidate IDs. Saves never overwrite a
-different file: an existing file with other content is refused, while
-re-saving identical bytes returns `already_saved` and refreshes the receipt.
-Nothing is written when verification or accounting checks fail.
+different file: an existing file with other content is refused, and so is an
+existing `<file>.receipt.json` that isn't this artifact's own receipt (same
+file, artifact ID and digest). Re-saving identical bytes returns
+`already_saved` and refreshes that artifact's receipt. Nothing is written when
+any of these checks, verification or accounting fails.
 
 `hubu artifact save --operation-handle HANDLE --folder NAME [--artifact-id ID]
 [--name STEM]` is the CLI form using the selected stack profile. A manually
