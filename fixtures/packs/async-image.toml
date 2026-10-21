@@ -1,0 +1,87 @@
+# Fixture provider pack (schema v1) shaped like a submit-and-poll image API:
+# the submission returns a job ID and a regional polling URL, results come
+# from per-region delivery hosts, and cost is reported in one-cent credits.
+# Used by Gongbu's async engine tests only.
+schema_version = 1
+pack_id = "async-image"
+pack_version = "2026-10-20.1"
+provider = "async-image"
+display_name = "Async image provider"
+billing_merchant = "merchant:async-image"
+capability = "capability:image:generate"
+workload_type = "image_generation"
+archetype = "async_poll"
+pricing_trust = "verified"
+
+[transport]
+endpoint = "https://api.async-image.test"
+api_version = "v1"
+allowed_hosts = ["api.async-image.test", "api.eu.async-image.test", "api.us.async-image.test"]
+auth_header = "x-key"
+credential = "async_image"
+timeout_ms = 60000
+
+[request]
+path = "/v1/image-v1"
+
+[request.body]
+prompt = "{{prompt}}"
+output_format = "{{output_format}}"
+
+[[parameters]]
+name = "prompt"
+type = "string"
+required = true
+max_length = 32000
+
+[[parameters]]
+name = "image_count"
+type = "integer"
+min = 1
+max = 1
+default = 1
+quantity = "image_count"
+
+[[parameters]]
+name = "output_format"
+type = "enum"
+values = ["png", "jpeg"]
+default = "png"
+
+[poll]
+job_id = "/id"
+path = "/v1/get_result"
+query = { id = "{{job_id}}" }
+url = "/polling_url"
+hosts = ["api.eu.async-image.test", "api.us.async-image.test"]
+interval_ms = 1
+status = "/status"
+pending = ["pending", "generating"]
+ready = ["ready"]
+rejected = { "content moderated" = "provider_content_moderated", "error" = "provider_error" }
+ambiguous = { "task not found" = "provider_task_not_found" }
+
+[response]
+request_id_headers = ["x-request-id"]
+reported_cost = "/cost"
+reported_cost_scale = 2
+artifact_items = "/result"
+artifact_url = "/sample"
+
+[artifacts]
+media_types = ["image/png", "image/jpeg"]
+hosts = ["delivery.*.async-image.test"]
+
+[[models]]
+model = "image-v1"
+provider_config_version = "async-image-v1-2026-10-20"
+pricing_version = "async-image-v1-usd-2026-10-20-v1"
+pricing_reviewed_on = "2026-10-20"
+
+[[models.pricing_rules]]
+rule_id = "async-image-v1-2026-10-20"
+currency = "USD"
+components = [
+  { unit = "request", rate_numerator_minor = 1, rate_denominator = 2 },
+  { unit = "image", rate_numerator_minor = 3, rate_denominator = 1 },
+]

@@ -14,11 +14,10 @@ use crate::{
     provider::{
         contract::{
             enforce_cost, vendor_idempotency_key, AdapterOutcome, AdapterSubmission,
-            AsyncProviderOperation, NormalizedRequest, PricingSnapshot, PricingUnit,
-            ProviderFailure, ProviderTransportInteraction, ProviderTransportObserver,
-            SpendDisposition,
+            AsyncProviderOperation, NormalizedRequest, PricingSnapshot, ProviderFailure,
+            ProviderTransportInteraction, ProviderTransportObserver, SpendDisposition,
         },
-        flux2_api,
+        flux_contract,
         registry::ValidatedProviderCatalog,
     },
     secrets::{MacOsKeychain, SecretProvider},
@@ -120,7 +119,10 @@ impl GenericProviderActivities {
             .map_err(|_| WorkflowActivityError::Proven("provider_target_unavailable".into()))?;
         let snapshot: PricingSnapshot = serde_json::from_value(execution.pricing_snapshot.clone())
             .map_err(|_| WorkflowActivityError::Proven("pricing_snapshot_invalid".into()))?;
-        if !snapshot.is_image_only()
+        // Multi-component pricing is safe only for pack targets: their engines
+        // re-derive every priced quantity from bounded, validated parameters
+        // and refuse a request that differs from the one rebuilt here.
+        if !(snapshot.is_image_only() || target.pack().is_some())
             || snapshot.provider != target.provider
             || snapshot.model != target.model
             || i64::from(snapshot.schema_version) != execution.pricing_schema_version
@@ -135,19 +137,17 @@ impl GenericProviderActivities {
             &execution.authorization_currency,
         )
         .map_err(|_| WorkflowActivityError::Proven("authorization_invalid".into()))?;
-        let image_size = snapshot
-            .selector
-            .as_ref()
-            .map(|selector| selector.image_size.clone());
+        let selector = snapshot.selector.clone().unwrap_or_default();
+        let image_size = selector.image_size().map(str::to_owned);
         let mut normalized_input = execution.normalized_input.clone();
         let output_dimensions = match snapshot.output_dimensions.clone() {
             Some(dimensions) => Some(dimensions),
-            None if target.provider == flux2_api::PROVIDER_ID
-                && target.adapter == flux2_api::ADAPTER_ID
-                && target.model == flux2_api::MODEL_ID =>
+            None if target.provider == flux_contract::PROVIDER_ID
+                && target.adapter == flux_contract::ADAPTER_ID
+                && target.model == flux_contract::MODEL_ID =>
             {
                 Some(
-                    flux2_api::bind_legacy_output_dimensions(
+                    flux_contract::bind_legacy_output_dimensions(
                         image_size.as_deref().ok_or_else(|| {
                             WorkflowActivityError::Proven("pricing_snapshot_invalid".into())
                         })?,
@@ -158,15 +158,16 @@ impl GenericProviderActivities {
             }
             None => None,
         };
-        let request = NormalizedRequest {
-            provider: snapshot.provider.clone(),
-            model: snapshot.model.clone(),
-            image_count: snapshot.estimated_quantity(PricingUnit::Image),
-            input_tokens: None,
-            max_output_tokens: None,
-            image_size,
-            output_dimensions,
-        };
+        // Rebuild exactly the request that was priced: every frozen quantity
+        // and the full selector that picked the rule.
+        let mut request = NormalizedRequest::new(snapshot.provider.clone(), snapshot.model.clone())
+            .with_output_dimensions(output_dimensions);
+        request.selector = selector;
+        for component in &snapshot.components {
+            if let Some(name) = component.unit.quantity_name() {
+                request.set_quantity(name, Some(component.quantity));
+            }
+        }
         Ok((target, adapter, request, normalized_input))
     }
 }
@@ -174,12 +175,23 @@ impl GenericProviderActivities {
 impl ProviderActivities for GenericProviderActivities {
     fn preflight(&self, execution: &Execution) -> Result<(), WorkflowActivityError> {
         let (target, adapter, request, normalized_input) = self.selected(execution)?;
-        crate::provider_contract::validate_image_input_versioned(
-            &request,
-            &normalized_input,
-            execution.input_schema_version,
-        )
-        .map_err(map_contract_error)?;
+        if target.pack().is_some() {
+            // A pack engine checks the input against the pack's own bounded
+            // parameters in `preflight_input`, which may go beyond the
+            // image-generation input shape.
+            if execution.input_schema_version != 1 {
+                return Err(map_contract_error(
+                    crate::provider_contract::ContractError::IndeterminableCost,
+                ));
+            }
+        } else {
+            crate::provider_contract::validate_image_input_versioned(
+                &request,
+                &normalized_input,
+                execution.input_schema_version,
+            )
+            .map_err(map_contract_error)?;
+        }
         adapter
             .preflight_input(&request, &normalized_input)
             .map_err(map_contract_error)?;
@@ -1033,12 +1045,7 @@ pub fn listener_address(listener: &tokio::net::TcpListener) -> std::io::Result<S
 mod tests {
     use super::*;
     use crate::{
-        provider::{
-            contract::PricingCatalog,
-            gemini_developer_image::{GeminiDeveloperImageAdapter, GeminiDeveloperTransport},
-            ideogram_image::{IdeogramImageAdapter, IdeogramTransport},
-            registry::ProviderRegistry,
-        },
+        provider::{contract::PricingCatalog, registry::ProviderRegistry},
         provider_targets::ProviderTargetConfig,
     };
 
@@ -1444,17 +1451,23 @@ mod tests {
     }
 
     #[test]
-    fn fixture_gemini_runs_through_durable_workflow_artifacts_and_settlement() {
+    fn verified_gemini_pack_runs_through_durable_workflow_artifacts_and_settlement() {
         use crate::{
             artifact::{ArtifactLimits, LocalFsStorage},
             execution::{CreateExecutionParams, HubuTokenReference},
-            provider::gemini_developer_image::TransportResponse,
+            provider::{
+                http_kernel::{ArtifactDownloadPolicy, InvocationDeadline},
+                pack::{Archetype, ArtifactFetchError},
+                pack_sync::{SyncFixedEngine, SyncTransport, TransportFailure, TransportResponse},
+                verified_packs::verified_packs,
+            },
             secrets::{ProviderSecret, SecretError, SecretReference},
         };
         use base64::{engine::general_purpose::STANDARD, Engine};
         use image::{DynamicImage, ImageOutputFormat, RgbaImage};
         use serde_json::json;
         use std::{
+            collections::BTreeMap,
             io::Cursor,
             sync::atomic::{AtomicUsize, Ordering},
             time::Duration,
@@ -1468,25 +1481,43 @@ mod tests {
             }
         }
         struct FixtureTransport(AtomicUsize, Vec<u8>);
-        impl GeminiDeveloperTransport for FixtureTransport {
-            fn create_interaction(
+        impl SyncTransport for FixtureTransport {
+            fn post_json(
                 &self,
                 endpoint: &reqwest::Url,
-                _: &[u8],
+                auth: (&str, &str),
+                _: &BTreeMap<String, String>,
+                body: &serde_json::Value,
                 _: Duration,
-                _: &std::collections::BTreeMap<String, String>,
-                _: &serde_json::Value,
-            ) -> Result<TransportResponse, Box<dyn std::error::Error + Send + Sync>> {
+            ) -> Result<TransportResponse, TransportFailure> {
                 assert_eq!(
-                    endpoint.host_str(),
-                    Some("generativelanguage.googleapis.com")
+                    endpoint.as_str(),
+                    "https://generativelanguage.googleapis.com/v1beta/interactions"
+                );
+                assert_eq!(auth, ("x-goog-api-key", "fixture-secret"));
+                assert_eq!(
+                    body,
+                    &json!({"model": "gemini-3.1-flash-lite-image",
+                        "input": [{"type": "text", "text": "draw a cat"}],
+                        "response_format": {"type": "image", "image_size": "1K"}})
                 );
                 self.0.fetch_add(1, Ordering::SeqCst);
                 Ok(TransportResponse {
                     status: 200,
-                    request_id: Some("google-request-1".into()),
+                    headers: BTreeMap::from([(
+                        "x-goog-request-id".into(),
+                        "google-request-1".into(),
+                    )]),
                     body: json!({"id":"interaction-1","status":"completed","steps":[{"type":"model_output","content":[{"type":"image","mime_type":"image/png","data":STANDARD.encode(&self.1)}]}],"usage":{"input_tokens":3,"output_tokens":7}}),
                 })
+            }
+            fn download(
+                &self,
+                _: &reqwest::Url,
+                _: &ArtifactDownloadPolicy,
+                _: InvocationDeadline,
+            ) -> Result<Vec<u8>, ArtifactFetchError> {
+                unreachable!("Gemini images are inline")
             }
         }
         #[derive(Default)]
@@ -1509,9 +1540,10 @@ mod tests {
                 &self,
                 _: &Execution,
                 _: &str,
-                amount_minor: i64,
+                units: i64,
             ) -> Result<String, WorkflowActivityError> {
-                assert_eq!(amount_minor, 25_0000);
+                // 3.36¢ for one 1k Flash-Lite image, exactly.
+                assert_eq!(units, 33_600);
                 self.settlements.fetch_add(1, Ordering::SeqCst);
                 Ok("hubu-settlement-1".into())
             }
@@ -1525,11 +1557,35 @@ mod tests {
             .write_to(&mut Cursor::new(&mut png), ImageOutputFormat::Png)
             .unwrap();
         let calls = Arc::new(FixtureTransport(AtomicUsize::new(0), png.clone()));
-        let targets: ProviderTargetConfig = serde_json::from_value(json!({"schema_version":2,"provider_configs":[
-          {"provider_config_version":"google-pcv-1","workload_type":"image_generation","provider":"google","adapter":"gemini_developer_image","model":"gemini-3.1-flash-lite-image","secret_service":"gongbu.google","secret_account":"fixture-v1","active":false,"execution_enabled":true,"settings":{"type":"gemini_developer_image","config":{"endpoint":"https://generativelanguage.googleapis.com","api_version":"v1beta","timeout_ms":1000,"max_retries":0}}},
-          {"provider_config_version":"google-pcv-2","workload_type":"image_generation","provider":"google","adapter":"gemini_developer_image","model":"gemini-3.1-flash-lite-image","secret_service":"gongbu.google","secret_account":"fixture-v2","active":true,"execution_enabled":true,"settings":{"type":"gemini_developer_image","config":{"endpoint":"https://generativelanguage.googleapis.com","api_version":"v1beta","timeout_ms":1000,"max_retries":0}}}
-        ]})).unwrap();
-        targets.validate().unwrap();
+        let pack = verified_packs()
+            .into_iter()
+            .find(|pack| pack.pack_id() == "google-gemini-developer-image")
+            .unwrap();
+        let secret = SecretReference::new("gongbu.google", "fixture").unwrap();
+        let targets: ProviderTargetConfig = serde_json::from_value(json!({
+            "schema_version": 2,
+            "provider_configs": pack.provider_configs(&secret),
+        }))
+        .unwrap();
+        let pricing = PricingCatalog::from_json(
+            &serde_json::to_vec(&json!({
+                "schema_version": 2,
+                "catalog_version": "gemini-pack-test",
+                "rules": pack.pricing_rules(),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let model = pack.model("gemini-3.1-flash-lite-image").unwrap();
+        let target = targets
+            .resolve_active(&pack.target_key(model))
+            .unwrap()
+            .clone();
+        let input = json!({"prompt":"draw a cat","image_count":1,"image_size":"1k"});
+        let request = pack.prepare(&model.model, &input).unwrap().request;
+        let snapshot = pricing
+            .snapshot_for_target(&target.target_key(), &request)
+            .unwrap();
         let repository = Repository::in_memory().unwrap();
         let params = CreateExecutionParams {
             account_id: "account".into(),
@@ -1537,27 +1593,21 @@ mod tests {
             hubu_authorization_id: "token-ref".into(),
             hubu_claim_id: None,
             hubu_token_reference: HubuTokenReference::new("token-ref").unwrap(),
-            authorized_units: 25_0000,
+            authorized_units: snapshot.estimated_units,
             authorization_currency: "USD".into(),
-            normalized_input: json!({"prompt":"draw a cat","image_count":1}),
+            normalized_input: input,
             input_hash: "hash".into(),
             input_schema_version: 1,
-            target: "image_generation/google/gemini_developer_image/gemini-3.1-flash-lite-image"
-                .into(),
-            config_version: "google-pcv-1".into(),
-            workload_type: "image_generation".into(),
-            provider: "google".into(),
-            adapter: "gemini_developer_image".into(),
-            model: "gemini-3.1-flash-lite-image".into(),
-            provider_config_version: "google-pcv-1".into(),
-            provider_config_digest: targets
-                .revisions()
-                .find(|revision| revision.provider_config_version == "google-pcv-1")
-                .unwrap()
-                .digest()
-                .to_owned(),
-            pricing_snapshot: json!({"schema_version":2,"provider":"google","model":"gemini-3.1-flash-lite-image","catalog_version":"prices-v2","catalog_digest":format!("sha256:{}", "a".repeat(64)),"pricing_rule_id":"gemini-developer-image","components":[{"unit":"image","rate_numerator_minor":25,"rate_denominator":1,"quantity":1}],"exact_estimate_numerator":"25","exact_estimate_denominator":"1","estimated_amount_minor":25,"currency":"USD"}),
-            pricing_schema_version: 2,
+            target: target.target_key().canonical_name(),
+            config_version: target.provider_config_version.clone(),
+            workload_type: target.workload_type.clone(),
+            provider: target.provider.clone(),
+            adapter: target.adapter.clone(),
+            model: target.model.clone(),
+            provider_config_version: target.provider_config_version.clone(),
+            provider_config_digest: target.digest().to_owned(),
+            pricing_snapshot: serde_json::to_value(&snapshot).unwrap(),
+            pricing_schema_version: i64::from(snapshot.schema_version),
             execution_scope: None,
             created_at: "now".into(),
         };
@@ -1569,11 +1619,11 @@ mod tests {
         let invalid = [
             (
                 "gemini-invalid-prompt",
-                json!({"prompt":"   ","image_count":1}),
+                json!({"prompt":"   ","image_count":1,"image_size":"1k"}),
             ),
             (
                 "gemini-invalid-options",
-                json!({"prompt":"cat","image_count":1,"options":{"seed":1}}),
+                json!({"prompt":"cat","image_count":1,"image_size":"1k","options":{"seed":1}}),
             ),
         ]
         .map(|(operation_key, normalized_input)| {
@@ -1590,15 +1640,16 @@ mod tests {
         );
         let hubu = Arc::new(FixtureHubu::default());
         let mut registry = ProviderRegistry::new();
+        registry.register_pack(pack.clone());
         let fixture_calls = calls.clone();
-        registry.register("google", "gemini_developer_image", move |target| {
-            Ok(Arc::new(GeminiDeveloperImageAdapter::new(
-                target.gemini_developer_image().cloned().unwrap(),
-                target.model.clone(),
+        registry.register_pack_engine(Archetype::SyncFixed, move |target, pack| {
+            Ok(Arc::new(SyncFixedEngine::new(
+                pack.clone(),
+                &target.model,
                 fixture_calls.clone(),
+                ArtifactLimits::default().max_encoded_bytes,
             )?))
         });
-        let pricing = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"prices-v2","rules":[{"rule_id":"gemini-developer-image","provider":"google","model":"gemini-3.1-flash-lite-image","currency":"USD","components":[{"unit":"image","rate_numerator_minor":25,"rate_denominator":1}]}]}"#).unwrap();
         let providers = ValidatedProviderCatalog::bind(targets, pricing, &registry).unwrap();
         let runner = PersistedExecutionRunner::new(
             repository.clone(),
@@ -1645,7 +1696,7 @@ mod tests {
                 .get_receipt_for_execution(&execution.execution_id)
                 .unwrap()
                 .settlement_units,
-            25_0000
+            33_600
         );
         assert_eq!(
             runner.run_execution(&mismatched.execution_id).unwrap(),
@@ -1667,180 +1718,23 @@ mod tests {
     }
 
     #[test]
-    fn fixture_ideogram_uses_frozen_price_and_durable_artifact_pipeline() {
-        use crate::{
-            artifact::{ArtifactLimits, LocalFsStorage},
-            execution::{CreateExecutionParams, HubuTokenReference},
-            provider::ideogram_image::TransportResponse,
-            secrets::{ProviderSecret, SecretError, SecretReference},
-        };
-        use image::{DynamicImage, ImageOutputFormat, RgbaImage};
-        use serde_json::json;
-        use std::{
-            io::Cursor,
-            sync::atomic::{AtomicUsize, Ordering},
-            time::Duration,
-        };
-        use tempfile::tempdir;
-
-        struct Secrets;
-        impl SecretProvider for Secrets {
-            fn resolve(&self, _: &SecretReference) -> Result<ProviderSecret, SecretError> {
-                Ok(crate::secrets::secret_for_test("ideogram-fixture-secret"))
-            }
-        }
-        struct Transport(AtomicUsize, Vec<u8>);
-        impl IdeogramTransport for Transport {
-            fn generate(
-                &self,
-                _: &reqwest::Url,
-                _: &[u8],
-                _: Duration,
-                _: &std::collections::BTreeMap<String, String>,
-                _: &serde_json::Value,
-            ) -> Result<TransportResponse, Box<dyn std::error::Error + Send + Sync>> {
-                self.0.fetch_add(1, Ordering::SeqCst);
-                Ok(TransportResponse {
-                    status: 200,
-                    request_id: Some("ideogram-request-1".into()),
-                    operation_id: Some("ideogram-generation-1".into()),
-                    body: json!({"data":[{"url":"https://ideogram.ai/output.png"}]}),
-                })
-            }
-            fn fetch_artifact(
-                &self,
-                _: &reqwest::Url,
-                _: Duration,
-                _: usize,
-            ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
-                Ok(self.1.clone())
-            }
-        }
-        #[derive(Default)]
-        struct Hubu(AtomicUsize);
-        impl HubuActivities for Hubu {
-            fn preflight(&self, _: &Execution) -> Result<(), WorkflowActivityError> {
-                Ok(())
-            }
-            fn claim(&self, _: &Execution) -> Result<String, WorkflowActivityError> {
-                unreachable!()
-            }
-            fn validate_claim(&self, _: &Execution) -> Result<(), WorkflowActivityError> {
-                Ok(())
-            }
-            fn settle(
-                &self,
-                _: &Execution,
-                _: &str,
-                amount_minor: i64,
-            ) -> Result<String, WorkflowActivityError> {
-                assert_eq!(amount_minor, 30_0000);
-                self.0.fetch_add(1, Ordering::SeqCst);
-                Ok("settlement-1".into())
-            }
-            fn release(&self, _: &Execution) -> Result<(), WorkflowActivityError> {
-                unreachable!()
-            }
-        }
-
-        let mut png = Vec::new();
-        DynamicImage::ImageRgba8(RgbaImage::new(1, 1))
-            .write_to(&mut Cursor::new(&mut png), ImageOutputFormat::Png)
-            .unwrap();
-        let transport = Arc::new(Transport(AtomicUsize::new(0), png.clone()));
-        let targets: ProviderTargetConfig = serde_json::from_value(json!({"provider_configs":[{
-            "provider_config_version":"ideogram-pcv-1","workload_type":"image_generation","provider":"ideogram","adapter":"ideogram_image","model":"ideogram-v3","secret_service":"gongbu.ideogram","secret_account":"fixture","ideogram_image":{"endpoint":"https://api.ideogram.ai","api_version":"v1","timeout_ms":1000,"max_retries":0,"approved_artifact_hosts":["ideogram.ai"]}
-        }]})).unwrap();
-        targets.validate().unwrap();
-        let repository = Repository::in_memory().unwrap();
-        let execution = repository.create_execution(&CreateExecutionParams {
-            account_id:"account".into(), operation_key:"ideogram-workflow".into(), hubu_authorization_id:"token-ref".into(), hubu_claim_id:Some("claim".into()), hubu_token_reference:HubuTokenReference::new("token-ref").unwrap(), authorized_units:30_0000, authorization_currency:"USD".into(), normalized_input:json!({"prompt":"draw a cat","image_count":1}), input_hash:"hash".into(), input_schema_version:1, target:"image_generation/ideogram/ideogram_image/ideogram-v3".into(), config_version:"ideogram-pcv-1".into(), workload_type:"image_generation".into(), provider:"ideogram".into(), adapter:"ideogram_image".into(), model:"ideogram-v3".into(), provider_config_version:"ideogram-pcv-1".into(), provider_config_digest:targets.resolve("image_generation","ideogram","ideogram_image","ideogram-v3").unwrap().digest().to_owned(), pricing_snapshot:json!({"schema_version":2,"provider":"ideogram","model":"ideogram-v3","catalog_version":"prices-v2","catalog_digest":format!("sha256:{}", "a".repeat(64)),"pricing_rule_id":"ideogram-image","components":[{"unit":"image","rate_numerator_minor":30,"rate_denominator":1,"quantity":1}],"exact_estimate_numerator":"30","exact_estimate_denominator":"1","estimated_amount_minor":30,"currency":"USD"}), pricing_schema_version:2, execution_scope:None, created_at:"now".into()
-        }).unwrap();
-        let root = tempdir().unwrap();
-        let artifacts = ArtifactService::new(
-            repository.clone(),
-            LocalFsStorage::new(root.path()),
-            ArtifactLimits::default(),
-        );
-        let hubu = Arc::new(Hubu::default());
-        let mut registry = ProviderRegistry::new();
-        let fixture_transport = transport.clone();
-        registry.register("ideogram", "ideogram_image", move |target| {
-            Ok(Arc::new(IdeogramImageAdapter::new(
-                target.ideogram_image().cloned().unwrap(),
-                target.model.clone(),
-                fixture_transport.clone(),
-            )?))
-        });
-        let pricing = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"prices-v2","rules":[{"rule_id":"ideogram-image","provider":"ideogram","model":"ideogram-v3","currency":"USD","components":[{"unit":"image","rate_numerator_minor":30,"rate_denominator":1}]}]}"#).unwrap();
-        let providers = ValidatedProviderCatalog::bind(targets, pricing, &registry).unwrap();
-        let runner = PersistedExecutionRunner::new(
-            repository.clone(),
-            hubu.clone(),
-            Arc::new(GenericProviderActivities::new(
-                repository.clone(),
-                providers,
-                Arc::new(Secrets),
-            )),
-            Arc::new(ArtifactServiceActivities::new(artifacts.clone(), || {
-                "now".into()
-            })),
-            || "now".into(),
-        );
-        assert_eq!(
-            runner.run_execution(&execution.execution_id).unwrap(),
-            "succeeded"
-        );
-        assert_eq!(transport.0.load(Ordering::SeqCst), 1);
-        assert_eq!(hubu.0.load(Ordering::SeqCst), 1);
-        let attempt = repository
-            .get_provider_attempt_for_execution(&execution.execution_id)
-            .unwrap();
-        assert_eq!(
-            attempt.provider_request_id.as_deref(),
-            Some("ideogram-request-1")
-        );
-        assert_eq!(
-            attempt.provider_operation_id.as_deref(),
-            Some("ideogram-generation-1")
-        );
-        let stored = artifacts
-            .list_for_account(&execution.execution_id, "account")
-            .unwrap();
-        assert_eq!(stored.len(), 1);
-        assert_eq!(
-            artifacts
-                .retrieve_for_account(&stored[0].artifact_id, "account")
-                .unwrap()
-                .bytes,
-            png
-        );
-        assert_eq!(
-            repository
-                .get_receipt_for_execution(&execution.execution_id)
-                .unwrap()
-                .settlement_units,
-            30_0000
-        );
-    }
-
-    #[test]
     fn flux_tampered_dimension_evidence_fails_before_claim_attempt_or_transport() {
         use crate::{
             artifact::{ArtifactLimits, LocalFsStorage},
             execution::{CreateExecutionParams, HubuTokenReference},
             provider::{
                 contract::OutputDimensions,
-                flux2_api::{
-                    Flux2ApiAdapter, Flux2Transport, TransportResponse as FluxTransportResponse,
-                },
+                http_kernel::{ArtifactDownloadPolicy, InvocationDeadline},
+                pack::{Archetype, ArtifactFetchError},
+                pack_async::AsyncPollEngine,
+                pack_sync::{SyncTransport, TransportFailure, TransportResponse},
+                verified_packs::verified_packs,
             },
             secrets::{ProviderSecret, SecretError, SecretReference},
         };
         use serde_json::{json, Value};
         use std::{
             collections::BTreeMap,
-            error::Error as StdError,
             sync::atomic::{AtomicUsize, Ordering},
             time::Duration,
         };
@@ -1854,35 +1748,34 @@ mod tests {
         }
         #[derive(Clone)]
         struct Transport(Arc<AtomicUsize>);
-        impl Flux2Transport for Transport {
-            fn submit(
+        impl SyncTransport for Transport {
+            fn post_json(
                 &self,
                 _: &reqwest::Url,
-                _: &[u8],
-                _: Duration,
+                _: (&str, &str),
                 _: &BTreeMap<String, String>,
-                _: Option<(&str, &str)>,
                 _: &Value,
-            ) -> Result<FluxTransportResponse, Box<dyn StdError + Send + Sync>> {
+                _: Duration,
+            ) -> Result<TransportResponse, TransportFailure> {
                 self.0.fetch_add(1, Ordering::SeqCst);
                 unreachable!("invalid frozen dimensions must not reach FLUX submission")
             }
-            fn poll(
+            fn get_json(
                 &self,
                 _: &reqwest::Url,
-                _: &[u8],
-                _: Duration,
+                _: (&str, &str),
                 _: &BTreeMap<String, String>,
-            ) -> Result<FluxTransportResponse, Box<dyn StdError + Send + Sync>> {
+                _: Duration,
+            ) -> Result<TransportResponse, TransportFailure> {
                 self.0.fetch_add(1, Ordering::SeqCst);
                 unreachable!("invalid frozen dimensions must not reach FLUX polling")
             }
-            fn fetch_artifact(
+            fn download(
                 &self,
                 _: &reqwest::Url,
-                _: Duration,
-                _: usize,
-            ) -> Result<Vec<u8>, Box<dyn StdError + Send + Sync>> {
+                _: &ArtifactDownloadPolicy,
+                _: InvocationDeadline,
+            ) -> Result<Vec<u8>, ArtifactFetchError> {
                 self.0.fetch_add(1, Ordering::SeqCst);
                 unreachable!("invalid frozen dimensions must not fetch FLUX artifacts")
             }
@@ -1915,41 +1808,33 @@ mod tests {
             }
         }
 
+        let flux = verified_packs()
+            .into_iter()
+            .find(|pack| pack.pack_id() == "bfl-flux-2")
+            .unwrap();
         let targets: ProviderTargetConfig = serde_json::from_value(json!({
-            "schema_version":2,
-            "provider_configs":[{
-                "provider_config_version":"flux-v1",
-                "workload_type":"image_generation",
-                "provider":"flux",
-                "adapter":"flux2_api",
-                "model":"flux-2-pro",
-                "secret_service":"gongbu.flux",
-                "secret_account":"fixture",
-                "active":true,
-                "execution_enabled":true,
-                "settings":{"type":"flux2_api","config":{
-                    "endpoint":"https://api.bfl.ai",
-                    "api_version":"v1",
-                    "timeout_ms":1000,
-                    "poll_interval_ms":10,
-                    "approved_artifact_hosts":[]
-                }}
-            }]
+            "schema_version": 2,
+            "provider_configs": flux.provider_configs(
+                &SecretReference::new("gongbu.flux", "fixture").unwrap()
+            ),
         }))
         .unwrap();
-        let pricing = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"flux-v1","rules":[{"rule_id":"flux-1k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"1k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":45,"rate_denominator":1}]},{"rule_id":"flux-2k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"2k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":90,"rate_denominator":1}]},{"rule_id":"flux-4k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"4k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":180,"rate_denominator":1}]}]}"#).unwrap();
-        let request = NormalizedRequest {
-            provider: "flux".into(),
-            model: "flux-2-pro".into(),
-            image_count: Some(1),
-            input_tokens: None,
-            max_output_tokens: None,
-            image_size: Some("1k".into()),
-            output_dimensions: Some(OutputDimensions {
+        let pricing = PricingCatalog::from_json(
+            &serde_json::to_vec(&json!({
+                "schema_version": 2,
+                "catalog_version": flux.models()[0].pricing_version,
+                "rules": flux.pricing_rules(),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let request = NormalizedRequest::new("flux", "flux-2-pro")
+            .with_quantity("image_count", Some(1))
+            .with_selector("image_size", Some("1k".into()))
+            .with_output_dimensions(Some(OutputDimensions {
                 width: 1024,
                 height: 1024,
-            }),
-        };
+            }));
         let snapshot = pricing.snapshot(&request).unwrap();
         let target = targets
             .resolve("image_generation", "flux", "flux2_api", "flux-2-pro")
@@ -1962,18 +1847,18 @@ mod tests {
             hubu_claim_id: None,
             hubu_token_reference: HubuTokenReference::new(format!("token-{operation_key}"))
                 .unwrap(),
-            authorized_units: 45_0000,
+            authorized_units: 3_0000,
             authorization_currency: "USD".into(),
             normalized_input: input,
             input_hash: format!("hash-{operation_key}"),
             input_schema_version: 1,
             target: target.target_key().canonical_name(),
-            config_version: "flux-v1".into(),
+            config_version: target.provider_config_version.clone(),
             workload_type: "image_generation".into(),
             provider: "flux".into(),
             adapter: "flux2_api".into(),
             model: "flux-2-pro".into(),
-            provider_config_version: "flux-v1".into(),
+            provider_config_version: target.provider_config_version.clone(),
             provider_config_digest: target.digest().into(),
             pricing_snapshot: snapshot,
             pricing_schema_version: 3,
@@ -2052,11 +1937,18 @@ mod tests {
         let transport_calls = Arc::new(AtomicUsize::new(0));
         let mut registry = ProviderRegistry::new();
         let fixture_calls = transport_calls.clone();
-        registry.register("flux", "flux2_api", move |target| {
-            Ok(Arc::new(Flux2ApiAdapter::new(
-                target.flux2_api().cloned().unwrap(),
-                target.model.clone(),
+        registry.register_pack(
+            verified_packs()
+                .into_iter()
+                .find(|pack| pack.pack_id() == "bfl-flux-2")
+                .unwrap(),
+        );
+        registry.register_pack_engine(Archetype::AsyncPoll, move |target, pack| {
+            Ok(Arc::new(AsyncPollEngine::new(
+                pack.clone(),
+                &target.model,
                 Transport(fixture_calls.clone()),
+                ArtifactLimits::default().max_encoded_bytes,
             )?))
         });
         let providers = ValidatedProviderCatalog::bind(targets, pricing, &registry).unwrap();
@@ -2109,16 +2001,17 @@ mod tests {
             execution::{CreateExecutionParams, HubuTokenReference},
             provider::{
                 contract::OutputDimensions,
-                flux2_api::{
-                    Flux2ApiAdapter, Flux2Transport, TransportResponse as FluxTransportResponse,
-                },
+                http_kernel::{ArtifactDownloadPolicy, InvocationDeadline},
+                pack::{Archetype, ArtifactFetchError},
+                pack_async::AsyncPollEngine,
+                pack_sync::{SyncTransport, TransportFailure, TransportResponse},
+                verified_packs::verified_packs,
             },
             secrets::{ProviderSecret, SecretError, SecretReference},
         };
         use serde_json::{json, Value};
         use std::{
             collections::BTreeMap,
-            error::Error as StdError,
             fs,
             sync::atomic::{AtomicUsize, Ordering},
             time::Duration,
@@ -2146,35 +2039,34 @@ mod tests {
 
         #[derive(Clone)]
         struct Transport(Arc<AtomicUsize>);
-        impl Flux2Transport for Transport {
-            fn submit(
+        impl SyncTransport for Transport {
+            fn post_json(
                 &self,
                 _: &reqwest::Url,
-                _: &[u8],
-                _: Duration,
+                _: (&str, &str),
                 _: &BTreeMap<String, String>,
-                _: Option<(&str, &str)>,
                 _: &Value,
-            ) -> Result<FluxTransportResponse, Box<dyn StdError + Send + Sync>> {
+                _: Duration,
+            ) -> Result<TransportResponse, TransportFailure> {
                 self.0.fetch_add(1, Ordering::SeqCst);
                 unreachable!("managed FLUX preflight rejection must not submit")
             }
-            fn poll(
+            fn get_json(
                 &self,
                 _: &reqwest::Url,
-                _: &[u8],
-                _: Duration,
+                _: (&str, &str),
                 _: &BTreeMap<String, String>,
-            ) -> Result<FluxTransportResponse, Box<dyn StdError + Send + Sync>> {
+                _: Duration,
+            ) -> Result<TransportResponse, TransportFailure> {
                 self.0.fetch_add(1, Ordering::SeqCst);
                 unreachable!("managed FLUX preflight rejection must not poll")
             }
-            fn fetch_artifact(
+            fn download(
                 &self,
                 _: &reqwest::Url,
-                _: Duration,
-                _: usize,
-            ) -> Result<Vec<u8>, Box<dyn StdError + Send + Sync>> {
+                _: &ArtifactDownloadPolicy,
+                _: InvocationDeadline,
+            ) -> Result<Vec<u8>, ArtifactFetchError> {
                 self.0.fetch_add(1, Ordering::SeqCst);
                 unreachable!("managed FLUX preflight rejection must not fetch")
             }
@@ -2257,18 +2149,13 @@ mod tests {
         let target_name = target.target_key().canonical_name();
         let target_version = target.provider_config_version.clone();
         let target_digest = target.digest().to_owned();
-        let request = NormalizedRequest {
-            provider: "flux".into(),
-            model: "flux-2-pro".into(),
-            image_count: Some(1),
-            input_tokens: None,
-            max_output_tokens: None,
-            image_size: Some("1k".into()),
-            output_dimensions: Some(OutputDimensions {
+        let request = NormalizedRequest::new("flux", "flux-2-pro")
+            .with_quantity("image_count", Some(1))
+            .with_selector("image_size", Some("1k".into()))
+            .with_output_dimensions(Some(OutputDimensions {
                 width: 1024,
                 height: 1024,
-            }),
-        };
+            }));
         let snapshot = pricing
             .snapshot_for_target(&target.target_key(), &request)
             .unwrap();
@@ -2280,11 +2167,18 @@ mod tests {
         let transport_calls = Arc::new(AtomicUsize::new(0));
         let mut registry = ProviderRegistry::new();
         let fixture_calls = transport_calls.clone();
-        registry.register("flux", "flux2_api", move |target| {
-            Ok(Arc::new(Flux2ApiAdapter::new(
-                target.flux2_api().cloned().unwrap(),
-                target.model.clone(),
+        registry.register_pack(
+            verified_packs()
+                .into_iter()
+                .find(|pack| pack.pack_id() == "bfl-flux-2")
+                .unwrap(),
+        );
+        registry.register_pack_engine(Archetype::AsyncPoll, move |target, pack| {
+            Ok(Arc::new(AsyncPollEngine::new(
+                pack.clone(),
+                &target.model,
                 Transport(fixture_calls.clone()),
+                ArtifactLimits::default().max_encoded_bytes,
             )?))
         });
         let providers = ValidatedProviderCatalog::bind(targets, pricing, &registry).unwrap();
@@ -2427,6 +2321,508 @@ mod tests {
     }
 
     #[test]
+    fn sync_pack_engine_settles_once_and_replay_never_calls_the_provider_again() {
+        use crate::{
+            artifact::{ArtifactLimits, LocalFsStorage},
+            execution::{CreateExecutionParams, HubuTokenReference},
+            provider::{
+                http_kernel::{ArtifactDownloadPolicy, InvocationDeadline},
+                pack::{Archetype, ArtifactFetchError, Pack},
+                pack_sync::{SyncFixedEngine, SyncTransport, TransportFailure, TransportResponse},
+            },
+            secrets::{ProviderSecret, SecretError, SecretReference},
+        };
+        use base64::Engine as _;
+        use image::{DynamicImage, ImageOutputFormat, RgbaImage};
+        use serde_json::json;
+        use std::{
+            collections::BTreeMap,
+            io::Cursor,
+            sync::{
+                atomic::{AtomicUsize, Ordering},
+                Mutex,
+            },
+            time::Duration,
+        };
+        use tempfile::tempdir;
+
+        struct Secrets;
+        impl SecretProvider for Secrets {
+            fn resolve(&self, _: &SecretReference) -> Result<ProviderSecret, SecretError> {
+                Ok(crate::secrets::secret_for_test("pack-secret"))
+            }
+        }
+
+        // Succeeds for "a lighthouse"; loses the response for anything else.
+        #[derive(Clone, Default)]
+        struct Transport {
+            posts: Arc<Mutex<Vec<String>>>,
+            png: Vec<u8>,
+        }
+        impl SyncTransport for Transport {
+            fn post_json(
+                &self,
+                _: &reqwest::Url,
+                _: (&str, &str),
+                _: &BTreeMap<String, String>,
+                body: &serde_json::Value,
+                _: Duration,
+            ) -> Result<TransportResponse, TransportFailure> {
+                let prompt = body["input"][0]["text"].as_str().unwrap().to_owned();
+                self.posts.lock().unwrap().push(prompt.clone());
+                if prompt != "a lighthouse" {
+                    return Err(TransportFailure::UnknownOutcome {
+                        request_id: Some("lost-1".into()),
+                    });
+                }
+                let data = base64::engine::general_purpose::STANDARD.encode(&self.png);
+                Ok(TransportResponse {
+                    status: 200,
+                    headers: BTreeMap::from([("x-goog-request-id".into(), "req-ok".into())]),
+                    body: json!({"cost": 0, "steps": [{"type": "model_output", "content": [
+                        {"type": "image", "mime_type": "image/png", "data": data}
+                    ]}]}),
+                })
+            }
+            fn download(
+                &self,
+                _: &reqwest::Url,
+                _: &ArtifactDownloadPolicy,
+                _: InvocationDeadline,
+            ) -> Result<Vec<u8>, ArtifactFetchError> {
+                Err(ArtifactFetchError::Failed)
+            }
+        }
+
+        #[derive(Default)]
+        struct Hubu(AtomicUsize, Mutex<Vec<i64>>);
+        impl HubuActivities for Hubu {
+            fn preflight(&self, _: &Execution) -> Result<(), WorkflowActivityError> {
+                Ok(())
+            }
+            fn claim(&self, _: &Execution) -> Result<String, WorkflowActivityError> {
+                Ok("claim".into())
+            }
+            fn validate_claim(&self, _: &Execution) -> Result<(), WorkflowActivityError> {
+                Ok(())
+            }
+            fn settle(
+                &self,
+                _: &Execution,
+                _: &str,
+                units: i64,
+            ) -> Result<String, WorkflowActivityError> {
+                self.1.lock().unwrap().push(units);
+                Ok(format!(
+                    "settlement-{}",
+                    self.0.fetch_add(1, Ordering::SeqCst)
+                ))
+            }
+            fn release(&self, _: &Execution) -> Result<(), WorkflowActivityError> {
+                Ok(())
+            }
+        }
+
+        let source = include_str!("../../../fixtures/packs/inline-image.toml")
+            .replace("[response]", "[response]\nreported_cost = \"/cost\"");
+        let pack = Pack::from_toml_str(&source).unwrap();
+        let secret = SecretReference::new("gongbu.inline-image", "fixture").unwrap();
+        let targets: ProviderTargetConfig = serde_json::from_value(json!({
+            "schema_version": 2,
+            "provider_configs": pack.provider_configs(&secret),
+        }))
+        .unwrap();
+        let pricing = PricingCatalog::from_json(
+            &serde_json::to_vec(&json!({
+                "schema_version": 2,
+                "catalog_version": pack.models()[0].pricing_version,
+                "rules": pack.pricing_rules(),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut png = Vec::new();
+        DynamicImage::ImageRgba8(RgbaImage::new(1, 1))
+            .write_to(&mut Cursor::new(&mut png), ImageOutputFormat::Png)
+            .unwrap();
+        let transport = Transport {
+            png,
+            ..Default::default()
+        };
+        let mut registry = ProviderRegistry::new();
+        registry.register_pack(pack.clone());
+        let engine_transport = transport.clone();
+        registry.register_pack_engine(Archetype::SyncFixed, move |target, pack| {
+            Ok(Arc::new(SyncFixedEngine::new(
+                pack.clone(),
+                &target.model,
+                engine_transport.clone(),
+                ArtifactLimits::default().max_encoded_bytes,
+            )?))
+        });
+        let providers =
+            ValidatedProviderCatalog::bind(targets.clone(), pricing.clone(), &registry).unwrap();
+        let repository = Repository::in_memory().unwrap();
+        let model = &pack.models()[0];
+        let target = targets
+            .resolve_active(&pack.target_key(model))
+            .unwrap()
+            .clone();
+        let create = |operation: &str, prompt: &str| {
+            let input = json!({"prompt": prompt, "image_size": "2k"});
+            let request = pack.prepare(&model.model, &input).unwrap().request;
+            let snapshot = pricing
+                .snapshot_for_target(&target.target_key(), &request)
+                .unwrap();
+            repository
+                .create_execution(&CreateExecutionParams {
+                    account_id: "account".into(),
+                    operation_key: operation.into(),
+                    hubu_authorization_id: format!("token-{operation}"),
+                    hubu_claim_id: Some(format!("claim-{operation}")),
+                    hubu_token_reference: HubuTokenReference::new(format!("token-{operation}"))
+                        .unwrap(),
+                    authorized_units: snapshot.estimated_units,
+                    authorization_currency: "USD".into(),
+                    normalized_input: input,
+                    input_hash: format!("hash-{operation}"),
+                    input_schema_version: 1,
+                    target: target.target_key().canonical_name(),
+                    config_version: target.provider_config_version.clone(),
+                    workload_type: target.workload_type.clone(),
+                    provider: target.provider.clone(),
+                    adapter: target.adapter.clone(),
+                    model: target.model.clone(),
+                    provider_config_version: target.provider_config_version.clone(),
+                    provider_config_digest: target.digest().into(),
+                    pricing_snapshot: serde_json::to_value(&snapshot).unwrap(),
+                    pricing_schema_version: i64::from(snapshot.schema_version),
+                    execution_scope: None,
+                    created_at: "now".into(),
+                })
+                .unwrap()
+        };
+        let delivered = create("pack-ok", "a lighthouse");
+        let lost = create("pack-lost", "a storm");
+        let root = tempdir().unwrap();
+        let artifacts = ArtifactService::new(
+            repository.clone(),
+            LocalFsStorage::new(root.path()),
+            ArtifactLimits::default(),
+        );
+        let hubu = Arc::new(Hubu::default());
+        let runner = provider_execution_runner(
+            repository.clone(),
+            hubu.clone(),
+            artifacts.clone(),
+            providers,
+            Arc::new(Secrets),
+            || "now".into(),
+        );
+        for _ in 0..2 {
+            assert_eq!(
+                runner.run_execution(&delivered.execution_id, None).unwrap(),
+                "succeeded"
+            );
+            assert_eq!(
+                runner.run_execution(&lost.execution_id, None).unwrap(),
+                "reconciliation_required"
+            );
+        }
+        // One provider call per execution, however often it is replayed.
+        assert_eq!(
+            transport.posts.lock().unwrap().as_slice(),
+            ["a lighthouse", "a storm"]
+        );
+        // 10.1¢ for one 2k image, settled exactly once.
+        assert_eq!(hubu.1.lock().unwrap().as_slice(), [101_000]);
+        assert_eq!(
+            repository
+                .get_receipt_for_execution(&delivered.execution_id)
+                .unwrap()
+                .settlement_units,
+            101_000
+        );
+        assert_eq!(
+            artifacts
+                .list_for_account(&delivered.execution_id, "account")
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(artifacts
+            .list_for_account(&lost.execution_id, "account")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn async_pack_engine_polls_settles_once_and_replay_never_resubmits() {
+        use crate::{
+            artifact::{ArtifactLimits, LocalFsStorage},
+            execution::{CreateExecutionParams, HubuTokenReference},
+            provider::{
+                http_kernel::{ArtifactDownloadPolicy, InvocationDeadline},
+                pack::{Archetype, ArtifactFetchError, Pack},
+                pack_async::AsyncPollEngine,
+                pack_sync::{SyncTransport, TransportFailure, TransportResponse},
+            },
+            secrets::{ProviderSecret, SecretError, SecretReference},
+        };
+        use image::{DynamicImage, ImageOutputFormat, RgbaImage};
+        use serde_json::json;
+        use std::{
+            collections::BTreeMap,
+            io::Cursor,
+            sync::{
+                atomic::{AtomicUsize, Ordering},
+                Mutex,
+            },
+            time::Duration,
+        };
+        use tempfile::tempdir;
+
+        struct Secrets;
+        impl SecretProvider for Secrets {
+            fn resolve(&self, _: &SecretReference) -> Result<ProviderSecret, SecretError> {
+                Ok(crate::secrets::secret_for_test("pack-secret"))
+            }
+        }
+
+        // Accepts "a lighthouse" as a job; loses the submission response for
+        // anything else. Polls report the job ready.
+        #[derive(Clone, Default)]
+        struct Transport {
+            posts: Arc<Mutex<Vec<String>>>,
+            polls: Arc<Mutex<Vec<String>>>,
+            png: Vec<u8>,
+        }
+        impl SyncTransport for Transport {
+            fn post_json(
+                &self,
+                _: &reqwest::Url,
+                _: (&str, &str),
+                _: &BTreeMap<String, String>,
+                body: &serde_json::Value,
+                _: Duration,
+            ) -> Result<TransportResponse, TransportFailure> {
+                let prompt = body["prompt"].as_str().unwrap().to_owned();
+                self.posts.lock().unwrap().push(prompt.clone());
+                if prompt != "a lighthouse" {
+                    return Err(TransportFailure::UnknownOutcome { request_id: None });
+                }
+                Ok(TransportResponse {
+                    status: 200,
+                    headers: BTreeMap::from([("x-request-id".into(), "req-ok".into())]),
+                    body: json!({"id": "job-1",
+                        "polling_url": "https://api.us.async-image.test/v1/get_result?id=job-1"}),
+                })
+            }
+            fn get_json(
+                &self,
+                url: &reqwest::Url,
+                _: (&str, &str),
+                _: &BTreeMap<String, String>,
+                _: Duration,
+            ) -> Result<TransportResponse, TransportFailure> {
+                self.polls.lock().unwrap().push(url.to_string());
+                Ok(TransportResponse {
+                    status: 200,
+                    headers: BTreeMap::from([("x-request-id".into(), "req-poll".into())]),
+                    body: json!({"id": "job-1", "status": "Ready",
+                        "result": {"sample": "https://delivery.us1.async-image.test/out.png"}}),
+                })
+            }
+            fn download(
+                &self,
+                url: &reqwest::Url,
+                policy: &ArtifactDownloadPolicy,
+                _: InvocationDeadline,
+            ) -> Result<Vec<u8>, ArtifactFetchError> {
+                policy
+                    .validate_url(url)
+                    .map_err(|_| ArtifactFetchError::Failed)?;
+                Ok(self.png.clone())
+            }
+        }
+
+        #[derive(Default)]
+        struct Hubu(AtomicUsize, Mutex<Vec<i64>>);
+        impl HubuActivities for Hubu {
+            fn preflight(&self, _: &Execution) -> Result<(), WorkflowActivityError> {
+                Ok(())
+            }
+            fn claim(&self, _: &Execution) -> Result<String, WorkflowActivityError> {
+                Ok("claim".into())
+            }
+            fn validate_claim(&self, _: &Execution) -> Result<(), WorkflowActivityError> {
+                Ok(())
+            }
+            fn settle(
+                &self,
+                _: &Execution,
+                _: &str,
+                units: i64,
+            ) -> Result<String, WorkflowActivityError> {
+                self.1.lock().unwrap().push(units);
+                Ok(format!(
+                    "settlement-{}",
+                    self.0.fetch_add(1, Ordering::SeqCst)
+                ))
+            }
+            fn release(&self, _: &Execution) -> Result<(), WorkflowActivityError> {
+                Ok(())
+            }
+        }
+
+        let pack =
+            Pack::from_toml_str(include_str!("../../../fixtures/packs/async-image.toml")).unwrap();
+        let secret = SecretReference::new("gongbu.async-image", "fixture").unwrap();
+        let targets: ProviderTargetConfig = serde_json::from_value(json!({
+            "schema_version": 2,
+            "provider_configs": pack.provider_configs(&secret),
+        }))
+        .unwrap();
+        let pricing = PricingCatalog::from_json(
+            &serde_json::to_vec(&json!({
+                "schema_version": 2,
+                "catalog_version": pack.models()[0].pricing_version,
+                "rules": pack.pricing_rules(),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut png = Vec::new();
+        DynamicImage::ImageRgba8(RgbaImage::new(1, 1))
+            .write_to(&mut Cursor::new(&mut png), ImageOutputFormat::Png)
+            .unwrap();
+        let transport = Transport {
+            png,
+            ..Default::default()
+        };
+        let mut registry = ProviderRegistry::new();
+        registry.register_pack(pack.clone());
+        let engine_transport = transport.clone();
+        registry.register_pack_engine(Archetype::AsyncPoll, move |target, pack| {
+            Ok(Arc::new(AsyncPollEngine::new(
+                pack.clone(),
+                &target.model,
+                engine_transport.clone(),
+                ArtifactLimits::default().max_encoded_bytes,
+            )?))
+        });
+        let providers =
+            ValidatedProviderCatalog::bind(targets.clone(), pricing.clone(), &registry).unwrap();
+        let repository = Repository::in_memory().unwrap();
+        let model = &pack.models()[0];
+        let target = targets
+            .resolve_active(&pack.target_key(model))
+            .unwrap()
+            .clone();
+        let create = |operation: &str, prompt: &str| {
+            // `output_format` is a pack parameter outside the image input shape;
+            // the pack engine, not the image schema, validates it.
+            let input = json!({"prompt": prompt, "output_format": "png"});
+            let request = pack.prepare(&model.model, &input).unwrap().request;
+            let snapshot = pricing
+                .snapshot_for_target(&target.target_key(), &request)
+                .unwrap();
+            repository
+                .create_execution(&CreateExecutionParams {
+                    account_id: "account".into(),
+                    operation_key: operation.into(),
+                    hubu_authorization_id: format!("token-{operation}"),
+                    hubu_claim_id: Some(format!("claim-{operation}")),
+                    hubu_token_reference: HubuTokenReference::new(format!("token-{operation}"))
+                        .unwrap(),
+                    authorized_units: snapshot.estimated_units,
+                    authorization_currency: "USD".into(),
+                    normalized_input: input,
+                    input_hash: format!("hash-{operation}"),
+                    input_schema_version: 1,
+                    target: target.target_key().canonical_name(),
+                    config_version: target.provider_config_version.clone(),
+                    workload_type: target.workload_type.clone(),
+                    provider: target.provider.clone(),
+                    adapter: target.adapter.clone(),
+                    model: target.model.clone(),
+                    provider_config_version: target.provider_config_version.clone(),
+                    provider_config_digest: target.digest().into(),
+                    pricing_snapshot: serde_json::to_value(&snapshot).unwrap(),
+                    pricing_schema_version: i64::from(snapshot.schema_version),
+                    execution_scope: None,
+                    created_at: "now".into(),
+                })
+                .unwrap()
+        };
+        let delivered = create("async-ok", "a lighthouse");
+        let lost = create("async-lost", "a storm");
+        let root = tempdir().unwrap();
+        let artifacts = ArtifactService::new(
+            repository.clone(),
+            LocalFsStorage::new(root.path()),
+            ArtifactLimits::default(),
+        );
+        let hubu = Arc::new(Hubu::default());
+        let runner = provider_execution_runner(
+            repository.clone(),
+            hubu.clone(),
+            artifacts.clone(),
+            providers,
+            Arc::new(Secrets),
+            || "now".into(),
+        );
+        for _ in 0..2 {
+            assert_eq!(
+                runner.run_execution(&delivered.execution_id, None).unwrap(),
+                "succeeded"
+            );
+            assert_eq!(
+                runner.run_execution(&lost.execution_id, None).unwrap(),
+                "reconciliation_required"
+            );
+        }
+        // One submission per execution and one poll for the accepted job,
+        // however often either execution is replayed.
+        assert_eq!(
+            transport.posts.lock().unwrap().as_slice(),
+            ["a lighthouse", "a storm"]
+        );
+        assert_eq!(
+            transport.polls.lock().unwrap().as_slice(),
+            ["https://api.us.async-image.test/v1/get_result?id=job-1"]
+        );
+        assert_eq!(
+            repository
+                .get_provider_attempt_for_execution(&delivered.execution_id)
+                .unwrap()
+                .provider_request_id
+                .as_deref(),
+            Some("req-ok")
+        );
+        // 0.5¢ per request + 3¢ per image, settled exactly once.
+        assert_eq!(hubu.1.lock().unwrap().as_slice(), [35_000]);
+        assert_eq!(
+            repository
+                .get_receipt_for_execution(&delivered.execution_id)
+                .unwrap()
+                .settlement_units,
+            35_000
+        );
+        assert_eq!(
+            artifacts
+                .list_for_account(&delivered.execution_id, "account")
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(artifacts
+            .list_for_account(&lost.execution_id, "account")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
     fn mixed_provider_dispatch_recovers_legacy_flux_dimensions_and_is_replay_safe() {
         use crate::{
             artifact::{ArtifactLimits, LocalFsStorage},
@@ -2524,6 +2920,7 @@ mod tests {
                         images: Some(1),
                         input_tokens: None,
                         output_tokens: None,
+                        ..Default::default()
                     }),
                     actual_vendor_cost: None,
                     artifacts: vec![NormalizedArtifact {
@@ -2560,25 +2957,60 @@ mod tests {
             }
         }
 
+        let flux_pack = crate::provider::verified_packs::verified_packs()
+            .into_iter()
+            .find(|pack| pack.pack_id() == "bfl-flux-2")
+            .unwrap();
+        let flux_target = flux_pack
+            .provider_configs(&SecretReference::new("gongbu.flux", "flux").unwrap())
+            .remove(0);
         let targets: ProviderTargetConfig = serde_json::from_value(json!({
             "schema_version": 2,
             "provider_configs": [
-                {"provider_config_version":"google-v1","workload_type":"image_generation","provider":"google","adapter":"gemini_developer_image","model":"gemini-3.1-flash-lite-image","secret_service":"gongbu.google","secret_account":"gemini","active":true,"execution_enabled":true,"settings":{"type":"gemini_developer_image","config":{"endpoint":"https://generativelanguage.googleapis.com","api_version":"v1beta","timeout_ms":1000}}},
-                {"provider_config_version":"ideogram-v1","workload_type":"image_generation","provider":"ideogram","adapter":"ideogram_image","model":"ideogram-v3","secret_service":"gongbu.ideogram","secret_account":"ideogram","active":true,"execution_enabled":true,"settings":{"type":"ideogram_image","config":{"endpoint":"https://ideogram.example","api_version":"v1","timeout_ms":1000,"approved_artifact_hosts":["ideogram.example"]}}},
-                {"provider_config_version":"flux-v1","workload_type":"image_generation","provider":"flux","adapter":"flux2_api","model":"flux-2-pro","secret_service":"gongbu.flux","secret_account":"flux","active":true,"execution_enabled":true,"settings":{"type":"flux2_api","config":{"endpoint":"https://api.bfl.ai","api_version":"v1","timeout_ms":1000,"poll_interval_ms":10,"idempotency_header":"x-idempotency-key","approved_artifact_hosts":[]}}}
+                {"provider_config_version":"sync-v1","workload_type":"image_generation","provider":"sync-example","adapter":"sync_example","model":"image-v1","secret_service":"gongbu.sync","secret_account":"sync","active":true,"execution_enabled":true,"settings":{"type":"fixture"}},
+                {"provider_config_version":"example-v1","workload_type":"image_generation","provider":"example","adapter":"fixture","model":"image-v1","secret_service":"gongbu.example","secret_account":"example","active":true,"execution_enabled":true,"settings":{"type":"fixture"}},
+                flux_target
             ]
         })).unwrap();
-        let pricing = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"mixed-v2","rules":[{"rule_id":"g","provider":"google","model":"gemini-3.1-flash-lite-image","currency":"USD","components":[{"unit":"image","rate_numerator_minor":25,"rate_denominator":1}]},{"rule_id":"i","provider":"ideogram","model":"ideogram-v3","currency":"USD","components":[{"unit":"image","rate_numerator_minor":30,"rate_denominator":1}]},{"rule_id":"f-1k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"1k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":45,"rate_denominator":1}]},{"rule_id":"f-2k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"2k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":90,"rate_denominator":1}]},{"rule_id":"f-4k","provider":"flux","model":"flux-2-pro","selector":{"image_size":"4k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":180,"rate_denominator":1}]}]}"#).unwrap();
+        let mut rules = vec![
+            json!({"rule_id":"sync-fixture","provider":"sync-example","model":"image-v1","currency":"USD","components":[{"unit":"image","rate_numerator_minor":25,"rate_denominator":1}]}),
+            json!({"rule_id":"ambiguous-fixture","provider":"example","model":"image-v1","currency":"USD","components":[{"unit":"image","rate_numerator_minor":30,"rate_denominator":1}]}),
+        ];
+        rules.extend(
+            flux_pack
+                .pricing_rules()
+                .into_iter()
+                .map(|rule| serde_json::to_value(rule).unwrap()),
+        );
+        let pricing = PricingCatalog::from_json(
+            &serde_json::to_vec(
+                &json!({"schema_version":2,"catalog_version":"mixed-v2","rules":rules}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
         let mut png = Vec::new();
         DynamicImage::ImageRgba8(RgbaImage::new(1, 1))
             .write_to(&mut Cursor::new(&mut png), ImageOutputFormat::Png)
             .unwrap();
         let calls = Arc::new(Calls::default());
         let mut registry = ProviderRegistry::new();
+        // FLUX binds through its verified pack; the async engine here is the
+        // same counting fixture adapter as the other providers.
+        registry.register_pack(flux_pack.clone());
+        let flux_calls = calls.clone();
+        let flux_png = png.clone();
+        registry.register_pack_engine(crate::provider::pack::Archetype::AsyncPoll, move |_, _| {
+            Ok(Arc::new(Adapter {
+                id: "flux2_api",
+                ambiguous: false,
+                calls: flux_calls.clone(),
+                png: flux_png.clone(),
+            }))
+        });
         for (provider, id, ambiguous) in [
-            ("google", "gemini_developer_image", false),
-            ("ideogram", "ideogram_image", true),
-            ("flux", "flux2_api", false),
+            ("sync-example", "sync_example", false),
+            ("example", "fixture", true),
         ] {
             let calls = calls.clone();
             let png = png.clone();
@@ -2599,18 +3031,15 @@ mod tests {
                 .resolve("image_generation", provider, adapter, model)
                 .unwrap();
             let is_flux = provider == "flux";
-            let request = NormalizedRequest {
-                provider: provider.into(),
-                model: model.into(),
-                image_count: Some(1),
-                input_tokens: None,
-                max_output_tokens: None,
-                image_size: is_flux.then(|| "1k".into()),
-                output_dimensions: is_flux.then_some(crate::provider_contract::OutputDimensions {
-                    width: 1024,
-                    height: 1024,
-                }),
-            };
+            let request = NormalizedRequest::new(provider, model)
+                .with_quantity("image_count", Some(1))
+                .with_selector("image_size", is_flux.then(|| "1k".into()))
+                .with_output_dimensions(is_flux.then_some(
+                    crate::provider_contract::OutputDimensions {
+                        width: 1024,
+                        height: 1024,
+                    },
+                ));
             let snapshot = pricing
                 .snapshot_for_target(&target.target_key(), &request)
                 .unwrap();
@@ -2655,21 +3084,15 @@ mod tests {
                 })
                 .unwrap()
         };
-        let gemini = create(
-            "google",
-            "gemini_developer_image",
-            "gemini-3.1-flash-lite-image",
-            "google-v1",
-            25,
+        let sync = create("sync-example", "sync_example", "image-v1", "sync-v1", 25);
+        let ambiguous = create("example", "fixture", "image-v1", "example-v1", 30);
+        let flux = create(
+            "flux",
+            "flux2_api",
+            "flux-2-pro",
+            "hubu-flux-2-pro-t2i-2026-08-28-v1",
+            3,
         );
-        let ideogram = create(
-            "ideogram",
-            "ideogram_image",
-            "ideogram-v3",
-            "ideogram-v1",
-            30,
-        );
-        let flux = create("flux", "flux2_api", "flux-2-pro", "flux-v1", 45);
         let root = tempdir().unwrap();
         let artifacts = ArtifactService::new(
             repository.clone(),
@@ -2688,11 +3111,11 @@ mod tests {
         );
 
         assert_eq!(
-            runner.run_execution(&gemini.execution_id, None).unwrap(),
+            runner.run_execution(&sync.execution_id, None).unwrap(),
             "succeeded"
         );
         assert_eq!(
-            runner.run_execution(&ideogram.execution_id, None).unwrap(),
+            runner.run_execution(&ambiguous.execution_id, None).unwrap(),
             "reconciliation_required"
         );
         assert_eq!(
@@ -2700,11 +3123,11 @@ mod tests {
             "succeeded"
         );
         assert_eq!(
-            runner.run_execution(&gemini.execution_id, None).unwrap(),
+            runner.run_execution(&sync.execution_id, None).unwrap(),
             "succeeded"
         );
         assert_eq!(
-            runner.run_execution(&ideogram.execution_id, None).unwrap(),
+            runner.run_execution(&ambiguous.execution_id, None).unwrap(),
             "reconciliation_required"
         );
         assert_eq!(
@@ -2713,21 +3136,18 @@ mod tests {
         );
 
         let counts = calls.counts.lock().unwrap();
-        assert_eq!(counts.get("gemini_developer_image"), Some(&1));
-        assert_eq!(counts.get("ideogram_image"), Some(&1));
+        assert_eq!(counts.get("sync_example"), Some(&1));
+        assert_eq!(counts.get("fixture"), Some(&1));
         assert_eq!(counts.get("flux2_api"), Some(&1));
         drop(counts);
-        let expected_key =
-            vendor_idempotency_key("flux", "flux-2-pro", "account", "mixed-flux").unwrap();
-        assert_eq!(
-            calls.flux_keys.lock().unwrap().as_slice(),
-            &[Some(expected_key)]
-        );
+        // Pack targets never send a vendor idempotency key: the engines refuse
+        // one, because they never retry a provider mutation.
+        assert_eq!(calls.flux_keys.lock().unwrap().as_slice(), &[None]);
         assert_eq!(hubu.0.load(Ordering::SeqCst), 2);
         let resolved = secrets.0.lock().unwrap();
         for expected in [
-            ("gongbu.google", "gemini"),
-            ("gongbu.ideogram", "ideogram"),
+            ("gongbu.sync", "sync"),
+            ("gongbu.example", "example"),
             ("gongbu.flux", "flux"),
         ] {
             assert_eq!(
@@ -2742,7 +3162,7 @@ mod tests {
         drop(resolved);
         assert_eq!(
             artifacts
-                .list_for_account(&gemini.execution_id, "account")
+                .list_for_account(&sync.execution_id, "account")
                 .unwrap()
                 .len(),
             1
@@ -2755,24 +3175,24 @@ mod tests {
             1
         );
         assert!(artifacts
-            .list_for_account(&ideogram.execution_id, "account")
+            .list_for_account(&ambiguous.execution_id, "account")
             .unwrap()
             .is_empty());
-        let gemini_attempt = repository
-            .get_provider_attempt_for_execution(&gemini.execution_id)
+        let sync_attempt = repository
+            .get_provider_attempt_for_execution(&sync.execution_id)
             .unwrap();
         let flux_attempt = repository
             .get_provider_attempt_for_execution(&flux.execution_id)
             .unwrap();
-        assert_eq!(gemini_attempt.provider, "google");
+        assert_eq!(sync_attempt.provider, "sync-example");
         assert_eq!(flux_attempt.provider, "flux");
         assert_ne!(
-            gemini_attempt.provider_attempt_id,
+            sync_attempt.provider_attempt_id,
             flux_attempt.provider_attempt_id
         );
         assert_ne!(
             repository
-                .get_execution(&gemini.execution_id)
+                .get_execution(&sync.execution_id)
                 .unwrap()
                 .provider_config_digest,
             repository
@@ -2782,7 +3202,7 @@ mod tests {
         );
         assert_eq!(
             repository
-                .get_receipt_for_execution(&gemini.execution_id)
+                .get_receipt_for_execution(&sync.execution_id)
                 .unwrap()
                 .settlement_units,
             25_0000
@@ -2792,7 +3212,7 @@ mod tests {
                 .get_receipt_for_execution(&flux.execution_id)
                 .unwrap()
                 .settlement_units,
-            45_0000
+            3_0000
         );
         let recovered_legacy_flux = repository.get_execution(&flux.execution_id).unwrap();
         assert!(recovered_legacy_flux

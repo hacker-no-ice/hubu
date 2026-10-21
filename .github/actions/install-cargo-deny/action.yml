@@ -1,0 +1,16 @@
+name: Install matching cargo-deny
+description: Install the cargo-deny version shipped by the pinned cargo-deny-action.
+runs:
+  using: composite
+  steps:
+    # Keep this version aligned with cargo-deny-action's pinned Dockerfile.
+    - uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+      id: cache
+      with:
+        path: ${{ runner.tool_cache }}/hubu-cargo-deny/0.20.2
+        key: cargo-deny-${{ runner.os }}-${{ runner.arch }}-0.20.2-v1
+    - if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: cargo install cargo-deny --version '=0.20.2' --locked --root "${{ runner.tool_cache }}/hubu-cargo-deny/0.20.2"
+    - shell: bash
+      run: echo "${{ runner.tool_cache }}/hubu-cargo-deny/0.20.2/bin" >> "$GITHUB_PATH"

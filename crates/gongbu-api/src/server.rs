@@ -12,7 +12,7 @@ use crate::{
     provider::{
         contract::PricingCatalog,
         registry::{ProviderRegistry, ValidatedProviderCatalog},
-        targets::ProviderTargetConfig,
+        targets::{ProviderTargetConfig, TargetKey},
     },
     redaction::Redactor,
     secrets::{
@@ -236,6 +236,51 @@ pub enum ServerError {
 
 fn invalid(message: impl Into<String>) -> ServerError {
     ServerError::Invalid(message.into())
+}
+
+/// Refuse to start when an unfinished execution (including one waiting for
+/// reconciliation) was frozen against a provider target revision this
+/// configuration no longer has. Without its revision the execution could
+/// never be resumed or reconciled, so upgrades that replace provider targets
+/// must drain unfinished work first.
+fn refuse_orphaned_executions(
+    repository: &Repository,
+    targets: &ProviderTargetConfig,
+) -> Result<(), ServerError> {
+    let mut orphaned = Vec::new();
+    for id in repository
+        .list_nonterminal_execution_ids()
+        .map_err(|_| invalid("unfinished executions could not be listed"))?
+    {
+        let execution = repository
+            .get_execution(&id)
+            .map_err(|_| invalid("an unfinished execution could not be read"))?;
+        let key = TargetKey::new(
+            &execution.workload_type,
+            &execution.provider,
+            &execution.adapter,
+            &execution.model,
+        );
+        let present = key.is_ok_and(|key| {
+            targets.has_revision(
+                &key,
+                &execution.provider_config_version,
+                &execution.provider_config_digest,
+            )
+        });
+        if !present {
+            orphaned.push(execution.target);
+        }
+    }
+    match orphaned.first() {
+        None => Ok(()),
+        Some(example) => Err(invalid(format!(
+            "{} unfinished execution(s) reference provider target revisions this configuration \
+             no longer has (for example {example}); finish or reconcile them with the previous \
+             Gongbu version and provider configuration, then upgrade",
+            orphaned.len()
+        ))),
+    }
 }
 
 impl ServerConfig {
@@ -579,6 +624,7 @@ pub async fn serve_config(mut config: ServerConfig) -> Result<(), BoxError> {
         limits,
     );
     artifacts.preflight()?;
+    refuse_orphaned_executions(&repository, providers.targets())?;
 
     let hubu_client =
         HubuClient::new(&config.hubu.endpoint).with_bearer_token(hubu_secret.expose().to_vec());
@@ -1656,5 +1702,166 @@ mod tests {
 
         assert!(!hubu_is_compatible(&client, "0.1.0", "hubu-executor.v1"));
         server.join().unwrap();
+    }
+
+    #[test]
+    fn startup_requires_exact_unfinished_revisions_and_ignores_completed_legacy_rows() {
+        use crate::{
+            execution::{CreateExecutionParams, HubuTokenReference},
+            provider::{targets::LEGACY_UNRESOLVED_DIGEST, verified_packs::verified_packs},
+        };
+        let pack = verified_packs().remove(0);
+        let secret = SecretReference::new("gongbu.google", "fixture").unwrap();
+        let targets: ProviderTargetConfig = serde_json::from_value(serde_json::json!({
+            "schema_version": 2,
+            "provider_configs": pack.provider_configs(&secret),
+        }))
+        .unwrap();
+        let model = pack.models()[0].clone();
+        let target = targets
+            .resolve_active(&pack.target_key(&model))
+            .unwrap()
+            .clone();
+        let input = serde_json::json!({"prompt": "x", "image_size": "1k"});
+        let pricing = PricingCatalog::from_json(
+            &serde_json::to_vec(&serde_json::json!({
+                "schema_version": 2, "catalog_version": "v", "rules": pack.pricing_rules()
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let snapshot = pricing
+            .snapshot(&pack.prepare(&model.model, &input).unwrap().request)
+            .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("executions.sqlite");
+        // Match the historical schema used by the repository migration tests:
+        // resolved target fields existed, but configuration digests did not.
+        let legacy_schema = include_str!("../migrations/0001_execution_core.sql")
+            .replace(
+                ", provider_config_digest TEXT NOT NULL CHECK(provider_config_digest GLOB 'sha256:*' AND length(provider_config_digest)=71)",
+                "",
+            )
+            .replace(
+                " execution_scope_json TEXT CHECK(execution_scope_json IS NULL OR json_valid(execution_scope_json)),\n",
+                "",
+            );
+        assert!(!legacy_schema.contains("provider_config_digest"));
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection.execute_batch(&legacy_schema).unwrap();
+        for column in [
+            "workload_type",
+            "provider",
+            "adapter",
+            "model",
+            "provider_config_version",
+        ] {
+            connection
+                .execute(
+                    &format!("ALTER TABLE executions ADD COLUMN {column} TEXT NOT NULL DEFAULT 'legacy-unresolved' CHECK(trim({column})<>'')"),
+                    [],
+                )
+                .unwrap();
+        }
+        connection
+            .execute(
+                "INSERT INTO executions(execution_id,account_id,operation_key,hubu_authorization_id,hubu_token_reference,authorized_minor,authorization_currency,normalized_input_json,input_hash,input_schema_version,target,config_version,workload_type,provider,adapter,model,provider_config_version,pricing_snapshot_json,pricing_schema_version,status,created_at,updated_at,version) VALUES('legacy-execution','account','legacy-unresolved','legacy-token','legacy-token',100,'USD',?7,'hash',1,?1,?2,?3,?4,?5,?6,?2,?8,3,'pending','now','now',0)",
+                rusqlite::params![
+                    target.target_key().canonical_name(),
+                    target.provider_config_version,
+                    target.workload_type,
+                    target.provider,
+                    target.adapter,
+                    target.model,
+                    serde_json::to_string(&input).unwrap(),
+                    serde_json::to_string(&snapshot).unwrap(),
+                ],
+            )
+            .unwrap();
+        drop(connection);
+        // Opening through Repository performs the real migration, supplying
+        // the historical unresolved marker without bypassing current checks.
+        let repository = Repository::open(&path, Redactor::default()).unwrap();
+        let create = |operation: &str, digest: &str| {
+            repository
+                .create_execution(&CreateExecutionParams {
+                    account_id: "account".into(),
+                    operation_key: operation.into(),
+                    hubu_authorization_id: format!("token-{operation}"),
+                    hubu_claim_id: None,
+                    hubu_token_reference: HubuTokenReference::new(format!("token-{operation}"))
+                        .unwrap(),
+                    authorized_units: snapshot.estimated_units,
+                    authorization_currency: "USD".into(),
+                    normalized_input: input.clone(),
+                    input_hash: "hash".into(),
+                    input_schema_version: 1,
+                    target: target.target_key().canonical_name(),
+                    config_version: target.provider_config_version.clone(),
+                    workload_type: target.workload_type.clone(),
+                    provider: target.provider.clone(),
+                    adapter: target.adapter.clone(),
+                    model: target.model.clone(),
+                    provider_config_version: target.provider_config_version.clone(),
+                    provider_config_digest: digest.into(),
+                    pricing_snapshot: serde_json::to_value(&snapshot).unwrap(),
+                    pricing_schema_version: 3,
+                    execution_scope: None,
+                    created_at: "now".into(),
+                })
+                .unwrap()
+        };
+        create("current", target.digest());
+        assert!(targets.has_revision(
+            &target.target_key(),
+            &target.provider_config_version,
+            target.digest(),
+        ));
+
+        let legacy = repository.get_execution("legacy-execution").unwrap();
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        assert_eq!(
+            legacy.provider_config_version,
+            target.provider_config_version
+        );
+        assert_eq!(legacy.target, target.target_key().canonical_name());
+        assert_eq!(legacy.provider_config_digest, LEGACY_UNRESOLVED_DIGEST);
+        // The lower-level compatibility resolver still exists, but cannot
+        // establish the exact revision required by the startup migration gate.
+        assert!(targets
+            .resolve_persisted_revision(
+                &target.target_key(),
+                &legacy.provider_config_version,
+                LEGACY_UNRESOLVED_DIGEST,
+            )
+            .is_ok());
+        let error = refuse_orphaned_executions(&repository, &targets)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("1 unfinished execution(s)"), "{error}");
+        assert!(error.contains("previous Gongbu version"), "{error}");
+
+        // Completed historical work remains readable and never blocks startup.
+        for status in ["succeeded", "failed", "released"] {
+            connection
+                .execute(
+                    "UPDATE executions SET status=?1, completed_at='now' WHERE execution_id=?2",
+                    rusqlite::params![status, legacy.execution_id],
+                )
+                .unwrap();
+            refuse_orphaned_executions(&repository, &targets).unwrap();
+        }
+
+        // Work frozen against the pre-upgrade revision blocks startup.
+        create("pre-upgrade", &format!("sha256:{}", "c".repeat(64)));
+        let error = refuse_orphaned_executions(&repository, &targets)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("1 unfinished execution(s)"), "{error}");
+        assert!(
+            error.contains(&target.target_key().canonical_name()),
+            "{error}"
+        );
+        assert!(error.contains("previous Gongbu version"), "{error}");
     }
 }

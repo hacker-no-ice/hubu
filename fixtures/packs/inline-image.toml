@@ -1,0 +1,78 @@
+# Fixture provider pack (schema v1) shaped like an inline-image API: a nested
+# request body, the request ID in a response header, and base64 images found
+# by filtering response arrays. Used by Gongbu's sync engine tests only.
+schema_version = 1
+pack_id = "inline-image"
+pack_version = "2026-10-19.1"
+provider = "inline-image"
+display_name = "Inline image provider"
+billing_merchant = "merchant:inline-image"
+capability = "capability:image:generate"
+workload_type = "image_generation"
+archetype = "sync_fixed"
+pricing_trust = "verified"
+
+[transport]
+endpoint = "https://api.inline-image.test"
+api_version = "v1beta"
+allowed_hosts = ["api.inline-image.test"]
+auth_header = "x-goog-api-key"
+credential = "inline_image"
+timeout_ms = 60000
+
+[request]
+path = "/v1beta/interactions"
+
+[request.body]
+model = "{{model}}"
+input = [{ type = "text", text = "{{prompt}}" }]
+response_format = { type = "image", image_size = "{{image_size|upper}}" }
+
+[[parameters]]
+name = "prompt"
+type = "string"
+required = true
+max_length = 32000
+
+[[parameters]]
+name = "image_count"
+type = "integer"
+min = 1
+max = 1
+default = 1
+quantity = "image_count"
+
+[[parameters]]
+name = "image_size"
+type = "enum"
+values = ["1k", "2k"]
+default = "1k"
+selector = "image_size"
+
+[response]
+request_id_headers = ["x-goog-request-id", "x-request-id"]
+provider_request_id = "/id"
+usage = { images = "/steps[type=model_output]/content[type=image]" }
+artifact_items = "/steps[type=model_output]/content[type=image]"
+artifact_base64 = "/data"
+
+[artifacts]
+media_types = ["image/png", "image/jpeg"]
+
+[[models]]
+model = "inline-image-v1"
+provider_config_version = "inline-image-v1-2026-10-19"
+pricing_version = "inline-image-v1-usd-2026-10-19-v1"
+pricing_reviewed_on = "2026-10-19"
+
+[[models.pricing_rules]]
+rule_id = "inline-image-v1-1k-2026-10-19"
+currency = "USD"
+selector = { image_size = "1k" }
+components = [{ unit = "image", rate_numerator_minor = 336, rate_denominator = 100 }]
+
+[[models.pricing_rules]]
+rule_id = "inline-image-v1-2k-2026-10-19"
+currency = "USD"
+selector = { image_size = "2k" }
+components = [{ unit = "image", rate_numerator_minor = 101, rate_denominator = 10 }]

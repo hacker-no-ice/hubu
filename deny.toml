@@ -20,7 +20,7 @@ allow = [
 ]
 exceptions = [
     { allow = ["MPL-2.0"], crate = "option-ext@0.2.0" },
-    { allow = ["CDLA-Permissive-2.0"], crate = "webpki-roots@1.0.9" },
+    { allow = ["CDLA-Permissive-2.0"], crate = "webpki-roots@1.0.10" },
 ]
 
 [[licenses.clarify]]
