@@ -55,9 +55,11 @@ pub mod error;
 pub mod manager;
 pub mod model;
 pub(crate) mod state;
+pub mod task;
 pub use commands::*;
 
 pub use dto::*;
 pub use error::*;
 pub use manager::*;
 pub use model::*;
+pub use task::*;

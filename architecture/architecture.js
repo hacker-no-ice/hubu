@@ -51,6 +51,10 @@ const sharedLinks = {
   budget: ["Budget manager", "crates/hubu-core/src/budget/manager.rs"],
   budgetState: ["Private budget state", "crates/hubu-core/src/budget/state.rs"],
   budgetModel: ["Budget model", "crates/hubu-core/src/budget/model.rs"],
+  taskBudget: ["Task budget model", "crates/hubu-core/src/budget/task.rs"],
+  taskBudgetStore: ["Task budget store", "crates/hubu-core/src/persistence/task_budget.rs"],
+  taskBudgetHttp: ["Task budget HTTP routes", "crates/hubu-api/src/task_budget.rs"],
+  taskBudgetMcp: ["Task budget MCP session binding", "crates/hubu-unified-mcp/src/hubu/task_budget.rs"],
   spendingTarget: ["Spending target model", "crates/hubu-core/src/spending_target.rs"],
   payment: ["Payment manager", "crates/hubu-wallet/src/payment.rs"],
   paymentAttempt: ["Payment attempt store", "crates/hubu-wallet/src/persistence.rs"],
@@ -344,7 +348,7 @@ const components = {
       ["Evidence observation", "An independent worker records expired financial claims and scoped legacy-gap presence at startup and normally every 30 seconds. It changes no financial state; reads do not trigger it. Financial and inventory errors are reported separately; failed owner inventories do not stop other owners. Failures retry and may delay capture."],
       ["Bounded logs", "Writes structured JSONL events with fixed-size rotation and skips successful health-probe noise."],
     ],
-    links: [sharedLinks.api, sharedLinks.governanceHttp, sharedLinks.lifecycleQuery, sharedLinks.lifecycleContract, sharedLinks.budget, sharedLinks.budgetCoordinator, sharedLinks.appSpend, sharedLinks.appClaims, sharedLinks.spendExecutor, sharedLinks.executorConformance, sharedLinks.externalExecutor, sharedLinks.persistence, sharedLinks.lifecycleFinancial, sharedLinks.financialObserver, sharedLinks.lifecycleCoverage, sharedLinks.telemetry],
+    links: [sharedLinks.api, sharedLinks.taskBudgetHttp, sharedLinks.governanceHttp, sharedLinks.lifecycleQuery, sharedLinks.lifecycleContract, sharedLinks.budget, sharedLinks.budgetCoordinator, sharedLinks.appSpend, sharedLinks.appClaims, sharedLinks.spendExecutor, sharedLinks.executorConformance, sharedLinks.externalExecutor, sharedLinks.persistence, sharedLinks.lifecycleFinancial, sharedLinks.financialObserver, sharedLinks.lifecycleCoverage, sharedLinks.telemetry],
     nodes: [
       { id: "routes", label: "HTTP framing + routes", sub: "bounded GET/POST JSON", x: 72, y: 92, w: 220, h: 90, tone: "agent" },
       { id: "observer", label: "Evidence observer", sub: "startup + every 30s", x: 72, y: 300, w: 220, h: 90, tone: "core", path: "crates/hubu-api/src/financial_observer.rs" },
@@ -509,8 +513,9 @@ const components = {
       ["Overruns need a human", "Ambiguous or over-limit outcomes stay frozen until a human with the reconciliation capability records the real cost."],
       ["Replay-safe", "Authorizations, claims, and settlements are keyed by agent and operation; identical retries return stored state."],
       ["Advisory targets", "Owner spending targets are separate records. Exceeding one produces a warning, never a block."],
+      ["Task budgets", "A task budget caps spend carrying its trusted task_id and holds its unused part back from other spend in the same agent budget. Holds stay on the agent budget and record the task; spend so far is derived from those holds and ledger charges. Closing returns the unused part."],
     ],
-    links: [["Budget boundary and lock order", "docs/budget-architecture.md"], sharedLinks.budget, sharedLinks.budgetState, sharedLinks.budgetModel, sharedLinks.spendingTarget, sharedLinks.budgetCoordinator, sharedLinks.appSpend, sharedLinks.appClaims, sharedLinks.spendExecutor, sharedLinks.persistence, ["Budget DTOs", "crates/hubu-core/src/budget/dto.rs"]],
+    links: [["Budget boundary and lock order", "docs/budget-architecture.md"], ["Task budgets", "docs/task-budgets.md"], sharedLinks.taskBudget, sharedLinks.taskBudgetStore, sharedLinks.budget, sharedLinks.budgetState, sharedLinks.budgetModel, sharedLinks.spendingTarget, sharedLinks.budgetCoordinator, sharedLinks.appSpend, sharedLinks.appClaims, sharedLinks.spendExecutor, sharedLinks.persistence, ["Budget DTOs", "crates/hubu-core/src/budget/dto.rs"]],
     nodes: [
       { id: "create", label: "Admin commands", sub: "create / update / revoke", x: 36, y: 76, w: 200, h: 92, tone: "human" },
       { id: "periods", label: "BudgetManager", sub: "sole public facade", x: 295, y: 76, w: 210, h: 92, tone: "core", path: "crates/hubu-core/src/budget/manager.rs" },
@@ -523,6 +528,7 @@ const components = {
       { id: "settle", label: "Settle/release", sub: "ceil µ units + remainder", x: 420, y: 480, w: 238, h: 92, tone: "core" },
       { id: "store", label: "Governance store", sub: "append + pointer + balance", x: 780, y: 282, w: 230, h: 96, tone: "data" },
       { id: "reconcile", label: "Human reconciliation", sub: "evidence + overrun", x: 780, y: 500, w: 230, h: 96, tone: "human", path: "crates/hubu-core/src/app/executor_claim.rs" },
+      { id: "taskBudget", label: "Task budgets", sub: "task cap + held part", x: 1040, y: 248, w: 150, h: 92, tone: "core", path: "crates/hubu-core/src/budget/task.rs" },
     ],
     edges: [
       ["create", "periods", "typed inputs"],
@@ -539,6 +545,8 @@ const components = {
       ["reconcile", "store", "audit receipt"],
       ["settle", "store", "one transaction"],
       ["periods", "reserve", "derive availability"],
+      ["reserve", "taskBudget", "task cap", { fromSide: "top", toSide: "top", waypoints: [{ x: 525, y: 222 }, { x: 1115, y: 222 }], labelSegment: 1 }],
+      ["taskBudget", "store", "open / close", { fromSide: "bottom", toSide: "right", waypoints: [{ x: 1115, y: 360 }], labelSegment: 1 }],
     ],
   },
   payment: {
@@ -700,7 +708,8 @@ const components = {
       ["Credential handoff", "Starts Hubu first, hands credentials to Gongbu through a protected step, then starts Gongbu."],
       ["Agent setup", "Writes the Codex MCP configuration and builds registration envelopes from server guidance."],
       ["Acceptance canary", "One command verifies the full stack end to end without billable provider spend."],
-      ["Read-only watch", "Polls owner-scoped GET /watch every second for current-version budget bars and the combined current decision feed with trusted providers, rules, reservations and exact settlement; no runtime telemetry or execution."],
+      ["Read-only watch", "Polls owner-scoped GET /watch every second for current-version budget bars, open task budgets with spend so far, and the combined current decision feed with trusted providers, rules, reservations and exact settlement; no runtime telemetry or execution."],
+      ["Task budgets", "`hubu budget task open|close|list|show` manages task-scoped caps through the Hubu HTTP routes."],
     ],
     links: [sharedLinks.feedback, sharedLinks.cli, sharedLinks.watch, sharedLinks.saveFolders, sharedLinks.stackProviderContract, sharedLinks.stackProviderDoctor, sharedLinks.stackLifecycle, sharedLinks.managedCredentialHandoff, sharedLinks.gongbuProviderContracts, sharedLinks.liveProviders, sharedLinks.fluxProviderContract, sharedLinks.localStack, sharedLinks.localStackAcceptance, sharedLinks.api, sharedLinks.registrationProtocol],
     nodes: [
@@ -755,8 +764,9 @@ const components = {
       ["Human gates", "Approval and reconciliation capabilities are sent only on those mutations, and tools carry approval annotations."],
       ["Result delivery", "Returns PNG or JPEG artifacts up to 8 MiB, with timing that never labels waiting as provider time. Native gallery export downloads up to 64 MiB directly from Gongbu to a local directory, verifies Hubu settlement and registry binding, and avoids passing image bytes through the model."],
       ["Allowlisted save", "`hubu_save_artifact` writes one verified artifact plus a receipt (artifact ID, digest, settled cost) into a human-allowlisted folder named by the agent, never a path, and never exposes Gongbu storage paths."],
+      ["Task budget binding", "`hubu_open_task_budget` binds a task budget to the session; new Codex or Claude Code spend operations then carry its task_id, and `hubu_operation_status` shows the task's spend so far. Envelope invocations keep their own task_id."],
     ],
-    links: [sharedLinks.lifecycleContract, sharedLinks.governanceHttp, sharedLinks.governanceMcp, sharedLinks.lifecycleQuery, sharedLinks.artifactSave, sharedLinks.gallery, sharedLinks.galleryCli, sharedLinks.feedback, sharedLinks.unifiedMcp, sharedLinks.unifiedGovernedExecution, sharedLinks.unifiedResumeOperation, sharedLinks.unifiedMcpStdio, sharedLinks.unifiedMcpNotifications, sharedLinks.unifiedHubuCatalog, sharedLinks.unifiedHubuRouting, sharedLinks.unifiedOperationRegistry, sharedLinks.unifiedOperationWorker, sharedLinks.unifiedGongbuCatalog, sharedLinks.unifiedGongbuFixture, sharedLinks.unifiedMcpContract, sharedLinks.operationKeySkill, sharedLinks.operationKeyHelper, sharedLinks.liveProviders, sharedLinks.fluxProviderContract, sharedLinks.gongbuProviderContracts, sharedLinks.api, sharedLinks.gongbuApplication],
+    links: [sharedLinks.taskBudgetMcp, sharedLinks.lifecycleContract, sharedLinks.governanceHttp, sharedLinks.governanceMcp, sharedLinks.lifecycleQuery, sharedLinks.artifactSave, sharedLinks.gallery, sharedLinks.galleryCli, sharedLinks.feedback, sharedLinks.unifiedMcp, sharedLinks.unifiedGovernedExecution, sharedLinks.unifiedResumeOperation, sharedLinks.unifiedMcpStdio, sharedLinks.unifiedMcpNotifications, sharedLinks.unifiedHubuCatalog, sharedLinks.unifiedHubuRouting, sharedLinks.unifiedOperationRegistry, sharedLinks.unifiedOperationWorker, sharedLinks.unifiedGongbuCatalog, sharedLinks.unifiedGongbuFixture, sharedLinks.unifiedMcpContract, sharedLinks.operationKeySkill, sharedLinks.operationKeyHelper, sharedLinks.liveProviders, sharedLinks.fluxProviderContract, sharedLinks.gongbuProviderContracts, sharedLinks.api, sharedLinks.gongbuApplication],
     zones: [
       { label: "hubu-unified-mcp process", x: 286, y: 44, w: 596, h: 670 },
       { label: "Hubu process + failure domain", x: 940, y: 44, w: 292, h: 280 },
@@ -843,6 +853,7 @@ const components = {
       ["Decide explicitly", "Says approve or deny in chat, then confirms the prompt; canceling leaves the request pending."],
       ["Safe decisions", "Repeating a decision is harmless, conflicting decisions are rejected, and approval never calls a provider by itself."],
       ["Save destinations", "Chooses which project folders agents may save artifacts into with `hubu folders allow`."],
+      ["Task budgets", "Gives one task a cap, such as $3 for a landing page, with `hubu budget task open`; agents can open one through MCP. Closing returns the unused part."],
     ],
     links: [sharedLinks.saveFolders, sharedLinks.galleryCli, sharedLinks.gallery, sharedLinks.cli, sharedLinks.unifiedMcp, sharedLinks.registrationProtocol, sharedLinks.budget],
     nodes: [
@@ -912,6 +923,7 @@ const sidebarHighlights = {
     "Agent budgets are hard limits; owner targets are advisory.",
     "Authorization freezes one execution-scoped hold.",
     "Exact costs round up once to micro-units in the budget's own currency (USD or USDC); overruns wait for human reconciliation.",
+    "Task budgets cap one task's spend inside an agent budget and return the unused part on close.",
   ],
   payment: [
     "Requests validate idempotency, spend token, and scope.",

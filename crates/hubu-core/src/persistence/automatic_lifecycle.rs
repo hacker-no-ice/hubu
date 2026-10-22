@@ -318,6 +318,13 @@ pub(super) fn save_denied(
                         && b.availability_at(budget_checked_at)
                             .is_ok_and(|a| a.allows_reservation())
                 }) => {}
+        AdmissionDenialReason::InsufficientTaskBudget
+            if decision.evaluation.decision == Effect::Allow
+                && before.is_some_and(|b| {
+                    b.budget.currency == decision.request.currency
+                        && b.availability_at(budget_checked_at)
+                            .is_ok_and(|a| a.allows_reservation())
+                }) => {}
         _ => return Err(invalid("automatic denial does not match its transition")),
     }
     let tx = repo
@@ -325,6 +332,19 @@ pub(super) fn save_denied(
         .transaction_with_behavior(TransactionBehavior::Immediate)?;
     if let Some(before) = before {
         validate_before(&tx, before, budget_checked_at)?;
+    }
+    if cause == AdmissionDenialReason::InsufficientTaskBudget {
+        let has_open_task_budget: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM task_budgets WHERE agent_id = ?1 AND currency = ?2 AND state = 'open')",
+            params![
+                decision.request.agent_id.to_string(),
+                decision.request.currency.to_string()
+            ],
+            |row| row.get(0),
+        )?;
+        if !has_open_task_budget {
+            return Err(invalid("task budget denial has no open task budget"));
+        }
     }
     if cause == AdmissionDenialReason::NoAvailableBudget {
         validate_no_available_budget(&tx, decision, budget_checked_at)?;

@@ -68,6 +68,7 @@ pub enum GovernanceDenialReason {
     Policy,
     NoAvailableBudget,
     InsufficientBudget,
+    InsufficientTaskBudget,
     BudgetUnavailable,
     Unknown,
 }
@@ -287,6 +288,9 @@ pub(crate) fn denial_reason(fact: &LifecycleFact) -> Option<GovernanceDenialReas
         AdmissionDenialReason::Policy => GovernanceDenialReason::Policy,
         AdmissionDenialReason::NoAvailableBudget => GovernanceDenialReason::NoAvailableBudget,
         AdmissionDenialReason::InsufficientBudget => GovernanceDenialReason::InsufficientBudget,
+        AdmissionDenialReason::InsufficientTaskBudget => {
+            GovernanceDenialReason::InsufficientTaskBudget
+        }
         AdmissionDenialReason::BudgetUnavailable => GovernanceDenialReason::BudgetUnavailable,
         AdmissionDenialReason::Unknown => GovernanceDenialReason::Unknown,
     })

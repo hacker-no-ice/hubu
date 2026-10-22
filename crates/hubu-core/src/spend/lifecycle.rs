@@ -48,6 +48,9 @@ pub enum AdmissionDenialReason {
     Policy,
     NoAvailableBudget,
     InsufficientBudget,
+    /// The spend exceeded an open task budget, or would have used headroom
+    /// another open task budget holds back from the agent budget.
+    InsufficientTaskBudget,
     BudgetUnavailable,
     Unknown,
 }
