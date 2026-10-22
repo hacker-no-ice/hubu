@@ -1,0 +1,113 @@
+# Fixture provider pack (schema v1) for aspect-ratio size presets and
+# per-megapixel pricing: the agent picks an image size and an aspect ratio,
+# the pack certifies the exact output size of each combination, and the price
+# is a flat first megapixel plus each additional billed megapixel. Sizes and
+# rates are fixture values, not any provider's. Used by Gongbu tests only; the
+# local-mock provider gives it the local fixture execution scope.
+schema_version = 1
+pack_id = "megapixel-image"
+pack_version = "2026-10-21.1"
+provider = "local-mock"
+display_name = "Megapixel image provider"
+billing_merchant = "merchant:local"
+capability = "capability:image:generate"
+workload_type = "image_generation"
+archetype = "sync_fixed"
+pricing_trust = "verified"
+
+[transport]
+endpoint = "https://api.megapixel-image.test"
+api_version = "v1"
+allowed_hosts = ["api.megapixel-image.test"]
+auth_header = "x-key"
+credential = "megapixel_image"
+timeout_ms = 60000
+
+[request]
+path = "/v1/generate"
+
+[request.body]
+model = "{{model}}"
+prompt = "{{prompt}}"
+width = "{{output_width}}"
+height = "{{output_height}}"
+count = "{{image_count}}"
+
+[[parameters]]
+name = "prompt"
+type = "string"
+required = true
+max_length = 32000
+
+[[parameters]]
+name = "image_count"
+type = "integer"
+min = 1
+max = 2
+default = 1
+quantity = "image_count"
+
+[[parameters]]
+name = "image_size"
+type = "enum"
+values = ["1k", "2k"]
+default = "1k"
+
+[[parameters]]
+name = "aspect_ratio"
+type = "enum"
+values = ["1:1", "16:9", "9:16"]
+default = "1:1"
+
+[[size_presets]]
+when = { image_size = "1k", aspect_ratio = "1:1" }
+size = [1024, 1024]
+
+[[size_presets]]
+when = { image_size = "1k", aspect_ratio = "16:9" }
+size = [1344, 768]
+
+[[size_presets]]
+when = { image_size = "1k", aspect_ratio = "9:16" }
+size = [768, 1344]
+
+[[size_presets]]
+when = { image_size = "2k", aspect_ratio = "1:1" }
+size = [2048, 2048]
+
+[[size_presets]]
+when = { image_size = "2k", aspect_ratio = "16:9" }
+size = [2688, 1536]
+
+[[size_presets]]
+when = { image_size = "2k", aspect_ratio = "9:16" }
+size = [1536, 2688]
+
+# Billed megapixels: whole millions of pixels, partial ones free, at least 1.
+[megapixels]
+rounding = "floor"
+pixels_per_megapixel = 1000000
+
+[response]
+request_id_headers = ["x-request-id"]
+usage = { images = "/images" }
+artifact_items = "/images"
+artifact_base64 = "/b64"
+
+[artifacts]
+media_types = ["image/png"]
+
+[[models]]
+model = "megapixel-image-v1"
+provider_config_version = "megapixel-image-v1-2026-10-21"
+pricing_version = "megapixel-image-v1-usd-2026-10-21-v1"
+pricing_reviewed_on = "2026-10-21"
+
+# 3 cents for each image's first megapixel, 1.5 cents for each one after it.
+[[models.pricing_rules]]
+rule_id = "megapixel-image-v1-2026-10-21"
+currency = "USD"
+components = [
+  { unit = "image", rate_numerator_minor = 3, rate_denominator = 1 },
+  { unit = "additional_megapixel", rate_numerator_minor = 3, rate_denominator = 2 },
+]

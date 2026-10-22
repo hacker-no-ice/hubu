@@ -295,7 +295,7 @@ Optional inline table of named dimensions used to distinguish prices for the sam
 
 Selector keys are lowercase identifiers (`a`–`z`, digits and `_`, starting with a letter). Values are trimmed and lowercased and may contain letters, digits, `_`, `-`, `.` and `:` (for example `aspect_ratio = "16:9"`). An empty selector is rejected.
 
-A selector that includes `image_size` must contain exactly one `image` price component. Define one unambiguous rule for every enabled image size. Two rules with the same provider, model, and selector are rejected.
+A rule whose selector includes `image_size` prices only output images: exactly one `image` component, or `megapixel` / `additional_megapixel` components with or without an `image` component. Define one unambiguous rule for every enabled image size. Two rules with the same provider, model, and selector are rejected.
 
 ### `pricing_rules.selector.image_size`
 
@@ -323,7 +323,15 @@ Required. Allowed values:
 - `request` — one per provider call, whatever it returns;
 - `result` — quantity of returned results (`results`);
 - `page` — quantity of returned pages of content (`pages`);
-- `second` — billable seconds of generated or processed media (`seconds`).
+- `second` — billable seconds of generated or processed media (`seconds`);
+- `megapixel` — billed megapixels of every output image (`megapixels`);
+- `additional_megapixel` — billed megapixels beyond the first of each output
+  image (`additional_megapixels`). Pair it with an `image` component to price
+  "first megapixel, then each additional one". Its quantity may be zero.
+
+The two megapixel units are available only to [provider packs](../../../provider-packs.md#megapixels),
+which derive them from certified output sizes and settle them from the
+delivered images.
 
 A component is priced against the named request quantity shown in brackets.
 The estimate uses the requested quantity and settlement uses the delivered

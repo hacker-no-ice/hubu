@@ -389,3 +389,39 @@ fn transport_projects_admission_diagnostics_only_for_v2_create() {
     assert!(requests[0].starts_with("POST /v2/executions "));
     assert!(requests[1].starts_with("GET /v1/executions/exec-1 "));
 }
+
+#[test]
+fn megapixel_targets_publish_certified_sizes_and_rounding() {
+    const CATALOG: &str = r#"{"schema_version":2,"targets":[{"target_id":"gongbu:target:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","workload_type":"image_generation","provider":"local-mock","model":"megapixel-image-v1","execution_scope":{"schema_version":1,"provider":"provider:local:fixture","executor":"executor:gongbu:image","capability":"capability:image:generate","billing_merchant":"merchant:local"},"image_sizes":[],"pricing":[{"rule_id":"mp","currency":"USD","components":[{"unit":"image","rate_numerator_minor":3,"rate_denominator":1},{"unit":"additional_megapixel","rate_numerator_minor":3,"rate_denominator":2}]}],"output_sizes":[{"when":{"aspect_ratio":"16:9","image_size":"2k"},"width":2688,"height":1536}],"megapixels":{"rounding":"floor","pixels_per_megapixel":1000000,"minimum":1}}]}"#;
+    let (endpoint, _) = mock_server(vec![("200 OK", "application/json", CATALOG)]);
+    let result = call_tool(
+        &client(&endpoint, "secret"),
+        "gongbu_list_execution_targets",
+        json!({}),
+        None,
+    )
+    .result;
+    assert_eq!(result["isError"], false, "{result}");
+    let target = &result["structuredContent"]["targets"][0];
+    assert_eq!(target["output_sizes"][0]["width"], 2688);
+    assert_eq!(target["megapixels"]["rounding"], "floor");
+
+    // Megapixel pricing without certified sizes cannot be priced by an agent.
+    let unpriceable: &'static str = Box::leak(
+        CATALOG
+            .replace(
+                r#""output_sizes":[{"when":{"aspect_ratio":"16:9","image_size":"2k"},"width":2688,"height":1536}],"#,
+                "",
+            )
+            .into_boxed_str(),
+    );
+    let (endpoint, _) = mock_server(vec![("200 OK", "application/json", unpriceable)]);
+    let result = call_tool(
+        &client(&endpoint, "secret"),
+        "gongbu_list_execution_targets",
+        json!({}),
+        None,
+    )
+    .result;
+    assert_eq!(result["isError"], true);
+}

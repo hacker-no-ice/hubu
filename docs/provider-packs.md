@@ -260,9 +260,9 @@ spend is reserved.
 | `max_length` | Required on `string` parameters. |
 | `min` / `max` | `integer` only. |
 | `values` | `enum` only: unique, lowercase selector values. |
-| `quantity` | `integer` only: the priced quantity it sets (`image_count`, `input_tokens`, `max_output_tokens`, `results`, `pages`, `seconds`). Needs `min >= 0` and a `max`, so every hold is bounded. |
+| `quantity` | `integer` only: the priced quantity it sets (`image_count`, `input_tokens`, `max_output_tokens`, `results`, `pages`, `seconds`). Needs `min >= 0` and a `max`, so every hold is bounded. `megapixels` and `additional_megapixels` are derived from the certified size, never set by a parameter. |
 | `selector` | `enum` only: the pricing selector key it sets. |
-| `output_dimensions` | `enum` with a `selector` only: the certified `[width, height]` for each value, such as `{ "1k" = [1024, 1024] }`. The chosen size is frozen into the request and available to the body template as `{{output_width}}` and `{{output_height}}`. |
+| `output_dimensions` | `enum` with a `selector` only: the certified `[width, height]` for each value, such as `{ "1k" = [1024, 1024] }`. The chosen size is frozen into the request and available to the body template as `{{output_width}}` and `{{output_height}}`. For sizes set by more than one parameter, use [`[[size_presets]]`](#size_presets) instead. |
 | `equals` | `integer` only: `output_width` or `output_height`. The value must equal the size the preset certifies, and the parameter is sent as that size. |
 
 A parameter name may sit in one input group, such as `options.seed`: the agent
@@ -274,6 +274,76 @@ Grouped names such as `options.output_width` remain separate from the reserved
 A priced parameter (`quantity` or `selector`) must be required or have a
 default. `[fixed]` fields are sent with every request and can't collide with a
 parameter's field.
+
+### `[[size_presets]]`
+
+Certified output sizes for combinations of enum parameters, such as an image
+size and an aspect ratio. A pack uses either `size_presets` or one parameter's
+`output_dimensions`, not both.
+
+```toml
+[[size_presets]]
+when = { image_size = "2k", aspect_ratio = "16:9" }
+size = [2688, 1536]
+```
+
+| Field | Rules |
+| --- | --- |
+| `when` | The value of each preset parameter. Every preset names the same enum parameters, each of which must be required or have a default. |
+| `size` | The `[width, height]` the provider returns for that combination, each 1 to 65535. |
+
+Every combination of values a model accepts (honoring its `parameter_values`)
+must have exactly one preset, and no two presets may certify the same size.
+The selected size is frozen into the request as its output dimensions and is
+available to the body template as `{{output_width}}` and `{{output_height}}`.
+Because a size identifies its preset, the preset parameters themselves don't
+have to be sent when the template sends the size.
+
+Discovery (`GET /v2/execution-targets`) lists a target's presets as
+`output_sizes`, each with its `when` values, `width` and `height`.
+
+### `[megapixels]`
+
+How billed megapixels are counted, required when a pricing rule uses the
+`megapixel` or `additional_megapixel` unit, and refused otherwise. It needs a
+certified size for every input, from `size_presets` or `output_dimensions`.
+
+```toml
+[megapixels]
+rounding = "floor"
+pixels_per_megapixel = 1000000
+```
+
+| Field | Rules |
+| --- | --- |
+| `rounding` | Required: `floor` (partial megapixels are free), `ceil` (any partial megapixel is billed whole), or `nearest` (half a megapixel or more is billed whole). |
+| `pixels_per_megapixel` | Positive integer. Defaults to 1,000,000; use 1048576 for a binary megapixel. |
+| `minimum` | Billed megapixels for any image, at least 1. Defaults to 1. |
+
+Each image bills `max(minimum, round(width × height ÷ pixels_per_megapixel))`
+megapixels, with integer arithmetic only. `additional_megapixels` is that
+number minus one. Both are multiplied by `image_count`.
+
+The estimate uses the certified size. Settlement decodes the size of each
+delivered image and bills its megapixels under the same rule. A smaller image
+than requested settles less; a larger one than was held is a settlement
+overage, never a larger charge.
+
+A "first megapixel, then each additional one" price is an `image` component
+for the first plus an `additional_megapixel` component:
+
+```toml
+components = [
+  { unit = "image", rate_numerator_minor = 3, rate_denominator = 1 },
+  { unit = "additional_megapixel", rate_numerator_minor = 3, rate_denominator = 2 },
+]
+```
+
+At those rates, a 2688 × 1536 image is 4 billed megapixels under `floor`, so
+it costs 3¢ + 3 × 1.5¢ = 7.5¢ exactly. Discovery publishes the rule as
+`megapixels`, so an agent can compute the same exact estimate before it asks
+Hubu for authorization. `fixtures/packs/megapixel-image.toml` is a complete
+example.
 
 ### `[response]`
 
