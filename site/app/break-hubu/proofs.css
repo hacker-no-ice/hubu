@@ -165,7 +165,7 @@
   .proof-report pre code { font-size: 11px; }
   .proof-figure { padding: 18px 15px 15px; }
   .proof-line-chart { min-width: 0; }
-  .proof-line-chart text { font-size: 17px; }
+  .proof-line-chart text { font-size: 32px; }
   .proof-counts, .proof-money-states { gap: 18px 12px; }
   .proof-counts dt { font-size: 10px; line-height: 1.5; align-items: baseline; gap: 5px; }
   .proof-counts dd { font-size: 22px; }
