@@ -24,7 +24,7 @@ CI job or required gate. Product regression tests remain in normal bug-fix PRs.
 4. Write the versioned repository card and website release page: a concise
    summary of the repository changelog, claims and system card, with a link to
    the full analysis. Add the release to `/releases`, linked from the landing
-   page, and update the version link beside the landing-page wordmark. Start
+   page, and update the version link below the landing-page wordmark. Start
    with v0.2.4; earlier releases are not backfilled. Record release
    source and kits commit separately. Keep failures, known identity and
    bearer limitations, shortened leases, mock execution and untested surfaces

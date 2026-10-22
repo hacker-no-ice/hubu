@@ -47,7 +47,7 @@ button, input { font: inherit; }
 .topbar .site-menu nav a:hover { background: var(--surface-2); }
 
 .hero { max-width: 1400px; min-height: 720px; margin: 0 auto; padding: 86px clamp(24px, 6vw, 86px) 90px; display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(420px, .75fr); align-items: center; gap: clamp(58px, 8vw, 120px); }
-.hero-branding { display: flex; align-items: center; gap: 16px; margin-bottom: 18px; }
+.hero-branding { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; margin-bottom: 18px; }
 .hero-wordmark { width: min(260px, 72vw); min-width: 0; height: auto; }
 .hero-version { display: inline-flex; flex: none; align-items: center; gap: 7px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); color: var(--muted); font: 450 12px/1 var(--font-geist-mono), monospace; white-space: nowrap; }
 .hero-version:hover { color: var(--text); border-color: var(--cyan); }
@@ -295,7 +295,6 @@ footer span { color: #d7d8da; font-weight: 620; } footer p { flex: 1; } footer a
   .topbar nav { gap: 0; }
   .brand-wordmark { width: 69px; height: auto; }
   .hero { padding: 46px 22px 70px; }
-  .hero-branding { gap: 12px; }
   .hero-wordmark { width: 210px; height: auto; }
   .hero h1 { font-size: 58px; }
   .hero-actions { flex-direction: column; align-items: stretch; }
