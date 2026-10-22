@@ -598,7 +598,9 @@ impl Api {
             &resolved.adapter,
             &resolved.model,
             // A megapixel-priced pack may not select its rule by size, but
-            // the policy Hubu evaluated still binds the size the agent chose.
+            // the policy Hubu evaluated still binds the size the agent sent.
+            // Persistence requires that exact input value, so a defaulted
+            // size makes no size claim and a v2 size binding fails closed.
             pricing_request.image_size().or_else(|| {
                 pack.and(normalized_input.get("image_size"))
                     .and_then(Value::as_str)
@@ -1634,15 +1636,21 @@ mod tests {
                         "local-mock",
                         "sync_fixed",
                         "megapixel-image-v1",
-                        Some("2k"),
+                        Some(if rest.contains("-1k") { "1k" } else { "2k" }),
                     )
                 } else {
                     for_target("local-mock", "sync_fixed")
                 };
-                response.amount_cents = 8;
-                response.budget_hold.amount_cents = 8;
-                response.budget_hold.frozen_amount_cents = 8;
-                response.amount = Some(exact("75000"));
+                // A 1k square is one megapixel: 3¢.
+                let (cents, units) = if rest.contains("-1k") {
+                    (3, "30000")
+                } else {
+                    (8, "75000")
+                };
+                response.amount_cents = cents;
+                response.budget_hold.amount_cents = cents;
+                response.budget_hold.frozen_amount_cents = cents;
+                response.amount = Some(exact(units));
             }
             if let Some(rest) = spend_auth_token_id.strip_prefix("edit-") {
                 // A 1k Flash edit of one input image is exactly 6.756¢.
@@ -2556,6 +2564,23 @@ mod tests {
                 })
             );
         }
+        // A defaulted size prices at the default, but makes no size claim:
+        // a v2 authorization that binds a size needs the size sent.
+        let defaulted = |token: &str| {
+            call_create(
+                &fixture,
+                &json!({
+                    "schema_version": 2,
+                    "spend_auth_token_id": token,
+                    "input": {"prompt": "a square"},
+                    "input_schema_version": 1,
+                    "target_id": target_id,
+                }),
+            )
+            .status
+        };
+        assert_eq!(defaulted("megapixel-v1-1k-default"), 200);
+        assert_eq!(defaulted("megapixel-v2-1k-default"), 400);
         // A 1k header prices 3¢, so the 7.5¢ authorization does not match it.
         let mismatch = call_create(&fixture, &header("megapixel-small", "1k"));
         assert_eq!(mismatch.status, 400);

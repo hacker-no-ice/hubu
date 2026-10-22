@@ -303,7 +303,7 @@ Optional inline table of named dimensions used to distinguish prices for the sam
 
 Selector keys are lowercase identifiers (`a`–`z`, digits and `_`, starting with a letter). Values are trimmed and lowercased and may contain letters, digits, `_`, `-`, `.` and `:` (for example `aspect_ratio = "16:9"`). An empty selector is rejected.
 
-A selector that includes `image_size` must contain one `image` price component; the only other component it may add is `input_image`, for edits. Define one unambiguous rule for every enabled image size. Two rules with the same provider, model, workload, and selector are rejected.
+A rule whose selector includes `image_size` prices only images: exactly one `image` component, or `megapixel` / `additional_megapixel` components with or without an `image` component, plus an optional `input_image` component for edits. Define one unambiguous rule for every enabled image size. Two rules with the same provider, model, workload, and selector are rejected.
 
 ### `pricing_rules.selector.image_size`
 
@@ -383,7 +383,7 @@ billable component.
 - Every selectable live target needs a pricing rule for its exact provider/model, workload, and request selector.
 - Rule IDs are globally unique within the catalog.
 - Provider/model/workload/selector combinations are unambiguous.
-- Selectors that include `image_size` require one image component, plus at most an `input_image` component.
+- Selectors that include `image_size` price only images: one `image` component or megapixel components, plus at most an `input_image` component.
 - Component units cannot repeat within one rule.
 - Rates cannot be negative and denominators must be positive.
 - Unsupported currencies, units, selectors, or old flat pricing shapes are rejected.
