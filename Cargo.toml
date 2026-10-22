@@ -38,7 +38,7 @@ uuid = { version = "=1.18.1", features = ["serde", "v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
 rusqlite = { version = "0.32", features = ["bundled"] }
-image = { version = "0.24.9", default-features = false, features = ["jpeg", "png"] }
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
 tempfile = "3"
 toml = "1.1.4"
 temporalio-sdk = "=0.6.0"
