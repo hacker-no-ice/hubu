@@ -55,6 +55,7 @@ test("release notes lead from the landing page to one concise stable release and
   assert.equal(overviewResponse.status, 200);
   const index = await indexResponse.text();
   const overview = await overviewResponse.text();
+  assert.match(home, /class="hero-version" href="\/releases\/v0.2.4" aria-label="Read release notes for Hubu v0.2.4"/);
   for (const html of [home, index, overview, docs, blog]) {
     assert.match(html, /href="\/releases"/);
     assert.doesNotMatch(html, /Break Hubu|href="\/break-hubu"|linear\.app|HUB-\d+/);

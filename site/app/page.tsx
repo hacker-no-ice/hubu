@@ -60,7 +60,10 @@ export default function Home() {
       <main id="main-content">
         <section className="hero">
           <div className="hero-copy">
-            <HubuWordmark className="hero-wordmark" />
+            <div className="hero-branding">
+              <HubuWordmark className="hero-wordmark" />
+              <a className="hero-version" href="/releases/v0.2.4" aria-label="Read release notes for Hubu v0.2.4">v0.2.4 <span aria-hidden="true">↗</span></a>
+            </div>
             <p className="eyebrow"><span /> Agent spend control plane</p>
             <h1>Governed spend<br />for AI agents.</h1>
             <p className="hero-lede">
