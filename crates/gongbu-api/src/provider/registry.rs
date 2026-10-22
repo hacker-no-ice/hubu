@@ -779,12 +779,18 @@ mod tests {
             ),
             ("google", "gemini_developer_image", "gemini-3.1-flash-image"),
             ("flux", "flux2_api", "flux-2-pro"),
+            ("flux", "flux2_api", "flux-3-image"),
         ] {
             let key = TargetKey::new("image_generation", provider, adapter, model).unwrap();
             assert_eq!(catalog.resolve_active(&key).unwrap().adapter, adapter);
         }
         let execution_targets = catalog.execution_targets();
-        assert_eq!(execution_targets.len(), 3);
+        assert_eq!(execution_targets.len(), 4);
+        let flux_3 = execution_targets
+            .iter()
+            .find(|target| target.model == "flux-3-image")
+            .unwrap();
+        assert_eq!(flux_3.image_sizes, ["1k", "2k"]);
         let gemini_full = execution_targets
             .iter()
             .find(|target| target.model == "gemini-3.1-flash-image")
@@ -792,7 +798,7 @@ mod tests {
         assert_eq!(gemini_full.image_sizes, ["1k", "2k", "4k"]);
         let flux = execution_targets
             .iter()
-            .find(|target| target.provider == "flux")
+            .find(|target| target.model == "flux-2-pro")
             .unwrap();
         assert_eq!(flux.image_sizes, ["1k", "2k", "4k"]);
         assert_eq!(

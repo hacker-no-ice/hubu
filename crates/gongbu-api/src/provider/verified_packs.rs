@@ -10,13 +10,19 @@ const GOOGLE_GEMINI_DEVELOPER_IMAGE: &str =
     include_str!("../../../../packs/verified/google-gemini-developer-image.toml");
 const BFL_FLUX_2: &str = include_str!("../../../../packs/verified/bfl-flux-2.toml");
 const BFL_FLUX_2_V2: &str = include_str!("../../../../packs/verified/bfl-flux-2-v2.toml");
+const BFL_FLUX_3_IMAGE: &str = include_str!("../../../../packs/verified/bfl-flux-3-image.toml");
 
 /// Every verified pack, validated.
 pub fn verified_packs() -> Vec<Pack> {
-    [GOOGLE_GEMINI_DEVELOPER_IMAGE, BFL_FLUX_2, BFL_FLUX_2_V2]
-        .into_iter()
-        .map(|source| Pack::from_toml_str(source).expect("verified packs are valid"))
-        .collect()
+    [
+        GOOGLE_GEMINI_DEVELOPER_IMAGE,
+        BFL_FLUX_2,
+        BFL_FLUX_2_V2,
+        BFL_FLUX_3_IMAGE,
+    ]
+    .into_iter()
+    .map(|source| Pack::from_toml_str(source).expect("verified packs are valid"))
+    .collect()
 }
 
 #[cfg(test)]
@@ -136,7 +142,7 @@ mod tests {
             projected += 1;
         }
         assert_eq!(
-            projected, 4,
+            projected, 5,
             "every shipped contract comes from a verified pack"
         );
     }
@@ -559,6 +565,14 @@ mod tests {
     }
 
     fn snapshot(pack: &Pack, input: &Value) -> crate::provider::contract::PricingSnapshot {
+        snapshot_for(pack, "flux-2-pro", input)
+    }
+
+    fn snapshot_for(
+        pack: &Pack,
+        model: &str,
+        input: &Value,
+    ) -> crate::provider::contract::PricingSnapshot {
         let catalog = crate::provider::contract::PricingCatalog::from_json(
             &serde_json::to_vec(&json!({
                 "schema_version": 2,
@@ -569,7 +583,7 @@ mod tests {
         )
         .unwrap();
         catalog
-            .snapshot(&pack.prepare("flux-2-pro", input).unwrap().request)
+            .snapshot(&pack.prepare(model, input).unwrap().request)
             .unwrap()
     }
 
@@ -685,6 +699,104 @@ mod tests {
             frozen.settle(&oversized, 75_000),
             Err(crate::provider::contract::ContractError::SettlementOverage)
         );
+    }
+
+    #[test]
+    fn flux_3_sends_tier_and_ratio_without_grounding_and_prices_by_tier() {
+        let flux3 = pack("bfl-flux-3-image");
+        assert_eq!(
+            flux3.request_url().as_str(),
+            "https://api.bfl.ai/v1/flux-3-image"
+        );
+        let prepared = flux3
+            .prepare(
+                "flux-3-image",
+                &json!({"prompt": "a skyline", "image_size": "2k", "aspect_ratio": "21:9",
+                        "options": {"safety_tolerance": 2}}),
+            )
+            .unwrap();
+        // Only fields BFL's FLUX 3 schema accepts; web search stays off.
+        assert_eq!(
+            prepared.body,
+            json!({"prompt": "a skyline", "resolution": "2k", "aspect_ratio": "21:9",
+                   "safety_tolerance": 2, "grounding": false})
+        );
+        assert_eq!(prepared.request.output_dimensions, None);
+        let square = flux3
+            .prepare("flux-3-image", &json!({"prompt": "x", "image_size": "1k"}))
+            .unwrap();
+        assert_eq!(square.body["aspect_ratio"], "1:1");
+        // Every ratio in a tier costs the same: 4.8¢ at 1k, 10¢ at 2k.
+        for (tier, units) in [("1k", 48_000), ("2k", 100_000)] {
+            for ratio in ["21:9", "1:1", "9:21"] {
+                let frozen = snapshot_for(
+                    &flux3,
+                    "flux-3-image",
+                    &json!({"prompt": "x", "image_size": tier, "aspect_ratio": ratio}),
+                );
+                assert_eq!(frozen.estimated_units, units, "{tier} {ratio}");
+            }
+        }
+        // Not offered: 4k, auto ratio, seed, size options and unknown fields.
+        for input in [
+            json!({"prompt": "x", "image_size": "4k"}),
+            json!({"prompt": "x", "image_size": "1k", "aspect_ratio": "auto"}),
+            json!({"prompt": "x", "image_size": "1k", "options": {"seed": 1}}),
+            json!({"prompt": "x", "image_size": "1k", "options": {"width": 1024}}),
+            json!({"prompt": "x", "image_size": "1k", "grounding": true}),
+            json!({"prompt": "x"}),
+        ] {
+            assert!(flux3.prepare("flux-3-image", &input).is_err(), "{input}");
+        }
+    }
+
+    #[test]
+    fn flux_3_polls_bfl_and_settles_reported_credits() {
+        let flux3 = Arc::new(pack("bfl-flux-3-image"));
+        let input = json!({"prompt": "a skyline", "image_size": "1k", "aspect_ratio": "16:9"});
+        let request = flux3.prepare("flux-3-image", &input).unwrap().request;
+        let run = |polls: Vec<TransportResponse>| {
+            let transport = FluxTransport {
+                submit: Ok(accepted()),
+                polls: Arc::new(std::sync::Mutex::new(polls)),
+                posts: Arc::default(),
+                artifact: PNG.to_vec(),
+            };
+            let posts = transport.posts.clone();
+            let result = AsyncPollEngine::new(flux3.clone(), "flux-3-image", transport, 1 << 20)
+                .unwrap()
+                .with_poll_interval_for_tests(Duration::from_millis(1))
+                .invoke(&request, &input, &secret_for_test("secret-canary"), None);
+            let submissions = *posts.lock().unwrap();
+            (result, submissions)
+        };
+        let (outcome, submissions) = run(vec![
+            bfl(200, json!({"id": "job-1", "status": "Reasoning"})),
+            bfl(
+                200,
+                json!({"id": "job-1", "status": "Ready", "cost": 4.8,
+                       "result": {"sample": "https://delivery.eu2.bfl.ai/out.png"}}),
+            ),
+        ]);
+        let outcome = outcome.unwrap();
+        assert_eq!(submissions, 1);
+        // 4.8 credits are exactly USD 0.048, the frozen 1k price.
+        let frozen = snapshot_for(&flux3, "flux-3-image", &input);
+        let settled = frozen
+            .settle_precise(
+                outcome.usage.as_ref().unwrap(),
+                outcome.actual_vendor_cost.as_ref(),
+                frozen.estimated_units,
+            )
+            .unwrap();
+        assert_eq!(settled.budget_units, 48_000);
+        let (moderated, _) = run(vec![bfl(
+            200,
+            json!({"id": "job-1", "status": "Content Moderated"}),
+        )]);
+        let failure = moderated.unwrap_err();
+        assert_eq!(failure.code, "provider_content_moderated");
+        assert_eq!(failure.spend_disposition, SpendDisposition::Release);
     }
 
     #[test]

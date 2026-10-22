@@ -32,7 +32,7 @@ const MANAGED_GONGBU_CALLER_ACCOUNT: &str = "gongbu-caller";
 const PROVIDER_CONTRACTS_DOCUMENT: &str =
     include_str!("../../../contracts/provider-contracts-v1.json");
 const PROVIDER_CONTRACTS_DOCUMENT_SHA256: &str =
-    "43b7098e601bb8b20cb3b72ca710d175605e098284a5d1fdb7f9acbbe9eba3c9";
+    "edbe0c681b7abee6dc0c65d2fa15b1f3301385f18808978c1225bdb9d9abfed4";
 const MANAGED_CREDENTIAL_IGNORE: &[u8] =
     b"# Hubu-managed credentials. Do not edit or remove.\n*\n!.gitignore\n";
 
@@ -503,8 +503,11 @@ impl ProviderContractMegapixels {
 #[serde(deny_unknown_fields)]
 struct ProviderContractPreset {
     name: String,
-    width: u32,
-    height: u32,
+    /// The certified output size, when the provider publishes one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    height: Option<u32>,
     /// The input values that select this size beyond `image_size`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     when: BTreeMap<String, String>,
@@ -549,8 +552,10 @@ struct ProviderContractCapabilitySummary {
 #[derive(Clone, Debug, Serialize)]
 struct ProviderContractPresetSummary {
     name: String,
-    width: u32,
-    height: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    height: Option<u32>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     when: BTreeMap<String, String>,
     currency: String,
@@ -723,7 +728,7 @@ fn megapixel_preset_price(
     if rule.get("selector").is_some() {
         return None;
     }
-    let billed = i128::from(megapixels.billed(preset.width, preset.height)?);
+    let billed = i128::from(megapixels.billed(preset.width?, preset.height?)?);
     let (mut numerator, mut denominator) = (0_i128, 1_i128);
     for component in rule.get("components")?.as_array()? {
         let quantity = match component.get("unit")?.as_str()? {
@@ -1152,11 +1157,14 @@ fn catalog(mut args: Vec<String>, hubu_home: &Path) -> Result<()> {
             entry.pricing_reviewed_on
         );
         for preset in &entry.capability.presets {
+            let size = match (preset.width, preset.height) {
+                (Some(width), Some(height)) => format!("{width}x{height}"),
+                _ => "size varies".to_owned(),
+            };
             println!(
-                "  {}  {}x{}  {}/{} {} minor units",
+                "  {}  {}  {}/{} {} minor units",
                 preset.name,
-                preset.width,
-                preset.height,
+                size,
                 preset.rate_numerator_minor,
                 preset.rate_denominator,
                 preset.currency
@@ -5326,7 +5334,7 @@ live_spend_acknowledgement = "{LIVE_SPEND_ACKNOWLEDGEMENT}"
             .iter()
             .find(|preset| preset.name == "2k-16:9")
             .unwrap();
-        assert_eq!((header.width, header.height), (1920, 1088));
+        assert_eq!((header.width, header.height), (Some(1920), Some(1088)));
         assert_eq!(header.when["aspect_ratio"], "16:9");
         assert_eq!(
             (header.rate_numerator_minor, header.rate_denominator),
@@ -5348,6 +5356,47 @@ live_spend_acknowledgement = "{LIVE_SPEND_ACKNOWLEDGEMENT}"
             "hubu.flux-2-pro.text-to-image/v2",
         ]);
         assert!(validate_provider_source(&both).is_err());
+    }
+
+    #[test]
+    fn flux_3_binds_beside_flux_2_with_tier_prices_and_no_fixed_sizes() {
+        let providers: ProvidersSource = toml::from_str(&format!(
+            r#"schema_version = 1
+mode = "live"
+maximum_spend_minor = 25
+live_spend_acknowledgement = "{LIVE_SPEND_ACKNOWLEDGEMENT}"
+[[contract_bindings]]
+contract = "hubu.flux-2-pro.text-to-image/v2"
+credential = "bfl"
+[[contract_bindings]]
+contract = "hubu.flux-3-image.text-to-image/v1"
+credential = "bfl"
+"#
+        ))
+        .unwrap();
+        // Different models of one provider, so both bind with one BFL key.
+        validate_provider_source(&providers).unwrap();
+        let entries = provider_contract_catalog_entries(&providers, true);
+        let flux_3 = entries
+            .iter()
+            .find(|entry| entry.contract == "hubu.flux-3-image.text-to-image/v1")
+            .unwrap();
+        let prices: Vec<_> = flux_3
+            .capability
+            .presets
+            .iter()
+            .map(|preset| {
+                (
+                    preset.name.as_str(),
+                    preset.width,
+                    preset.rate_numerator_minor,
+                    preset.rate_denominator,
+                )
+            })
+            .collect();
+        assert_eq!(prices, [("1k", None, 48, 10), ("2k", None, 10, 1)]);
+        let rendered = serde_json::to_string(&flux_3.capability).unwrap();
+        assert!(!rendered.contains("width"));
     }
 
     #[test]

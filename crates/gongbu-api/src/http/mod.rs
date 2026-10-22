@@ -2394,6 +2394,7 @@ mod tests {
             ids,
             std::collections::BTreeSet::from([
                 "hubu.flux-2-pro.text-to-image/v1",
+                "hubu.flux-3-image.text-to-image/v1",
                 "hubu.gemini-3.1-flash-image.text-to-image/v1",
                 "hubu.gemini-3.1-flash-lite-image.text-to-image/v1"
             ])
