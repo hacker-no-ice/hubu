@@ -295,7 +295,7 @@ Optional inline table of named dimensions used to distinguish prices for the sam
 
 Selector keys are lowercase identifiers (`a`–`z`, digits and `_`, starting with a letter). Values are trimmed and lowercased and may contain letters, digits, `_`, `-`, `.` and `:` (for example `aspect_ratio = "16:9"`). An empty selector is rejected.
 
-A selector that includes `image_size` must contain exactly one `image` price component. Define one unambiguous rule for every enabled image size. Two rules with the same provider, model, and selector are rejected.
+A rule whose selector includes `image_size` prices only output images: exactly one `image` component, or `megapixel` / `additional_megapixel` components with or without an `image` component. Define one unambiguous rule for every enabled image size. Two rules with the same provider, model, and selector are rejected.
 
 ### `pricing_rules.selector.image_size`
 

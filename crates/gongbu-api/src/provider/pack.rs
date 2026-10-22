@@ -4089,6 +4089,44 @@ mod tests {
     }
 
     #[test]
+    fn size_selected_rules_may_price_megapixels() {
+        // One size parameter with output_dimensions that also selects the rule.
+        let mut document: PackDocument = toml::from_str(MEGAPIXEL).unwrap();
+        document.size_presets.clear();
+        document.parameters.truncate(3);
+        let size = &mut document.parameters[2];
+        size.selector = Some("image_size".into());
+        size.output_dimensions =
+            BTreeMap::from([("1k".into(), [1024, 1024]), ("2k".into(), [2048, 2048])]);
+        let mut rule_2k = document.models[0].pricing_rules[0].clone();
+        rule_2k.rule_id = "megapixel-image-v1-2k".into();
+        rule_2k.selector = Some(serde_json::from_value(json!({"image_size": "2k"})).unwrap());
+        // 2k images carry a 1¢ surcharge per additional megapixel on top.
+        rule_2k.components[1].rate_numerator_minor = 5;
+        document.models[0].pricing_rules[0].selector =
+            Some(serde_json::from_value(json!({"image_size": "1k"})).unwrap());
+        document.models[0].pricing_rules.push(rule_2k);
+        let pack = Pack::from_toml_str(&toml::to_string(&document).unwrap()).unwrap();
+        // 2048² = 4,194,304 pixels: 4 megapixels, 3 additional at 2.5¢.
+        let (request, snapshot) =
+            megapixel_snapshot(&pack, json!({"prompt": "x", "image_size": "2k"}));
+        assert_eq!(request.image_size(), Some("2k"));
+        assert_eq!(snapshot.estimated_units, 105_000);
+        let usage = delivered(&pack, &request, &[(2048, 2048)]).usage.unwrap();
+        assert_eq!(
+            snapshot.settle(&usage, snapshot.estimated_units).unwrap(),
+            105_000
+        );
+        // A size still never selects a token or request price.
+        assert!(!PricingUnit::prices_images_only([
+            PricingUnit::Image,
+            PricingUnit::InputToken
+        ]));
+        assert!(!PricingUnit::prices_images_only([PricingUnit::Request]));
+        assert!(PricingUnit::prices_images_only([PricingUnit::Megapixel]));
+    }
+
+    #[test]
     fn megapixel_targets_publish_their_sizes_and_rounding() {
         let pack = Pack::from_toml_str(MEGAPIXEL).unwrap();
         let catalog = bind(&pack, &pack).unwrap();

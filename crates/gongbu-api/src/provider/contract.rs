@@ -441,6 +441,21 @@ impl PricingUnit {
         }
     }
 
+    /// Whether a size-selected rule's units price only the output images:
+    /// one `image` component, or per-image megapixel components with or
+    /// without it. Size never selects a token or request price.
+    pub fn prices_images_only(units: impl IntoIterator<Item = Self>) -> bool {
+        let units: Vec<_> = units.into_iter().collect();
+        units == [Self::Image]
+            || (!units.is_empty()
+                && units
+                    .iter()
+                    .any(|u| matches!(u, Self::Megapixel | Self::AdditionalMegapixel))
+                && units.iter().all(|u| {
+                    matches!(u, Self::Image | Self::Megapixel | Self::AdditionalMegapixel)
+                }))
+    }
+
     /// Whether a frozen quantity of zero is a real price. Only additional
     /// megapixels may be: a one-megapixel image has none.
     pub fn allows_zero(self) -> bool {
@@ -541,10 +556,10 @@ impl PricingCatalog {
                 .selector
                 .as_ref()
                 .is_some_and(|selector| selector.image_size().is_some())
-                && (rule.components.len() != 1 || rule.components[0].unit != PricingUnit::Image)
+                && !PricingUnit::prices_images_only(rule.components.iter().map(|c| c.unit))
             {
                 return Err(ContractError::Malformed(
-                    "image selector requires one image component".into(),
+                    "image selector requires image or megapixel components only".into(),
                 ));
             }
             let key = (
@@ -1136,7 +1151,7 @@ impl PricingSnapshot {
                 || (component.quantity == 0 && !component.unit.allows_zero())
                 || !units.insert(component.unit)
         }) || (image_size.is_some()
-            && (components.len() != 1 || components[0].unit != PricingUnit::Image))
+            && !PricingUnit::prices_images_only(components.iter().map(|c| c.unit)))
         {
             return Err(ContractError::IndeterminableCost);
         }
