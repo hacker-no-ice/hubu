@@ -378,6 +378,11 @@ mod tests {
                 serde_json::json!(["target_id"]),
                 AdmissionDiagnostic::TargetIdNotSelectable,
             ),
+            (
+                "input_artifact_unavailable",
+                serde_json::json!(["input.input_images"]),
+                AdmissionDiagnostic::InputArtifactUnavailable,
+            ),
         ];
         for (reason_code, fields, expected) in cases {
             let body = serde_json::to_vec(&serde_json::json!({

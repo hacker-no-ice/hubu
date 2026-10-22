@@ -1,5 +1,8 @@
 //! Gongbu-owned artifact normalization and storage.
-use crate::persistence::{Artifact, CreateArtifactParams, Repository};
+use crate::{
+    persistence::{Artifact, CreateArtifactParams, Repository},
+    provider::contract::{ContractError, InputImage, InputImageSource, INPUT_ARTIFACT_UNAVAILABLE},
+};
 use image::ImageFormat;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -290,6 +293,36 @@ impl ArtifactService {
 
     pub fn receipt_reference(artifact: &Artifact) -> String {
         format!("artifact://{}", artifact.artifact_id)
+    }
+
+    /// Input images for an edit request, loaded only from `account_id`'s
+    /// own artifacts and verified against their recorded digest.
+    pub fn input_images<'a>(&'a self, account_id: &'a str) -> AccountInputImages<'a> {
+        AccountInputImages {
+            service: self,
+            account_id,
+        }
+    }
+}
+
+/// The artifacts of one account, as the input images of an edit request.
+pub struct AccountInputImages<'a> {
+    service: &'a ArtifactService,
+    account_id: &'a str,
+}
+
+impl InputImageSource for AccountInputImages<'_> {
+    fn load(&self, artifact_id: &str) -> crate::provider::contract::Result<InputImage> {
+        let retrieved = self
+            .service
+            .retrieve_for_account(artifact_id, self.account_id)
+            .map_err(|_| ContractError::Provider {
+                code: INPUT_ARTIFACT_UNAVAILABLE.into(),
+            })?;
+        Ok(InputImage {
+            media_type: retrieved.artifact.media_type,
+            bytes: retrieved.bytes,
+        })
     }
 }
 

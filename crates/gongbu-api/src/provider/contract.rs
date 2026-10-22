@@ -316,10 +316,47 @@ pub struct PricingRule {
     pub rule_id: String,
     pub provider: String,
     pub model: String,
+    /// The workload this rule prices, so a model can carry separate
+    /// generation and edit prices. A rule without one prices every workload
+    /// of its model that no rule names; contracts read it as
+    /// `image_generation`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workload_type: Option<String>,
     pub currency: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selector: Option<PricingSelector>,
     pub components: Vec<PriceComponent>,
+}
+
+/// The workload a pricing rule or request without one belongs to.
+pub const DEFAULT_WORKLOAD_TYPE: &str = "image_generation";
+
+impl PricingRule {
+    /// The workload a contract reads this rule as pricing.
+    pub fn workload(&self) -> &str {
+        self.workload_type
+            .as_deref()
+            .unwrap_or(DEFAULT_WORKLOAD_TYPE)
+    }
+}
+
+impl FrozenCatalog {
+    /// Whether `rule` prices `workload` of this model. A rule naming a
+    /// workload prices only it; a rule without one prices the workloads of
+    /// its model that no rule names, as every rule did before rules named
+    /// workloads.
+    fn rule_prices(&self, rule: &PricingRule, provider: &str, model: &str, workload: &str) -> bool {
+        rule.provider == provider
+            && rule.model == model
+            && match &rule.workload_type {
+                Some(named) => named == workload,
+                None => !self.rules.iter().any(|other| {
+                    other.provider == provider
+                        && other.model == model
+                        && other.workload_type.as_deref() == Some(workload)
+                }),
+            }
+    }
 }
 
 /// Named dimensions that pick one pricing rule for a request, such as
@@ -422,6 +459,9 @@ pub enum PricingUnit {
     /// `image` component for the first, it prices "first megapixel, then each
     /// additional one". It is the one unit whose quantity may be zero.
     AdditionalMegapixel,
+    /// Each input image an edit request sends, priced where the provider
+    /// charges for reading it.
+    InputImage,
 }
 
 impl PricingUnit {
@@ -438,14 +478,19 @@ impl PricingUnit {
             Self::Second => Some("seconds"),
             Self::Megapixel => Some("megapixels"),
             Self::AdditionalMegapixel => Some("additional_megapixels"),
+            Self::InputImage => Some("input_images"),
         }
     }
 
-    /// Whether a size-selected rule's units price only the output images:
-    /// one `image` component, or per-image megapixel components with or
-    /// without it. Size never selects a token or request price.
+    /// Whether a size-selected rule's units price only images: one `image`
+    /// component, or per-image megapixel components with or without it,
+    /// plus any `input_image` component an edit adds. Size never selects a
+    /// token or request price.
     pub fn prices_images_only(units: impl IntoIterator<Item = Self>) -> bool {
-        let units: Vec<_> = units.into_iter().collect();
+        let units: Vec<_> = units
+            .into_iter()
+            .filter(|unit| *unit != Self::InputImage)
+            .collect();
         units == [Self::Image]
             || (!units.is_empty()
                 && units
@@ -473,6 +518,7 @@ pub const REQUEST_QUANTITIES: &[&str] = &[
     "seconds",
     "megapixels",
     "additional_megapixels",
+    "input_images",
 ];
 
 /// Request quantities a pack derives from the output dimensions; no input
@@ -517,6 +563,9 @@ impl PricingCatalog {
             rule.rule_id = normalized(&rule.rule_id, "rule_id")?;
             rule.provider = normalized(&rule.provider, "provider")?;
             rule.model = normalized(&rule.model, "model")?;
+            if let Some(workload) = &rule.workload_type {
+                rule.workload_type = Some(normalized(workload, "workload_type")?);
+            }
             rule.currency = rule.currency.trim().to_ascii_uppercase();
             if let Some(selector) = &mut rule.selector {
                 if selector.is_empty() {
@@ -552,6 +601,8 @@ impl PricingCatalog {
             if rule.components.iter().any(|c| !units.insert(c.unit)) {
                 return Err(ContractError::Malformed("duplicate price component".into()));
             }
+            // An image-size rule prices output images, plus the input images
+            // an edit sends.
             if rule
                 .selector
                 .as_ref()
@@ -565,6 +616,7 @@ impl PricingCatalog {
             let key = (
                 rule.provider.clone(),
                 rule.model.clone(),
+                rule.workload_type.clone(),
                 rule.selector.clone(),
             );
             if !selectors.insert(key) {
@@ -576,7 +628,11 @@ impl PricingCatalog {
                 && doc
                     .rules
                     .iter()
-                    .filter(|other| other.provider == rule.provider && other.model == rule.model)
+                    .filter(|other| {
+                        other.provider == rule.provider
+                            && other.model == rule.model
+                            && other.workload_type == rule.workload_type
+                    })
                     .count()
                     > 1
             {
@@ -600,8 +656,8 @@ impl PricingCatalog {
             .rules
             .iter()
             .filter(|rule| {
-                rule.provider == request.provider
-                    && rule.model == request.model
+                self.0
+                    .rule_prices(rule, &request.provider, &request.model, request.workload())
                     && match &rule.selector {
                         Some(selector) => *selector == request.selector,
                         None => request.selector.is_empty(),
@@ -616,7 +672,9 @@ impl PricingCatalog {
             .copied()
             .ok_or(ContractError::UnsupportedTarget)?;
         if self.0.rules.iter().any(|r| {
-            r.provider == request.provider && r.model == request.model && r.selector.is_some()
+            self.0
+                .rule_prices(r, &request.provider, &request.model, request.workload())
+                && r.selector.is_some()
         }) && rule.selector.is_none()
         {
             return Err(ContractError::IndeterminableCost);
@@ -660,7 +718,10 @@ impl PricingCatalog {
         target: &TargetKey,
         request: &NormalizedRequest,
     ) -> Result<PricingSnapshot> {
-        if request.provider != target.provider || request.model != target.model {
+        if request.provider != target.provider
+            || request.model != target.model
+            || request.workload() != target.workload_type
+        {
             return Err(ContractError::UnsupportedTarget);
         }
         self.snapshot(request)
@@ -672,14 +733,13 @@ impl PricingCatalog {
         self.0
             .rules
             .iter()
-            .any(|rule| rule.provider == target.provider && rule.model == target.model)
+            .any(|rule| self.matches_target(rule, target))
     }
 
     /// Whether this target has an exact, selector-qualified image pricing rule.
     pub fn supports_image_size(&self, target: &TargetKey, image_size: &str) -> bool {
         self.0.rules.iter().any(|rule| {
-            rule.provider == target.provider
-                && rule.model == target.model
+            self.matches_target(rule, target)
                 && rule
                     .selector
                     .as_ref()
@@ -700,9 +760,14 @@ impl PricingCatalog {
         self.0
             .rules
             .iter()
-            .filter(|rule| rule.provider == target.provider && rule.model == target.model)
+            .filter(|rule| self.matches_target(rule, target))
             .cloned()
             .collect()
+    }
+
+    fn matches_target(&self, rule: &PricingRule, target: &TargetKey) -> bool {
+        self.0
+            .rule_prices(rule, &target.provider, &target.model, &target.workload_type)
     }
 }
 
@@ -730,6 +795,9 @@ fn normalized(value: &str, field: &str) -> Result<String> {
 pub struct NormalizedRequest {
     pub provider: String,
     pub model: String,
+    /// The workload priced; absent means `image_generation`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workload_type: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub quantities: BTreeMap<String, i64>,
     #[serde(default, skip_serializing_if = "PricingSelector::is_empty")]
@@ -750,10 +818,21 @@ impl NormalizedRequest {
         Self {
             provider: provider.into(),
             model: model.into(),
+            workload_type: None,
             quantities: BTreeMap::new(),
             selector: PricingSelector::default(),
             output_dimensions: None,
         }
+    }
+    /// Price this request as `workload`; the default workload is left unset.
+    pub fn with_workload(mut self, workload: &str) -> Self {
+        self.workload_type = (workload != DEFAULT_WORKLOAD_TYPE).then(|| workload.to_owned());
+        self
+    }
+    pub fn workload(&self) -> &str {
+        self.workload_type
+            .as_deref()
+            .unwrap_or(DEFAULT_WORKLOAD_TYPE)
     }
     pub fn with_quantity(mut self, name: &str, value: Option<i64>) -> Self {
         self.set_quantity(name, value);
@@ -1277,6 +1356,9 @@ pub struct NormalizedUsage {
     pub megapixels: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_megapixels: Option<i64>,
+    /// Input images the request sent to the provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_images: Option<i64>,
 }
 impl NormalizedUsage {
     fn quantity_for(&self, unit: PricingUnit) -> Option<i64> {
@@ -1291,6 +1373,7 @@ impl NormalizedUsage {
             PricingUnit::Second => self.seconds,
             PricingUnit::Megapixel => self.megapixels,
             PricingUnit::AdditionalMegapixel => self.additional_megapixels,
+            PricingUnit::InputImage => self.input_images,
         }
         .filter(|v| *v >= 0)
     }
@@ -1511,6 +1594,34 @@ impl RetryPolicy {
     }
 }
 
+/// The failure code for an input image that can't be loaded. Nothing has
+/// been sent when it is returned, so the claim is released.
+pub const INPUT_ARTIFACT_UNAVAILABLE: &str = "input_artifact_unavailable";
+
+/// One input image an edit request sends: the verified bytes of an artifact
+/// an earlier governed execution delivered.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InputImage {
+    pub media_type: String,
+    pub bytes: Vec<u8>,
+}
+
+/// Loads input images by artifact ID, only from the executing account.
+pub trait InputImageSource {
+    fn load(&self, artifact_id: &str) -> Result<InputImage>;
+}
+
+/// The source for a call that may not send input images.
+pub struct NoInputImages;
+
+impl InputImageSource for NoInputImages {
+    fn load(&self, _artifact_id: &str) -> Result<InputImage> {
+        Err(ContractError::Provider {
+            code: INPUT_ARTIFACT_UNAVAILABLE.into(),
+        })
+    }
+}
+
 pub trait ProviderAdapter: Send + Sync {
     fn adapter_id(&self) -> &str;
     fn capabilities(&self) -> AdapterCapabilities;
@@ -1562,6 +1673,25 @@ pub trait ProviderAdapter: Send + Sync {
         _observer: &dyn ProviderTransportObserver,
     ) -> Result<AdapterSubmission, ProviderFailure> {
         self.submit(request, normalized_input, secret, vendor_idempotency_key)
+    }
+    /// Submit with the input images an edit request references. Adapters
+    /// without image inputs ignore the source.
+    fn submit_with_inputs(
+        &self,
+        request: &NormalizedRequest,
+        normalized_input: &serde_json::Value,
+        _inputs: &dyn InputImageSource,
+        secret: &ProviderSecret,
+        vendor_idempotency_key: Option<&str>,
+        observer: &dyn ProviderTransportObserver,
+    ) -> Result<AdapterSubmission, ProviderFailure> {
+        self.submit_observed(
+            request,
+            normalized_input,
+            secret,
+            vendor_idempotency_key,
+            observer,
+        )
     }
     /// Poll a previously checkpointed asynchronous operation. The default is
     /// fail-closed because synchronous adapters never create such checkpoints.
@@ -2248,6 +2378,58 @@ mod tests {
             }
         }
         assert_eq!(checked, baseline["snapshots"].as_array().unwrap().len());
+    }
+
+    #[test]
+    fn a_model_prices_generation_and_editing_separately() {
+        let catalog = PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"edit-v1","rules":[
+            {"rule_id":"generate-1k","provider":"google","model":"image-v1","currency":"USD","selector":{"image_size":"1k"},"components":[{"unit":"image","rate_numerator_minor":67,"rate_denominator":10}]},
+            {"rule_id":"edit-1k","provider":"google","model":"image-v1","workload_type":"image_edit","currency":"USD","selector":{"image_size":"1k"},"components":[{"unit":"image","rate_numerator_minor":67,"rate_denominator":10},{"unit":"input_image","rate_numerator_minor":56,"rate_denominator":1000}]},
+            {"rule_id":"legacy-text","provider":"example","model":"text-v1","currency":"USD","components":[{"unit":"request","rate_numerator_minor":1,"rate_denominator":1}]}
+        ]}"#).unwrap();
+        let request = |workload: &str| {
+            NormalizedRequest::new("google", "image-v1")
+                .with_workload(workload)
+                .with_quantity("image_count", Some(1))
+                .with_quantity("input_images", Some(2))
+                .with_selector(IMAGE_SIZE_SELECTOR, Some("1k".into()))
+        };
+        let generate = catalog.snapshot(&request("image_generation")).unwrap();
+        assert_eq!(generate.pricing_rule_id, "generate-1k");
+        assert_eq!(generate.estimated_units, 67_000);
+        let edit = catalog.snapshot(&request("image_edit")).unwrap();
+        assert_eq!(edit.pricing_rule_id, "edit-1k");
+        assert_eq!(edit.estimated_units, 68_120);
+        // A snapshot settles the input images the request sent.
+        let usage = NormalizedUsage {
+            images: Some(1),
+            input_images: Some(2),
+            ..Default::default()
+        };
+        assert_eq!(edit.settle(&usage, edit.estimated_units).unwrap(), 68_120);
+        // A rule that names no workload still prices the workloads no rule names.
+        let text = NormalizedRequest::new("example", "text-v1").with_workload("text_generation");
+        assert_eq!(
+            catalog.snapshot(&text).unwrap().pricing_rule_id,
+            "legacy-text"
+        );
+        let target =
+            |workload: &str| TargetKey::new(workload, "google", "gemini", "image-v1").unwrap();
+        assert_eq!(
+            catalog.rules_for_target(&target("image_generation")).len(),
+            1
+        );
+        assert_eq!(
+            catalog.rules_for_target(&target("image_edit"))[0].rule_id,
+            "edit-1k"
+        );
+        assert!(catalog
+            .snapshot_for_target(&target("image_edit"), &request("image_generation"))
+            .is_err());
+        // Only input images may join an image-size rule's output image.
+        assert!(PricingCatalog::from_json(br#"{"schema_version":2,"catalog_version":"edit-v1","rules":[
+            {"rule_id":"edit-1k","provider":"google","model":"image-v1","workload_type":"image_edit","currency":"USD","selector":{"image_size":"1k"},"components":[{"unit":"image","rate_numerator_minor":67,"rate_denominator":10},{"unit":"request","rate_numerator_minor":1,"rate_denominator":1}]}
+        ]}"#).is_err());
     }
 
     #[test]

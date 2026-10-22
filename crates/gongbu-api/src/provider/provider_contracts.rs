@@ -12,7 +12,7 @@ use thiserror::Error;
 
 const CONTRACT_DOCUMENT: &str = include_str!("../../../../contracts/provider-contracts-v1.json");
 const CONTRACT_DOCUMENT_SHA256: &str =
-    "edbe0c681b7abee6dc0c65d2fa15b1f3301385f18808978c1225bdb9d9abfed4";
+    "160f81a950924beb58c2b5e0f452751b4cd1daa4517999606b495510d7588ae1";
 
 #[derive(Debug, Error)]
 pub(crate) enum Error {
@@ -208,7 +208,9 @@ fn validate_and_project_with_mode(
     }
     for definition in &document.contracts {
         let known_pricing_present = pricing.rules().iter().any(|rule| {
-            rule.provider == definition.target.provider && rule.model == definition.target.model
+            rule.provider == definition.target.provider
+                && rule.model == definition.target.model
+                && rule.workload() == definition.target.workload_type
         });
         // Successive contract versions share one target; binding any one
         // of them accounts for that target's pricing.
@@ -216,6 +218,7 @@ fn validate_and_project_with_mode(
             selected.contains(other.contract.as_str())
                 && other.target.provider == definition.target.provider
                 && other.target.model == definition.target.model
+                && other.target.workload_type == definition.target.workload_type
         });
         if require_shipped_bindings && known_pricing_present && !target_selected {
             return Err(Error::UnknownContract);
@@ -326,6 +329,7 @@ fn validate_pricing(
         .filter(|rule| {
             rule.provider == contract_definition.target.provider
                 && rule.model == contract_definition.target.model
+                && rule.workload() == contract_definition.target.workload_type
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -396,7 +400,7 @@ fn project(contract_definition: &ContractDefinition) -> Result<CatalogContract, 
     })
 }
 
-/// A v1 preset's price: the one image component of the rule its size selects.
+/// A size-selected preset's output price; edit rules also price input images.
 fn size_preset_price(
     contract_definition: &ContractDefinition,
     preset: &Preset,
@@ -413,7 +417,12 @@ fn size_preset_price(
     let component = rule
         .components
         .first()
-        .filter(|component| rule.components.len() == 1 && component.unit == PricingUnit::Image)
+        .filter(|component| {
+            component.unit == PricingUnit::Image
+                && rule.components[1..]
+                    .iter()
+                    .all(|other| other.unit == PricingUnit::InputImage)
+        })
         .ok_or(Error::InvalidDocument)?;
     Ok((
         rule.currency.clone(),
@@ -735,7 +744,13 @@ mod tests {
     fn mixed_contracts_are_order_independent_and_credentials_are_isolated() {
         let (targets, pricing) = mixed_contract_inputs(false);
         let projected = validate_and_project(&targets, &pricing).unwrap();
-        assert_eq!(projected.len(), 4);
+        assert_eq!(projected.len(), 6);
+        // An edit contract on the same model keeps its own prices.
+        assert!(projected.iter().any(|contract| {
+            contract.contract == "hubu.gemini-3.1-flash-image.image-edit/v1"
+                && contract.target.workload_type == "image_edit"
+                && contract.capability.presets[0].rate_numerator_minor == 67
+        }));
         // FLUX 3 prices by tier; BFL publishes no fixed size per tier.
         assert!(projected.iter().any(|contract| {
             contract.contract == "hubu.flux-3-image.text-to-image/v1"

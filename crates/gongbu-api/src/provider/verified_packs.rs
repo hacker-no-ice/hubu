@@ -8,6 +8,8 @@ use super::pack::Pack;
 
 const GOOGLE_GEMINI_DEVELOPER_IMAGE: &str =
     include_str!("../../../../packs/verified/google-gemini-developer-image.toml");
+const GOOGLE_GEMINI_DEVELOPER_IMAGE_EDIT: &str =
+    include_str!("../../../../packs/verified/google-gemini-developer-image-edit.toml");
 const BFL_FLUX_2: &str = include_str!("../../../../packs/verified/bfl-flux-2.toml");
 const BFL_FLUX_2_V2: &str = include_str!("../../../../packs/verified/bfl-flux-2-v2.toml");
 const BFL_FLUX_3_IMAGE: &str = include_str!("../../../../packs/verified/bfl-flux-3-image.toml");
@@ -16,6 +18,7 @@ const BFL_FLUX_3_IMAGE: &str = include_str!("../../../../packs/verified/bfl-flux
 pub fn verified_packs() -> Vec<Pack> {
     [
         GOOGLE_GEMINI_DEVELOPER_IMAGE,
+        GOOGLE_GEMINI_DEVELOPER_IMAGE_EDIT,
         BFL_FLUX_2,
         BFL_FLUX_2_V2,
         BFL_FLUX_3_IMAGE,
@@ -104,6 +107,9 @@ mod tests {
             let presets = contract["capability"]["presets"].as_array().unwrap();
             for preset in presets {
                 let mut input = json!({"prompt": "x", "image_size": preset["name"]});
+                if pack.parameters().iter().any(|p| p.name == "input_images") {
+                    input["input_images"] = json!(["0f5c2a64-3f0e-4c9b-9a51-2b7d1c4e8a10"]);
+                }
                 for (name, value) in preset["when"].as_object().into_iter().flatten() {
                     input[name] = value.clone();
                 }
@@ -142,7 +148,7 @@ mod tests {
             projected += 1;
         }
         assert_eq!(
-            projected, 5,
+            projected, 7,
             "every shipped contract comes from a verified pack"
         );
     }

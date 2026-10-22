@@ -21,11 +21,15 @@ pub(crate) use transport::{CallOutcome, DurableCallError, DurableExecutionObserv
 
 const TARGET_ID_FIELDS: &[&str] = &["target_id"];
 const PRICING_SELECTOR_FIELDS: &[&str] = &["input.image_size"];
+const INPUT_ARTIFACT_FIELDS: &[&str] = &["input.input_images"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AdmissionDiagnostic {
     TargetIdNotSelectable,
     PricingSelectorNotMatched,
+    /// An edit named an input image that is not one of this account's
+    /// delivered artifacts.
+    InputArtifactUnavailable,
 }
 
 impl AdmissionDiagnostic {
@@ -33,6 +37,7 @@ impl AdmissionDiagnostic {
         match self {
             Self::TargetIdNotSelectable => "target_not_selectable",
             Self::PricingSelectorNotMatched => "pricing_selector_not_matched",
+            Self::InputArtifactUnavailable => "input_artifact_unavailable",
         }
     }
 
@@ -40,6 +45,7 @@ impl AdmissionDiagnostic {
         match self {
             Self::TargetIdNotSelectable => TARGET_ID_FIELDS,
             Self::PricingSelectorNotMatched => PRICING_SELECTOR_FIELDS,
+            Self::InputArtifactUnavailable => INPUT_ARTIFACT_FIELDS,
         }
     }
 
@@ -47,6 +53,7 @@ impl AdmissionDiagnostic {
         match self {
             Self::TargetIdNotSelectable => "execution_request_target_id_not_selectable",
             Self::PricingSelectorNotMatched => "execution_request_pricing_selector_not_matched",
+            Self::InputArtifactUnavailable => "execution_request_input_artifact_unavailable",
         }
     }
 
@@ -56,6 +63,7 @@ impl AdmissionDiagnostic {
             "execution_request_pricing_selector_not_matched" => {
                 Some(Self::PricingSelectorNotMatched)
             }
+            "execution_request_input_artifact_unavailable" => Some(Self::InputArtifactUnavailable),
             _ => None,
         }
     }

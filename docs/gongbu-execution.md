@@ -172,7 +172,10 @@ provider/model labels, the Hubu authorization scope, supported image-size
 selectors, and exact configured price components. A pack target that certifies
 sizes by parameter combination, such as aspect ratio, also lists
 `output_sizes`; one priced per megapixel also lists its `megapixels` rounding
-rule, so the caller can compute the exact estimate. It never returns adapter
+rule, so the caller can compute the exact estimate. An image-edit target
+(`workload_type: "image_edit"`, scope capability `capability:image:edit`) lists
+`input_images`: the input parameter that takes artifact IDs and how many it
+accepts. It never returns adapter
 settings, credential references, endpoints, headers, configuration revisions,
 or configuration digests.
 
@@ -262,6 +265,34 @@ persists storage-neutral artifact identities.
 
 API and MCP responses expose safe artifact IDs, media type, size, and digest.
 They never expose an absolute filesystem path or internal storage key.
+
+### Editing an image
+
+An image-edit target takes input images by artifact ID, never as bytes or
+URLs. An agent generates a draft, then sends a governed edit whose
+`input_images` names the draft's artifact ID:
+
+```json
+{
+  "prompt": "Make the background blue",
+  "image_size": "1k",
+  "input_images": ["0f5c2a64-3f0e-4c9b-9a51-2b7d1c4e8a10"]
+}
+```
+
+Each ID must name an image that an earlier execution of the same account
+delivered. Admission rejects any other ID with reason code
+`input_artifact_unavailable` on `input.input_images`, before any spend is
+reserved. Preflight loads every input image again before the claim, and the
+engine reads the verified bytes, checks their recorded digest, and sends them
+in the provider's declared shape. An image that can't be loaded releases the
+claim before anything is transmitted.
+
+The edit is its own governed operation with its own approval and ledger entry,
+priced from its own contract: the output image plus each input image where the
+provider charges for reading it. Its Hubu scope capability is
+`capability:image:edit`, so a policy can allow generation without allowing
+edits.
 
 ## Service surface
 

@@ -2254,6 +2254,11 @@ mod tests {
                 "pricing_selector_not_matched",
                 json!(["input.image_size"]),
             ),
+            (
+                "execution_request_input_artifact_unavailable",
+                "input_artifact_unavailable",
+                json!(["input.input_images"]),
+            ),
         ];
         for (internal_code, reason_code, fields) in cases {
             let response = operation_status_result(&operation_registry::DurableOperationStatus {

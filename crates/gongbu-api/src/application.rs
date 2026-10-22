@@ -14,8 +14,9 @@ use crate::{
     provider::{
         contract::{
             enforce_cost, vendor_idempotency_key, AdapterOutcome, AdapterSubmission,
-            AsyncProviderOperation, NormalizedRequest, PricingSnapshot, ProviderFailure,
-            ProviderTransportInteraction, ProviderTransportObserver, SpendDisposition,
+            AsyncProviderOperation, InputImageSource, NoInputImages, NormalizedRequest,
+            PricingSnapshot, ProviderFailure, ProviderTransportInteraction,
+            ProviderTransportObserver, SpendDisposition,
         },
         flux_contract,
         registry::ValidatedProviderCatalog,
@@ -64,6 +65,9 @@ pub struct GenericProviderActivities {
     repository: Repository,
     providers: ValidatedProviderCatalog,
     secrets: Arc<dyn SecretProvider>,
+    /// Where edit requests load their input images; without it, a request
+    /// that references one is released before anything is sent.
+    input_artifacts: Option<ArtifactService>,
 }
 
 impl GenericProviderActivities {
@@ -80,6 +84,26 @@ impl GenericProviderActivities {
             repository,
             providers,
             secrets,
+            input_artifacts: None,
+        }
+    }
+
+    /// Load edit requests' input images from `artifacts`, scoped to each
+    /// execution's account.
+    pub fn with_input_artifacts(mut self, artifacts: ArtifactService) -> Self {
+        self.input_artifacts = Some(artifacts);
+        self
+    }
+
+    /// Send `f` the input images `execution`'s account may reference.
+    fn with_input_images<R>(
+        &self,
+        execution: &Execution,
+        f: impl FnOnce(&dyn InputImageSource) -> R,
+    ) -> R {
+        match &self.input_artifacts {
+            Some(artifacts) => f(&artifacts.input_images(&execution.account_id)),
+            None => f(&NoInputImages),
         }
     }
 
@@ -161,6 +185,7 @@ impl GenericProviderActivities {
         // Rebuild exactly the request that was priced: every frozen quantity
         // and the full selector that picked the rule.
         let mut request = NormalizedRequest::new(snapshot.provider.clone(), snapshot.model.clone())
+            .with_workload(&execution.workload_type)
             .with_output_dimensions(output_dimensions);
         request.selector = selector;
         for component in &snapshot.components {
@@ -195,6 +220,15 @@ impl ProviderActivities for GenericProviderActivities {
         adapter
             .preflight_input(&request, &normalized_input)
             .map_err(map_contract_error)?;
+        // Every input image must still load before the claim is taken.
+        if let Some(pack) = self.providers.pack(target) {
+            self.with_input_images(execution, |images| {
+                pack.input_artifact_ids(&normalized_input)
+                    .iter()
+                    .try_for_each(|id| images.load(id).map(drop))
+            })
+            .map_err(map_contract_error)?;
+        }
         self.secrets
             .resolve(
                 &target
@@ -270,17 +304,20 @@ impl ProviderActivities for GenericProviderActivities {
             })
             .transpose()
             .map_err(map_contract_error)?;
-        let submission = adapter
-            .submit_observed(
-                &request,
-                &normalized_input,
-                &secret,
-                idempotency_key.as_deref(),
-                &DurableProviderTransportObserver {
-                    repository: &self.repository,
-                    attempt_id,
-                },
-            )
+        let submission = self
+            .with_input_images(execution, |images| {
+                adapter.submit_with_inputs(
+                    &request,
+                    &normalized_input,
+                    images,
+                    &secret,
+                    idempotency_key.as_deref(),
+                    &DurableProviderTransportObserver {
+                        repository: &self.repository,
+                        attempt_id,
+                    },
+                )
+            })
             .map_err(map_provider_failure)?;
         normalize_provider_submission(submission)
     }
@@ -495,9 +532,10 @@ pub fn provider_execution_runner(
     Arc::new(PersistedExecutionRunner::new(
         repository.clone(),
         hubu,
-        Arc::new(GenericProviderActivities::new(
-            repository, providers, secrets,
-        )),
+        Arc::new(
+            GenericProviderActivities::new(repository, providers, secrets)
+                .with_input_artifacts(artifacts.clone()),
+        ),
         Arc::new(ArtifactServiceActivities::new(artifacts, artifact_now)),
         now,
     ))
@@ -574,11 +612,14 @@ where
 {
     let redaction_attestation_secrets = dependencies.secrets.clone();
     let provider = dependencies.provider_activities.unwrap_or_else(|| {
-        Arc::new(GenericProviderActivities::new(
-            dependencies.repository.clone(),
-            dependencies.providers.clone(),
-            dependencies.secrets.clone(),
-        ))
+        Arc::new(
+            GenericProviderActivities::new(
+                dependencies.repository.clone(),
+                dependencies.providers.clone(),
+                dependencies.secrets.clone(),
+            )
+            .with_input_artifacts(dependencies.artifacts.clone()),
+        )
     });
     let artifacts = dependencies.artifact_activities.unwrap_or_else(|| {
         let now = dependencies.now.clone();
@@ -1715,6 +1756,290 @@ mod tests {
         }
         assert_eq!(hubu.claims.load(Ordering::SeqCst), 1);
         assert_eq!(calls.0.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_draft_is_edited_by_artifact_id_and_both_settle_through_the_durable_workflow() {
+        use crate::{
+            artifact::{ArtifactLimits, LocalFsStorage},
+            execution::{CreateExecutionParams, HubuTokenReference},
+            provider::{
+                http_kernel::{ArtifactDownloadPolicy, InvocationDeadline},
+                pack::{Archetype, ArtifactFetchError, Pack},
+                pack_sync::{SyncFixedEngine, SyncTransport, TransportFailure, TransportResponse},
+                verified_packs::verified_packs,
+            },
+            secrets::{ProviderSecret, SecretError, SecretReference},
+        };
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        use image::{DynamicImage, ImageOutputFormat, RgbaImage};
+        use serde_json::json;
+        use std::{
+            collections::BTreeMap,
+            io::Cursor,
+            sync::{
+                atomic::{AtomicUsize, Ordering},
+                Mutex,
+            },
+            time::Duration,
+        };
+        use tempfile::tempdir;
+
+        fn png(rgba: [u8; 4]) -> Vec<u8> {
+            let mut png = Vec::new();
+            DynamicImage::ImageRgba8(RgbaImage::from_pixel(1, 1, image::Rgba(rgba)))
+                .write_to(&mut Cursor::new(&mut png), ImageOutputFormat::Png)
+                .unwrap();
+            png
+        }
+        struct FixtureSecrets;
+        impl SecretProvider for FixtureSecrets {
+            fn resolve(&self, _: &SecretReference) -> Result<ProviderSecret, SecretError> {
+                Ok(crate::secrets::secret_for_test("fixture-secret"))
+            }
+        }
+        /// Returns the draft for a prompt alone, and the edit when the
+        /// request carries the draft's bytes as its input image.
+        struct FixtureTransport {
+            calls: AtomicUsize,
+            draft: Vec<u8>,
+            edited: Vec<u8>,
+        }
+        impl SyncTransport for FixtureTransport {
+            fn post_json(
+                &self,
+                _: &reqwest::Url,
+                _: (&str, &str),
+                _: &BTreeMap<String, String>,
+                body: &serde_json::Value,
+                _: Duration,
+            ) -> Result<TransportResponse, TransportFailure> {
+                let call = self.calls.fetch_add(1, Ordering::SeqCst);
+                let input = body["input"].as_array().unwrap();
+                let image = if input.len() == 1 {
+                    assert_eq!(input[0], json!({"type": "text", "text": "draw a cat"}));
+                    &self.draft
+                } else {
+                    assert_eq!(
+                        input,
+                        &[
+                            json!({"type": "text", "text": "make it blue"}),
+                            json!({"type": "image", "mime_type": "image/png",
+                                "data": STANDARD.encode(&self.draft)}),
+                        ]
+                    );
+                    &self.edited
+                };
+                Ok(TransportResponse {
+                    status: 200,
+                    headers: BTreeMap::new(),
+                    body: json!({"id":format!("interaction-{call}"),"status":"completed","steps":[{"type":"model_output","content":[{"type":"image","mime_type":"image/png","data":STANDARD.encode(image)}]}]}),
+                })
+            }
+            fn download(
+                &self,
+                _: &reqwest::Url,
+                _: &ArtifactDownloadPolicy,
+                _: InvocationDeadline,
+            ) -> Result<Vec<u8>, ArtifactFetchError> {
+                unreachable!("Gemini images are inline")
+            }
+        }
+        #[derive(Default)]
+        struct LedgerHubu {
+            claims: AtomicUsize,
+            settled: Mutex<Vec<i64>>,
+        }
+        impl HubuActivities for LedgerHubu {
+            fn preflight(&self, _: &Execution) -> Result<(), WorkflowActivityError> {
+                Ok(())
+            }
+            fn claim(&self, _: &Execution) -> Result<String, WorkflowActivityError> {
+                self.claims.fetch_add(1, Ordering::SeqCst);
+                Ok("claim".into())
+            }
+            fn validate_claim(&self, _: &Execution) -> Result<(), WorkflowActivityError> {
+                Ok(())
+            }
+            fn settle(
+                &self,
+                _: &Execution,
+                _: &str,
+                units: i64,
+            ) -> Result<String, WorkflowActivityError> {
+                let mut settled = self.settled.lock().unwrap();
+                settled.push(units);
+                Ok(format!("settlement-{}", settled.len()))
+            }
+            fn release(&self, _: &Execution) -> Result<(), WorkflowActivityError> {
+                Ok(())
+            }
+        }
+
+        let transport = Arc::new(FixtureTransport {
+            calls: AtomicUsize::new(0),
+            draft: png([1, 2, 3, 255]),
+            edited: png([0, 0, 255, 255]),
+        });
+        let packs: Vec<Pack> = verified_packs()
+            .into_iter()
+            .filter(|pack| pack.provider() == "google")
+            .collect();
+        let secret = SecretReference::new("gongbu.google", "fixture").unwrap();
+        let targets: ProviderTargetConfig = serde_json::from_value(json!({
+            "schema_version": 2,
+            "provider_configs": packs
+                .iter()
+                .flat_map(|pack| pack.provider_configs(&secret))
+                .collect::<Vec<_>>(),
+        }))
+        .unwrap();
+        let pricing = PricingCatalog::from_json(
+            &serde_json::to_vec(&json!({
+                "schema_version": 2,
+                "catalog_version": "gemini-edit-test",
+                "rules": packs.iter().flat_map(Pack::pricing_rules).collect::<Vec<_>>(),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let repository = Repository::in_memory().unwrap();
+        let create = |workload: &str, account: &str, key: &str, input: serde_json::Value| {
+            let pack = packs
+                .iter()
+                .find(|pack| pack.workload_type() == workload)
+                .unwrap();
+            let model = pack.model("gemini-3.1-flash-image").unwrap();
+            let target = targets.resolve_active(&pack.target_key(model)).unwrap();
+            let request = pack.prepare(&model.model, &input).unwrap().request;
+            let snapshot = pricing
+                .snapshot_for_target(&target.target_key(), &request)
+                .unwrap();
+            repository
+                .create_execution(&CreateExecutionParams {
+                    account_id: account.into(),
+                    operation_key: key.into(),
+                    hubu_authorization_id: key.into(),
+                    hubu_claim_id: None,
+                    hubu_token_reference: HubuTokenReference::new(key).unwrap(),
+                    authorized_units: snapshot.estimated_units,
+                    authorization_currency: "USD".into(),
+                    normalized_input: input,
+                    input_hash: "hash".into(),
+                    input_schema_version: 1,
+                    target: target.target_key().canonical_name(),
+                    config_version: target.provider_config_version.clone(),
+                    workload_type: target.workload_type.clone(),
+                    provider: target.provider.clone(),
+                    adapter: target.adapter.clone(),
+                    model: target.model.clone(),
+                    provider_config_version: target.provider_config_version.clone(),
+                    provider_config_digest: target.digest().to_owned(),
+                    pricing_snapshot: serde_json::to_value(&snapshot).unwrap(),
+                    pricing_schema_version: i64::from(snapshot.schema_version),
+                    execution_scope: None,
+                    created_at: "now".into(),
+                })
+                .unwrap()
+        };
+        let root = tempdir().unwrap();
+        let artifact_service = ArtifactService::new(
+            repository.clone(),
+            LocalFsStorage::new(root.path()),
+            ArtifactLimits::default(),
+        );
+        let hubu = Arc::new(LedgerHubu::default());
+        let mut registry = ProviderRegistry::new();
+        for pack in &packs {
+            registry.register_pack(pack.clone());
+        }
+        let engine_transport = transport.clone();
+        registry.register_pack_engine(Archetype::SyncFixed, move |target, pack| {
+            Ok(Arc::new(SyncFixedEngine::new(
+                pack.clone(),
+                &target.model,
+                engine_transport.clone(),
+                ArtifactLimits::default().max_encoded_bytes,
+            )?))
+        });
+        let providers =
+            ValidatedProviderCatalog::bind(targets.clone(), pricing.clone(), &registry).unwrap();
+        let runner = PersistedExecutionRunner::new(
+            repository.clone(),
+            hubu.clone(),
+            Arc::new(
+                GenericProviderActivities::new(
+                    repository.clone(),
+                    providers,
+                    Arc::new(FixtureSecrets),
+                )
+                .with_input_artifacts(artifact_service.clone()),
+            ),
+            Arc::new(ArtifactServiceActivities::new(
+                artifact_service.clone(),
+                || "now".into(),
+            )),
+            || "now".into(),
+        );
+
+        let draft = create(
+            "image_generation",
+            "account",
+            "draft",
+            json!({"prompt": "draw a cat", "image_size": "1k"}),
+        );
+        assert_eq!(
+            runner.run_execution(&draft.execution_id).unwrap(),
+            "succeeded"
+        );
+        let draft_artifact = artifact_service
+            .list_for_account(&draft.execution_id, "account")
+            .unwrap()
+            .remove(0);
+
+        let edit_input = json!({
+            "prompt": "make it blue",
+            "image_size": "1k",
+            "input_images": [draft_artifact.artifact_id],
+        });
+        // Another account can't name this account's draft.
+        let foreign = create("image_edit", "intruder", "foreign-edit", edit_input.clone());
+        assert_eq!(
+            runner.run_execution(&foreign.execution_id).unwrap(),
+            "failed"
+        );
+        assert!(repository
+            .get_provider_attempt_for_execution(&foreign.execution_id)
+            .is_err());
+        assert_eq!(hubu.claims.load(Ordering::SeqCst), 1);
+
+        let edit = create("image_edit", "account", "edit", edit_input);
+        assert_eq!(
+            runner.run_execution(&edit.execution_id).unwrap(),
+            "succeeded"
+        );
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 2);
+        let edited = artifact_service
+            .list_for_account(&edit.execution_id, "account")
+            .unwrap();
+        assert_eq!(
+            artifact_service
+                .retrieve_for_account(&edited[0].artifact_id, "account")
+                .unwrap()
+                .bytes,
+            transport.edited
+        );
+        // 6.7¢ for the draft; 6.7¢ plus 0.056¢ for the one input image.
+        assert_eq!(*hubu.settled.lock().unwrap(), [67_000, 67_560]);
+        for (execution, units) in [(&draft, 67_000), (&edit, 67_560)] {
+            assert_eq!(
+                repository
+                    .get_receipt_for_execution(&execution.execution_id)
+                    .unwrap()
+                    .settlement_units,
+                units
+            );
+        }
     }
 
     #[test]

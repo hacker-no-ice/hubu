@@ -1481,8 +1481,8 @@ mod tests {
 
         let validated = validate_runtime_inputs(&path).unwrap();
         let catalog = validated_provider_catalog(&validated).unwrap();
-        assert_eq!(catalog.provider_contracts().len(), 4);
-        assert_eq!(catalog.targets().revisions().count(), 4);
+        assert_eq!(catalog.provider_contracts().len(), 6);
+        assert_eq!(catalog.targets().revisions().count(), 6);
         assert!(
             !catalog.provider_contracts()[0]
                 .readiness

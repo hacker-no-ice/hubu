@@ -10,8 +10,9 @@
 
 use super::{
     contract::{
-        AdapterCapabilities, AdapterOutcome, ContractError, NormalizedRequest, ProviderAdapter,
-        ProviderFailure, ProviderPhase,
+        AdapterCapabilities, AdapterOutcome, AdapterSubmission, ContractError, InputImageSource,
+        NoInputImages, NormalizedRequest, ProviderAdapter, ProviderFailure, ProviderPhase,
+        ProviderTransportObserver, INPUT_ARTIFACT_UNAVAILABLE,
     },
     http_kernel::{
         read_bounded, shared_client, ArtifactDownloadPolicy, CredentialForwarding,
@@ -328,6 +329,46 @@ impl<T: SyncTransport> ProviderAdapter for SyncFixedEngine<T> {
         secret: &ProviderSecret,
         vendor_idempotency_key: Option<&str>,
     ) -> Result<AdapterOutcome, ProviderFailure> {
+        self.send(
+            request,
+            normalized_input,
+            &NoInputImages,
+            secret,
+            vendor_idempotency_key,
+        )
+    }
+
+    fn submit_with_inputs(
+        &self,
+        request: &NormalizedRequest,
+        normalized_input: &Value,
+        inputs: &dyn InputImageSource,
+        secret: &ProviderSecret,
+        vendor_idempotency_key: Option<&str>,
+        _observer: &dyn ProviderTransportObserver,
+    ) -> Result<AdapterSubmission, ProviderFailure> {
+        self.send(
+            request,
+            normalized_input,
+            inputs,
+            secret,
+            vendor_idempotency_key,
+        )
+        .map(AdapterSubmission::Complete)
+    }
+}
+
+impl<T: SyncTransport> SyncFixedEngine<T> {
+    /// Send the one provider request, with any input images loaded from
+    /// `inputs` before anything is transmitted.
+    fn send(
+        &self,
+        request: &NormalizedRequest,
+        normalized_input: &Value,
+        inputs: &dyn InputImageSource,
+        secret: &ProviderSecret,
+        vendor_idempotency_key: Option<&str>,
+    ) -> Result<AdapterOutcome, ProviderFailure> {
         let pre_send =
             |code: &str| ProviderFailure::release(code.to_owned(), ProviderPhase::PreSend);
         // Proven before transmission: nothing below has contacted the provider.
@@ -338,8 +379,13 @@ impl<T: SyncTransport> ProviderAdapter for SyncFixedEngine<T> {
             .map_err(|_| pre_send("invalid_request"))?;
         let prepared = self
             .pack
-            .prepare(&self.model, normalized_input)
-            .map_err(|_| pre_send("invalid_request"))?;
+            .prepare_with_images(&self.model, normalized_input, inputs)
+            .map_err(|error| match error {
+                ContractError::Provider { code } if code == INPUT_ARTIFACT_UNAVAILABLE => {
+                    pre_send(INPUT_ARTIFACT_UNAVAILABLE)
+                }
+                _ => pre_send("invalid_request"),
+            })?;
         let transport = self.pack.transport();
         let secret_text =
             std::str::from_utf8(secret.expose()).map_err(|_| pre_send("credential_invalid"))?;
@@ -874,5 +920,41 @@ mod tests {
             SyncFixedEngine::new(Arc::new(metered_pack), "image-v1", ReqwestSyncTransport, 1)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn an_edit_without_its_input_images_is_released_before_sending() {
+        const EDIT: &str =
+            include_str!("../../../../packs/verified/google-gemini-developer-image-edit.toml");
+        let transport = FakeTransport::ok(json!({}));
+        let engine = engine(EDIT, "gemini-3.1-flash-image", transport.clone());
+        let input = json!({"prompt": "make it blue", "image_size": "1k",
+            "input_images": ["0f5c2a64-3f0e-4c9b-9a51-2b7d1c4e8a10"]});
+        let request = engine
+            .pack
+            .prepare("gemini-3.1-flash-image", &input)
+            .unwrap()
+            .request;
+        engine.preflight_input(&request, &input).unwrap();
+        let secret = secret_for_test("key");
+        for failure in [
+            engine.invoke(&request, &input, &secret, None).unwrap_err(),
+            engine
+                .submit_with_inputs(
+                    &request,
+                    &input,
+                    &NoInputImages,
+                    &secret,
+                    None,
+                    &crate::provider::contract::NoopProviderTransportObserver,
+                )
+                .err()
+                .unwrap(),
+        ] {
+            assert_eq!(failure.code, INPUT_ARTIFACT_UNAVAILABLE);
+            assert_eq!(failure.spend_disposition, SpendDisposition::Release);
+            assert_eq!(failure.phase, ProviderPhase::PreSend);
+        }
+        assert!(transport.posts.lock().unwrap().is_empty());
     }
 }

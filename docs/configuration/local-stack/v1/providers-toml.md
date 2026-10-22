@@ -288,6 +288,14 @@ Required normalized provider ID. It must exactly match the target's `provider` v
 
 Required normalized model ID. It must exactly match the target's `model` value.
 
+### `pricing_rules.workload_type`
+
+Optional workload this rule prices, such as `image_edit`, so one model can carry
+separate generation and edit prices. A rule that names a workload prices only
+that workload. A rule without one prices every workload of its model that no
+rule names, which is how every rule priced before v0.2.5; shipped
+text-to-image contracts leave it out.
+
 ### `pricing_rules.currency`
 
 Required currency code. Schema version 2 currently supports `USD`; it is normalized to uppercase.
@@ -298,7 +306,7 @@ Optional inline table of named dimensions used to distinguish prices for the sam
 
 Selector keys are lowercase identifiers (`a`–`z`, digits and `_`, starting with a letter). Values are trimmed and lowercased and may contain letters, digits, `_`, `-`, `.` and `:` (for example `aspect_ratio = "16:9"`). An empty selector is rejected.
 
-A rule whose selector includes `image_size` prices only output images: exactly one `image` component, or `megapixel` / `additional_megapixel` components with or without an `image` component. Define one unambiguous rule for every enabled image size. Two rules with the same provider, model, and selector are rejected.
+A rule whose selector includes `image_size` prices only images: exactly one `image` component, or `megapixel` / `additional_megapixel` components with or without an `image` component, plus an optional `input_image` component for edits. Define one unambiguous rule for every enabled image size. Two rules with the same provider, model, workload, and selector are rejected.
 
 ### `pricing_rules.selector.image_size`
 
@@ -330,7 +338,8 @@ Required. Allowed values:
 - `megapixel` — billed megapixels of every output image (`megapixels`);
 - `additional_megapixel` — billed megapixels beyond the first of each output
   image (`additional_megapixels`). Pair it with an `image` component to price
-  "first megapixel, then each additional one". Its quantity may be zero.
+  "first megapixel, then each additional one". Its quantity may be zero;
+- `input_image` — each input image an edit request sends (`input_images`).
 
 The two megapixel units are available only to [provider packs](../../../provider-packs.md#megapixels),
 which derive them from certified output sizes and settle them from the
@@ -374,10 +383,10 @@ billable component.
 
 ## Matching and ambiguity rules
 
-- Every selectable live target needs a pricing rule for its exact provider/model and request selector.
+- Every selectable live target needs a pricing rule for its exact provider/model, workload, and request selector.
 - Rule IDs are globally unique within the catalog.
-- Provider/model/selector combinations are unambiguous.
-- Selectors that include `image_size` require one image component.
+- Provider/model/workload/selector combinations are unambiguous.
+- Selectors that include `image_size` price only images: one `image` component or megapixel components, plus at most an `input_image` component.
 - Component units cannot repeat within one rule.
 - Rates cannot be negative and denominators must be positive.
 - Unsupported currencies, units, selectors, or old flat pricing shapes are rejected.
