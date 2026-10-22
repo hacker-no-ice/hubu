@@ -1,0 +1,178 @@
+.proof-report { padding-top: 66px; }
+.proof-heading { max-width: 760px; margin: 0 0 48px; }
+.proof-heading .eyebrow { margin: 40px 0 24px; }
+.proof-heading h1 { margin: 0 0 28px; font-size: clamp(56px, 7.6vw, 94px); line-height: .98; font-weight: 550; letter-spacing: -.065em; }
+.proof-heading .engineering-deck { max-width: 640px; font-size: 23px; }
+.proof-scope-statement { max-width: 610px; margin: 24px 0; font-size: 15px; line-height: 1.7; color: var(--text); }
+.proof-top-actions { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 30px; }
+.proof-kicker { color: var(--muted); font: 11px/1.6 var(--font-geist-mono), monospace; text-transform: uppercase; letter-spacing: .075em; }
+.proof-provenance { display: grid; grid-template-columns: 1.5fr 1fr 1.2fr 1fr; gap: 24px; margin: 0 0 76px; padding: 23px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.proof-provenance dt, .proof-money-states dt, .proof-metrics dt { color: var(--muted); font: 11px/1.6 var(--font-geist-mono), monospace; }
+.proof-provenance dd { margin: 7px 0 0; font: 12px/1.7 var(--font-geist-mono), monospace; overflow-wrap: anywhere; }
+.proof-provenance a, .proof-text-link, .proof-evidence-links a, .proof-method-body a, .proof-identity a, .proof-reproduce a:not(.button), .proof-figure figcaption a { color: var(--cyan); }
+.proof-section-label h2 { margin: 13px 0 15px; font-size: clamp(29px, 4vw, 40px); font-weight: 540; letter-spacing: -.04em; line-height: 1.15; }
+.proof-section-label > p:last-child { max-width: 650px; margin-bottom: 30px; color: var(--muted); font-size: 16px; line-height: 1.75; }
+.proof-overview { scroll-margin-top: 100px; }
+.proof-summary-table table { width: 100%; border-collapse: collapse; }
+.proof-summary-table thead th { padding: 15px 0; text-align: left; color: var(--muted); font: 11px/1.5 var(--font-geist-mono), monospace; text-transform: uppercase; letter-spacing: .06em; border-bottom: 1px solid var(--line); }
+.proof-summary-table tbody th, .proof-summary-table td { padding: 25px 22px 25px 0; text-align: left; border-bottom: 1px solid var(--line); vertical-align: top; }
+.proof-summary-table tbody th { width: 29%; font-size: 15px; line-height: 1.6; font-weight: 500; }
+.proof-summary-table th a { display: flex; gap: 10px; align-items: baseline; }
+.proof-summary-table th a > span:first-child { color: var(--muted); font: 11px/1.6 var(--font-geist-mono), monospace; }
+.proof-summary-table th a > span:last-child { color: var(--cyan); margin-left: auto; }
+.proof-summary-table td:nth-child(2) { width: 23%; }
+.proof-summary-table td:last-child { width: 48%; color: var(--muted); font-size: 14px; line-height: 1.75; padding-right: 0; }
+.proof-summary-table tbody th a:hover { color: var(--cyan); }
+.proof-verdict { display: inline-flex; gap: 8px; align-items: center; width: max-content; font: 11px/1.6 var(--font-geist-mono), monospace; white-space: nowrap; padding: 5px 9px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); color: var(--muted); }
+.proof-verdict > span { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.proof-verdict-holds { color: var(--cyan); border-color: #254b53; }
+.proof-verdict-holds-with-caveat { color: var(--warning); border-color: #53432c; }
+.proof-verdict-does-not-hold { color: #f0aaa4; border-color: #5a3634; }
+.proof-scope { display: grid; grid-template-columns: 1fr 1fr; gap: 32px; padding: 26px 28px; margin: 34px 0 74px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; }
+.proof-scope p { margin: 9px 0 0; color: var(--text); font-size: 14px; line-height: 1.8; }
+.proof-scope > div:last-child p { color: var(--muted); }
+.proof-episode, .proof-identity, .proof-reproduce { scroll-margin-top: 110px; margin-top: 80px; padding-top: 32px; border-top: 1px solid var(--line); }
+.proof-episode-header { display: grid; grid-template-columns: 45px minmax(0, 1fr) auto; align-items: start; gap: 20px; }
+.proof-episode-number { color: var(--indigo); font: 16px/1.6 var(--font-geist-mono), monospace; padding-top: 1px; }
+.proof-episode-header .proof-kicker { margin: 0 0 10px; }
+.proof-episode-header h2 { margin: 0; font-size: clamp(26px, 3vw, 34px); line-height: 1.2; font-weight: 540; letter-spacing: -.035em; }
+.proof-claim { margin: 25px 0 25px 65px; max-width: 770px; color: var(--muted); font-size: 17px; line-height: 1.8; }
+.proof-observation { margin: 28px 0; padding-left: 20px; border-left: 2px solid var(--indigo); }
+.proof-observation .proof-kicker { margin: 0 0 7px; }
+.proof-observation > p:last-child { margin: 0; font-size: 18px; line-height: 1.75; max-width: 830px; }
+.proof-metrics { display: flex; flex-wrap: wrap; gap: 25px 55px; margin: 28px 0; }
+.proof-metrics dd { margin: 7px 0 0; font: 24px/1.4 var(--font-geist-mono), monospace; letter-spacing: -.04em; }
+.proof-no-data { padding: 26px 28px; margin: 28px 0; border: 1px dashed var(--line); border-radius: 7px; }
+.proof-no-data p { margin: 8px 0 0; font-size: 14px; color: var(--muted); line-height: 1.7; }
+.proof-caveat { padding: 15px 18px; background: #12100c; border-left: 2px solid var(--warning); color: #c9c0b3; font-size: 14px; line-height: 1.8; }
+.proof-caveat strong { color: var(--warning); font-weight: 550; }
+.proof-method, .proof-terminal { margin-top: 24px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); }
+.proof-method summary, .proof-terminal summary { padding: 18px 21px; cursor: pointer; font-size: 14px; line-height: 1.5; }
+.proof-method summary { display: flex; justify-content: space-between; gap: 20px; list-style: none; }
+.proof-method summary::-webkit-details-marker { display: none; }
+.proof-expand { color: var(--cyan); font-family: var(--font-geist-mono), monospace; }
+.proof-method[open] .proof-expand { transform: rotate(45deg); }
+.proof-method-body { padding: 4px 25px 26px; border-top: 1px solid var(--line); }
+.proof-method-body h3 { font-size: 15px; margin-top: 25px; }
+.proof-method-body p, .proof-method-body li, .proof-method-body a, .proof-reproduce-grid p { font-size: 14px; line-height: 1.8; }
+.proof-method-body p, .proof-method-body li { color: var(--muted); }
+.proof-method-body ol { padding-left: 21px; list-style: decimal; }
+.proof-method-body li { padding-left: 5px; margin: 8px 0; }
+.proof-method-body li::marker { color: var(--cyan); }
+.proof-report pre { overflow: auto; padding: 20px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 7px; }
+.proof-report pre code { font: 12px/1.8 var(--font-geist-mono), monospace; white-space: pre; }
+.proof-terminal pre { margin: 0 20px; }
+.proof-terminal > p { margin: 16px 20px 20px; color: var(--muted); font-size: 12px; line-height: 1.7; }
+.proof-evidence-links { display: flex; flex-wrap: wrap; gap: 10px 28px; margin: 21px 0; font-size: 12px; line-height: 1.7; }
+.proof-evidence-links > span { color: var(--muted); }
+.proof-evidence-links a { display: inline-flex; align-items: center; gap: 10px; }
+.proof-figure { margin: 28px 0; padding: 24px 28px 17px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; }
+.proof-figure figcaption { padding-top: 15px; margin-top: 20px; border-top: 1px solid var(--line); color: var(--muted); font: 11px/1.8 var(--font-geist-mono), monospace; }
+.proof-line-chart { display: block; width: 100%; height: auto; }
+.proof-line-chart text { fill: var(--muted); font: 12px var(--font-geist-mono), monospace; }
+.proof-chart-grid { stroke: var(--line); }
+.proof-chart-budget { stroke: var(--muted); stroke-dasharray: 5 7; }
+.proof-chart-line { fill: none; stroke: var(--cyan); stroke-width: 3; }
+.proof-chart-point { fill: var(--cyan); }
+.proof-chart-note { color: var(--muted); font-size: 13px; line-height: 1.75; margin: 12px 0 0; }
+.proof-data-table { margin-top: 15px; font-size: 12px; color: var(--muted); }
+.proof-data-table summary { cursor: pointer; padding: 6px 0; }
+.proof-data-table table { border-collapse: collapse; width: 100%; max-width: 400px; margin-top: 10px; font-family: var(--font-geist-mono), monospace; }
+.proof-data-table th, .proof-data-table td { text-align: left; padding: 5px 12px 5px 0; border-bottom: 1px solid var(--line); }
+.proof-cost-bars { display: grid; gap: 25px; padding: 12px 0; }
+.proof-bar-row > div:first-child { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; color: var(--muted); margin-bottom: 10px; }
+.proof-bar-row strong { color: var(--text); font: 16px/1.5 var(--font-geist-mono), monospace; }
+.proof-bar-track { height: 13px; background: var(--surface-2); border-radius: 2px; overflow: hidden; }
+.proof-bar-fill { display: block; height: 100%; }
+.proof-series-0 { background: var(--cyan); }
+.proof-series-1 { background: var(--indigo); }
+.proof-series-2 { background: var(--warning); }
+.proof-timeline { list-style: none; padding: 4px 0; margin: 0; }
+.proof-timeline li { position: relative; display: grid; grid-template-columns: 76px minmax(0, 1fr); gap: 24px; padding: 0 0 24px; }
+.proof-timeline li:last-child { padding-bottom: 0; }
+.proof-timeline li::before { content: ""; position: absolute; left: 86px; top: 8px; bottom: -7px; width: 1px; background: var(--line); }
+.proof-timeline li:last-child::before { display: none; }
+.proof-timeline li::after { content: ""; position: absolute; left: 83px; top: 7px; width: 7px; height: 7px; border-radius: 50%; background: var(--cyan); }
+.proof-timeline-time { color: var(--muted); font: 12px/1.7 var(--font-geist-mono), monospace; }
+.proof-timeline strong { font-size: 14px; font-weight: 550; }
+.proof-timeline p { margin: 7px 0 0; color: var(--muted); font-size: 13px; line-height: 1.7; }
+.proof-outcome-strip { display: flex; gap: 3px; height: 35px; margin: 10px 0 23px; border-radius: 3px; overflow: hidden; }
+.proof-outcome-strip span { display: grid; place-items: center; color: var(--bg); font: 12px var(--font-geist-mono), monospace; min-width: 24px; }
+.proof-counts, .proof-money-states { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+.proof-counts dt { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
+.proof-key { display: inline-block; width: 7px; height: 7px; }
+.proof-counts dd { margin: 12px 0 0; font: 28px/1.2 var(--font-geist-mono), monospace; }
+.proof-counts small { color: var(--muted); font-size: 12px; }
+.proof-money-states { margin-top: 30px; padding-top: 20px; border-top: 1px solid var(--line); }
+.proof-money-states dd { margin: 8px 0 0; font: 17px/1.5 var(--font-geist-mono), monospace; }
+.proof-identity { border-color: #5a3634; }
+.proof-identity > p { max-width: 860px; margin: 26px 0 0 65px; color: var(--muted); font-size: 15px; line-height: 1.85; }
+.proof-identity strong { color: var(--text); font-weight: 550; }
+.proof-identity a { text-decoration: underline; text-underline-offset: 3px; }
+.proof-reproduce-grid { display: grid; grid-template-columns: 1.15fr 1fr; gap: 40px; margin-top: 30px; }
+.proof-reproduce-grid > div { min-width: 0; }
+.proof-reproduce-grid h3 { font-size: 16px; font-weight: 550; }
+.proof-reproduce-grid p { color: var(--muted); }
+.proof-reproduce-grid a { font-size: 13px; line-height: 1.7; }
+.proof-pending-note { padding: 15px 0; border-top: 1px solid var(--line); }
+.proof-reading { margin-top: 45px; }
+.proof-reading dl > div { display: grid; grid-template-columns: 155px 1fr; gap: 20px; margin: 20px 0; font-size: 14px; line-height: 1.75; }
+.proof-reading dd { margin: 0; color: var(--muted); }
+.proof-footer { width: 100%; display: flex; justify-content: space-between; gap: 25px; }
+.proof-report a:focus-visible, .proof-report summary:focus-visible, .proof-index a:focus-visible { outline: 2px solid var(--cyan); outline-offset: 5px; }
+.proof-report a:hover, .proof-index a:hover .proof-text-link { text-decoration: underline; text-underline-offset: 4px; }
+.proof-report .button:hover { text-decoration: none; }
+.proof-release-link { display: grid; grid-template-columns: 1.2fr 1fr; gap: 50px; padding: 35px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.proof-release-link h2 { font-size: clamp(28px, 4vw, 42px); line-height: 1.2; font-weight: 540; letter-spacing: -.04em; margin: 18px 0 0; }
+.proof-release-link p { color: var(--muted); font-size: 17px; line-height: 1.8; }
+.proof-text-link { font-size: 14px; }
+.proof-index-note { color: var(--muted); font-size: 13px; line-height: 1.8; margin-top: 28px; }
+@media (max-width: 900px) {
+  .proof-provenance { grid-template-columns: 1fr 1fr; }
+  .proof-summary-table tbody th { width: 33%; }
+  .proof-summary-table td:nth-child(2) { width: 25%; }
+  .proof-summary-table td:last-child { width: 42%; }
+  .proof-episode-header { grid-template-columns: 32px minmax(0, 1fr); gap: 16px; }
+  .proof-episode-header > .proof-verdict { grid-column: 2; }
+  .proof-claim, .proof-identity > p { margin-left: 48px; }
+}
+@media (max-width: 620px) {
+  .proof-report { padding: 34px 20px 60px; }
+  .proof-heading .eyebrow { margin-top: 30px; }
+  .proof-heading h1 { font-size: clamp(50px, 13vw, 76px); }
+  .proof-heading .engineering-deck { font-size: 19px; line-height: 1.65; }
+  .proof-provenance { gap: 22px 16px; margin-bottom: 48px; }
+  .proof-provenance dd { font-size: 11px; }
+  .proof-summary-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .proof-summary-table tbody tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; padding: 22px 0; border-top: 1px solid var(--line); }
+  .proof-summary-table tbody tr:last-child { border-bottom: 1px solid var(--line); }
+  .proof-summary-table tbody th, .proof-summary-table td { padding: 0; border: 0; width: auto !important; }
+  .proof-summary-table tbody th { font-size: 14px; }
+  .proof-summary-table th a { gap: 8px; }
+  .proof-summary-table th a > span:last-child { display: none; }
+  .proof-summary-table td:last-child { grid-column: 1 / -1; font-size: 13px; }
+  .proof-verdict { font-size: 10px; gap: 6px; padding: 4px 7px; }
+  .proof-scope { grid-template-columns: 1fr; gap: 22px; padding: 22px; margin-bottom: 50px; }
+  .proof-episode, .proof-identity, .proof-reproduce { margin-top: 56px; padding-top: 26px; }
+  .proof-overview, .proof-episode, .proof-identity, .proof-reproduce { scroll-margin-top: 145px; }
+  .proof-episode-header { gap: 14px; grid-template-columns: 26px minmax(0, 1fr); }
+  .proof-episode-header h2 { font-size: 27px; }
+  .proof-episode-number { font-size: 14px; }
+  .proof-claim, .proof-identity > p { margin-left: 0; font-size: 15px; }
+  .proof-observation > p:last-child { font-size: 16px; }
+  .proof-method-body { padding-left: 18px; padding-right: 18px; }
+  .proof-report pre { padding: 15px; }
+  .proof-report pre code { font-size: 11px; }
+  .proof-figure { padding: 18px 15px 15px; }
+  .proof-line-chart { min-width: 0; }
+  .proof-line-chart text { font-size: 17px; }
+  .proof-counts, .proof-money-states { gap: 18px 12px; }
+  .proof-counts dt { font-size: 10px; line-height: 1.5; align-items: baseline; gap: 5px; }
+  .proof-counts dd { font-size: 22px; }
+  .proof-counts small { font-size: 10px; }
+  .proof-money-states dt { font-size: 10px; }
+  .proof-money-states dd { font-size: 14px; }
+  .proof-reading dl > div { grid-template-columns: 1fr; gap: 5px; }
+  .proof-reproduce-grid, .proof-release-link { grid-template-columns: 1fr; gap: 20px; }
+  .proof-footer { flex-wrap: wrap; font-size: 12px; }
+}

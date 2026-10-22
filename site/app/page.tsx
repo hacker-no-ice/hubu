@@ -195,7 +195,7 @@ export default function Home() {
         </section>
       </main>
 
-      <footer><span>Hubu / 户部</span><p>Governance before execution.</p><a href="https://github.com/hacker-no-ice/hubu">Source on GitHub ↗</a></footer>
+      <footer><span>Hubu / 户部</span><p>Governance before execution.</p><a href="/break-hubu">Break Hubu: public proof kits ↗</a><a href="https://github.com/hacker-no-ice/hubu">Source on GitHub ↗</a></footer>
     </div>
   );
 }

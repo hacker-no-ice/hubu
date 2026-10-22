@@ -42,6 +42,34 @@ test("server-renders the Hubu documentation home", async () => {
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/i);
 });
 
+test("the release card keeps reproducibility and authority limits alongside its claims", async () => {
+  const [home, index, response, sitemap] = await Promise.all([
+    render().then((response) => response.text()),
+    render("/break-hubu").then((response) => response.text()),
+    render("/break-hubu/v0.2.4"),
+    readFile(new URL("../dist/client/sitemap.xml", import.meta.url), "utf8"),
+  ]);
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(home, /href="\/break-hubu"/);
+  assert.match(index, /href="\/break-hubu\/v0.2.4"/);
+  assert.match(sitemap, /https:\/\/hubustack.dev\/break-hubu\/v0.2.4/);
+  assert.match(html, /href="https:\/\/hubustack.dev\/break-hubu\/v0.2.4"/);
+  assert.match(html, /5344ab565171e1aa3d3ec628641cdbfce18372af/);
+  assert.match(html, /All claims are about Hubu’s own ledger and records, not provider invoices/);
+  assert.match(html, /Gongbu, Temporal, MCP transport, provider adapters, and actual provider billing/);
+  for (const id of ["ep01-runaway", "ep02-last-cent", "ep03-crash-recovery", "ep04-many-clients", "identity"]) {
+    assert.match(html, new RegExp(`id="${id}"`));
+    assert.match(html, new RegExp(`href="#${id}"`));
+  }
+  assert.match(html, /HUB-162\/bind-agent-account-use-to-an-authenticated-agent-session/);
+  assert.match(html, /HUB-32\/issue-executor-scoped-hubu-capabilities-for-gongbu/);
+  assert.match(html, /not server-enforced role isolation/);
+  assert.match(html, /Does not hold/);
+  assert.match(html, /a timeout never counts as a denial/i);
+  assert.doesNotMatch(html, /All claims pass|100% secure|autoplay|setInterval/);
+});
+
 test("embeds the introduction below the hero without autoplay", async () => {
   const html = await (await render()).text();
   assert.match(html, /Meet Hubu in 3 min/);
