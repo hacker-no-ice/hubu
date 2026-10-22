@@ -786,7 +786,7 @@
       "elapsed_seconds": 5.64
     }
   ],
-  "documentary_identity_gap": "Does not hold in v0.2.4: runtime/thread-bound account authority (HUB-162).",
-  "authority_boundary": "Normal bearer has broad administrative authority (HUB-32); configuration stays fixed.",
+  "documentary_identity_gap": "Does not hold in v0.2.4: runtime/thread-bound account authority is a known gap that will be addressed in future releases.",
+  "authority_boundary": "Normal bearer has broad administrative authority; configuration stays fixed. More narrowly scoped executor authority is planned for future releases.",
   "scope": "Hubu public HTTP/CLI accounting with synthetic executor receipts; no provider billing or Gongbu execution."
 }

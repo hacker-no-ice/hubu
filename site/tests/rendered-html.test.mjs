@@ -62,8 +62,8 @@ test("the release card keeps reproducibility and authority limits alongside its 
     assert.match(html, new RegExp(`id="${id}"`));
     assert.match(html, new RegExp(`href="#${id}"`));
   }
-  assert.match(html, /HUB-162\/bind-agent-account-use-to-an-authenticated-agent-session/);
-  assert.match(html, /HUB-32\/issue-executor-scoped-hubu-capabilities-for-gongbu/);
+  assert.match(html, /known gap that will be addressed in future releases/);
+  assert.doesNotMatch(html, /linear\.app|HUB-\d+/);
   assert.match(html, /not server-enforced role isolation/);
   assert.match(html, /Does not hold/);
   assert.match(html, /a timeout never counts as a denial/i);

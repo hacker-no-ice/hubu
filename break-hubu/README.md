@@ -138,8 +138,8 @@ passing result.
 Policy, budget version, account and credentials remain fixed during each attack.
 v0.2.4's normal bearer can also administer policy and budgets: this is not proof
 that a malicious bearer holder cannot raise a budget. Runtime/thread-bound
-account authority is a documented gap ([HUB-162](https://linear.app/hubu/issue/HUB-162/bind-agent-account-use-to-an-authenticated-agent-session));
-executor-scoped authority is tracked in [HUB-32](https://linear.app/hubu/issue/HUB-32/issue-executor-scoped-hubu-capabilities-for-gongbu).
+account authority is a documented gap that will be addressed in future releases;
+more narrowly scoped executor authority is also planned.
 
 The public catalog labels the fixture scope `executor:gongbu:image`. That is
 stored execution-scope metadata here: the Python fixture performs the executor

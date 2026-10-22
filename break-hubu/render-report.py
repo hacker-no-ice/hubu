@@ -31,6 +31,14 @@ def read(path):
     return json.loads(path.read_text())
 
 
+def public_summary(path):
+    summary = read(path)
+    # These are runner annotations, not Hubu protocol evidence or measured outcomes.
+    summary['documentary_identity_gap'] = 'Does not hold in v0.2.4: runtime/thread-bound account authority is a known gap that will be addressed in future releases.'
+    summary['authority_boundary'] = 'Normal bearer has broad administrative authority; configuration stays fixed. More narrowly scoped executor authority is planned for future releases.'
+    return summary
+
+
 def micros(value):
     amount = Evidence.money(value) * 1_000_000
     if amount.denominator != 1:
@@ -199,7 +207,7 @@ def main():
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(source, target)
         if (args.evidence / 'summary.json').exists():
-            shutil.copyfile(args.evidence / 'summary.json', staging / 'summary.json')
+            (staging / 'summary.json').write_text(json.dumps(public_summary(args.evidence / 'summary.json'), indent=2) + '\n')
         with zipfile.ZipFile(staging / 'evidence.zip', 'w', zipfile.ZIP_DEFLATED) as archive:
             for path in sorted(staging.rglob('*')):
                 if path.is_file() and path.name != 'evidence.zip':
