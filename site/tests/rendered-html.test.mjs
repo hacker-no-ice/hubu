@@ -35,7 +35,7 @@ test("server-renders the Hubu documentation home", async () => {
   assert.doesNotMatch(html, /authorize → execute → submit/);
   assert.equal(html.match(/src="\/brand\/hubu-wordmark\.svg"/g)?.length, 2);
   assert.match(html, /alt="Hubu"/);
-  assert.match(html, /aria-label="Hubu documentation home"/);
+  assert.match(html, /aria-label="Hubu home"/);
   assert.match(html, /og-wordmark\.png/);
   assert.match(html, /https:\/\/hubustack\.dev\/og-wordmark\.png/);
   assert.doesNotMatch(html, /not on main yet/i);
@@ -55,7 +55,14 @@ test("release notes lead from the landing page to one concise stable release and
   assert.equal(overviewResponse.status, 200);
   const index = await indexResponse.text();
   const overview = await overviewResponse.text();
-  assert.match(home, /class="hero-version" href="\/releases\/v0.2.4" aria-label="Read release notes for Hubu v0.2.4"/);
+  const header = home.match(/<header\b[^>]*>[\s\S]*?<\/header>/)?.[0];
+  const hero = home.match(/<section class="hero">[\s\S]*?<\/section>/)?.[0];
+  assert.ok(header);
+  assert.ok(hero);
+  assert.match(header, /class="header-version" href="https:\/\/github\.com\/hacker-no-ice\/hubu\/releases\/tag\/v0\.2\.4" aria-label="Read Hubu v0.2.4 release notes on GitHub"/);
+  assert.match(header, /v0\.2\.4 <span aria-hidden="true">↗<\/span>/);
+  assert.doesNotMatch(header, /\/ docs/);
+  assert.doesNotMatch(hero, /v0\.2\.4|hero-version/);
   for (const html of [home, index, overview, docs, blog]) {
     assert.match(html, /href="\/releases"/);
     assert.doesNotMatch(html, /Break Hubu|href="\/break-hubu"|linear\.app|HUB-\d+/);
