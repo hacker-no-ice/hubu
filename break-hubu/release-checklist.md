@@ -21,8 +21,11 @@ CI job or required gate. Product regression tests remain in normal bug-fix PRs.
    operator interventions, exact arithmetic, tool/host metadata and cleanup.
    Reuse earlier evidence only if tested source and configuration match exactly;
    otherwise rerun. Never carry a stale verified label forward.
-4. Write the versioned repository card and matching dark website report. Record
-   release source and kits commit separately. Keep failures, known identity and
+4. Write the versioned repository card and website release page: a concise
+   summary of the repository changelog, claims and system card, with a link to
+   the full analysis. Add the release to `/releases`, linked from the landing
+   page. Start with v0.2.4; earlier releases are not backfilled. Record release
+   source and kits commit separately. Keep failures, known identity and
    bearer limitations, shortened leases, mock execution and untested surfaces
    visible. Link genuine product failures to engineering issues; preserve the
    original release's result when a later release fixes them.

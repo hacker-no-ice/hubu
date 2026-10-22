@@ -217,7 +217,7 @@ def main():
     source = 'import type { ReleaseReport } from "./types";\nexport type { EpisodeId, EpisodeResult, EvidenceVisual, Verdict } from "./types";\n\n'
     source += '// Generated from captured public evidence by break-hubu/render-report.py.\n'
     source += 'export const report: ReleaseReport = ' + json.dumps(report, ensure_ascii=False, indent=2) + ';\n'
-    (root / 'site/app/break-hubu/v0.2.4/report.ts').write_text(source)
+    (root / 'site/app/releases/v0.2.4/report.ts').write_text(source)
     print('Prepared website report and evidence:', destination)
 
 

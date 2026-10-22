@@ -1,9 +1,9 @@
-import { EngineeringHeader } from "../../components/EngineeringHeader";
-import { documentMetadata } from "../../lib/metadata";
-import { report, type EpisodeId, type EpisodeResult, type EvidenceVisual, type Verdict } from "./report";
+import { EngineeringHeader } from "../../../components/EngineeringHeader";
+import { documentMetadata } from "../../../lib/metadata";
+import { report, type EpisodeId, type EpisodeResult, type EvidenceVisual, type Verdict } from "../report";
 
 export const metadata = documentMetadata({
-  title: "Break Hubu · v0.2.4 release card", href: "/break-hubu/v0.2.4",
+  title: "v0.2.4 system analysis", href: "/releases/v0.2.4/report",
   description: "Four public, reproducible Hubu experiments: budget exhaustion, overrun accounting, crash recovery, and shared-budget requests. Evidence and limits included.",
 });
 
@@ -110,14 +110,14 @@ function Episode({ episode, result }: { episode: typeof episodes[number]; result
 
 export default function ReleaseCard() {
   return <div className="engineering-shell">
-    <EngineeringHeader section="break-hubu" />
+    <EngineeringHeader section="releases" />
     <main className="engineering-article proof-report" id="main-content">
       <article className="engineering-article-inner">
         <header className="proof-heading">
-          <a className="engineering-back" href="/break-hubu">← Release cards</a>
-          <p className="eyebrow"><span /> Break Hubu · {report.release}</p>
-          <h1>Claims meet<br />the ledger.</h1>
-          <p className="engineering-deck">Four small experiments against a released Hubu. The setup, the scripts, the outcomes—and the limits.</p>
+          <a className="engineering-back" href="/releases/v0.2.4">← v0.2.4 release notes</a>
+          <p className="eyebrow"><span /> Release analysis · {report.release}</p>
+          <h1>v0.2.4 system analysis</h1>
+          <p className="engineering-deck">Four reproducible experiments against Hubu’s USD budget accounting, with their setup, scripts, evidence, and limits.</p>
           <p className="proof-scope-statement">All claims are about Hubu’s own ledger and records, not provider invoices.</p>
           <div className="proof-top-actions"><a className="button primary" href="#results">Read the results <span aria-hidden="true">↓</span></a><a className="button secondary" href="#reproduce">Run it yourself <span aria-hidden="true">↗</span></a></div>
         </header>
@@ -130,8 +130,8 @@ export default function ReleaseCard() {
         {episodes.map((episode) => <Episode key={episode.id} episode={episode} result={report.episodes[episode.id]} />)}
         <section className="proof-identity" id="identity" aria-labelledby="identity-title"><div className="proof-episode-header"><span className="proof-episode-number">05</span><div><p className="proof-kicker">Documented limitation · no experiment in this card</p><h2 id="identity-title">The identity gap stays visible.</h2></div><VerdictLabel verdict="does-not-hold" /></div><p>v0.2.4 does not bind authority to use a registered agent account to an authenticated runtime or thread. These budget experiments do not establish that boundary. This is a known gap that will be addressed in future releases.</p><p><strong>The bearer boundary matters too.</strong> The normal bearer can access protected administration routes, including budget and policy changes. Each kit fixes those settings; it does not prove a bearer holder cannot raise a budget. Driver and mock-executor separation is not server-enforced role isolation. More narrowly scoped executor authority is planned for future releases. Read the <a href={`${repository}/blob/${report.sourceCommit}/crates/hubu-api/src/lib.rs`}>released routing source ↗</a>.</p></section>
         <section className="proof-reproduce" id="reproduce" aria-labelledby="reproduce-title"><div className="proof-section-label"><p className="proof-kicker">Make it your experiment</p><h2 id="reproduce-title">Read it. Run it. Compare it.</h2><p>One deterministic driver is enough. You do not need an LLM subscription or real provider credentials.</p></div><div className="proof-reproduce-grid"><div><h3>Start from the recorded kit</h3>{report.kitsCommit ? <pre><code>{`git clone ${repository}.git\ncd hubu\ngit checkout ${report.kitsCommit}\n./break-hubu/run-all.sh --release ${report.release}`}</code></pre> : <p className="proof-caveat">A kits revision will be pinned with the recorded run. No reproducibility claim is made before that revision and its evidence are attached.</p>}<p>The entry point builds the exact released source in a separate checkout and starts an isolated instance. It does not replace your installation or select another profile.</p><a href={`${repository}/blob/${report.kitsCommit ?? "main"}/break-hubu/README.md`}>Prerequisites and complete instructions ↗</a></div><div><h3>Inspect the evidence</h3><p>Every run retains the real terminal transcript, request trace, public ledger pages, authorization records, budget snapshots, and verification output—even when a claim fails.</p><p>Initial qualified host: macOS. Git, Python 3, the pinned Rust toolchain, and platform build prerequisites are required. The first build downloads source and dependencies; the experiment uses loopback.</p>{report.evidenceBundle ? <a className="button secondary" href={report.evidenceBundle.href}>{report.evidenceBundle.label} ↓</a> : <p className="proof-pending-note">A downloadable evidence bundle has not been attached.</p>}</div></div></section>
-        <details className="proof-method proof-reading"><summary><span>How to read this card</span><span className="proof-expand" aria-hidden="true">+</span></summary><div className="proof-method-body"><dl><div><dt>Holds</dt><dd>Complete evidence supports every assertion in the stated claim.</dd></div><div><dt>Holds with caveat</dt><dd>The claim depends on an explicit condition or intervention shown beside the result.</dd></div><div><dt>Does not hold</dt><dd>Valid evidence contradicts a required assertion. A later harness failure does not erase it.</dd></div><div><dt>Not tested</dt><dd>The run is incomplete or evidence is insufficient. It is not a pass.</dd></div></dl><p>Fixture receipts let us control cost and timing. They do not establish real invoices, truthful executors, provider-side exactly-once execution, or task quality. Unknown outcomes remain unresolved until evidence supports a resolution.</p><p>This is the first release card. There is no previous card to compare against.</p></div></details>
-        <footer className="engineering-article-footer proof-footer"><a href="/break-hubu">← All release cards</a><a href={`${repository}/blob/main/break-hubu/cards/v0.2.4.md`}>Plain-text release card ↗</a></footer>
+        <details className="proof-method proof-reading"><summary><span>How to read this card</span><span className="proof-expand" aria-hidden="true">+</span></summary><div className="proof-method-body"><dl><div><dt>Holds</dt><dd>Complete evidence supports every assertion in the stated claim.</dd></div><div><dt>Holds with caveat</dt><dd>The claim depends on an explicit condition or intervention shown beside the result.</dd></div><div><dt>Does not hold</dt><dd>Valid evidence contradicts a required assertion. A later harness failure does not erase it.</dd></div><div><dt>Not tested</dt><dd>The run is incomplete or evidence is insufficient. It is not a pass.</dd></div></dl><p>Fixture receipts let us control cost and timing. They do not establish real invoices, truthful executors, provider-side exactly-once execution, or task quality. Unknown outcomes remain unresolved until evidence supports a resolution.</p><p>This is the first published system analysis. No earlier release has been retroactively verified here.</p></div></details>
+        <footer className="engineering-article-footer proof-footer"><a href="/releases/v0.2.4">← v0.2.4 release notes</a><a href={`${repository}/blob/main/break-hubu/cards/v0.2.4.md`}>Plain-text system analysis ↗</a></footer>
       </article>
     </main>
   </div>;

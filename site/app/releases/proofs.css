@@ -127,6 +127,39 @@
 .proof-release-link p { color: var(--muted); font-size: 17px; line-height: 1.8; }
 .proof-text-link { font-size: 14px; }
 .proof-index-note { color: var(--muted); font-size: 13px; line-height: 1.8; margin-top: 28px; }
+.release-overview { padding-top: 60px; }
+.release-overview .engineering-article-inner { max-width: 900px; }
+.release-heading { margin-bottom: 44px; }
+.release-heading .eyebrow { margin: 38px 0 22px; }
+.release-heading h1 { margin: 0 0 18px; font-size: clamp(42px, 6vw, 66px); line-height: 1.1; font-weight: 550; letter-spacing: -.055em; }
+.release-heading .engineering-deck { max-width: 720px; font-size: 22px; }
+.release-links { display: flex; gap: 12px 28px; flex-wrap: wrap; margin-top: 24px; font-size: 13px; }
+.release-links a, .release-system-card a, .release-overview .proof-caveat a { color: var(--cyan); }
+.release-section { margin-top: 40px; padding-top: 28px; border-top: 1px solid var(--line); }
+.release-section h2 { margin: 0 0 22px; font-size: 27px; font-weight: 540; letter-spacing: -.035em; }
+.release-highlights { padding: 0 0 0 20px; list-style: disc; margin: 0 0 25px; }
+.release-highlights li { margin: 14px 0; padding-left: 7px; color: var(--muted); font-size: 15px; line-height: 1.8; }
+.release-highlights strong { color: var(--text); font-weight: 550; }
+.release-highlights li::marker { color: var(--indigo); }
+.release-section-heading { display: flex; align-items: baseline; gap: 15px 28px; justify-content: space-between; }
+.release-system-card { display: grid; grid-template-columns: 1fr 1fr; gap: 26px 36px; margin: 0; padding: 25px 28px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); }
+.release-system-card dt { color: var(--text); font-size: 13px; font-weight: 550; }
+.release-system-card dd { margin: 9px 0 0; color: var(--muted); font-size: 13px; line-height: 1.8; }
+.release-scope-note { margin: 22px 0; color: var(--muted); font-size: 13px; line-height: 1.8; }
+.release-claims { display: grid; grid-template-columns: 1fr 1fr; gap: 24px 36px; margin-top: 28px; }
+.release-claim { padding-top: 19px; border-top: 1px solid var(--line); }
+.release-claim > div { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; align-items: baseline; }
+.release-claim h3 { margin: 0; font-size: 15px; font-weight: 550; }
+.release-claim h3 span { color: var(--cyan); margin-left: 4px; }
+.release-claim p { color: var(--muted); font-size: 13px; line-height: 1.8; margin: 13px 0 0; }
+.release-claim .release-condition { color: var(--warning); font-size: 12px; margin-top: 9px; }
+.release-analysis-link { display: flex; align-items: center; justify-content: space-between; gap: 28px; margin: 35px 0 0; padding: 26px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.release-analysis-link h3 { font-size: 17px; font-weight: 550; margin: 0 0 9px; }
+.release-analysis-link p { color: var(--muted); font-size: 13px; line-height: 1.8; margin: 0; max-width: 510px; }
+.release-analysis-link .button { flex-shrink: 0; }
+.release-overview a:focus-visible { outline: 2px solid var(--cyan); outline-offset: 5px; }
+.release-overview a:hover { text-decoration: underline; text-underline-offset: 4px; }
+.release-overview .button:hover { text-decoration: none; }
 @media (max-width: 900px) {
   .proof-provenance { grid-template-columns: 1fr 1fr; }
   .proof-summary-table tbody th { width: 33%; }
@@ -137,6 +170,16 @@
   .proof-claim, .proof-identity > p { margin-left: 48px; }
 }
 @media (max-width: 620px) {
+  .release-overview { padding: 34px 20px 60px; }
+  .release-heading .engineering-deck { font-size: 19px; }
+  .release-section-heading, .release-analysis-link { flex-direction: column; align-items: flex-start; }
+  .release-section-heading { gap: 0; margin-bottom: 20px; }
+  .release-section-heading h2 { margin-bottom: 9px; }
+  .release-system-card, .release-claims { grid-template-columns: 1fr; }
+  .release-system-card { padding: 22px; gap: 23px; }
+  .release-claims { gap: 20px; }
+  .release-claim > div { gap: 8px; }
+  .release-claim h3 { font-size: 14px; }
   .proof-report { padding: 34px 20px 60px; }
   .proof-heading .eyebrow { margin-top: 30px; }
   .proof-heading h1 { font-size: clamp(50px, 13vw, 76px); }

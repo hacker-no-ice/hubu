@@ -16,6 +16,9 @@ provider key, provider invocation or paid workload is needed.
 The [v0.2.4 release card](cards/v0.2.4.md) ties measured outcomes to their exact
 scripts, environment and evidence. Targets in the episode READMEs are assertions
 to test, not guarantees. A failing or incomplete experiment stays visible.
+The public website presents this under release notes: `/releases/v0.2.4`
+summarizes the changelog, claims and system card, then links to the full analysis
+at `/releases/v0.2.4/report`.
 
 ## Prerequisites and release identity
 
