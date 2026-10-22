@@ -2,6 +2,7 @@ mod catalog;
 mod governance;
 mod response;
 mod routing;
+mod task_budget;
 mod transport;
 
 use serde_json::{json, Value};
@@ -17,6 +18,7 @@ use routing::{
     public_spend_result, route_tool_call_v1, tool_error_result_v1, tool_result_v1,
     validate_model_spend_arguments,
 };
+pub(crate) use task_budget::{status_task_budget, ActiveTaskBudget};
 pub use transport::RoutingConfig;
 
 pub(crate) use catalog::{
@@ -278,6 +280,12 @@ fn call_tool_with_operation_identity(
                         error_response(id, -32000, &message)
                     }
                 };
+            }
+            if matches!(
+                name.as_str(),
+                task_budget::OPEN_TOOL | task_budget::CLOSE_TOOL
+            ) {
+                return success_response(id, task_budget::observe_result(server, &name, result));
             }
             success_response(id, result)
         }

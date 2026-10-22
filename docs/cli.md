@@ -117,6 +117,23 @@ See [Spend lifecycle](spend-lifecycle.md) for reservation, settlement, and
 ledger behavior. Policies govern individual requests; budgets govern cumulative
 spending over their active period.
 
+## Task budgets
+
+A [task budget](task-budgets.md) reserves part of an agent budget for one task.
+Spend for that task must fit it, and closing it returns the unused part:
+
+```bash
+hubu budget task open --agent-id AGENT_ID --task-id landing-page --amount 3 --reason "landing page design"
+hubu budget task list
+hubu budget task show --agent-id AGENT_ID --task-id landing-page
+hubu budget task close --task-budget-id tbg_0123456789ab
+```
+
+`list` shows open task budgets. Use `--all` to include closed ones. Each entry
+shows spend so far, frozen, remaining and the agent budget it draws from. A
+closed one also shows the amount returned. `hubu watch` shows open task budgets
+under their agent.
+
 ## Amounts
 
 Every amount the CLI accepts (`--amount` on `budget create`, `budget update`,

@@ -98,6 +98,7 @@ fn server_with_spend_approval(
         ))),
         meta_shape_diagnostics: false,
         save_folders_path: None,
+        active_task_budget: Arc::new(Mutex::new(None)),
         use_capability_snapshot_for_test: true,
     }
 }
@@ -200,7 +201,7 @@ fn configured_catalog_matches_the_owned_hubu_contract() {
 
     let expected = super::catalog::tool_definitions();
     assert_eq!(&actual[5..], expected.as_slice());
-    assert_eq!(expected.len(), 31);
+    assert_eq!(expected.len(), 34);
     assert!(!actual
         .iter()
         .any(|tool| tool["name"] == "hubu_replace_budget"));
@@ -332,7 +333,7 @@ fn combined_catalog_exposes_both_approved_sets_under_readiness_gates() {
         None,
     );
     let tools = server.list_tools_for_snapshot();
-    assert_eq!(tools.len(), 42);
+    assert_eq!(tools.len(), 45);
     assert!(tools.contains(&gongbu::operation_status_definition()));
     for definition in super::catalog::tool_definitions()
         .into_iter()
@@ -350,7 +351,7 @@ fn combined_catalog_exposes_both_approved_sets_under_readiness_gates() {
         snapshot.gongbu.reason_code = Some("backend_not_ready");
     }
     let degraded = server.list_tools_for_snapshot();
-    assert_eq!(degraded.len(), 40);
+    assert_eq!(degraded.len(), 43);
     assert!(!degraded
         .iter()
         .any(|tool| tool["name"] == "gongbu_create_execution"));
@@ -2544,4 +2545,206 @@ fn save_artifact_tool_is_listed_only_for_human_allowlisted_folders() {
     );
     assert_eq!(response["error"]["code"], -32602);
     assert!(!root.path().join("brand").exists());
+}
+
+/// Serve `responses` to consecutive connections, capturing each raw request.
+fn scripted_http_server(
+    responses: Vec<(u16, String)>,
+) -> (String, Receiver<String>, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let (sender, receiver) = mpsc::channel();
+    let handle = thread::spawn(move || {
+        for (status, body) in responses {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut bytes = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            loop {
+                let count = stream.read(&mut buffer).unwrap();
+                if count == 0 {
+                    break;
+                }
+                bytes.extend_from_slice(&buffer[..count]);
+                if let Some(end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&bytes[..end + 4]).to_ascii_lowercase();
+                    let length = headers
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length:"))
+                        .and_then(|value| value.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    if bytes.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+            }
+            sender.send(String::from_utf8(bytes).unwrap()).unwrap();
+            write!(
+                stream,
+                "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        }
+    });
+    (endpoint, receiver, handle)
+}
+
+fn request_body(raw: &str) -> Value {
+    serde_json::from_str(raw.split("\r\n\r\n").nth(1).unwrap()).unwrap()
+}
+
+#[test]
+fn opened_task_budget_binds_session_spend_and_shows_in_operation_status() {
+    let money =
+        |units: &str| json!({"units": units, "scale": 6, "currency": "usd", "display": "x"});
+    let task_budget = |state: &str, consumed: &str| {
+        json!({
+            "task_budget_id": "tbg_0123456789ab", "task_id": "landing-page", "state": state,
+            "agent_id": "agt_1", "budget_id": "bgt_1", "currency": "usd",
+            "amount_limit": money("3000000"), "consumed_amount": money(consumed),
+            "frozen_amount": money("0"), "remaining_amount": money("1766000"),
+        })
+    };
+    let responses = vec![
+        (200, json!({"task_budget": task_budget("open", "0"), "idempotent_replay": false}).to_string()),
+        (200, json!({"decision": "deny", "reasons": ["task budget does not have enough remaining balance"], "payment": null}).to_string()),
+        (200, json!({"task_budgets": [task_budget("open", "1234000")]}).to_string()),
+        (200, json!({"task_budget": task_budget("closed", "1234000"), "idempotent_replay": false}).to_string()),
+        (200, json!({"decision": "deny", "reasons": ["policy"], "payment": null}).to_string()),
+    ];
+    let (endpoint, requests, handle) = scripted_http_server(responses);
+    let server = server_with_backends(&endpoint, None, false, None);
+
+    let opened = tool_call(
+        &server,
+        "hubu_open_task_budget",
+        json!({"agent_id": "agt_1", "task_id": "landing-page", "amount": "3"}),
+        None,
+    );
+    let raw = requests
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap_or_else(|_| panic!("open did not reach Hubu: {opened}"));
+    assert!(raw.starts_with("POST /task-budgets HTTP/1.1"));
+    assert_eq!(request_body(&raw)["source"], "hubu-unified-mcp");
+    assert!(opened["result"]["structuredContent"]["session_binding"]
+        .as_str()
+        .unwrap()
+        .contains("draw from this task budget"));
+
+    let spend = |tool_use_id: &str| {
+        tool_call(
+            &server,
+            "hubu_authorize_spend",
+            json!({"account_id": "acct_1", "amount": "2.00", "reason": "draft", "merchant": "gongbu.image"}),
+            Some(json!({"claudecode/toolUseId": tool_use_id})),
+        )
+    };
+    let denied = spend("toolu_1");
+    let raw = requests.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(raw.starts_with("POST /spend/authorize HTTP/1.1"));
+    assert_eq!(request_body(&raw)["task_id"], "landing-page");
+    let handle_id = denied["result"]["structuredContent"]["operation_handle"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let status = server.call_tool_from_snapshot(
+        json!(8),
+        json!({"name": "hubu_operation_status", "arguments": {"operation_handle": handle_id}}),
+    );
+    let raw = requests.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(raw.starts_with("GET /task-budgets?all=true HTTP/1.1"));
+    let projected = &status["result"]["structuredContent"]["task_budget"];
+    assert_eq!(projected["task_budget_id"], "tbg_0123456789ab");
+    assert_eq!(projected["spent_amount"]["units"], "1234000");
+    assert!(status["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("spent_amount"));
+
+    let closed = tool_call(
+        &server,
+        "hubu_close_task_budget",
+        json!({"task_budget_id": "tbg_0123456789ab"}),
+        None,
+    );
+    let raw = requests.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(raw.starts_with("POST /task-budgets/close HTTP/1.1"));
+    assert!(closed["result"]["structuredContent"]["session_binding"]
+        .as_str()
+        .unwrap()
+        .contains("closed"));
+
+    spend("toolu_2");
+    let raw = requests.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert_eq!(request_body(&raw)["task_id"], Value::Null);
+    handle.join().unwrap();
+
+    // Redelivering the first call after the task closed keeps its recorded task.
+    let replay = spend("toolu_1");
+    assert_eq!(
+        replay["result"]["structuredContent"]["operation_handle"],
+        denied["result"]["structuredContent"]["operation_handle"]
+    );
+}
+
+#[test]
+fn task_budget_tool_arguments_fail_before_network() {
+    let server = server_with_backends("http://127.0.0.1:1", None, false, None);
+    for (name, arguments) in [
+        (
+            "hubu_open_task_budget",
+            json!({"agent_id": "agt_1", "task_id": "t"}),
+        ),
+        (
+            "hubu_open_task_budget",
+            json!({"agent_id": "agt_1", "task_id": "t", "amount": "1", "operation_key": "x"}),
+        ),
+        ("hubu_close_task_budget", json!({})),
+        (
+            "hubu_close_task_budget",
+            json!({"task_budget_id": "tbg_1&all=true"}),
+        ),
+        ("hubu_list_task_budgets", json!({"agent_id": "agt 1"})),
+        ("hubu_list_task_budgets", json!({"include_all": "yes"})),
+    ] {
+        let response = tool_call(&server, name, arguments.clone(), None);
+        assert!(
+            response.get("error").is_some(),
+            "{name} {arguments} should fail before network: {response}"
+        );
+    }
+}
+
+#[test]
+fn platform_envelopes_keep_their_own_task_over_the_session_task() {
+    let envelope = crate::operation_registry::NormalizedHarnessIdentity::from_meta(Some(&json!({
+        "hubu.dev/platform-invocation": {"platform": "codex-controlled", "invocation_id": "i-1", "task_id": "linear:HUB-1"}
+    })))
+    .unwrap();
+    let claude = crate::operation_registry::NormalizedHarnessIdentity::from_meta(Some(&json!({
+        "claudecode/toolUseId": "toolu_9"
+    })))
+    .unwrap();
+    let mut registry = crate::operation_registry::OperationRegistry::open_in_memory().unwrap();
+    let arguments = json!({"amount": "1"});
+    let envelope = registry
+        .resolve_or_allocate(
+            &envelope.with_session_task(Some("session-task")),
+            "hubu_authorize_spend",
+            &arguments,
+        )
+        .unwrap();
+    assert_eq!(envelope.task_id.as_deref(), Some("linear:HUB-1"));
+    let claude = registry
+        .resolve_or_allocate(
+            &claude.with_session_task(Some("session-task")),
+            "hubu_authorize_spend",
+            &arguments,
+        )
+        .unwrap();
+    assert_eq!(claude.task_id.as_deref(), Some("session-task"));
 }
