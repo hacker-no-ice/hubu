@@ -2170,7 +2170,21 @@ mod tests {
         ))
         .unwrap();
         let mut rules = Vec::new();
-        for contract in contracts["contracts"].as_array().unwrap() {
+        // The contracts the baseline froze must stay byte identical; later
+        // contracts are not part of it.
+        const BASELINE: &[&str] = &[
+            "hubu.flux-2-pro.text-to-image/v1",
+            "hubu.gemini-3.1-flash-image.text-to-image/v1",
+            "hubu.gemini-3.1-flash-lite-image.text-to-image/v1",
+        ];
+        let baseline_contracts = || {
+            contracts["contracts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|contract| BASELINE.contains(&contract["contract"].as_str().unwrap()))
+        };
+        for contract in baseline_contracts() {
             rules.extend(
                 contract["pricing_rules"]
                     .as_array()
@@ -2193,7 +2207,7 @@ mod tests {
             baseline["catalog_digest"].as_str().unwrap()
         );
         let mut checked = 0;
-        for contract in contracts["contracts"].as_array().unwrap() {
+        for contract in baseline_contracts() {
             let provider = contract["target"]["provider"].as_str().unwrap();
             let model = contract["target"]["model"].as_str().unwrap();
             for preset in contract["capability"]["presets"].as_array().unwrap() {

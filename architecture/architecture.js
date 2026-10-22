@@ -75,6 +75,8 @@ const sharedLinks = {
   gongbuProvider: ["Gongbu provider boundary", "crates/gongbu-api/src/provider/mod.rs"],
   gongbuPricing: ["Gongbu provider contract", "crates/gongbu-api/src/provider/contract.rs"],
   gongbuFlux: ["Verified FLUX.2 provider pack", "packs/verified/bfl-flux-2.toml"],
+  gongbuFluxV2: ["Verified FLUX.2 v2 provider pack (aspect ratios, per-megapixel)", "packs/verified/bfl-flux-2-v2.toml"],
+  gongbuFlux3: ["Verified FLUX 3 Image provider pack", "packs/verified/bfl-flux-3-image.toml"],
   gongbuProviderContracts: ["Provider contract production validator", "crates/gongbu-api/src/provider/provider_contracts.rs"],
   gongbuPacks: ["Provider pack schema and sandbox engine", "crates/gongbu-api/src/provider/pack.rs"],
   gongbuSyncEngine: ["Sync fixed-price pack engine", "crates/gongbu-api/src/provider/pack_sync.rs"],
@@ -600,7 +602,7 @@ const components = {
       ["Degrades gracefully", "If Temporal or Hubu is unhealthy, new work is refused while reads and recovery continue."],
       ["Installation-level caller", "One service caller can read known executions across the owner's agents; there is no per-agent isolation."],
     ],
-    links: [sharedLinks.gongbuOverview, sharedLinks.gongbuServer, sharedLinks.liveProviders, sharedLinks.gongbuProviderConfig, sharedLinks.fluxProviderContract, sharedLinks.stackProviderContract, sharedLinks.gongbuServerConfig, sharedLinks.gongbuApplication, sharedLinks.gongbuWorkflow, sharedLinks.gongbuTemporal, sharedLinks.gongbuExecution, sharedLinks.gongbuArtifact, sharedLinks.gongbuAttestation, sharedLinks.gongbuProvider, sharedLinks.gongbuPricing, sharedLinks.gongbuProviderContracts, sharedLinks.gongbuPacks, sharedLinks.gongbuSyncEngine, sharedLinks.gongbuAsyncEngine, sharedLinks.verifiedGeminiPack, sharedLinks.providerPacks, sharedLinks.gongbuFlux, sharedLinks.gongbuHubu, sharedLinks.unifiedMcp, sharedLinks.gongbuConfig, sharedLinks.spendExecutor, sharedLinks.executorConformance, sharedLinks.executionScope, sharedLinks.api],
+    links: [sharedLinks.gongbuOverview, sharedLinks.gongbuServer, sharedLinks.liveProviders, sharedLinks.gongbuProviderConfig, sharedLinks.fluxProviderContract, sharedLinks.stackProviderContract, sharedLinks.gongbuServerConfig, sharedLinks.gongbuApplication, sharedLinks.gongbuWorkflow, sharedLinks.gongbuTemporal, sharedLinks.gongbuExecution, sharedLinks.gongbuArtifact, sharedLinks.gongbuAttestation, sharedLinks.gongbuProvider, sharedLinks.gongbuPricing, sharedLinks.gongbuProviderContracts, sharedLinks.gongbuPacks, sharedLinks.gongbuSyncEngine, sharedLinks.gongbuAsyncEngine, sharedLinks.verifiedGeminiPack, sharedLinks.providerPacks, sharedLinks.gongbuFlux, sharedLinks.gongbuFluxV2, sharedLinks.gongbuFlux3, sharedLinks.gongbuHubu, sharedLinks.unifiedMcp, sharedLinks.gongbuConfig, sharedLinks.spendExecutor, sharedLinks.executorConformance, sharedLinks.executionScope, sharedLinks.api],
     zones: [
       { label: "Gongbu process + owned state", x: 300, y: 44, w: 700, h: 810 },
       { label: "Provider boundary", x: 1025, y: 44, w: 270, h: 410 },

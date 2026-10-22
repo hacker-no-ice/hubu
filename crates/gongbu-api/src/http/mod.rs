@@ -498,8 +498,11 @@ impl Api {
                 ));
             }
         }
-        let (normalized_input, output_dimensions) =
-            normalize_provider_input(&request, submitted_input)?;
+        let (normalized_input, output_dimensions) = normalize_provider_input(
+            &request,
+            submitted_input,
+            self.certifies_own_sizes(&request, existing.as_ref()),
+        )?;
         if let Some(existing) = existing {
             if !immutable_request_matches(&existing, &request, &normalized_input) {
                 return Err(ApiError::conflict());
@@ -721,6 +724,37 @@ impl Api {
         ))
     }
 
+    /// Whether the revision this request runs on, the replayed execution's
+    /// or else the active one, is a pack that certifies its own sizes.
+    fn certifies_own_sizes(
+        &self,
+        request: &CreateExecutionRequest,
+        existing: Option<&Execution>,
+    ) -> bool {
+        let Ok(key) = TargetKey::new(
+            &request.workload_type,
+            &request.provider,
+            &request.adapter,
+            &request.model,
+        ) else {
+            return false;
+        };
+        let targets = self.providers.targets();
+        let revision = match existing {
+            Some(existing) => targets
+                .resolve_persisted_revision(
+                    &key,
+                    &existing.provider_config_version,
+                    &existing.provider_config_digest,
+                )
+                .ok(),
+            None => targets.resolve_active(&key).ok(),
+        };
+        revision
+            .and_then(|revision| self.providers.pack(revision))
+            .is_some_and(|pack| pack.has_size_presets())
+    }
+
     fn authorized_execution(
         &self,
         _caller: &AuthenticatedCaller,
@@ -888,8 +922,12 @@ impl Api {
 fn normalize_provider_input(
     request: &CreateExecutionRequest,
     mut input: Value,
+    certifies_own_sizes: bool,
 ) -> Result<(Value, Option<OutputDimensions>), ApiError> {
-    let output_dimensions = if request.provider == flux_contract::PROVIDER_ID
+    // The v1 FLUX contract writes its certified preset size into the stored
+    // input. A revision whose pack certifies its own sizes derives them.
+    let output_dimensions = if !certifies_own_sizes
+        && request.provider == flux_contract::PROVIDER_ID
         && request.adapter == flux_contract::ADAPTER_ID
         && request.model == flux_contract::MODEL_ID
     {
@@ -1604,6 +1642,14 @@ mod tests {
                 response.agent_id = "agt_wk3q33h3j6w8".into();
                 response.task_id = None;
             }
+            if spend_auth_token_id.starts_with("bflv2-") {
+                // FLUX.2 [pro] v2: every 2k size bills 2 megapixels, 4.5¢.
+                response.execution_scope = for_target("flux", "flux2_api");
+                response.amount_cents = 5;
+                response.budget_hold.amount_cents = 5;
+                response.budget_hold.frozen_amount_cents = 5;
+                response.amount = Some(exact("45000"));
+            }
             if let Some(rest) = spend_auth_token_id.strip_prefix("megapixel-") {
                 // The megapixel fixture pack: a 2k 16:9 header is exactly 7.5¢.
                 response.execution_scope = if rest.starts_with("v2-") {
@@ -1709,6 +1755,10 @@ mod tests {
     }
 
     fn supported_flux_catalog() -> ValidatedProviderCatalog {
+        flux_contract_catalog("hubu.flux-2-pro.text-to-image/v1")
+    }
+
+    fn flux_contract_catalog(contract: &str) -> ValidatedProviderCatalog {
         let document: Value = serde_json::from_str(include_str!(
             "../../../../contracts/provider-contracts-v1.json"
         ))
@@ -1717,7 +1767,7 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .find(|contract| contract["contract"] == "hubu.flux-2-pro.text-to-image/v1")
+            .find(|definition| definition["contract"] == contract)
             .unwrap();
         let mut target = contract_definition["target"].clone();
         target["secret_service"] = json!("gongbu.bfl.hubu-hub-172");
@@ -1761,7 +1811,13 @@ mod tests {
             "../../../../contracts/provider-contracts-v1.json"
         ))
         .unwrap();
-        let contracts = document["contracts"].as_array().unwrap();
+        // One revision per target: the v1 contracts, which share no target.
+        let contracts: Vec<&Value> = document["contracts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|contract| contract["contract"].as_str().unwrap().ends_with("/v1"))
+            .collect();
         let bindings = contracts
             .iter()
             .map(|contract| {
@@ -2338,6 +2394,7 @@ mod tests {
             ids,
             std::collections::BTreeSet::from([
                 "hubu.flux-2-pro.text-to-image/v1",
+                "hubu.flux-3-image.text-to-image/v1",
                 "hubu.gemini-3.1-flash-image.text-to-image/v1",
                 "hubu.gemini-3.1-flash-lite-image.text-to-image/v1"
             ])
@@ -2421,6 +2478,68 @@ mod tests {
         assert_eq!(response.status, 404);
         assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), 0);
         assert!(fixture.scheduler.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn flux_v2_creates_aspect_ratio_sizes_without_writing_v1_sizes() {
+        let mut fixture = fixture();
+        fixture.api = Api::new_with_authorization_resolver(
+            fixture.repository.clone(),
+            fixture.artifacts.clone(),
+            flux_contract_catalog("hubu.flux-2-pro.text-to-image/v2"),
+            fixture.scheduler.clone(),
+            i64::MAX,
+            fixture.resolver.clone(),
+            || "2026-08-05T20:00:00Z".into(),
+        );
+        let target_id = TargetKey::new("image_generation", "flux", "flux2_api", "flux-2-pro")
+            .unwrap()
+            .public_id();
+        for (token, aspect_ratio, size) in [
+            ("bflv2-header", "16:9", (1920, 1088)),
+            ("bflv2-square", "1:1", (1440, 1440)),
+            ("bflv2-portrait", "4:5", (1280, 1600)),
+        ] {
+            let created = call_create(
+                &fixture,
+                &json!({
+                    "schema_version": 2,
+                    "spend_auth_token_id": token,
+                    "input": {"prompt": "a lighthouse", "image_size": "2k",
+                              "aspect_ratio": aspect_ratio},
+                    "input_schema_version": 1,
+                    "target_id": target_id,
+                }),
+            );
+            assert_eq!(
+                created.status,
+                200,
+                "{token}: {}",
+                String::from_utf8_lossy(&created.body)
+            );
+            let stored = fixture
+                .repository
+                .get_execution(&execution(&created).execution_id)
+                .unwrap();
+            // v2 derives the size from its own presets; the stored input is
+            // what the agent sent, with no v1 preset size written into it.
+            assert!(stored.normalized_input.get("options").is_none(), "{token}");
+            assert_eq!(
+                stored.provider_config_version,
+                "hubu-flux-2-pro-t2i-2026-10-21-v2"
+            );
+            let snapshot: crate::provider_contract::PricingSnapshot =
+                serde_json::from_value(stored.pricing_snapshot).unwrap();
+            assert_eq!(snapshot.estimated_units, 45_000, "{token}");
+            assert_eq!(
+                snapshot.output_dimensions,
+                Some(OutputDimensions {
+                    width: size.0,
+                    height: size.1
+                }),
+                "{token}"
+            );
+        }
     }
 
     fn megapixel_fixture() -> (Fixture, Value) {
