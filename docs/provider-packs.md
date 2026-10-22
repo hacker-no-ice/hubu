@@ -20,7 +20,7 @@ pinned to the pack's content digest. Gongbu's tests fail if a pack and its
 contract entries disagree, so a pack change ships with a matching contract
 update. Successive versions of one pack can ship side by side, each backing
 its own contract revision: `bfl-flux-2.toml` backs FLUX.2 [pro] v1 and
-`bfl-flux-2-v2.toml` backs v2.
+`bfl-flux-2-v2.toml` backs v2. `bfl-flux-3-image.toml` backs FLUX 3 Image.
 
 ## What a pack declares and what engines own
 

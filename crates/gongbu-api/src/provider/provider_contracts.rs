@@ -12,7 +12,7 @@ use thiserror::Error;
 
 const CONTRACT_DOCUMENT: &str = include_str!("../../../../contracts/provider-contracts-v1.json");
 const CONTRACT_DOCUMENT_SHA256: &str =
-    "43b7098e601bb8b20cb3b72ca710d175605e098284a5d1fdb7f9acbbe9eba3c9";
+    "edbe0c681b7abee6dc0c65d2fa15b1f3301385f18808978c1225bdb9d9abfed4";
 
 #[derive(Debug, Error)]
 pub(crate) enum Error {
@@ -77,8 +77,11 @@ struct Capability {
 #[serde(deny_unknown_fields)]
 struct Preset {
     name: String,
-    width: u32,
-    height: u32,
+    /// The certified output size, when the provider publishes one.
+    #[serde(default)]
+    width: Option<u32>,
+    #[serde(default)]
+    height: Option<u32>,
     /// The input values that select this size, when more than `image_size`
     /// does (an aspect ratio, for example).
     #[serde(default)]
@@ -126,8 +129,10 @@ pub struct CatalogCapability {
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct CatalogPreset {
     pub name: String,
-    pub width: u32,
-    pub height: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub when: BTreeMap<String, String>,
     pub currency: String,
@@ -429,7 +434,10 @@ fn megapixel_preset_price(
     if pricing.selector.is_some() || preset.when.is_empty() {
         return Err(Error::InvalidDocument);
     }
-    let billed = i128::from(rule.billed(preset.width, preset.height));
+    let (Some(width), Some(height)) = (preset.width, preset.height) else {
+        return Err(Error::InvalidDocument);
+    };
+    let billed = i128::from(rule.billed(width, height));
     let (mut numerator, mut denominator) = (0_i128, 1_i128);
     for component in &pricing.components {
         let quantity = match component.unit {
@@ -585,7 +593,7 @@ mod tests {
     fn exact_contract_projects_sanitized_unqualified_catalog() {
         let contracts = validate_and_project(&exact_targets(), &exact_pricing()).unwrap();
         assert_eq!(contracts.len(), 1);
-        assert_eq!(contracts[0].capability.presets[1].width, 1920);
+        assert_eq!(contracts[0].capability.presets[1].width, Some(1920));
         assert_eq!(contracts[0].capability.presets[1].rate_numerator_minor, 45);
         assert!(!contracts[0].readiness.credential_reference_present);
         assert!(!contracts[0].readiness.live_qualified);
@@ -687,7 +695,7 @@ mod tests {
             .iter()
             .find(|preset| preset.name == "2k-16:9")
             .unwrap();
-        assert_eq!((header.width, header.height), (1920, 1088));
+        assert_eq!((header.width, header.height), (Some(1920), Some(1088)));
         assert_eq!(header.when["aspect_ratio"], "16:9");
         // Each tier keeps its v1 price at every ratio: 3¢, 9/2¢ and 15/2¢.
         for preset in &contract.capability.presets {
@@ -727,7 +735,14 @@ mod tests {
     fn mixed_contracts_are_order_independent_and_credentials_are_isolated() {
         let (targets, pricing) = mixed_contract_inputs(false);
         let projected = validate_and_project(&targets, &pricing).unwrap();
-        assert_eq!(projected.len(), 3);
+        assert_eq!(projected.len(), 4);
+        // FLUX 3 prices by tier; BFL publishes no fixed size per tier.
+        assert!(projected.iter().any(|contract| {
+            contract.contract == "hubu.flux-3-image.text-to-image/v1"
+                && contract.capability.presets[1].name == "2k"
+                && contract.capability.presets[1].width.is_none()
+                && contract.capability.presets[1].rate_numerator_minor == 10
+        }));
         assert!(projected.iter().any(|contract| {
             contract.contract == "hubu.gemini-3.1-flash-lite-image.text-to-image/v1"
                 && contract.capability.presets[0].rate_numerator_minor == 336
@@ -735,7 +750,7 @@ mod tests {
         assert!(projected.iter().any(|contract| {
             contract.contract == "hubu.gemini-3.1-flash-image.text-to-image/v1"
                 && contract.capability.presets[2].name == "4k"
-                && contract.capability.presets[2].width == 4096
+                && contract.capability.presets[2].width == Some(4096)
                 && contract.capability.presets[2].rate_numerator_minor == 151
         }));
         assert!(projected

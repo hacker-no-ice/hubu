@@ -116,6 +116,37 @@ revision change: drain unfinished FLUX work first (see
 three have not yet been checked with a live call, and redaction attestation
 covers v1 executions only.
 
+## FLUX 3 Image contract
+
+`hubu.flux-3-image.text-to-image/v1` runs BFL's
+[FLUX 3 Image](https://docs.bfl.ai/flux_3/flux3_image_overview) model
+(`flux-3-image`) from the verified pack `packs/verified/bfl-flux-3-image.toml`.
+It is a separate target from FLUX.2 [pro] (`flux` / `flux2_api` /
+`flux-3-image`), so a profile can bind it beside either FLUX.2 contract, with
+the same BFL key.
+
+- **Request:** `POST https://api.bfl.ai/v1/flux-3-image` with `prompt`,
+  `resolution` (from `image_size`), `aspect_ratio`, the optional
+  `options.safety_tolerance` (0 to 5), and `grounding = false`. FLUX 3 can
+  search the web to ground a prompt; this contract always turns that off, so
+  prompts never go to search. FLUX 3 takes no seed, width or height.
+- **Sizes:** `image_size` is `1k` or `2k`. `aspect_ratio` is one of BFL's
+  fixed ratios from `21:9` to `9:21`, `1:1` by default; `auto` is not offered,
+  so the agent always chooses the ratio. BFL doesn't publish the exact pixel
+  size of each tier and ratio, so the contract certifies the tier and ratio it
+  sends, not a size, and its presets carry no width or height.
+- **Pricing:** by tier, at any aspect ratio, from BFL's FLUX 3 Image rates
+  reviewed on 2026-10-21 (pricing version `bfl-flux-3-image-usd-2026-10-21-v1`):
+  USD 0.048 per `1k` image and USD 0.10 per `2k` image. BFL's reported credits
+  settle the actual cost, as for FLUX.2.
+- **Polling, statuses, delivery and recovery:** the same as FLUX.2.
+
+BFL also offers `768sq`, `1.5k` and `4k`. `768sq` and `1.5k` need Gongbu's
+`image_size` values widened. `4k` (about 16.8 MP) waits on a live check that
+BFL's 4k output fits the 20 MiB artifact bound, so a paid image is never
+refused at delivery. No live FLUX 3 call has been made yet; one guarded call
+per tier is still needed before relying on the contract.
+
 ## Certified output dimensions
 
 The `flux2_api` adapter pins the non-preview `flux-2-pro` model, and its
