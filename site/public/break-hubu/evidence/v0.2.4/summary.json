@@ -1,0 +1,792 @@
+{
+  "release": "v0.2.4",
+  "episodes": [
+    {
+      "verdict": "holds",
+      "checks": [
+        {
+          "name": "Fresh USD 0.10 budget",
+          "status": "supported"
+        },
+        {
+          "name": "No observed reservation exceeded the fixed ten-cent budget",
+          "status": "supported"
+        },
+        {
+          "name": "All ten funded authorize/resolve/claim/settle responses completed",
+          "status": "supported"
+        },
+        {
+          "name": "exhausted: ten balanced settlements, USD 0.10 consumed, no hold",
+          "status": "supported"
+        },
+        {
+          "name": "final: ten balanced settlements, USD 0.10 consumed, no hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-001: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-002: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-003: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-004: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-005: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-006: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-007: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-008: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-009: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-010: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-011: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-012: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-013: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-014: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-015: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-016: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-017: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-018: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-019: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-020: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-021: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-022: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-023: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-024: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-025: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-026: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-027: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-028: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-029: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-030: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-031: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-032: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-033: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-034: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-035: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-036: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-037: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-038: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-039: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-040: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-041: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-042: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-043: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-044: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-045: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-046: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-047: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-048: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-049: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-050: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-051: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-052: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-053: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-054: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-055: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-056: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-057: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-058: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-059: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-060: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-061: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-062: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-063: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-064: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-065: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-066: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-067: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-068: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-069: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-070: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-071: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-072: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-073: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-074: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-075: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-076: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-077: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-078: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-079: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-080: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-081: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-082: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-083: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-084: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-085: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-086: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-087: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-088: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-089: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-090: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-091: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-092: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-093: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-094: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-095: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-096: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-097: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-098: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-099: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "after-budget-100: explicit budget denial without token/hold",
+          "status": "supported"
+        },
+        {
+          "name": "Exactly 110 distinct logical attempts recorded",
+          "status": "supported"
+        },
+        {
+          "name": "Exactly ten public authorizations, all settled at one cent",
+          "status": "supported"
+        },
+        {
+          "name": "All posting identities unchanged after the 100 denials",
+          "status": "supported"
+        },
+        {
+          "name": "Operator configuration remained fixed",
+          "status": "supported"
+        }
+      ],
+      "caveat": "",
+      "episode": "ep01-runaway",
+      "execution": "complete",
+      "elapsed_seconds": 32.009
+    },
+    {
+      "verdict": "holds with caveat",
+      "checks": [
+        {
+          "name": "Fresh one-cent budget and empty public ledger",
+          "status": "supported"
+        },
+        {
+          "name": "Fresh instance has no earlier authorization records",
+          "status": "supported"
+        },
+        {
+          "name": "Overrun probe ran before the returned lease deadline",
+          "status": "supported"
+        },
+        {
+          "name": "Normal overrun rejected specifically as exceeding authorization",
+          "status": "supported"
+        },
+        {
+          "name": "held-after-overrun: exactly one admitted operation",
+          "status": "supported"
+        },
+        {
+          "name": "held-after-overrun: one cent remains held with no expense",
+          "status": "supported"
+        },
+        {
+          "name": "held-after-overrun: claimed obligation has no receipt",
+          "status": "supported"
+        },
+        {
+          "name": "expired: exactly one admitted operation",
+          "status": "supported"
+        },
+        {
+          "name": "expired: one cent remains held with no expense",
+          "status": "supported"
+        },
+        {
+          "name": "expired: claimed obligation has no receipt",
+          "status": "supported"
+        },
+        {
+          "name": "Fresh request denied while the original cent remains held",
+          "status": "supported"
+        },
+        {
+          "name": "Expired authorization publicly requires reconciliation",
+          "status": "supported"
+        },
+        {
+          "name": "Original claim is visible in the public reconciliation queue",
+          "status": "supported"
+        },
+        {
+          "name": "Owner first resolution and exact retry both succeeded",
+          "status": "supported"
+        },
+        {
+          "name": "Owner reused the frozen rejected receipt",
+          "status": "supported"
+        },
+        {
+          "name": "Owner retry preserved claim, receipt and evidence",
+          "status": "supported"
+        },
+        {
+          "name": "Post-reconciliation attempt 1 explicitly denied",
+          "status": "supported"
+        },
+        {
+          "name": "Post-reconciliation attempt 2 explicitly denied",
+          "status": "supported"
+        },
+        {
+          "name": "Post-reconciliation attempt 3 explicitly denied",
+          "status": "supported"
+        },
+        {
+          "name": "Post-reconciliation attempt 4 explicitly denied",
+          "status": "supported"
+        },
+        {
+          "name": "Post-reconciliation attempt 5 explicitly denied",
+          "status": "supported"
+        },
+        {
+          "name": "Post-reconciliation attempt 6 explicitly denied",
+          "status": "supported"
+        },
+        {
+          "name": "Post-reconciliation attempt 7 explicitly denied",
+          "status": "supported"
+        },
+        {
+          "name": "Post-reconciliation attempt 8 explicitly denied",
+          "status": "supported"
+        },
+        {
+          "name": "Post-reconciliation attempt 9 explicitly denied",
+          "status": "supported"
+        },
+        {
+          "name": "Post-reconciliation attempt 10 explicitly denied",
+          "status": "supported"
+        },
+        {
+          "name": "reconciled: no additional admitted operation",
+          "status": "supported"
+        },
+        {
+          "name": "reconciled: one three-cent expense, negative two-cent balance",
+          "status": "supported"
+        },
+        {
+          "name": "final: no additional admitted operation",
+          "status": "supported"
+        },
+        {
+          "name": "final: one three-cent expense, negative two-cent balance",
+          "status": "supported"
+        },
+        {
+          "name": "Public receipt discloses original maximum and full overrun",
+          "status": "supported"
+        },
+        {
+          "name": "Public claim records an explicit billed reconciliation",
+          "status": "supported"
+        },
+        {
+          "name": "Resolution retained the original authorization, claim and hold",
+          "status": "supported"
+        },
+        {
+          "name": "Retry preserved settlement and canonical transaction identities",
+          "status": "supported"
+        },
+        {
+          "name": "Policy and budget configuration stayed fixed",
+          "status": "supported"
+        }
+      ],
+      "caveat": "The full overrun is recorded only after explicit owner reconciliation and lease expiry.",
+      "episode": "ep02-last-cent",
+      "execution": "complete",
+      "elapsed_seconds": 31.273
+    },
+    {
+      "verdict": "holds",
+      "checks": [
+        {
+          "name": "Fresh one-cent budget and empty public ledger",
+          "status": "supported"
+        },
+        {
+          "name": "Fresh instance has no earlier authorization records",
+          "status": "supported"
+        },
+        {
+          "name": "Durable fixture preceded an owned SIGKILL before settlement",
+          "status": "supported"
+        },
+        {
+          "name": "Public pre-crash checkpoint was claimed and unsettled",
+          "status": "supported"
+        },
+        {
+          "name": "before-crash: exactly one admitted operation",
+          "status": "supported"
+        },
+        {
+          "name": "before-crash: frozen cent survived with no expense or replacement capacity",
+          "status": "supported"
+        },
+        {
+          "name": "before-crash: original authorization, claim and hold survive",
+          "status": "supported"
+        },
+        {
+          "name": "after-restart: exactly one admitted operation",
+          "status": "supported"
+        },
+        {
+          "name": "after-restart: frozen cent survived with no expense or replacement capacity",
+          "status": "supported"
+        },
+        {
+          "name": "after-restart: original authorization, claim and hold survive",
+          "status": "supported"
+        },
+        {
+          "name": "expired: exactly one admitted operation",
+          "status": "supported"
+        },
+        {
+          "name": "expired: frozen cent survived with no expense or replacement capacity",
+          "status": "supported"
+        },
+        {
+          "name": "expired: original authorization, claim and hold survive",
+          "status": "supported"
+        },
+        {
+          "name": "after-expired-probes: exactly one admitted operation",
+          "status": "supported"
+        },
+        {
+          "name": "after-expired-probes: frozen cent survived with no expense or replacement capacity",
+          "status": "supported"
+        },
+        {
+          "name": "after-expired-probes: original authorization, claim and hold survive",
+          "status": "supported"
+        },
+        {
+          "name": "Fresh request after restart explicitly denied without a hold",
+          "status": "supported"
+        },
+        {
+          "name": "Expired claim requires reconciliation and appears in public queue",
+          "status": "supported"
+        },
+        {
+          "name": "expired-normal-settle rejected specifically for expired claim",
+          "status": "supported"
+        },
+        {
+          "name": "expired-normal-release rejected specifically for expired claim",
+          "status": "supported"
+        },
+        {
+          "name": "Owner first resolution and exact retry both succeeded",
+          "status": "supported"
+        },
+        {
+          "name": "Owner reused the durable synthetic receipt",
+          "status": "supported"
+        },
+        {
+          "name": "Owner retry preserved claim, receipt and evidence",
+          "status": "supported"
+        },
+        {
+          "name": "reconciled: no additional admitted operation",
+          "status": "supported"
+        },
+        {
+          "name": "reconciled: one canonical cent settled, no pending obligation",
+          "status": "supported"
+        },
+        {
+          "name": "final: no additional admitted operation",
+          "status": "supported"
+        },
+        {
+          "name": "final: one canonical cent settled, no pending obligation",
+          "status": "supported"
+        },
+        {
+          "name": "Public receipt and claim show billed owner resolution",
+          "status": "supported"
+        },
+        {
+          "name": "Retry and final restart retain settlement, transaction, claim and hold identities",
+          "status": "supported"
+        },
+        {
+          "name": "Policy and budget configuration stayed fixed",
+          "status": "supported"
+        }
+      ],
+      "caveat": "",
+      "episode": "ep03-crash-recovery",
+      "execution": "complete",
+      "elapsed_seconds": 31.263
+    },
+    {
+      "verdict": "holds with caveat",
+      "checks": [
+        {
+          "name": "Ten paired client lifecycles contain their requests after the barrier",
+          "status": "supported"
+        },
+        {
+          "name": "No more than 33 observed admissions before expiry (USD 0.99)",
+          "status": "supported"
+        },
+        {
+          "name": "100 resolved attempts: 33 allows and 67 budget denials",
+          "status": "supported"
+        },
+        {
+          "name": "Fresh USD 1.00 budget",
+          "status": "supported"
+        },
+        {
+          "name": "Burst: USD 0.99 held, USD 0.01 available, zero postings",
+          "status": "supported"
+        },
+        {
+          "name": "Final: 33 balanced settlements, USD 0.99 consumed",
+          "status": "supported"
+        },
+        {
+          "name": "33 unique authorizations and holds",
+          "status": "supported"
+        },
+        {
+          "name": "All costs remain exactly three cents",
+          "status": "supported"
+        },
+        {
+          "name": "No settlement/release during burst",
+          "status": "supported"
+        },
+        {
+          "name": "Admitted authorization identities match public history",
+          "status": "supported"
+        },
+        {
+          "name": "Every admitted claim matches its public burst authorization and hold",
+          "status": "supported"
+        },
+        {
+          "name": "Every normal settlement response matches its public final settlement",
+          "status": "supported"
+        },
+        {
+          "name": "Operator configuration remained fixed",
+          "status": "supported"
+        }
+      ],
+      "caveat": "v0.2.4 serializes TCP request handling. This tests competing network demand, not simultaneous SQLite writers, throughput or fairness.",
+      "episode": "ep04-many-clients",
+      "execution": "complete",
+      "elapsed_seconds": 5.64
+    }
+  ],
+  "documentary_identity_gap": "Does not hold in v0.2.4: runtime/thread-bound account authority is a known gap that will be addressed in future releases.",
+  "authority_boundary": "Normal bearer has broad administrative authority; configuration stays fixed. More narrowly scoped executor authority is planned for future releases.",
+  "scope": "Hubu public HTTP/CLI accounting with synthetic executor receipts; no provider billing or Gongbu execution."
+}

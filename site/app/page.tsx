@@ -41,14 +41,13 @@ export const metadata: Metadata = homeMetadata;
 export default function Home() {
   return (
     <div className="home-shell">
-      <header className="topbar">
-        <a className="brand" href="/" aria-label="Hubu documentation home">
-          <HubuWordmark className="brand-wordmark" decorative />
-          <i>/ docs</i>
-        </a>
-        <nav className="primary-nav" aria-label="Primary navigation">
-          {primaryLinks.map(([label, href]) => <a href={href} key={href}>{label}</a>)}
-        </nav>
+      <header className="topbar home-header">
+        <div className="header-branding">
+          <a className="brand" href="/" aria-label="Hubu home">
+            <HubuWordmark className="brand-wordmark" decorative />
+          </a>
+          <a className="header-version" href="/releases/v0.2.4" aria-label="Read Hubu v0.2.4 release notes and system card">v0.2.4 <span aria-hidden="true">↗</span></a>
+        </div>
         <details className="site-menu">
           <summary>Menu</summary>
           <nav aria-label="Primary navigation">
@@ -60,8 +59,10 @@ export default function Home() {
       <main id="main-content">
         <section className="hero">
           <div className="hero-copy">
-            <HubuWordmark className="hero-wordmark" />
-            <p className="eyebrow"><span /> Agent spend control plane</p>
+            <div className="hero-branding">
+              <HubuWordmark className="hero-wordmark" />
+              <p className="eyebrow"><span /> Agent spend control plane</p>
+            </div>
             <h1>Governed spend<br />for AI agents.</h1>
             <p className="hero-lede">
               Hubu governs AI-agent spend. Gongbu executes only Hubu-authorized provider work.
@@ -195,7 +196,7 @@ export default function Home() {
         </section>
       </main>
 
-      <footer><span>Hubu / 户部</span><p>Governance before execution.</p><a href="https://github.com/hacker-no-ice/hubu">Source on GitHub ↗</a></footer>
+      <footer><span>Hubu / 户部</span><p>Governance before execution.</p><a href="/releases">Release notes ↗</a><a href="https://github.com/hacker-no-ice/hubu">Source on GitHub ↗</a></footer>
     </div>
   );
 }

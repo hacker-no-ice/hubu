@@ -1,0 +1,61 @@
+{
+  "verdict": "holds with caveat",
+  "checks": [
+    {
+      "name": "Ten paired client lifecycles contain their requests after the barrier",
+      "status": "supported"
+    },
+    {
+      "name": "No more than 33 observed admissions before expiry (USD 0.99)",
+      "status": "supported"
+    },
+    {
+      "name": "100 resolved attempts: 33 allows and 67 budget denials",
+      "status": "supported"
+    },
+    {
+      "name": "Fresh USD 1.00 budget",
+      "status": "supported"
+    },
+    {
+      "name": "Burst: USD 0.99 held, USD 0.01 available, zero postings",
+      "status": "supported"
+    },
+    {
+      "name": "Final: 33 balanced settlements, USD 0.99 consumed",
+      "status": "supported"
+    },
+    {
+      "name": "33 unique authorizations and holds",
+      "status": "supported"
+    },
+    {
+      "name": "All costs remain exactly three cents",
+      "status": "supported"
+    },
+    {
+      "name": "No settlement/release during burst",
+      "status": "supported"
+    },
+    {
+      "name": "Admitted authorization identities match public history",
+      "status": "supported"
+    },
+    {
+      "name": "Every admitted claim matches its public burst authorization and hold",
+      "status": "supported"
+    },
+    {
+      "name": "Every normal settlement response matches its public final settlement",
+      "status": "supported"
+    },
+    {
+      "name": "Operator configuration remained fixed",
+      "status": "supported"
+    }
+  ],
+  "caveat": "v0.2.4 serializes TCP request handling. This tests competing network demand, not simultaneous SQLite writers, throughput or fairness.",
+  "episode": "ep04-many-clients",
+  "execution": "complete",
+  "elapsed_seconds": 5.64
+}

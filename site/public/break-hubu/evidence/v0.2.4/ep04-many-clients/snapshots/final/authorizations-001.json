@@ -1,0 +1,4032 @@
+{
+  "authorization_records": [
+    {
+      "account_id": "aga_svgykn95n571",
+      "agent_id": "agt_qgxbfqebvp11",
+      "authorization_id": "e99acf83-735f-4bf9-93b2-1e4db67d989c",
+      "authorized_max": {
+        "currency": "usd",
+        "display": "0.03",
+        "scale": 6,
+        "units": "30000"
+      },
+      "authorized_max_cents": 3,
+      "billing_merchant": {
+        "display_name": "Local merchant",
+        "id": "merchant:local"
+      },
+      "budget_hold": {
+        "amount": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "amount_cents": 3,
+        "budget_id": "bgt_gpcm6mns6tkb",
+        "budget_version_id": "bgv_zxa5jw5wbjfq",
+        "currency": "usd",
+        "expires_at": "2026-10-22T02:20:03.728875+00:00",
+        "id": "429092a7-419b-464a-aa4e-e5747c65f1b2",
+        "status": "settled"
+      },
+      "claim": {
+        "claimed_at": "2026-10-22T02:05:03.728875+00:00",
+        "expires_at": "2026-10-22T02:20:03.728875+00:00",
+        "finalized_at": "2026-10-22T02:05:03.915463+00:00",
+        "id": "afd79c95-ad52-4691-b55f-1a90b531ab73",
+        "lease_profile_reference": {
+          "digest": "sha256:37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "redacted": true
+        },
+        "provider_reference": null,
+        "reconciled_at": null,
+        "reconciliation_evidence_reference": null,
+        "reconciliation_outcome": null,
+        "reconciliation_required": false,
+        "status": "settled"
+      },
+      "created_at": "2026-10-22T02:05:03.702592+00:00",
+      "currency": "usd",
+      "decision": "allow",
+      "decision_id": "e99acf83-735f-4bf9-93b2-1e4db67d989c",
+      "id": "e99acf83-735f-4bf9-93b2-1e4db67d989c",
+      "ledger_transaction_ids": [
+        "cc807811-0781-44a6-a2fa-e8fe02fd2d27"
+      ],
+      "policy_decision": "allow",
+      "provider": {
+        "display_name": "Local fixture provider",
+        "id": "provider:local:fixture"
+      },
+      "purpose_reference": {
+        "digest": "sha256:a6f57cd50d19ae8f7fb6e7eaf03c353de4e4ed63e617c249bab2bed53b747f94",
+        "redacted": true
+      },
+      "raw_evidence_redacted": true,
+      "receipt": {
+        "actual_vendor_cost": {
+          "amount": "30000",
+          "currency": "usd",
+          "scale": 6
+        },
+        "artifact_reference": {
+          "digest": "sha256:fcd1e285dea04a5d506a8c8d9f44e2a615fb34dad3960eb78fccbb003bd77d2a",
+          "redacted": true
+        },
+        "authorized_max": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "authorized_max_cents": 3,
+        "budget_charge": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "budget_charge_cents": 3,
+        "created_at": "2026-10-22T02:05:03.915463+00:00",
+        "currency": "usd",
+        "overrun_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "overrun_amount_cents": 0,
+        "price_model_reference": {
+          "digest": "sha256:dac49c8e0e119f442e054f30356395ada299a6229ec8a09529320e8fea00a8d7",
+          "redacted": true
+        },
+        "provider_request_reference": {
+          "digest": "sha256:189679322a9ed4df939b8b1187f2fa26bffd0a3d3fa684429902ac583190f65c",
+          "redacted": true
+        },
+        "released_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "released_amount_cents": 0,
+        "settlement_id": "49f4d4fc-4479-45a0-a77f-6f0105a0c2a2"
+      },
+      "release_reason": null,
+      "revision": 1,
+      "status": "settled",
+      "task_reference": {
+        "digest": "sha256:a6f57cd50d19ae8f7fb6e7eaf03c353de4e4ed63e617c249bab2bed53b747f94",
+        "redacted": true
+      }
+    },
+    {
+      "account_id": "aga_svgykn95n571",
+      "agent_id": "agt_qgxbfqebvp11",
+      "authorization_id": "fe64c4a1-e43b-4a12-aa86-3e658c67f82f",
+      "authorized_max": {
+        "currency": "usd",
+        "display": "0.03",
+        "scale": 6,
+        "units": "30000"
+      },
+      "authorized_max_cents": 3,
+      "billing_merchant": {
+        "display_name": "Local merchant",
+        "id": "merchant:local"
+      },
+      "budget_hold": {
+        "amount": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "amount_cents": 3,
+        "budget_id": "bgt_gpcm6mns6tkb",
+        "budget_version_id": "bgv_zxa5jw5wbjfq",
+        "currency": "usd",
+        "expires_at": "2026-10-22T02:20:03.725405+00:00",
+        "id": "0d53be69-701b-4d96-a05e-58a1598786b3",
+        "status": "settled"
+      },
+      "claim": {
+        "claimed_at": "2026-10-22T02:05:03.725405+00:00",
+        "expires_at": "2026-10-22T02:20:03.725405+00:00",
+        "finalized_at": "2026-10-22T02:05:03.908933+00:00",
+        "id": "24a4da2e-9470-4f42-ba95-632acff8de95",
+        "lease_profile_reference": {
+          "digest": "sha256:37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "redacted": true
+        },
+        "provider_reference": null,
+        "reconciled_at": null,
+        "reconciliation_evidence_reference": null,
+        "reconciliation_outcome": null,
+        "reconciliation_required": false,
+        "status": "settled"
+      },
+      "created_at": "2026-10-22T02:05:03.700718+00:00",
+      "currency": "usd",
+      "decision": "allow",
+      "decision_id": "fe64c4a1-e43b-4a12-aa86-3e658c67f82f",
+      "id": "fe64c4a1-e43b-4a12-aa86-3e658c67f82f",
+      "ledger_transaction_ids": [
+        "d7d737ff-c2fa-41d7-acee-00e5f07e379f"
+      ],
+      "policy_decision": "allow",
+      "provider": {
+        "display_name": "Local fixture provider",
+        "id": "provider:local:fixture"
+      },
+      "purpose_reference": {
+        "digest": "sha256:f4adeee23e128e0db090aeed17f026a55ef278264cb9749617203c45c43d639b",
+        "redacted": true
+      },
+      "raw_evidence_redacted": true,
+      "receipt": {
+        "actual_vendor_cost": {
+          "amount": "30000",
+          "currency": "usd",
+          "scale": 6
+        },
+        "artifact_reference": {
+          "digest": "sha256:0b5d179942024d7264ac3b7f69ccadd5de7629c6bb797f9e26efc348c31c220d",
+          "redacted": true
+        },
+        "authorized_max": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "authorized_max_cents": 3,
+        "budget_charge": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "budget_charge_cents": 3,
+        "created_at": "2026-10-22T02:05:03.908933+00:00",
+        "currency": "usd",
+        "overrun_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "overrun_amount_cents": 0,
+        "price_model_reference": {
+          "digest": "sha256:dac49c8e0e119f442e054f30356395ada299a6229ec8a09529320e8fea00a8d7",
+          "redacted": true
+        },
+        "provider_request_reference": {
+          "digest": "sha256:303f9e54ee5f0f9d79bb1d1ef31b7128c73b89888f298bfcea3e788b4d26b809",
+          "redacted": true
+        },
+        "released_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "released_amount_cents": 0,
+        "settlement_id": "77e461f0-3705-4ddd-b90d-6aefeb9df12d"
+      },
+      "release_reason": null,
+      "revision": 1,
+      "status": "settled",
+      "task_reference": {
+        "digest": "sha256:f4adeee23e128e0db090aeed17f026a55ef278264cb9749617203c45c43d639b",
+        "redacted": true
+      }
+    },
+    {
+      "account_id": "aga_svgykn95n571",
+      "agent_id": "agt_qgxbfqebvp11",
+      "authorization_id": "174c9b14-6f32-4c41-a704-9bb8ba5fdc8b",
+      "authorized_max": {
+        "currency": "usd",
+        "display": "0.03",
+        "scale": 6,
+        "units": "30000"
+      },
+      "authorized_max_cents": 3,
+      "billing_merchant": {
+        "display_name": "Local merchant",
+        "id": "merchant:local"
+      },
+      "budget_hold": {
+        "amount": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "amount_cents": 3,
+        "budget_id": "bgt_gpcm6mns6tkb",
+        "budget_version_id": "bgv_zxa5jw5wbjfq",
+        "currency": "usd",
+        "expires_at": "2026-10-22T02:20:03.721526+00:00",
+        "id": "500611e5-e9dd-4250-a7e4-fba3d18cc698",
+        "status": "settled"
+      },
+      "claim": {
+        "claimed_at": "2026-10-22T02:05:03.721526+00:00",
+        "expires_at": "2026-10-22T02:20:03.721526+00:00",
+        "finalized_at": "2026-10-22T02:05:03.902677+00:00",
+        "id": "16810089-04b6-4948-8d41-e393346c24f0",
+        "lease_profile_reference": {
+          "digest": "sha256:37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "redacted": true
+        },
+        "provider_reference": null,
+        "reconciled_at": null,
+        "reconciliation_evidence_reference": null,
+        "reconciliation_outcome": null,
+        "reconciliation_required": false,
+        "status": "settled"
+      },
+      "created_at": "2026-10-22T02:05:03.697466+00:00",
+      "currency": "usd",
+      "decision": "allow",
+      "decision_id": "174c9b14-6f32-4c41-a704-9bb8ba5fdc8b",
+      "id": "174c9b14-6f32-4c41-a704-9bb8ba5fdc8b",
+      "ledger_transaction_ids": [
+        "a347e2f3-633b-44a5-837c-6c3e06be2d31"
+      ],
+      "policy_decision": "allow",
+      "provider": {
+        "display_name": "Local fixture provider",
+        "id": "provider:local:fixture"
+      },
+      "purpose_reference": {
+        "digest": "sha256:c04f9771405c1155a6a95712f3b8c8a96f3a929cb9f6c1d2923af7638230192a",
+        "redacted": true
+      },
+      "raw_evidence_redacted": true,
+      "receipt": {
+        "actual_vendor_cost": {
+          "amount": "30000",
+          "currency": "usd",
+          "scale": 6
+        },
+        "artifact_reference": {
+          "digest": "sha256:f96e76e3a24fea7e380bd98f2344498019bf47ceaef2583511842e208d97a0f1",
+          "redacted": true
+        },
+        "authorized_max": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "authorized_max_cents": 3,
+        "budget_charge": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "budget_charge_cents": 3,
+        "created_at": "2026-10-22T02:05:03.902677+00:00",
+        "currency": "usd",
+        "overrun_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "overrun_amount_cents": 0,
+        "price_model_reference": {
+          "digest": "sha256:dac49c8e0e119f442e054f30356395ada299a6229ec8a09529320e8fea00a8d7",
+          "redacted": true
+        },
+        "provider_request_reference": {
+          "digest": "sha256:8512a8c5fbd96a10a3f8760cf581a9d716ade1728fb696e5eb02697fd57c1461",
+          "redacted": true
+        },
+        "released_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "released_amount_cents": 0,
+        "settlement_id": "557b5048-f35e-4a71-8101-7c6a517fd947"
+      },
+      "release_reason": null,
+      "revision": 1,
+      "status": "settled",
+      "task_reference": {
+        "digest": "sha256:c04f9771405c1155a6a95712f3b8c8a96f3a929cb9f6c1d2923af7638230192a",
+        "redacted": true
+      }
+    },
+    {
+      "account_id": "aga_svgykn95n571",
+      "agent_id": "agt_qgxbfqebvp11",
+      "authorization_id": "41284cfe-a5e2-44ed-8d1d-c0591ecc6964",
+      "authorized_max": {
+        "currency": "usd",
+        "display": "0.03",
+        "scale": 6,
+        "units": "30000"
+      },
+      "authorized_max_cents": 3,
+      "billing_merchant": {
+        "display_name": "Local merchant",
+        "id": "merchant:local"
+      },
+      "budget_hold": {
+        "amount": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "amount_cents": 3,
+        "budget_id": "bgt_gpcm6mns6tkb",
+        "budget_version_id": "bgv_zxa5jw5wbjfq",
+        "currency": "usd",
+        "expires_at": "2026-10-22T02:20:03.698970+00:00",
+        "id": "e7c4cc86-eb71-47bb-88f9-05c8fac9e8ea",
+        "status": "settled"
+      },
+      "claim": {
+        "claimed_at": "2026-10-22T02:05:03.698970+00:00",
+        "expires_at": "2026-10-22T02:20:03.698970+00:00",
+        "finalized_at": "2026-10-22T02:05:03.890891+00:00",
+        "id": "3e36fc09-4aa4-4a42-95da-9f278a705500",
+        "lease_profile_reference": {
+          "digest": "sha256:37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "redacted": true
+        },
+        "provider_reference": null,
+        "reconciled_at": null,
+        "reconciliation_evidence_reference": null,
+        "reconciliation_outcome": null,
+        "reconciliation_required": false,
+        "status": "settled"
+      },
+      "created_at": "2026-10-22T02:05:03.688002+00:00",
+      "currency": "usd",
+      "decision": "allow",
+      "decision_id": "41284cfe-a5e2-44ed-8d1d-c0591ecc6964",
+      "id": "41284cfe-a5e2-44ed-8d1d-c0591ecc6964",
+      "ledger_transaction_ids": [
+        "5a229582-af4d-4877-8b9c-6c441a33cec0"
+      ],
+      "policy_decision": "allow",
+      "provider": {
+        "display_name": "Local fixture provider",
+        "id": "provider:local:fixture"
+      },
+      "purpose_reference": {
+        "digest": "sha256:c0b6853774be94fd6a2799dc418222a4472cc679aaa694232b08121e2bcb9c1b",
+        "redacted": true
+      },
+      "raw_evidence_redacted": true,
+      "receipt": {
+        "actual_vendor_cost": {
+          "amount": "30000",
+          "currency": "usd",
+          "scale": 6
+        },
+        "artifact_reference": {
+          "digest": "sha256:4892503583390ba595e87155b959813b4e77b8b14259b9c9639c47a6e1e6c91e",
+          "redacted": true
+        },
+        "authorized_max": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "authorized_max_cents": 3,
+        "budget_charge": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "budget_charge_cents": 3,
+        "created_at": "2026-10-22T02:05:03.890891+00:00",
+        "currency": "usd",
+        "overrun_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "overrun_amount_cents": 0,
+        "price_model_reference": {
+          "digest": "sha256:dac49c8e0e119f442e054f30356395ada299a6229ec8a09529320e8fea00a8d7",
+          "redacted": true
+        },
+        "provider_request_reference": {
+          "digest": "sha256:a98c7efe9d4ee3d9557cf7741ef3cb1a379c107653b7da992264ec0c156da925",
+          "redacted": true
+        },
+        "released_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "released_amount_cents": 0,
+        "settlement_id": "10c84eaa-2d1d-4cb8-b07e-b9bf77ada4cc"
+      },
+      "release_reason": null,
+      "revision": 1,
+      "status": "settled",
+      "task_reference": {
+        "digest": "sha256:c0b6853774be94fd6a2799dc418222a4472cc679aaa694232b08121e2bcb9c1b",
+        "redacted": true
+      }
+    },
+    {
+      "account_id": "aga_svgykn95n571",
+      "agent_id": "agt_qgxbfqebvp11",
+      "authorization_id": "b89ce974-8de0-4069-b63d-0f83cf7c6043",
+      "authorized_max": {
+        "currency": "usd",
+        "display": "0.03",
+        "scale": 6,
+        "units": "30000"
+      },
+      "authorized_max_cents": 3,
+      "billing_merchant": {
+        "display_name": "Local merchant",
+        "id": "merchant:local"
+      },
+      "budget_hold": {
+        "amount": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "amount_cents": 3,
+        "budget_id": "bgt_gpcm6mns6tkb",
+        "budget_version_id": "bgv_zxa5jw5wbjfq",
+        "currency": "usd",
+        "expires_at": "2026-10-22T02:20:03.699695+00:00",
+        "id": "56e4d23c-a7b9-4123-b314-e0350b1cb4e4",
+        "status": "settled"
+      },
+      "claim": {
+        "claimed_at": "2026-10-22T02:05:03.699695+00:00",
+        "expires_at": "2026-10-22T02:20:03.699695+00:00",
+        "finalized_at": "2026-10-22T02:05:03.896215+00:00",
+        "id": "0e8cff52-62ec-4f37-bf6f-3f51316a6bf5",
+        "lease_profile_reference": {
+          "digest": "sha256:37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "redacted": true
+        },
+        "provider_reference": null,
+        "reconciled_at": null,
+        "reconciliation_evidence_reference": null,
+        "reconciliation_outcome": null,
+        "reconciliation_required": false,
+        "status": "settled"
+      },
+      "created_at": "2026-10-22T02:05:03.686244+00:00",
+      "currency": "usd",
+      "decision": "allow",
+      "decision_id": "b89ce974-8de0-4069-b63d-0f83cf7c6043",
+      "id": "b89ce974-8de0-4069-b63d-0f83cf7c6043",
+      "ledger_transaction_ids": [
+        "9d137cff-9304-49a4-9690-6abbf810361b"
+      ],
+      "policy_decision": "allow",
+      "provider": {
+        "display_name": "Local fixture provider",
+        "id": "provider:local:fixture"
+      },
+      "purpose_reference": {
+        "digest": "sha256:b4954ddbdaa0447ce3f489af98b4f64dc450541dfb88d4ac3466dbd72105e6d4",
+        "redacted": true
+      },
+      "raw_evidence_redacted": true,
+      "receipt": {
+        "actual_vendor_cost": {
+          "amount": "30000",
+          "currency": "usd",
+          "scale": 6
+        },
+        "artifact_reference": {
+          "digest": "sha256:cde67d5abc74d2fe533ba5e28cb482a57e91847f5091e64501150233526d173e",
+          "redacted": true
+        },
+        "authorized_max": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "authorized_max_cents": 3,
+        "budget_charge": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "budget_charge_cents": 3,
+        "created_at": "2026-10-22T02:05:03.896215+00:00",
+        "currency": "usd",
+        "overrun_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "overrun_amount_cents": 0,
+        "price_model_reference": {
+          "digest": "sha256:dac49c8e0e119f442e054f30356395ada299a6229ec8a09529320e8fea00a8d7",
+          "redacted": true
+        },
+        "provider_request_reference": {
+          "digest": "sha256:ac6e5fa8b4fc7d7408bf14d931ab30944259b2215e7539e467480313973a3955",
+          "redacted": true
+        },
+        "released_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "released_amount_cents": 0,
+        "settlement_id": "eb12119c-87ac-4d77-927f-26bbb0746d7c"
+      },
+      "release_reason": null,
+      "revision": 1,
+      "status": "settled",
+      "task_reference": {
+        "digest": "sha256:b4954ddbdaa0447ce3f489af98b4f64dc450541dfb88d4ac3466dbd72105e6d4",
+        "redacted": true
+      }
+    },
+    {
+      "account_id": "aga_svgykn95n571",
+      "agent_id": "agt_qgxbfqebvp11",
+      "authorization_id": "291c2e5a-0e4e-4cb7-82fc-37c01779fe4a",
+      "authorized_max": {
+        "currency": "usd",
+        "display": "0.03",
+        "scale": 6,
+        "units": "30000"
+      },
+      "authorized_max_cents": 3,
+      "billing_merchant": {
+        "display_name": "Local merchant",
+        "id": "merchant:local"
+      },
+      "budget_hold": {
+        "amount": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "amount_cents": 3,
+        "budget_id": "bgt_gpcm6mns6tkb",
+        "budget_version_id": "bgv_zxa5jw5wbjfq",
+        "currency": "usd",
+        "expires_at": "2026-10-22T02:20:03.695469+00:00",
+        "id": "1eaae89a-0572-43bf-9b7d-d72aa729cb71",
+        "status": "settled"
+      },
+      "claim": {
+        "claimed_at": "2026-10-22T02:05:03.695469+00:00",
+        "expires_at": "2026-10-22T02:20:03.695469+00:00",
+        "finalized_at": "2026-10-22T02:05:03.880824+00:00",
+        "id": "01a700bb-a3d8-45b9-a9b7-0b77ff83c8ab",
+        "lease_profile_reference": {
+          "digest": "sha256:37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "redacted": true
+        },
+        "provider_reference": null,
+        "reconciled_at": null,
+        "reconciliation_evidence_reference": null,
+        "reconciliation_outcome": null,
+        "reconciliation_required": false,
+        "status": "settled"
+      },
+      "created_at": "2026-10-22T02:05:03.684521+00:00",
+      "currency": "usd",
+      "decision": "allow",
+      "decision_id": "291c2e5a-0e4e-4cb7-82fc-37c01779fe4a",
+      "id": "291c2e5a-0e4e-4cb7-82fc-37c01779fe4a",
+      "ledger_transaction_ids": [
+        "2c81e531-01f5-4683-be3a-73e96943fb08"
+      ],
+      "policy_decision": "allow",
+      "provider": {
+        "display_name": "Local fixture provider",
+        "id": "provider:local:fixture"
+      },
+      "purpose_reference": {
+        "digest": "sha256:b5f0a9ac2e79136ad996e6d00f5179655b2f0a36cc1dc76403795daa89e9166a",
+        "redacted": true
+      },
+      "raw_evidence_redacted": true,
+      "receipt": {
+        "actual_vendor_cost": {
+          "amount": "30000",
+          "currency": "usd",
+          "scale": 6
+        },
+        "artifact_reference": {
+          "digest": "sha256:5553a81679222d4258208e94b437c66c19cdf1894737b5abe20a6513c38cd671",
+          "redacted": true
+        },
+        "authorized_max": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "authorized_max_cents": 3,
+        "budget_charge": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "budget_charge_cents": 3,
+        "created_at": "2026-10-22T02:05:03.880824+00:00",
+        "currency": "usd",
+        "overrun_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "overrun_amount_cents": 0,
+        "price_model_reference": {
+          "digest": "sha256:dac49c8e0e119f442e054f30356395ada299a6229ec8a09529320e8fea00a8d7",
+          "redacted": true
+        },
+        "provider_request_reference": {
+          "digest": "sha256:c3a9f7b536e3f9b389d243c84aef70817c8304f589f7586496f32c3acbcdd6c4",
+          "redacted": true
+        },
+        "released_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "released_amount_cents": 0,
+        "settlement_id": "c8ef1271-eae8-440b-aa34-c2ecaf7c0e75"
+      },
+      "release_reason": null,
+      "revision": 1,
+      "status": "settled",
+      "task_reference": {
+        "digest": "sha256:b5f0a9ac2e79136ad996e6d00f5179655b2f0a36cc1dc76403795daa89e9166a",
+        "redacted": true
+      }
+    },
+    {
+      "account_id": "aga_svgykn95n571",
+      "agent_id": "agt_qgxbfqebvp11",
+      "authorization_id": "cb4b0be0-f3ec-4b0d-8c45-d4389561a0e8",
+      "authorized_max": {
+        "currency": "usd",
+        "display": "0.03",
+        "scale": 6,
+        "units": "30000"
+      },
+      "authorized_max_cents": 3,
+      "billing_merchant": {
+        "display_name": "Local merchant",
+        "id": "merchant:local"
+      },
+      "budget_hold": {
+        "amount": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "amount_cents": 3,
+        "budget_id": "bgt_gpcm6mns6tkb",
+        "budget_version_id": "bgv_zxa5jw5wbjfq",
+        "currency": "usd",
+        "expires_at": "2026-10-22T02:20:03.694773+00:00",
+        "id": "5f231943-17c3-49b2-8170-1ffbdbc5b72e",
+        "status": "settled"
+      },
+      "claim": {
+        "claimed_at": "2026-10-22T02:05:03.694773+00:00",
+        "expires_at": "2026-10-22T02:20:03.694773+00:00",
+        "finalized_at": "2026-10-22T02:05:03.875486+00:00",
+        "id": "bacf12b8-23c2-4264-8708-c279fa6385e5",
+        "lease_profile_reference": {
+          "digest": "sha256:37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "redacted": true
+        },
+        "provider_reference": null,
+        "reconciled_at": null,
+        "reconciliation_evidence_reference": null,
+        "reconciliation_outcome": null,
+        "reconciliation_required": false,
+        "status": "settled"
+      },
+      "created_at": "2026-10-22T02:05:03.682946+00:00",
+      "currency": "usd",
+      "decision": "allow",
+      "decision_id": "cb4b0be0-f3ec-4b0d-8c45-d4389561a0e8",
+      "id": "cb4b0be0-f3ec-4b0d-8c45-d4389561a0e8",
+      "ledger_transaction_ids": [
+        "bf0a871e-395e-4803-a003-9a93468965a5"
+      ],
+      "policy_decision": "allow",
+      "provider": {
+        "display_name": "Local fixture provider",
+        "id": "provider:local:fixture"
+      },
+      "purpose_reference": {
+        "digest": "sha256:91b5ab609ca865180969ea1c5716d46adca913e0f7d6a6bb2614cf214455c840",
+        "redacted": true
+      },
+      "raw_evidence_redacted": true,
+      "receipt": {
+        "actual_vendor_cost": {
+          "amount": "30000",
+          "currency": "usd",
+          "scale": 6
+        },
+        "artifact_reference": {
+          "digest": "sha256:d3ff96db66ff130544f85b58e9c2f4106918abcd16ef1a8f356fc8eec0fa50c5",
+          "redacted": true
+        },
+        "authorized_max": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "authorized_max_cents": 3,
+        "budget_charge": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "budget_charge_cents": 3,
+        "created_at": "2026-10-22T02:05:03.875486+00:00",
+        "currency": "usd",
+        "overrun_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "overrun_amount_cents": 0,
+        "price_model_reference": {
+          "digest": "sha256:dac49c8e0e119f442e054f30356395ada299a6229ec8a09529320e8fea00a8d7",
+          "redacted": true
+        },
+        "provider_request_reference": {
+          "digest": "sha256:6a39ce97d2de4cf798ec069de8080706c8521c29b9f7c540d4ff027c95edabc3",
+          "redacted": true
+        },
+        "released_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "released_amount_cents": 0,
+        "settlement_id": "b51af533-c046-45e2-8b25-9a57c34acdca"
+      },
+      "release_reason": null,
+      "revision": 1,
+      "status": "settled",
+      "task_reference": {
+        "digest": "sha256:91b5ab609ca865180969ea1c5716d46adca913e0f7d6a6bb2614cf214455c840",
+        "redacted": true
+      }
+    },
+    {
+      "account_id": "aga_svgykn95n571",
+      "agent_id": "agt_qgxbfqebvp11",
+      "authorization_id": "d3534eb2-d0d1-458e-9492-54d4f3f54f3d",
+      "authorized_max": {
+        "currency": "usd",
+        "display": "0.03",
+        "scale": 6,
+        "units": "30000"
+      },
+      "authorized_max_cents": 3,
+      "billing_merchant": {
+        "display_name": "Local merchant",
+        "id": "merchant:local"
+      },
+      "budget_hold": {
+        "amount": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "amount_cents": 3,
+        "budget_id": "bgt_gpcm6mns6tkb",
+        "budget_version_id": "bgv_zxa5jw5wbjfq",
+        "currency": "usd",
+        "expires_at": "2026-10-22T02:20:03.696264+00:00",
+        "id": "a4f606ae-93c4-4439-b62d-b502a20ecddf",
+        "status": "settled"
+      },
+      "claim": {
+        "claimed_at": "2026-10-22T02:05:03.696264+00:00",
+        "expires_at": "2026-10-22T02:20:03.696264+00:00",
+        "finalized_at": "2026-10-22T02:05:03.885941+00:00",
+        "id": "93f4c62b-f9e9-4b0e-ac74-b465902ba473",
+        "lease_profile_reference": {
+          "digest": "sha256:37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "redacted": true
+        },
+        "provider_reference": null,
+        "reconciled_at": null,
+        "reconciliation_evidence_reference": null,
+        "reconciliation_outcome": null,
+        "reconciliation_required": false,
+        "status": "settled"
+      },
+      "created_at": "2026-10-22T02:05:03.681356+00:00",
+      "currency": "usd",
+      "decision": "allow",
+      "decision_id": "d3534eb2-d0d1-458e-9492-54d4f3f54f3d",
+      "id": "d3534eb2-d0d1-458e-9492-54d4f3f54f3d",
+      "ledger_transaction_ids": [
+        "cb07c64e-df60-43f6-a116-399a7897c14f"
+      ],
+      "policy_decision": "allow",
+      "provider": {
+        "display_name": "Local fixture provider",
+        "id": "provider:local:fixture"
+      },
+      "purpose_reference": {
+        "digest": "sha256:c14a1b581244c8ccf328c567678eb5e43cabf39d11bc34147a78dca23ba02af2",
+        "redacted": true
+      },
+      "raw_evidence_redacted": true,
+      "receipt": {
+        "actual_vendor_cost": {
+          "amount": "30000",
+          "currency": "usd",
+          "scale": 6
+        },
+        "artifact_reference": {
+          "digest": "sha256:1205de10803618eb26b1cb37b7fa62d99ee0f69e60496b67e78ebb0132632f39",
+          "redacted": true
+        },
+        "authorized_max": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "authorized_max_cents": 3,
+        "budget_charge": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "budget_charge_cents": 3,
+        "created_at": "2026-10-22T02:05:03.885941+00:00",
+        "currency": "usd",
+        "overrun_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "overrun_amount_cents": 0,
+        "price_model_reference": {
+          "digest": "sha256:dac49c8e0e119f442e054f30356395ada299a6229ec8a09529320e8fea00a8d7",
+          "redacted": true
+        },
+        "provider_request_reference": {
+          "digest": "sha256:b327173497e70724529e0bf44b6ae2de58d80f5072ee84b6669de0648081c965",
+          "redacted": true
+        },
+        "released_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "released_amount_cents": 0,
+        "settlement_id": "c125a698-3b44-4635-bda2-92f2d4fd7578"
+      },
+      "release_reason": null,
+      "revision": 1,
+      "status": "settled",
+      "task_reference": {
+        "digest": "sha256:c14a1b581244c8ccf328c567678eb5e43cabf39d11bc34147a78dca23ba02af2",
+        "redacted": true
+      }
+    },
+    {
+      "account_id": "aga_svgykn95n571",
+      "agent_id": "agt_qgxbfqebvp11",
+      "authorization_id": "1e9fb643-035c-4585-99fc-ef2835ce8c18",
+      "authorized_max": {
+        "currency": "usd",
+        "display": "0.03",
+        "scale": 6,
+        "units": "30000"
+      },
+      "authorized_max_cents": 3,
+      "billing_merchant": {
+        "display_name": "Local merchant",
+        "id": "merchant:local"
+      },
+      "budget_hold": {
+        "amount": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "amount_cents": 3,
+        "budget_id": "bgt_gpcm6mns6tkb",
+        "budget_version_id": "bgv_zxa5jw5wbjfq",
+        "currency": "usd",
+        "expires_at": "2026-10-22T02:20:03.692349+00:00",
+        "id": "5912c01b-59a2-4cdd-aa9a-cae4db5de4d8",
+        "status": "settled"
+      },
+      "claim": {
+        "claimed_at": "2026-10-22T02:05:03.692349+00:00",
+        "expires_at": "2026-10-22T02:20:03.692349+00:00",
+        "finalized_at": "2026-10-22T02:05:03.913768+00:00",
+        "id": "3ade32bc-5495-4628-8720-2c65a2bbaf86",
+        "lease_profile_reference": {
+          "digest": "sha256:37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "redacted": true
+        },
+        "provider_reference": null,
+        "reconciled_at": null,
+        "reconciliation_evidence_reference": null,
+        "reconciliation_outcome": null,
+        "reconciliation_required": false,
+        "status": "settled"
+      },
+      "created_at": "2026-10-22T02:05:03.679700+00:00",
+      "currency": "usd",
+      "decision": "allow",
+      "decision_id": "1e9fb643-035c-4585-99fc-ef2835ce8c18",
+      "id": "1e9fb643-035c-4585-99fc-ef2835ce8c18",
+      "ledger_transaction_ids": [
+        "c9b80ddc-1fb6-4589-878f-ea3b7ccb66e8"
+      ],
+      "policy_decision": "allow",
+      "provider": {
+        "display_name": "Local fixture provider",
+        "id": "provider:local:fixture"
+      },
+      "purpose_reference": {
+        "digest": "sha256:d91df9c070f496788fe99603a97513da570a5f6c0cfd006742c3137f6f472750",
+        "redacted": true
+      },
+      "raw_evidence_redacted": true,
+      "receipt": {
+        "actual_vendor_cost": {
+          "amount": "30000",
+          "currency": "usd",
+          "scale": 6
+        },
+        "artifact_reference": {
+          "digest": "sha256:15c7f131a2403544a46660e9e334ee587937b1f07ada059439938e28b7729c37",
+          "redacted": true
+        },
+        "authorized_max": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "authorized_max_cents": 3,
+        "budget_charge": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "budget_charge_cents": 3,
+        "created_at": "2026-10-22T02:05:03.913768+00:00",
+        "currency": "usd",
+        "overrun_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "overrun_amount_cents": 0,
+        "price_model_reference": {
+          "digest": "sha256:dac49c8e0e119f442e054f30356395ada299a6229ec8a09529320e8fea00a8d7",
+          "redacted": true
+        },
+        "provider_request_reference": {
+          "digest": "sha256:c057fefdba0ef42bf70263dd46349e67963122cbb7b21e59859d10f63f9f99c2",
+          "redacted": true
+        },
+        "released_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "released_amount_cents": 0,
+        "settlement_id": "0320c656-495e-4c17-8027-d0ec2aaf1fd7"
+      },
+      "release_reason": null,
+      "revision": 1,
+      "status": "settled",
+      "task_reference": {
+        "digest": "sha256:d91df9c070f496788fe99603a97513da570a5f6c0cfd006742c3137f6f472750",
+        "redacted": true
+      }
+    },
+    {
+      "account_id": "aga_svgykn95n571",
+      "agent_id": "agt_qgxbfqebvp11",
+      "authorization_id": "e39b28cf-f7df-4a76-8217-328789201ae8",
+      "authorized_max": {
+        "currency": "usd",
+        "display": "0.03",
+        "scale": 6,
+        "units": "30000"
+      },
+      "authorized_max_cents": 3,
+      "billing_merchant": {
+        "display_name": "Local merchant",
+        "id": "merchant:local"
+      },
+      "budget_hold": {
+        "amount": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "amount_cents": 3,
+        "budget_id": "bgt_gpcm6mns6tkb",
+        "budget_version_id": "bgv_zxa5jw5wbjfq",
+        "currency": "usd",
+        "expires_at": "2026-10-22T02:20:03.693280+00:00",
+        "id": "af382bd8-7eec-40ef-a30d-892c0ac7ccf9",
+        "status": "settled"
+      },
+      "claim": {
+        "claimed_at": "2026-10-22T02:05:03.693280+00:00",
+        "expires_at": "2026-10-22T02:20:03.693280+00:00",
+        "finalized_at": "2026-10-22T02:05:03.865084+00:00",
+        "id": "1f9a6b6b-a0df-4e85-a657-2a4452a64b7d",
+        "lease_profile_reference": {
+          "digest": "sha256:37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "redacted": true
+        },
+        "provider_reference": null,
+        "reconciled_at": null,
+        "reconciliation_evidence_reference": null,
+        "reconciliation_outcome": null,
+        "reconciliation_required": false,
+        "status": "settled"
+      },
+      "created_at": "2026-10-22T02:05:03.678060+00:00",
+      "currency": "usd",
+      "decision": "allow",
+      "decision_id": "e39b28cf-f7df-4a76-8217-328789201ae8",
+      "id": "e39b28cf-f7df-4a76-8217-328789201ae8",
+      "ledger_transaction_ids": [
+        "2c84d09b-ed76-4d3d-ab83-cda4048e5cba"
+      ],
+      "policy_decision": "allow",
+      "provider": {
+        "display_name": "Local fixture provider",
+        "id": "provider:local:fixture"
+      },
+      "purpose_reference": {
+        "digest": "sha256:a8dddf2a609bad9e85d12215269f958ed0b03133e020faba8da072d02241e2e2",
+        "redacted": true
+      },
+      "raw_evidence_redacted": true,
+      "receipt": {
+        "actual_vendor_cost": {
+          "amount": "30000",
+          "currency": "usd",
+          "scale": 6
+        },
+        "artifact_reference": {
+          "digest": "sha256:ff73bacbae1c3bcf9c3dd18751f881163d13e5a1640b9827ce1ca0e34a8d9b86",
+          "redacted": true
+        },
+        "authorized_max": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "authorized_max_cents": 3,
+        "budget_charge": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "budget_charge_cents": 3,
+        "created_at": "2026-10-22T02:05:03.865084+00:00",
+        "currency": "usd",
+        "overrun_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "overrun_amount_cents": 0,
+        "price_model_reference": {
+          "digest": "sha256:dac49c8e0e119f442e054f30356395ada299a6229ec8a09529320e8fea00a8d7",
+          "redacted": true
+        },
+        "provider_request_reference": {
+          "digest": "sha256:37b9bca8e21b1d0757e2965e8ef08dec332caaec3619c617b71a57cf2baae9b6",
+          "redacted": true
+        },
+        "released_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "released_amount_cents": 0,
+        "settlement_id": "bc15cdc1-b2bc-498a-991f-bb180bf8ccd1"
+      },
+      "release_reason": null,
+      "revision": 1,
+      "status": "settled",
+      "task_reference": {
+        "digest": "sha256:a8dddf2a609bad9e85d12215269f958ed0b03133e020faba8da072d02241e2e2",
+        "redacted": true
+      }
+    },
+    {
+      "account_id": "aga_svgykn95n571",
+      "agent_id": "agt_qgxbfqebvp11",
+      "authorization_id": "7addbe35-567d-4c77-99ec-a81689bb41db",
+      "authorized_max": {
+        "currency": "usd",
+        "display": "0.03",
+        "scale": 6,
+        "units": "30000"
+      },
+      "authorized_max_cents": 3,
+      "billing_merchant": {
+        "display_name": "Local merchant",
+        "id": "merchant:local"
+      },
+      "budget_hold": {
+        "amount": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "amount_cents": 3,
+        "budget_id": "bgt_gpcm6mns6tkb",
+        "budget_version_id": "bgv_zxa5jw5wbjfq",
+        "currency": "usd",
+        "expires_at": "2026-10-22T02:20:03.694039+00:00",
+        "id": "5bc01b7a-e8fb-4b38-8d4d-0d6598835cbb",
+        "status": "settled"
+      },
+      "claim": {
+        "claimed_at": "2026-10-22T02:05:03.694039+00:00",
+        "expires_at": "2026-10-22T02:20:03.694039+00:00",
+        "finalized_at": "2026-10-22T02:05:03.870366+00:00",
+        "id": "8d14cf44-bb5e-481f-b565-61ac68a04466",
+        "lease_profile_reference": {
+          "digest": "sha256:37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "redacted": true
+        },
+        "provider_reference": null,
+        "reconciled_at": null,
+        "reconciliation_evidence_reference": null,
+        "reconciliation_outcome": null,
+        "reconciliation_required": false,
+        "status": "settled"
+      },
+      "created_at": "2026-10-22T02:05:03.676399+00:00",
+      "currency": "usd",
+      "decision": "allow",
+      "decision_id": "7addbe35-567d-4c77-99ec-a81689bb41db",
+      "id": "7addbe35-567d-4c77-99ec-a81689bb41db",
+      "ledger_transaction_ids": [
+        "53f5b0cb-e8d2-40d3-9747-9a65d48c3b2e"
+      ],
+      "policy_decision": "allow",
+      "provider": {
+        "display_name": "Local fixture provider",
+        "id": "provider:local:fixture"
+      },
+      "purpose_reference": {
+        "digest": "sha256:b6a7c32837081019631748a58b5efb89554f3164382f33de447b11007673a2be",
+        "redacted": true
+      },
+      "raw_evidence_redacted": true,
+      "receipt": {
+        "actual_vendor_cost": {
+          "amount": "30000",
+          "currency": "usd",
+          "scale": 6
+        },
+        "artifact_reference": {
+          "digest": "sha256:8971efa34085846834d3f167554bdc97f7026393f196b75c8bc88107972bb226",
+          "redacted": true
+        },
+        "authorized_max": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "authorized_max_cents": 3,
+        "budget_charge": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "budget_charge_cents": 3,
+        "created_at": "2026-10-22T02:05:03.870366+00:00",
+        "currency": "usd",
+        "overrun_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "overrun_amount_cents": 0,
+        "price_model_reference": {
+          "digest": "sha256:dac49c8e0e119f442e054f30356395ada299a6229ec8a09529320e8fea00a8d7",
+          "redacted": true
+        },
+        "provider_request_reference": {
+          "digest": "sha256:ba6e36eb6a4b1ae993375aec8295eac000a86f217e18988189ebb476400ce5e5",
+          "redacted": true
+        },
+        "released_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "released_amount_cents": 0,
+        "settlement_id": "c30539b3-1ec1-45f4-8383-4be5bb020ec6"
+      },
+      "release_reason": null,
+      "revision": 1,
+      "status": "settled",
+      "task_reference": {
+        "digest": "sha256:b6a7c32837081019631748a58b5efb89554f3164382f33de447b11007673a2be",
+        "redacted": true
+      }
+    },
+    {
+      "account_id": "aga_svgykn95n571",
+      "agent_id": "agt_qgxbfqebvp11",
+      "authorization_id": "62693ead-6c3b-42e4-8228-71a6a13cca2d",
+      "authorized_max": {
+        "currency": "usd",
+        "display": "0.03",
+        "scale": 6,
+        "units": "30000"
+      },
+      "authorized_max_cents": 3,
+      "billing_merchant": {
+        "display_name": "Local merchant",
+        "id": "merchant:local"
+      },
+      "budget_hold": {
+        "amount": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "amount_cents": 3,
+        "budget_id": "bgt_gpcm6mns6tkb",
+        "budget_version_id": "bgv_zxa5jw5wbjfq",
+        "currency": "usd",
+        "expires_at": "2026-10-22T02:20:03.691154+00:00",
+        "id": "a738d390-dacb-466d-8cf7-33ad4b9afc72",
+        "status": "settled"
+      },
+      "claim": {
+        "claimed_at": "2026-10-22T02:05:03.691154+00:00",
+        "expires_at": "2026-10-22T02:20:03.691154+00:00",
+        "finalized_at": "2026-10-22T02:05:03.907353+00:00",
+        "id": "98d7c1b9-1a4d-4a58-8989-cd0471469d34",
+        "lease_profile_reference": {
+          "digest": "sha256:37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "redacted": true
+        },
+        "provider_reference": null,
+        "reconciled_at": null,
+        "reconciliation_evidence_reference": null,
+        "reconciliation_outcome": null,
+        "reconciliation_required": false,
+        "status": "settled"
+      },
+      "created_at": "2026-10-22T02:05:03.673941+00:00",
+      "currency": "usd",
+      "decision": "allow",
+      "decision_id": "62693ead-6c3b-42e4-8228-71a6a13cca2d",
+      "id": "62693ead-6c3b-42e4-8228-71a6a13cca2d",
+      "ledger_transaction_ids": [
+        "938f0777-5016-41d9-a24c-9ae96af28754"
+      ],
+      "policy_decision": "allow",
+      "provider": {
+        "display_name": "Local fixture provider",
+        "id": "provider:local:fixture"
+      },
+      "purpose_reference": {
+        "digest": "sha256:e0c7fa78de1e7c9372dfb5fdc27b329108399a27f99f87e62b8b104397fd093b",
+        "redacted": true
+      },
+      "raw_evidence_redacted": true,
+      "receipt": {
+        "actual_vendor_cost": {
+          "amount": "30000",
+          "currency": "usd",
+          "scale": 6
+        },
+        "artifact_reference": {
+          "digest": "sha256:67e8221ec3480784cac8f7a1fd2f51b73cf73625e1e81fff9772f0f42ebeafa2",
+          "redacted": true
+        },
+        "authorized_max": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "authorized_max_cents": 3,
+        "budget_charge": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "budget_charge_cents": 3,
+        "created_at": "2026-10-22T02:05:03.907353+00:00",
+        "currency": "usd",
+        "overrun_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "overrun_amount_cents": 0,
+        "price_model_reference": {
+          "digest": "sha256:dac49c8e0e119f442e054f30356395ada299a6229ec8a09529320e8fea00a8d7",
+          "redacted": true
+        },
+        "provider_request_reference": {
+          "digest": "sha256:3bab7011d60a0cb7f6bd00ab6e5f9013b61de7e966008229cb73f8340e12fb99",
+          "redacted": true
+        },
+        "released_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "released_amount_cents": 0,
+        "settlement_id": "ab2335e2-46a7-4c3b-9fda-140806028599"
+      },
+      "release_reason": null,
+      "revision": 1,
+      "status": "settled",
+      "task_reference": {
+        "digest": "sha256:e0c7fa78de1e7c9372dfb5fdc27b329108399a27f99f87e62b8b104397fd093b",
+        "redacted": true
+      }
+    },
+    {
+      "account_id": "aga_svgykn95n571",
+      "agent_id": "agt_qgxbfqebvp11",
+      "authorization_id": "48e3ef99-ec41-419f-8ecf-b76b4fcb7cdc",
+      "authorized_max": {
+        "currency": "usd",
+        "display": "0.03",
+        "scale": 6,
+        "units": "30000"
+      },
+      "authorized_max_cents": 3,
+      "billing_merchant": {
+        "display_name": "Local merchant",
+        "id": "merchant:local"
+      },
+      "budget_hold": {
+        "amount": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "amount_cents": 3,
+        "budget_id": "bgt_gpcm6mns6tkb",
+        "budget_version_id": "bgv_zxa5jw5wbjfq",
+        "currency": "usd",
+        "expires_at": "2026-10-22T02:20:03.689818+00:00",
+        "id": "fca3df70-b264-48fb-9450-d196008954b0",
+        "status": "settled"
+      },
+      "claim": {
+        "claimed_at": "2026-10-22T02:05:03.689818+00:00",
+        "expires_at": "2026-10-22T02:20:03.689818+00:00",
+        "finalized_at": "2026-10-22T02:05:03.901172+00:00",
+        "id": "af7c412a-1043-4e88-a89a-43428ee881eb",
+        "lease_profile_reference": {
+          "digest": "sha256:37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "redacted": true
+        },
+        "provider_reference": null,
+        "reconciled_at": null,
+        "reconciliation_evidence_reference": null,
+        "reconciliation_outcome": null,
+        "reconciliation_required": false,
+        "status": "settled"
+      },
+      "created_at": "2026-10-22T02:05:03.672162+00:00",
+      "currency": "usd",
+      "decision": "allow",
+      "decision_id": "48e3ef99-ec41-419f-8ecf-b76b4fcb7cdc",
+      "id": "48e3ef99-ec41-419f-8ecf-b76b4fcb7cdc",
+      "ledger_transaction_ids": [
+        "1b580e2a-cc5f-4e19-9b6b-df1a0cd0c265"
+      ],
+      "policy_decision": "allow",
+      "provider": {
+        "display_name": "Local fixture provider",
+        "id": "provider:local:fixture"
+      },
+      "purpose_reference": {
+        "digest": "sha256:0ab41509bde9900fb04e817da53087c64571308e6abfc77a8fbf2a6d054e92c5",
+        "redacted": true
+      },
+      "raw_evidence_redacted": true,
+      "receipt": {
+        "actual_vendor_cost": {
+          "amount": "30000",
+          "currency": "usd",
+          "scale": 6
+        },
+        "artifact_reference": {
+          "digest": "sha256:6828310e067c28a69211effe3651da332037864b2c08c19a034a471f152524dc",
+          "redacted": true
+        },
+        "authorized_max": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "authorized_max_cents": 3,
+        "budget_charge": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "budget_charge_cents": 3,
+        "created_at": "2026-10-22T02:05:03.901172+00:00",
+        "currency": "usd",
+        "overrun_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "overrun_amount_cents": 0,
+        "price_model_reference": {
+          "digest": "sha256:dac49c8e0e119f442e054f30356395ada299a6229ec8a09529320e8fea00a8d7",
+          "redacted": true
+        },
+        "provider_request_reference": {
+          "digest": "sha256:ada916580813b6f456beb5d43e344afbae963f327e8985b9bc5551dd12b103c5",
+          "redacted": true
+        },
+        "released_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "released_amount_cents": 0,
+        "settlement_id": "b116e877-c235-4023-9e5a-5856b55ada60"
+      },
+      "release_reason": null,
+      "revision": 1,
+      "status": "settled",
+      "task_reference": {
+        "digest": "sha256:0ab41509bde9900fb04e817da53087c64571308e6abfc77a8fbf2a6d054e92c5",
+        "redacted": true
+      }
+    },
+    {
+      "account_id": "aga_svgykn95n571",
+      "agent_id": "agt_qgxbfqebvp11",
+      "authorization_id": "84c4b4ce-752c-4b36-bccd-f957053390d6",
+      "authorized_max": {
+        "currency": "usd",
+        "display": "0.03",
+        "scale": 6,
+        "units": "30000"
+      },
+      "authorized_max_cents": 3,
+      "billing_merchant": {
+        "display_name": "Local merchant",
+        "id": "merchant:local"
+      },
+      "budget_hold": {
+        "amount": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "amount_cents": 3,
+        "budget_id": "bgt_gpcm6mns6tkb",
+        "budget_version_id": "bgv_zxa5jw5wbjfq",
+        "currency": "usd",
+        "expires_at": "2026-10-22T02:20:03.675378+00:00",
+        "id": "af294527-dfbb-40f3-8c06-a6436c654add",
+        "status": "settled"
+      },
+      "claim": {
+        "claimed_at": "2026-10-22T02:05:03.675378+00:00",
+        "expires_at": "2026-10-22T02:20:03.675378+00:00",
+        "finalized_at": "2026-10-22T02:05:03.889307+00:00",
+        "id": "ad831e9b-dbca-4797-8365-d41e906b8644",
+        "lease_profile_reference": {
+          "digest": "sha256:37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "redacted": true
+        },
+        "provider_reference": null,
+        "reconciled_at": null,
+        "reconciliation_evidence_reference": null,
+        "reconciliation_outcome": null,
+        "reconciliation_required": false,
+        "status": "settled"
+      },
+      "created_at": "2026-10-22T02:05:03.662792+00:00",
+      "currency": "usd",
+      "decision": "allow",
+      "decision_id": "84c4b4ce-752c-4b36-bccd-f957053390d6",
+      "id": "84c4b4ce-752c-4b36-bccd-f957053390d6",
+      "ledger_transaction_ids": [
+        "41cf40cb-190d-41d8-ab0c-7a0e73abce77"
+      ],
+      "policy_decision": "allow",
+      "provider": {
+        "display_name": "Local fixture provider",
+        "id": "provider:local:fixture"
+      },
+      "purpose_reference": {
+        "digest": "sha256:27d2fb1a8c9e49242eb29f082345471da7d1a49248d9941c96cd6d2e796f3116",
+        "redacted": true
+      },
+      "raw_evidence_redacted": true,
+      "receipt": {
+        "actual_vendor_cost": {
+          "amount": "30000",
+          "currency": "usd",
+          "scale": 6
+        },
+        "artifact_reference": {
+          "digest": "sha256:0378949bda0d6757cf0957c8eaaea1f868cbd42a0581d3697ad3c7999510ec94",
+          "redacted": true
+        },
+        "authorized_max": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "authorized_max_cents": 3,
+        "budget_charge": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "budget_charge_cents": 3,
+        "created_at": "2026-10-22T02:05:03.889307+00:00",
+        "currency": "usd",
+        "overrun_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "overrun_amount_cents": 0,
+        "price_model_reference": {
+          "digest": "sha256:dac49c8e0e119f442e054f30356395ada299a6229ec8a09529320e8fea00a8d7",
+          "redacted": true
+        },
+        "provider_request_reference": {
+          "digest": "sha256:2fcf0f21d9cc0a983f76dede81c6143376c0480af164c159961bd45362318ca9",
+          "redacted": true
+        },
+        "released_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "released_amount_cents": 0,
+        "settlement_id": "a55f36c7-2ade-43ea-9aaf-2f83a103d2cf"
+      },
+      "release_reason": null,
+      "revision": 1,
+      "status": "settled",
+      "task_reference": {
+        "digest": "sha256:27d2fb1a8c9e49242eb29f082345471da7d1a49248d9941c96cd6d2e796f3116",
+        "redacted": true
+      }
+    },
+    {
+      "account_id": "aga_svgykn95n571",
+      "agent_id": "agt_qgxbfqebvp11",
+      "authorization_id": "5816b1dc-69df-4077-bf06-f6960dce3ae5",
+      "authorized_max": {
+        "currency": "usd",
+        "display": "0.03",
+        "scale": 6,
+        "units": "30000"
+      },
+      "authorized_max_cents": 3,
+      "billing_merchant": {
+        "display_name": "Local merchant",
+        "id": "merchant:local"
+      },
+      "budget_hold": {
+        "amount": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "amount_cents": 3,
+        "budget_id": "bgt_gpcm6mns6tkb",
+        "budget_version_id": "bgv_zxa5jw5wbjfq",
+        "currency": "usd",
+        "expires_at": "2026-10-22T02:20:03.671098+00:00",
+        "id": "eaf1fd45-2aae-427d-8ea6-0a94d158389b",
+        "status": "settled"
+      },
+      "claim": {
+        "claimed_at": "2026-10-22T02:05:03.671098+00:00",
+        "expires_at": "2026-10-22T02:20:03.671098+00:00",
+        "finalized_at": "2026-10-22T02:05:03.894333+00:00",
+        "id": "6577225c-25c7-4550-a38c-f2f539387943",
+        "lease_profile_reference": {
+          "digest": "sha256:37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "redacted": true
+        },
+        "provider_reference": null,
+        "reconciled_at": null,
+        "reconciliation_evidence_reference": null,
+        "reconciliation_outcome": null,
+        "reconciliation_required": false,
+        "status": "settled"
+      },
+      "created_at": "2026-10-22T02:05:03.660928+00:00",
+      "currency": "usd",
+      "decision": "allow",
+      "decision_id": "5816b1dc-69df-4077-bf06-f6960dce3ae5",
+      "id": "5816b1dc-69df-4077-bf06-f6960dce3ae5",
+      "ledger_transaction_ids": [
+        "bb61ea25-4e21-4253-a9ae-f85eab2666b7"
+      ],
+      "policy_decision": "allow",
+      "provider": {
+        "display_name": "Local fixture provider",
+        "id": "provider:local:fixture"
+      },
+      "purpose_reference": {
+        "digest": "sha256:df99917a9480f345d07259256e4fa794f8675fef6196cec9d77858cad5c7b81c",
+        "redacted": true
+      },
+      "raw_evidence_redacted": true,
+      "receipt": {
+        "actual_vendor_cost": {
+          "amount": "30000",
+          "currency": "usd",
+          "scale": 6
+        },
+        "artifact_reference": {
+          "digest": "sha256:5de8cfe0f09cb97cac0f7bed6ac62cb27898decbf31fb6a856545173bb8d5efb",
+          "redacted": true
+        },
+        "authorized_max": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "authorized_max_cents": 3,
+        "budget_charge": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "budget_charge_cents": 3,
+        "created_at": "2026-10-22T02:05:03.894333+00:00",
+        "currency": "usd",
+        "overrun_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "overrun_amount_cents": 0,
+        "price_model_reference": {
+          "digest": "sha256:dac49c8e0e119f442e054f30356395ada299a6229ec8a09529320e8fea00a8d7",
+          "redacted": true
+        },
+        "provider_request_reference": {
+          "digest": "sha256:1b32bd12ba581ecbdf48a0949c42c656de7c0fb112a750bcb1a849eca5ee6be9",
+          "redacted": true
+        },
+        "released_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "released_amount_cents": 0,
+        "settlement_id": "91e5a920-6e46-46eb-8390-f9eb4ee79c25"
+      },
+      "release_reason": null,
+      "revision": 1,
+      "status": "settled",
+      "task_reference": {
+        "digest": "sha256:df99917a9480f345d07259256e4fa794f8675fef6196cec9d77858cad5c7b81c",
+        "redacted": true
+      }
+    },
+    {
+      "account_id": "aga_svgykn95n571",
+      "agent_id": "agt_qgxbfqebvp11",
+      "authorization_id": "b0f3f01f-ca22-430c-9ffa-c8a5bdc3191d",
+      "authorized_max": {
+        "currency": "usd",
+        "display": "0.03",
+        "scale": 6,
+        "units": "30000"
+      },
+      "authorized_max_cents": 3,
+      "billing_merchant": {
+        "display_name": "Local merchant",
+        "id": "merchant:local"
+      },
+      "budget_hold": {
+        "amount": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "amount_cents": 3,
+        "budget_id": "bgt_gpcm6mns6tkb",
+        "budget_version_id": "bgv_zxa5jw5wbjfq",
+        "currency": "usd",
+        "expires_at": "2026-10-22T02:20:03.670404+00:00",
+        "id": "13d2da4e-9bdd-40af-912f-257bb33879f7",
+        "status": "settled"
+      },
+      "claim": {
+        "claimed_at": "2026-10-22T02:05:03.670404+00:00",
+        "expires_at": "2026-10-22T02:20:03.670404+00:00",
+        "finalized_at": "2026-10-22T02:05:03.878954+00:00",
+        "id": "efa6826a-e3b8-4254-ba40-29c2d90ecb4e",
+        "lease_profile_reference": {
+          "digest": "sha256:37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "redacted": true
+        },
+        "provider_reference": null,
+        "reconciled_at": null,
+        "reconciliation_evidence_reference": null,
+        "reconciliation_outcome": null,
+        "reconciliation_required": false,
+        "status": "settled"
+      },
+      "created_at": "2026-10-22T02:05:03.659327+00:00",
+      "currency": "usd",
+      "decision": "allow",
+      "decision_id": "b0f3f01f-ca22-430c-9ffa-c8a5bdc3191d",
+      "id": "b0f3f01f-ca22-430c-9ffa-c8a5bdc3191d",
+      "ledger_transaction_ids": [
+        "54c3ed19-89f9-43a1-9f56-88e8351594a1"
+      ],
+      "policy_decision": "allow",
+      "provider": {
+        "display_name": "Local fixture provider",
+        "id": "provider:local:fixture"
+      },
+      "purpose_reference": {
+        "digest": "sha256:21b9cd47452783db0ad4945a01f8480150b676b196eada64eed4cb6b3880e20b",
+        "redacted": true
+      },
+      "raw_evidence_redacted": true,
+      "receipt": {
+        "actual_vendor_cost": {
+          "amount": "30000",
+          "currency": "usd",
+          "scale": 6
+        },
+        "artifact_reference": {
+          "digest": "sha256:01e09b39d309144abf09cfc9718d26a01af29cf43ded2cf8fd7a22b67d87f33d",
+          "redacted": true
+        },
+        "authorized_max": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "authorized_max_cents": 3,
+        "budget_charge": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "budget_charge_cents": 3,
+        "created_at": "2026-10-22T02:05:03.878954+00:00",
+        "currency": "usd",
+        "overrun_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "overrun_amount_cents": 0,
+        "price_model_reference": {
+          "digest": "sha256:dac49c8e0e119f442e054f30356395ada299a6229ec8a09529320e8fea00a8d7",
+          "redacted": true
+        },
+        "provider_request_reference": {
+          "digest": "sha256:fc7ec9c55259c8dc35b981b38bdb99cf25711b60771260eaa9a496d3dd4317de",
+          "redacted": true
+        },
+        "released_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "released_amount_cents": 0,
+        "settlement_id": "479b7ac3-9267-43e5-a583-6c4c14e0aca4"
+      },
+      "release_reason": null,
+      "revision": 1,
+      "status": "settled",
+      "task_reference": {
+        "digest": "sha256:21b9cd47452783db0ad4945a01f8480150b676b196eada64eed4cb6b3880e20b",
+        "redacted": true
+      }
+    },
+    {
+      "account_id": "aga_svgykn95n571",
+      "agent_id": "agt_qgxbfqebvp11",
+      "authorization_id": "8f60dbe2-e258-496d-92aa-8485d991f116",
+      "authorized_max": {
+        "currency": "usd",
+        "display": "0.03",
+        "scale": 6,
+        "units": "30000"
+      },
+      "authorized_max_cents": 3,
+      "billing_merchant": {
+        "display_name": "Local merchant",
+        "id": "merchant:local"
+      },
+      "budget_hold": {
+        "amount": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "amount_cents": 3,
+        "budget_id": "bgt_gpcm6mns6tkb",
+        "budget_version_id": "bgv_zxa5jw5wbjfq",
+        "currency": "usd",
+        "expires_at": "2026-10-22T02:20:03.669701+00:00",
+        "id": "48a9d38d-6cf4-4e4d-8c9a-fa8e698fcaa5",
+        "status": "settled"
+      },
+      "claim": {
+        "claimed_at": "2026-10-22T02:05:03.669701+00:00",
+        "expires_at": "2026-10-22T02:20:03.669701+00:00",
+        "finalized_at": "2026-10-22T02:05:03.873709+00:00",
+        "id": "179a3823-6c18-4295-b164-50762eb1356a",
+        "lease_profile_reference": {
+          "digest": "sha256:37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "redacted": true
+        },
+        "provider_reference": null,
+        "reconciled_at": null,
+        "reconciliation_evidence_reference": null,
+        "reconciliation_outcome": null,
+        "reconciliation_required": false,
+        "status": "settled"
+      },
+      "created_at": "2026-10-22T02:05:03.657721+00:00",
+      "currency": "usd",
+      "decision": "allow",
+      "decision_id": "8f60dbe2-e258-496d-92aa-8485d991f116",
+      "id": "8f60dbe2-e258-496d-92aa-8485d991f116",
+      "ledger_transaction_ids": [
+        "588ab6ed-8c4e-45e0-8a7e-15b08b7fec4c"
+      ],
+      "policy_decision": "allow",
+      "provider": {
+        "display_name": "Local fixture provider",
+        "id": "provider:local:fixture"
+      },
+      "purpose_reference": {
+        "digest": "sha256:3afe15bb34e3b6f1b8a601358ed00bcd3c450f12595d3a1cfd22f33a9b6daa18",
+        "redacted": true
+      },
+      "raw_evidence_redacted": true,
+      "receipt": {
+        "actual_vendor_cost": {
+          "amount": "30000",
+          "currency": "usd",
+          "scale": 6
+        },
+        "artifact_reference": {
+          "digest": "sha256:8a0412a14c39a156222c1de0decb5ef324e49282cbb8ec98c9a1ca547370a222",
+          "redacted": true
+        },
+        "authorized_max": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "authorized_max_cents": 3,
+        "budget_charge": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "budget_charge_cents": 3,
+        "created_at": "2026-10-22T02:05:03.873709+00:00",
+        "currency": "usd",
+        "overrun_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "overrun_amount_cents": 0,
+        "price_model_reference": {
+          "digest": "sha256:dac49c8e0e119f442e054f30356395ada299a6229ec8a09529320e8fea00a8d7",
+          "redacted": true
+        },
+        "provider_request_reference": {
+          "digest": "sha256:61850e9491d22066cf1e244fd74b5fc6a4a2b0af3fbe9d4a525bee99de8f5ad6",
+          "redacted": true
+        },
+        "released_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "released_amount_cents": 0,
+        "settlement_id": "0d1f78ee-f12c-4204-89dd-9393d2d231a7"
+      },
+      "release_reason": null,
+      "revision": 1,
+      "status": "settled",
+      "task_reference": {
+        "digest": "sha256:3afe15bb34e3b6f1b8a601358ed00bcd3c450f12595d3a1cfd22f33a9b6daa18",
+        "redacted": true
+      }
+    },
+    {
+      "account_id": "aga_svgykn95n571",
+      "agent_id": "agt_qgxbfqebvp11",
+      "authorization_id": "2724b1c6-8340-4bc4-81a3-dbfcbe21dc63",
+      "authorized_max": {
+        "currency": "usd",
+        "display": "0.03",
+        "scale": 6,
+        "units": "30000"
+      },
+      "authorized_max_cents": 3,
+      "billing_merchant": {
+        "display_name": "Local merchant",
+        "id": "merchant:local"
+      },
+      "budget_hold": {
+        "amount": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "amount_cents": 3,
+        "budget_id": "bgt_gpcm6mns6tkb",
+        "budget_version_id": "bgv_zxa5jw5wbjfq",
+        "currency": "usd",
+        "expires_at": "2026-10-22T02:20:03.668304+00:00",
+        "id": "1cb6050e-c5b0-44ad-bce1-4549b0973e04",
+        "status": "settled"
+      },
+      "claim": {
+        "claimed_at": "2026-10-22T02:05:03.668304+00:00",
+        "expires_at": "2026-10-22T02:20:03.668304+00:00",
+        "finalized_at": "2026-10-22T02:05:03.912143+00:00",
+        "id": "ac86570f-8c14-4198-af29-ceae448839a0",
+        "lease_profile_reference": {
+          "digest": "sha256:37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "redacted": true
+        },
+        "provider_reference": null,
+        "reconciled_at": null,
+        "reconciliation_evidence_reference": null,
+        "reconciliation_outcome": null,
+        "reconciliation_required": false,
+        "status": "settled"
+      },
+      "created_at": "2026-10-22T02:05:03.656054+00:00",
+      "currency": "usd",
+      "decision": "allow",
+      "decision_id": "2724b1c6-8340-4bc4-81a3-dbfcbe21dc63",
+      "id": "2724b1c6-8340-4bc4-81a3-dbfcbe21dc63",
+      "ledger_transaction_ids": [
+        "9ee51c69-715a-4650-824c-7a29d7f2ac49"
+      ],
+      "policy_decision": "allow",
+      "provider": {
+        "display_name": "Local fixture provider",
+        "id": "provider:local:fixture"
+      },
+      "purpose_reference": {
+        "digest": "sha256:a7e71738c9e98eeaff4e59e4127e8baf3f74c55cad0b705a624b2fe5fcd06670",
+        "redacted": true
+      },
+      "raw_evidence_redacted": true,
+      "receipt": {
+        "actual_vendor_cost": {
+          "amount": "30000",
+          "currency": "usd",
+          "scale": 6
+        },
+        "artifact_reference": {
+          "digest": "sha256:04722bdfafca4c7e34b5e20d0f47f7a5643dd4ed8fc517690256fd07770b958f",
+          "redacted": true
+        },
+        "authorized_max": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "authorized_max_cents": 3,
+        "budget_charge": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "budget_charge_cents": 3,
+        "created_at": "2026-10-22T02:05:03.912143+00:00",
+        "currency": "usd",
+        "overrun_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "overrun_amount_cents": 0,
+        "price_model_reference": {
+          "digest": "sha256:dac49c8e0e119f442e054f30356395ada299a6229ec8a09529320e8fea00a8d7",
+          "redacted": true
+        },
+        "provider_request_reference": {
+          "digest": "sha256:5abc2c3e7bfdcdff9a9320b74ae67f183581d9931151fc262939dedfc5c9cf4e",
+          "redacted": true
+        },
+        "released_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "released_amount_cents": 0,
+        "settlement_id": "d386d12c-913e-4997-b3f8-395f6d364c32"
+      },
+      "release_reason": null,
+      "revision": 1,
+      "status": "settled",
+      "task_reference": {
+        "digest": "sha256:a7e71738c9e98eeaff4e59e4127e8baf3f74c55cad0b705a624b2fe5fcd06670",
+        "redacted": true
+      }
+    },
+    {
+      "account_id": "aga_svgykn95n571",
+      "agent_id": "agt_qgxbfqebvp11",
+      "authorization_id": "a86bf1e4-afa7-47f0-89d2-ef1700b2b9f2",
+      "authorized_max": {
+        "currency": "usd",
+        "display": "0.03",
+        "scale": 6,
+        "units": "30000"
+      },
+      "authorized_max_cents": 3,
+      "billing_merchant": {
+        "display_name": "Local merchant",
+        "id": "merchant:local"
+      },
+      "budget_hold": {
+        "amount": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "amount_cents": 3,
+        "budget_id": "bgt_gpcm6mns6tkb",
+        "budget_version_id": "bgv_zxa5jw5wbjfq",
+        "currency": "usd",
+        "expires_at": "2026-10-22T02:20:03.669007+00:00",
+        "id": "5d684261-49b6-4e34-9974-3faf72d47bd3",
+        "status": "settled"
+      },
+      "claim": {
+        "claimed_at": "2026-10-22T02:05:03.669007+00:00",
+        "expires_at": "2026-10-22T02:20:03.669007+00:00",
+        "finalized_at": "2026-10-22T02:05:03.884199+00:00",
+        "id": "0e002c89-29f5-4c4f-b69a-824c19f17b90",
+        "lease_profile_reference": {
+          "digest": "sha256:37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "redacted": true
+        },
+        "provider_reference": null,
+        "reconciled_at": null,
+        "reconciliation_evidence_reference": null,
+        "reconciliation_outcome": null,
+        "reconciliation_required": false,
+        "status": "settled"
+      },
+      "created_at": "2026-10-22T02:05:03.654504+00:00",
+      "currency": "usd",
+      "decision": "allow",
+      "decision_id": "a86bf1e4-afa7-47f0-89d2-ef1700b2b9f2",
+      "id": "a86bf1e4-afa7-47f0-89d2-ef1700b2b9f2",
+      "ledger_transaction_ids": [
+        "211cc47a-eaeb-42a9-964e-5171609f6fdd"
+      ],
+      "policy_decision": "allow",
+      "provider": {
+        "display_name": "Local fixture provider",
+        "id": "provider:local:fixture"
+      },
+      "purpose_reference": {
+        "digest": "sha256:2fbdb7be92562d576419a74b26bce72327701c54ba3916f17735f068036da0f8",
+        "redacted": true
+      },
+      "raw_evidence_redacted": true,
+      "receipt": {
+        "actual_vendor_cost": {
+          "amount": "30000",
+          "currency": "usd",
+          "scale": 6
+        },
+        "artifact_reference": {
+          "digest": "sha256:dd14ee5dd06919a56b6040018748c31669f3772cb4a8b9de4e5cd615784363b9",
+          "redacted": true
+        },
+        "authorized_max": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "authorized_max_cents": 3,
+        "budget_charge": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "budget_charge_cents": 3,
+        "created_at": "2026-10-22T02:05:03.884199+00:00",
+        "currency": "usd",
+        "overrun_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "overrun_amount_cents": 0,
+        "price_model_reference": {
+          "digest": "sha256:dac49c8e0e119f442e054f30356395ada299a6229ec8a09529320e8fea00a8d7",
+          "redacted": true
+        },
+        "provider_request_reference": {
+          "digest": "sha256:62e4205196d99c992d9516ad678619fae4a688a08892cb4b4f149f425a13de6a",
+          "redacted": true
+        },
+        "released_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "released_amount_cents": 0,
+        "settlement_id": "20d5bb4d-9e48-4eeb-bb65-31fb3d75d640"
+      },
+      "release_reason": null,
+      "revision": 1,
+      "status": "settled",
+      "task_reference": {
+        "digest": "sha256:2fbdb7be92562d576419a74b26bce72327701c54ba3916f17735f068036da0f8",
+        "redacted": true
+      }
+    },
+    {
+      "account_id": "aga_svgykn95n571",
+      "agent_id": "agt_qgxbfqebvp11",
+      "authorization_id": "fa56287e-5459-4056-9d1f-0b147ca0e850",
+      "authorized_max": {
+        "currency": "usd",
+        "display": "0.03",
+        "scale": 6,
+        "units": "30000"
+      },
+      "authorized_max_cents": 3,
+      "billing_merchant": {
+        "display_name": "Local merchant",
+        "id": "merchant:local"
+      },
+      "budget_hold": {
+        "amount": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "amount_cents": 3,
+        "budget_id": "bgt_gpcm6mns6tkb",
+        "budget_version_id": "bgv_zxa5jw5wbjfq",
+        "currency": "usd",
+        "expires_at": "2026-10-22T02:20:03.665876+00:00",
+        "id": "81f3553b-2e41-44e1-8c18-cc8dde5156b4",
+        "status": "settled"
+      },
+      "claim": {
+        "claimed_at": "2026-10-22T02:05:03.665876+00:00",
+        "expires_at": "2026-10-22T02:20:03.665876+00:00",
+        "finalized_at": "2026-10-22T02:05:03.905833+00:00",
+        "id": "67c4675b-8afb-404d-a70a-0c91541f3468",
+        "lease_profile_reference": {
+          "digest": "sha256:37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "redacted": true
+        },
+        "provider_reference": null,
+        "reconciled_at": null,
+        "reconciliation_evidence_reference": null,
+        "reconciliation_outcome": null,
+        "reconciliation_required": false,
+        "status": "settled"
+      },
+      "created_at": "2026-10-22T02:05:03.652761+00:00",
+      "currency": "usd",
+      "decision": "allow",
+      "decision_id": "fa56287e-5459-4056-9d1f-0b147ca0e850",
+      "id": "fa56287e-5459-4056-9d1f-0b147ca0e850",
+      "ledger_transaction_ids": [
+        "fc951d6b-bffb-4b6b-a0b6-9fb629d8aa0a"
+      ],
+      "policy_decision": "allow",
+      "provider": {
+        "display_name": "Local fixture provider",
+        "id": "provider:local:fixture"
+      },
+      "purpose_reference": {
+        "digest": "sha256:4340ee8fe08972f0504d68c3781fe2f3cb8cde3bb93a8815ed52bb64f2ffa07f",
+        "redacted": true
+      },
+      "raw_evidence_redacted": true,
+      "receipt": {
+        "actual_vendor_cost": {
+          "amount": "30000",
+          "currency": "usd",
+          "scale": 6
+        },
+        "artifact_reference": {
+          "digest": "sha256:36c337a9faa3b24f27dfa4b7355835ab89aebac658ac7795cc5f4969fb38d2a5",
+          "redacted": true
+        },
+        "authorized_max": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "authorized_max_cents": 3,
+        "budget_charge": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "budget_charge_cents": 3,
+        "created_at": "2026-10-22T02:05:03.905833+00:00",
+        "currency": "usd",
+        "overrun_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "overrun_amount_cents": 0,
+        "price_model_reference": {
+          "digest": "sha256:dac49c8e0e119f442e054f30356395ada299a6229ec8a09529320e8fea00a8d7",
+          "redacted": true
+        },
+        "provider_request_reference": {
+          "digest": "sha256:d7bb9e6925b93afd3649f74d6b8bff753e9632d9ffda44cab23e1d401c0a5682",
+          "redacted": true
+        },
+        "released_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "released_amount_cents": 0,
+        "settlement_id": "31a6fa17-6943-490f-be72-ab0d44bebc12"
+      },
+      "release_reason": null,
+      "revision": 1,
+      "status": "settled",
+      "task_reference": {
+        "digest": "sha256:4340ee8fe08972f0504d68c3781fe2f3cb8cde3bb93a8815ed52bb64f2ffa07f",
+        "redacted": true
+      }
+    },
+    {
+      "account_id": "aga_svgykn95n571",
+      "agent_id": "agt_qgxbfqebvp11",
+      "authorization_id": "c2030b80-801c-4017-ab23-720173d7477c",
+      "authorized_max": {
+        "currency": "usd",
+        "display": "0.03",
+        "scale": 6,
+        "units": "30000"
+      },
+      "authorized_max_cents": 3,
+      "billing_merchant": {
+        "display_name": "Local merchant",
+        "id": "merchant:local"
+      },
+      "budget_hold": {
+        "amount": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "amount_cents": 3,
+        "budget_id": "bgt_gpcm6mns6tkb",
+        "budget_version_id": "bgv_zxa5jw5wbjfq",
+        "currency": "usd",
+        "expires_at": "2026-10-22T02:20:03.666706+00:00",
+        "id": "64b53e4a-75a3-44a3-967d-d7eba15e984e",
+        "status": "settled"
+      },
+      "claim": {
+        "claimed_at": "2026-10-22T02:05:03.666706+00:00",
+        "expires_at": "2026-10-22T02:20:03.666706+00:00",
+        "finalized_at": "2026-10-22T02:05:03.868491+00:00",
+        "id": "8c43aa92-34dd-430a-9960-01c67b68a2d1",
+        "lease_profile_reference": {
+          "digest": "sha256:37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "redacted": true
+        },
+        "provider_reference": null,
+        "reconciled_at": null,
+        "reconciliation_evidence_reference": null,
+        "reconciliation_outcome": null,
+        "reconciliation_required": false,
+        "status": "settled"
+      },
+      "created_at": "2026-10-22T02:05:03.651136+00:00",
+      "currency": "usd",
+      "decision": "allow",
+      "decision_id": "c2030b80-801c-4017-ab23-720173d7477c",
+      "id": "c2030b80-801c-4017-ab23-720173d7477c",
+      "ledger_transaction_ids": [
+        "72719dd8-b6f9-4448-8cd2-8b203277f733"
+      ],
+      "policy_decision": "allow",
+      "provider": {
+        "display_name": "Local fixture provider",
+        "id": "provider:local:fixture"
+      },
+      "purpose_reference": {
+        "digest": "sha256:c0af3e663a4b03386f2f8eebcf2ea9f050ceab5970ae946238290919f886ca54",
+        "redacted": true
+      },
+      "raw_evidence_redacted": true,
+      "receipt": {
+        "actual_vendor_cost": {
+          "amount": "30000",
+          "currency": "usd",
+          "scale": 6
+        },
+        "artifact_reference": {
+          "digest": "sha256:efd49683b5547107788c7487d092834ea2471517140b4a77f9d54634a2d49b81",
+          "redacted": true
+        },
+        "authorized_max": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "authorized_max_cents": 3,
+        "budget_charge": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "budget_charge_cents": 3,
+        "created_at": "2026-10-22T02:05:03.868491+00:00",
+        "currency": "usd",
+        "overrun_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "overrun_amount_cents": 0,
+        "price_model_reference": {
+          "digest": "sha256:dac49c8e0e119f442e054f30356395ada299a6229ec8a09529320e8fea00a8d7",
+          "redacted": true
+        },
+        "provider_request_reference": {
+          "digest": "sha256:6be4ea07770610cd74d5cb0de4699dc8149f1e7e7ec1e7b19457e26385d9aa9f",
+          "redacted": true
+        },
+        "released_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "released_amount_cents": 0,
+        "settlement_id": "241108b9-c909-45fe-8218-0d482bbbb0d3"
+      },
+      "release_reason": null,
+      "revision": 1,
+      "status": "settled",
+      "task_reference": {
+        "digest": "sha256:c0af3e663a4b03386f2f8eebcf2ea9f050ceab5970ae946238290919f886ca54",
+        "redacted": true
+      }
+    },
+    {
+      "account_id": "aga_svgykn95n571",
+      "agent_id": "agt_qgxbfqebvp11",
+      "authorization_id": "6dedebd9-7bb7-4376-94bf-8ee2a80acfc5",
+      "authorized_max": {
+        "currency": "usd",
+        "display": "0.03",
+        "scale": 6,
+        "units": "30000"
+      },
+      "authorized_max_cents": 3,
+      "billing_merchant": {
+        "display_name": "Local merchant",
+        "id": "merchant:local"
+      },
+      "budget_hold": {
+        "amount": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "amount_cents": 3,
+        "budget_id": "bgt_gpcm6mns6tkb",
+        "budget_version_id": "bgv_zxa5jw5wbjfq",
+        "currency": "usd",
+        "expires_at": "2026-10-22T02:20:03.667471+00:00",
+        "id": "289506e8-4c81-4b3d-8763-19122aade24b",
+        "status": "settled"
+      },
+      "claim": {
+        "claimed_at": "2026-10-22T02:05:03.667471+00:00",
+        "expires_at": "2026-10-22T02:20:03.667471+00:00",
+        "finalized_at": "2026-10-22T02:05:03.863142+00:00",
+        "id": "3ccf65e2-8429-4ed6-a302-dac2089bdca2",
+        "lease_profile_reference": {
+          "digest": "sha256:37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "redacted": true
+        },
+        "provider_reference": null,
+        "reconciled_at": null,
+        "reconciliation_evidence_reference": null,
+        "reconciliation_outcome": null,
+        "reconciliation_required": false,
+        "status": "settled"
+      },
+      "created_at": "2026-10-22T02:05:03.649514+00:00",
+      "currency": "usd",
+      "decision": "allow",
+      "decision_id": "6dedebd9-7bb7-4376-94bf-8ee2a80acfc5",
+      "id": "6dedebd9-7bb7-4376-94bf-8ee2a80acfc5",
+      "ledger_transaction_ids": [
+        "298da71e-1aa7-4655-9ccb-492bcb36453d"
+      ],
+      "policy_decision": "allow",
+      "provider": {
+        "display_name": "Local fixture provider",
+        "id": "provider:local:fixture"
+      },
+      "purpose_reference": {
+        "digest": "sha256:6f1026eb4f2782ea2c3aaa04a3b83afd777e99c1b8ea2a4fd898116acec6b45b",
+        "redacted": true
+      },
+      "raw_evidence_redacted": true,
+      "receipt": {
+        "actual_vendor_cost": {
+          "amount": "30000",
+          "currency": "usd",
+          "scale": 6
+        },
+        "artifact_reference": {
+          "digest": "sha256:69e18ec31aac0ba7a1297528e243d2d7997d151703a7e4dcc43b770e3744f827",
+          "redacted": true
+        },
+        "authorized_max": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "authorized_max_cents": 3,
+        "budget_charge": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "budget_charge_cents": 3,
+        "created_at": "2026-10-22T02:05:03.863142+00:00",
+        "currency": "usd",
+        "overrun_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "overrun_amount_cents": 0,
+        "price_model_reference": {
+          "digest": "sha256:dac49c8e0e119f442e054f30356395ada299a6229ec8a09529320e8fea00a8d7",
+          "redacted": true
+        },
+        "provider_request_reference": {
+          "digest": "sha256:2d6a904351e34e5cb50839ab56945b1b1b82575809d85b54a3dde69ed533e506",
+          "redacted": true
+        },
+        "released_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "released_amount_cents": 0,
+        "settlement_id": "fd157638-f587-4057-8528-3f3aeb2fc5e0"
+      },
+      "release_reason": null,
+      "revision": 1,
+      "status": "settled",
+      "task_reference": {
+        "digest": "sha256:6f1026eb4f2782ea2c3aaa04a3b83afd777e99c1b8ea2a4fd898116acec6b45b",
+        "redacted": true
+      }
+    },
+    {
+      "account_id": "aga_svgykn95n571",
+      "agent_id": "agt_qgxbfqebvp11",
+      "authorization_id": "62a71ff1-2abe-449b-b282-8e09daa9f66f",
+      "authorized_max": {
+        "currency": "usd",
+        "display": "0.03",
+        "scale": 6,
+        "units": "30000"
+      },
+      "authorized_max_cents": 3,
+      "billing_merchant": {
+        "display_name": "Local merchant",
+        "id": "merchant:local"
+      },
+      "budget_hold": {
+        "amount": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "amount_cents": 3,
+        "budget_id": "bgt_gpcm6mns6tkb",
+        "budget_version_id": "bgv_zxa5jw5wbjfq",
+        "currency": "usd",
+        "expires_at": "2026-10-22T02:20:03.664510+00:00",
+        "id": "0e048616-4014-49b5-87a9-54cf7576f731",
+        "status": "settled"
+      },
+      "claim": {
+        "claimed_at": "2026-10-22T02:05:03.664510+00:00",
+        "expires_at": "2026-10-22T02:20:03.664510+00:00",
+        "finalized_at": "2026-10-22T02:05:03.899525+00:00",
+        "id": "a2d9d29a-5328-46af-9e24-f546f82dbcbb",
+        "lease_profile_reference": {
+          "digest": "sha256:37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "redacted": true
+        },
+        "provider_reference": null,
+        "reconciled_at": null,
+        "reconciliation_evidence_reference": null,
+        "reconciliation_outcome": null,
+        "reconciliation_required": false,
+        "status": "settled"
+      },
+      "created_at": "2026-10-22T02:05:03.647144+00:00",
+      "currency": "usd",
+      "decision": "allow",
+      "decision_id": "62a71ff1-2abe-449b-b282-8e09daa9f66f",
+      "id": "62a71ff1-2abe-449b-b282-8e09daa9f66f",
+      "ledger_transaction_ids": [
+        "731fc43c-0e82-41aa-873f-661f67ab2e3a"
+      ],
+      "policy_decision": "allow",
+      "provider": {
+        "display_name": "Local fixture provider",
+        "id": "provider:local:fixture"
+      },
+      "purpose_reference": {
+        "digest": "sha256:fd33a4ae8dcc0d3608916d8fa12f67d6128ca00566b15ef46fafac0a3525de0b",
+        "redacted": true
+      },
+      "raw_evidence_redacted": true,
+      "receipt": {
+        "actual_vendor_cost": {
+          "amount": "30000",
+          "currency": "usd",
+          "scale": 6
+        },
+        "artifact_reference": {
+          "digest": "sha256:d11b42d0a4d02cb4ce38771f01e2295b9256f8e05ff56542de24c68b82fc07bf",
+          "redacted": true
+        },
+        "authorized_max": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "authorized_max_cents": 3,
+        "budget_charge": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "budget_charge_cents": 3,
+        "created_at": "2026-10-22T02:05:03.899525+00:00",
+        "currency": "usd",
+        "overrun_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "overrun_amount_cents": 0,
+        "price_model_reference": {
+          "digest": "sha256:dac49c8e0e119f442e054f30356395ada299a6229ec8a09529320e8fea00a8d7",
+          "redacted": true
+        },
+        "provider_request_reference": {
+          "digest": "sha256:36e7008b60924d799a3cecad58c43ab940b62c33fdca17c46ebd00fe21587807",
+          "redacted": true
+        },
+        "released_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "released_amount_cents": 0,
+        "settlement_id": "e7d775f7-18a8-4cbd-a008-46f57826325d"
+      },
+      "release_reason": null,
+      "revision": 1,
+      "status": "settled",
+      "task_reference": {
+        "digest": "sha256:fd33a4ae8dcc0d3608916d8fa12f67d6128ca00566b15ef46fafac0a3525de0b",
+        "redacted": true
+      }
+    },
+    {
+      "account_id": "aga_svgykn95n571",
+      "agent_id": "agt_qgxbfqebvp11",
+      "authorization_id": "c7a63781-6402-432a-93ef-32f1ebfd3cef",
+      "authorized_max": {
+        "currency": "usd",
+        "display": "0.03",
+        "scale": 6,
+        "units": "30000"
+      },
+      "authorized_max_cents": 3,
+      "billing_merchant": {
+        "display_name": "Local merchant",
+        "id": "merchant:local"
+      },
+      "budget_hold": {
+        "amount": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "amount_cents": 3,
+        "budget_id": "bgt_gpcm6mns6tkb",
+        "budget_version_id": "bgv_zxa5jw5wbjfq",
+        "currency": "usd",
+        "expires_at": "2026-10-22T02:20:03.648521+00:00",
+        "id": "52073673-f327-4342-bbfc-8c97ea564d7f",
+        "status": "settled"
+      },
+      "claim": {
+        "claimed_at": "2026-10-22T02:05:03.648521+00:00",
+        "expires_at": "2026-10-22T02:20:03.648521+00:00",
+        "finalized_at": "2026-10-22T02:05:03.887675+00:00",
+        "id": "3302bfc6-9891-423a-b0bf-57cc33045823",
+        "lease_profile_reference": {
+          "digest": "sha256:37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "redacted": true
+        },
+        "provider_reference": null,
+        "reconciled_at": null,
+        "reconciliation_evidence_reference": null,
+        "reconciliation_outcome": null,
+        "reconciliation_required": false,
+        "status": "settled"
+      },
+      "created_at": "2026-10-22T02:05:03.637539+00:00",
+      "currency": "usd",
+      "decision": "allow",
+      "decision_id": "c7a63781-6402-432a-93ef-32f1ebfd3cef",
+      "id": "c7a63781-6402-432a-93ef-32f1ebfd3cef",
+      "ledger_transaction_ids": [
+        "abdcfd32-e7ff-4994-a118-ee2b50157c26"
+      ],
+      "policy_decision": "allow",
+      "provider": {
+        "display_name": "Local fixture provider",
+        "id": "provider:local:fixture"
+      },
+      "purpose_reference": {
+        "digest": "sha256:5fd829f903be1f1699370d07e427542338877a2163c3a6522ce1bcd98093cbe3",
+        "redacted": true
+      },
+      "raw_evidence_redacted": true,
+      "receipt": {
+        "actual_vendor_cost": {
+          "amount": "30000",
+          "currency": "usd",
+          "scale": 6
+        },
+        "artifact_reference": {
+          "digest": "sha256:662a9908041c6d11965c945e753a185a919a134b7b2e4d69befb09baedbaf8e0",
+          "redacted": true
+        },
+        "authorized_max": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "authorized_max_cents": 3,
+        "budget_charge": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "budget_charge_cents": 3,
+        "created_at": "2026-10-22T02:05:03.887675+00:00",
+        "currency": "usd",
+        "overrun_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "overrun_amount_cents": 0,
+        "price_model_reference": {
+          "digest": "sha256:dac49c8e0e119f442e054f30356395ada299a6229ec8a09529320e8fea00a8d7",
+          "redacted": true
+        },
+        "provider_request_reference": {
+          "digest": "sha256:5c0d0c5e395769d2f2e372795bcdea64f1f65fe2252227ea58a6ce4be6c5ce2f",
+          "redacted": true
+        },
+        "released_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "released_amount_cents": 0,
+        "settlement_id": "4e13b80a-d7ed-40a2-b4c7-c28ce3f50918"
+      },
+      "release_reason": null,
+      "revision": 1,
+      "status": "settled",
+      "task_reference": {
+        "digest": "sha256:5fd829f903be1f1699370d07e427542338877a2163c3a6522ce1bcd98093cbe3",
+        "redacted": true
+      }
+    },
+    {
+      "account_id": "aga_svgykn95n571",
+      "agent_id": "agt_qgxbfqebvp11",
+      "authorization_id": "9547292d-9531-4513-a10d-c97781560de8",
+      "authorized_max": {
+        "currency": "usd",
+        "display": "0.03",
+        "scale": 6,
+        "units": "30000"
+      },
+      "authorized_max_cents": 3,
+      "billing_merchant": {
+        "display_name": "Local merchant",
+        "id": "merchant:local"
+      },
+      "budget_hold": {
+        "amount": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "amount_cents": 3,
+        "budget_id": "bgt_gpcm6mns6tkb",
+        "budget_version_id": "bgv_zxa5jw5wbjfq",
+        "currency": "usd",
+        "expires_at": "2026-10-22T02:20:03.646096+00:00",
+        "id": "be9a85b1-8025-4f2d-8af5-2ad540d5d0d8",
+        "status": "settled"
+      },
+      "claim": {
+        "claimed_at": "2026-10-22T02:05:03.646096+00:00",
+        "expires_at": "2026-10-22T02:20:03.646096+00:00",
+        "finalized_at": "2026-10-22T02:05:03.892492+00:00",
+        "id": "c024c4ed-9789-4ac5-b078-c1d463551289",
+        "lease_profile_reference": {
+          "digest": "sha256:37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "redacted": true
+        },
+        "provider_reference": null,
+        "reconciled_at": null,
+        "reconciliation_evidence_reference": null,
+        "reconciliation_outcome": null,
+        "reconciliation_required": false,
+        "status": "settled"
+      },
+      "created_at": "2026-10-22T02:05:03.636070+00:00",
+      "currency": "usd",
+      "decision": "allow",
+      "decision_id": "9547292d-9531-4513-a10d-c97781560de8",
+      "id": "9547292d-9531-4513-a10d-c97781560de8",
+      "ledger_transaction_ids": [
+        "c98b3d9e-8d3b-4902-b0b9-dfc477d1ecbf"
+      ],
+      "policy_decision": "allow",
+      "provider": {
+        "display_name": "Local fixture provider",
+        "id": "provider:local:fixture"
+      },
+      "purpose_reference": {
+        "digest": "sha256:f4fe7080c364e4c3281483f450388781dcc3233118e2f636ab6343ea4c33fbda",
+        "redacted": true
+      },
+      "raw_evidence_redacted": true,
+      "receipt": {
+        "actual_vendor_cost": {
+          "amount": "30000",
+          "currency": "usd",
+          "scale": 6
+        },
+        "artifact_reference": {
+          "digest": "sha256:2fea7048756f9cfa5fbaab49a2b241c31bbed3c9bfa46479f7e4d71d39888198",
+          "redacted": true
+        },
+        "authorized_max": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "authorized_max_cents": 3,
+        "budget_charge": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "budget_charge_cents": 3,
+        "created_at": "2026-10-22T02:05:03.892492+00:00",
+        "currency": "usd",
+        "overrun_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "overrun_amount_cents": 0,
+        "price_model_reference": {
+          "digest": "sha256:dac49c8e0e119f442e054f30356395ada299a6229ec8a09529320e8fea00a8d7",
+          "redacted": true
+        },
+        "provider_request_reference": {
+          "digest": "sha256:289fbed7da31829aca2f3f5e61730b33b3672571f07f6133e16ffbb3c0693316",
+          "redacted": true
+        },
+        "released_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "released_amount_cents": 0,
+        "settlement_id": "87716dd6-9f74-42ed-8708-0e00e25fcf5f"
+      },
+      "release_reason": null,
+      "revision": 1,
+      "status": "settled",
+      "task_reference": {
+        "digest": "sha256:f4fe7080c364e4c3281483f450388781dcc3233118e2f636ab6343ea4c33fbda",
+        "redacted": true
+      }
+    },
+    {
+      "account_id": "aga_svgykn95n571",
+      "agent_id": "agt_qgxbfqebvp11",
+      "authorization_id": "7f56bc9e-4b4b-4793-9bc6-d19248689f20",
+      "authorized_max": {
+        "currency": "usd",
+        "display": "0.03",
+        "scale": 6,
+        "units": "30000"
+      },
+      "authorized_max_cents": 3,
+      "billing_merchant": {
+        "display_name": "Local merchant",
+        "id": "merchant:local"
+      },
+      "budget_hold": {
+        "amount": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "amount_cents": 3,
+        "budget_id": "bgt_gpcm6mns6tkb",
+        "budget_version_id": "bgv_zxa5jw5wbjfq",
+        "currency": "usd",
+        "expires_at": "2026-10-22T02:20:03.642664+00:00",
+        "id": "37934785-77e5-4033-9fe0-1de769577f1a",
+        "status": "settled"
+      },
+      "claim": {
+        "claimed_at": "2026-10-22T02:05:03.642664+00:00",
+        "expires_at": "2026-10-22T02:20:03.642664+00:00",
+        "finalized_at": "2026-10-22T02:05:03.904254+00:00",
+        "id": "bba50ce6-dc8a-491f-8c3a-7af6f804919c",
+        "lease_profile_reference": {
+          "digest": "sha256:37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "redacted": true
+        },
+        "provider_reference": null,
+        "reconciled_at": null,
+        "reconciliation_evidence_reference": null,
+        "reconciliation_outcome": null,
+        "reconciliation_required": false,
+        "status": "settled"
+      },
+      "created_at": "2026-10-22T02:05:03.634606+00:00",
+      "currency": "usd",
+      "decision": "allow",
+      "decision_id": "7f56bc9e-4b4b-4793-9bc6-d19248689f20",
+      "id": "7f56bc9e-4b4b-4793-9bc6-d19248689f20",
+      "ledger_transaction_ids": [
+        "a65fc936-e897-43c7-a03a-d59bd8ba30c1"
+      ],
+      "policy_decision": "allow",
+      "provider": {
+        "display_name": "Local fixture provider",
+        "id": "provider:local:fixture"
+      },
+      "purpose_reference": {
+        "digest": "sha256:15f2878d5f4d2aad26a04138f647ccc97f3342e8b5d5944fa65e7f4718ed46ce",
+        "redacted": true
+      },
+      "raw_evidence_redacted": true,
+      "receipt": {
+        "actual_vendor_cost": {
+          "amount": "30000",
+          "currency": "usd",
+          "scale": 6
+        },
+        "artifact_reference": {
+          "digest": "sha256:9f1bfca30cc5609332803aac052d89e302c773b49f6ddd83522d3cf8071b09b1",
+          "redacted": true
+        },
+        "authorized_max": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "authorized_max_cents": 3,
+        "budget_charge": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "budget_charge_cents": 3,
+        "created_at": "2026-10-22T02:05:03.904254+00:00",
+        "currency": "usd",
+        "overrun_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "overrun_amount_cents": 0,
+        "price_model_reference": {
+          "digest": "sha256:dac49c8e0e119f442e054f30356395ada299a6229ec8a09529320e8fea00a8d7",
+          "redacted": true
+        },
+        "provider_request_reference": {
+          "digest": "sha256:e3a0e6a5feb11950204e378f9a51c612c5f7df00955c2da470814ae602a23573",
+          "redacted": true
+        },
+        "released_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "released_amount_cents": 0,
+        "settlement_id": "05fcd014-f793-4ab3-ab8b-da905bae2615"
+      },
+      "release_reason": null,
+      "revision": 1,
+      "status": "settled",
+      "task_reference": {
+        "digest": "sha256:15f2878d5f4d2aad26a04138f647ccc97f3342e8b5d5944fa65e7f4718ed46ce",
+        "redacted": true
+      }
+    },
+    {
+      "account_id": "aga_svgykn95n571",
+      "agent_id": "agt_qgxbfqebvp11",
+      "authorization_id": "a475324c-f6a8-4fca-831e-84b5dd27f11b",
+      "authorized_max": {
+        "currency": "usd",
+        "display": "0.03",
+        "scale": 6,
+        "units": "30000"
+      },
+      "authorized_max_cents": 3,
+      "billing_merchant": {
+        "display_name": "Local merchant",
+        "id": "merchant:local"
+      },
+      "budget_hold": {
+        "amount": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "amount_cents": 3,
+        "budget_id": "bgt_gpcm6mns6tkb",
+        "budget_version_id": "bgv_zxa5jw5wbjfq",
+        "currency": "usd",
+        "expires_at": "2026-10-22T02:20:03.644690+00:00",
+        "id": "78684699-fad9-4d2d-be92-aa1f92770738",
+        "status": "settled"
+      },
+      "claim": {
+        "claimed_at": "2026-10-22T02:05:03.644690+00:00",
+        "expires_at": "2026-10-22T02:20:03.644690+00:00",
+        "finalized_at": "2026-10-22T02:05:03.872076+00:00",
+        "id": "f2dc8182-9222-4bb5-bce1-aebb80ca699f",
+        "lease_profile_reference": {
+          "digest": "sha256:37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "redacted": true
+        },
+        "provider_reference": null,
+        "reconciled_at": null,
+        "reconciliation_evidence_reference": null,
+        "reconciliation_outcome": null,
+        "reconciliation_required": false,
+        "status": "settled"
+      },
+      "created_at": "2026-10-22T02:05:03.633060+00:00",
+      "currency": "usd",
+      "decision": "allow",
+      "decision_id": "a475324c-f6a8-4fca-831e-84b5dd27f11b",
+      "id": "a475324c-f6a8-4fca-831e-84b5dd27f11b",
+      "ledger_transaction_ids": [
+        "aed863c1-f7d3-424c-b3fe-465a86e12203"
+      ],
+      "policy_decision": "allow",
+      "provider": {
+        "display_name": "Local fixture provider",
+        "id": "provider:local:fixture"
+      },
+      "purpose_reference": {
+        "digest": "sha256:5f241b4fb0e348afeb87903c273808c8cffda5a5ce4b051df9e154b9e2d8f758",
+        "redacted": true
+      },
+      "raw_evidence_redacted": true,
+      "receipt": {
+        "actual_vendor_cost": {
+          "amount": "30000",
+          "currency": "usd",
+          "scale": 6
+        },
+        "artifact_reference": {
+          "digest": "sha256:c604d5f6a8948bbbca581ab0f2b6edd0b73aad94d396f48d503c93a5f1180a53",
+          "redacted": true
+        },
+        "authorized_max": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "authorized_max_cents": 3,
+        "budget_charge": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "budget_charge_cents": 3,
+        "created_at": "2026-10-22T02:05:03.872076+00:00",
+        "currency": "usd",
+        "overrun_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "overrun_amount_cents": 0,
+        "price_model_reference": {
+          "digest": "sha256:dac49c8e0e119f442e054f30356395ada299a6229ec8a09529320e8fea00a8d7",
+          "redacted": true
+        },
+        "provider_request_reference": {
+          "digest": "sha256:b401ec8cf0e3c2e82eb6d6e511f82990781d740581e4467e012f24b93682e4ad",
+          "redacted": true
+        },
+        "released_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "released_amount_cents": 0,
+        "settlement_id": "d3b5074b-1870-4e04-bb8b-6db056ba5cfa"
+      },
+      "release_reason": null,
+      "revision": 1,
+      "status": "settled",
+      "task_reference": {
+        "digest": "sha256:5f241b4fb0e348afeb87903c273808c8cffda5a5ce4b051df9e154b9e2d8f758",
+        "redacted": true
+      }
+    },
+    {
+      "account_id": "aga_svgykn95n571",
+      "agent_id": "agt_qgxbfqebvp11",
+      "authorization_id": "1fb4428f-12a9-42da-a53e-b7ce8a1595f5",
+      "authorized_max": {
+        "currency": "usd",
+        "display": "0.03",
+        "scale": 6,
+        "units": "30000"
+      },
+      "authorized_max_cents": 3,
+      "billing_merchant": {
+        "display_name": "Local merchant",
+        "id": "merchant:local"
+      },
+      "budget_hold": {
+        "amount": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "amount_cents": 3,
+        "budget_id": "bgt_gpcm6mns6tkb",
+        "budget_version_id": "bgv_zxa5jw5wbjfq",
+        "currency": "usd",
+        "expires_at": "2026-10-22T02:20:03.644063+00:00",
+        "id": "40f0fd96-c4f5-4cdf-890e-3163e7d5f515",
+        "status": "settled"
+      },
+      "claim": {
+        "claimed_at": "2026-10-22T02:05:03.644063+00:00",
+        "expires_at": "2026-10-22T02:20:03.644063+00:00",
+        "finalized_at": "2026-10-22T02:05:03.910570+00:00",
+        "id": "4501cf31-022e-432e-83e5-49498aa9c901",
+        "lease_profile_reference": {
+          "digest": "sha256:37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "redacted": true
+        },
+        "provider_reference": null,
+        "reconciled_at": null,
+        "reconciliation_evidence_reference": null,
+        "reconciliation_outcome": null,
+        "reconciliation_required": false,
+        "status": "settled"
+      },
+      "created_at": "2026-10-22T02:05:03.631488+00:00",
+      "currency": "usd",
+      "decision": "allow",
+      "decision_id": "1fb4428f-12a9-42da-a53e-b7ce8a1595f5",
+      "id": "1fb4428f-12a9-42da-a53e-b7ce8a1595f5",
+      "ledger_transaction_ids": [
+        "be6db812-e880-4351-ac20-6f949132d62c"
+      ],
+      "policy_decision": "allow",
+      "provider": {
+        "display_name": "Local fixture provider",
+        "id": "provider:local:fixture"
+      },
+      "purpose_reference": {
+        "digest": "sha256:308e647c0ceaef292bcc8ae6ae17b02f8342b5491c7c920b999d9a15aaf3c2dc",
+        "redacted": true
+      },
+      "raw_evidence_redacted": true,
+      "receipt": {
+        "actual_vendor_cost": {
+          "amount": "30000",
+          "currency": "usd",
+          "scale": 6
+        },
+        "artifact_reference": {
+          "digest": "sha256:2e8d492f71412081829ada2b5eb47ab3b2499b5b1e1b18bf169eb55cb0802aa8",
+          "redacted": true
+        },
+        "authorized_max": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "authorized_max_cents": 3,
+        "budget_charge": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "budget_charge_cents": 3,
+        "created_at": "2026-10-22T02:05:03.910570+00:00",
+        "currency": "usd",
+        "overrun_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "overrun_amount_cents": 0,
+        "price_model_reference": {
+          "digest": "sha256:dac49c8e0e119f442e054f30356395ada299a6229ec8a09529320e8fea00a8d7",
+          "redacted": true
+        },
+        "provider_request_reference": {
+          "digest": "sha256:f40139661e82f10aa3db519da5bd263c2a516165424168f6375b9836477e1956",
+          "redacted": true
+        },
+        "released_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "released_amount_cents": 0,
+        "settlement_id": "540b171a-dabb-4183-a78c-a1343fcf5a68"
+      },
+      "release_reason": null,
+      "revision": 1,
+      "status": "settled",
+      "task_reference": {
+        "digest": "sha256:308e647c0ceaef292bcc8ae6ae17b02f8342b5491c7c920b999d9a15aaf3c2dc",
+        "redacted": true
+      }
+    },
+    {
+      "account_id": "aga_svgykn95n571",
+      "agent_id": "agt_qgxbfqebvp11",
+      "authorization_id": "865c9dcf-8bf3-4b96-b7bb-30df8b37e54c",
+      "authorized_max": {
+        "currency": "usd",
+        "display": "0.03",
+        "scale": 6,
+        "units": "30000"
+      },
+      "authorized_max_cents": 3,
+      "billing_merchant": {
+        "display_name": "Local merchant",
+        "id": "merchant:local"
+      },
+      "budget_hold": {
+        "amount": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "amount_cents": 3,
+        "budget_id": "bgt_gpcm6mns6tkb",
+        "budget_version_id": "bgv_zxa5jw5wbjfq",
+        "currency": "usd",
+        "expires_at": "2026-10-22T02:20:03.645376+00:00",
+        "id": "a3777f6f-8f69-4023-a6f1-4e295ee5a48a",
+        "status": "settled"
+      },
+      "claim": {
+        "claimed_at": "2026-10-22T02:05:03.645376+00:00",
+        "expires_at": "2026-10-22T02:20:03.645376+00:00",
+        "finalized_at": "2026-10-22T02:05:03.877129+00:00",
+        "id": "613b9315-f377-4d95-8f67-a9ed699a3503",
+        "lease_profile_reference": {
+          "digest": "sha256:37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "redacted": true
+        },
+        "provider_reference": null,
+        "reconciled_at": null,
+        "reconciliation_evidence_reference": null,
+        "reconciliation_outcome": null,
+        "reconciliation_required": false,
+        "status": "settled"
+      },
+      "created_at": "2026-10-22T02:05:03.628421+00:00",
+      "currency": "usd",
+      "decision": "allow",
+      "decision_id": "865c9dcf-8bf3-4b96-b7bb-30df8b37e54c",
+      "id": "865c9dcf-8bf3-4b96-b7bb-30df8b37e54c",
+      "ledger_transaction_ids": [
+        "b958df62-1e64-4c01-98b6-aafd5c8e5fee"
+      ],
+      "policy_decision": "allow",
+      "provider": {
+        "display_name": "Local fixture provider",
+        "id": "provider:local:fixture"
+      },
+      "purpose_reference": {
+        "digest": "sha256:355c332bcbde4c452473c52f38b66504deb832958cc26972c7889fe817e6a5dc",
+        "redacted": true
+      },
+      "raw_evidence_redacted": true,
+      "receipt": {
+        "actual_vendor_cost": {
+          "amount": "30000",
+          "currency": "usd",
+          "scale": 6
+        },
+        "artifact_reference": {
+          "digest": "sha256:142e20495e196c42e56942f4a7e59259d2eb5289a6ac57f09702ea6139324b29",
+          "redacted": true
+        },
+        "authorized_max": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "authorized_max_cents": 3,
+        "budget_charge": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "budget_charge_cents": 3,
+        "created_at": "2026-10-22T02:05:03.877129+00:00",
+        "currency": "usd",
+        "overrun_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "overrun_amount_cents": 0,
+        "price_model_reference": {
+          "digest": "sha256:dac49c8e0e119f442e054f30356395ada299a6229ec8a09529320e8fea00a8d7",
+          "redacted": true
+        },
+        "provider_request_reference": {
+          "digest": "sha256:be6425c22aaa20f1396b46237f654e79e2a8cc23cddd276d250729d847f83a55",
+          "redacted": true
+        },
+        "released_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "released_amount_cents": 0,
+        "settlement_id": "2d16c639-18c0-4064-8895-03f897427c48"
+      },
+      "release_reason": null,
+      "revision": 1,
+      "status": "settled",
+      "task_reference": {
+        "digest": "sha256:355c332bcbde4c452473c52f38b66504deb832958cc26972c7889fe817e6a5dc",
+        "redacted": true
+      }
+    },
+    {
+      "account_id": "aga_svgykn95n571",
+      "agent_id": "agt_qgxbfqebvp11",
+      "authorization_id": "b03143c7-7595-41f5-a336-08e4b2034597",
+      "authorized_max": {
+        "currency": "usd",
+        "display": "0.03",
+        "scale": 6,
+        "units": "30000"
+      },
+      "authorized_max_cents": 3,
+      "billing_merchant": {
+        "display_name": "Local merchant",
+        "id": "merchant:local"
+      },
+      "budget_hold": {
+        "amount": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "amount_cents": 3,
+        "budget_id": "bgt_gpcm6mns6tkb",
+        "budget_version_id": "bgv_zxa5jw5wbjfq",
+        "currency": "usd",
+        "expires_at": "2026-10-22T02:20:03.643338+00:00",
+        "id": "d013dfb1-be08-4a47-91c8-150130849adb",
+        "status": "settled"
+      },
+      "claim": {
+        "claimed_at": "2026-10-22T02:05:03.643338+00:00",
+        "expires_at": "2026-10-22T02:20:03.643338+00:00",
+        "finalized_at": "2026-10-22T02:05:03.882568+00:00",
+        "id": "6147e19c-25bf-4020-afbf-9011c111783b",
+        "lease_profile_reference": {
+          "digest": "sha256:37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "redacted": true
+        },
+        "provider_reference": null,
+        "reconciled_at": null,
+        "reconciliation_evidence_reference": null,
+        "reconciliation_outcome": null,
+        "reconciliation_required": false,
+        "status": "settled"
+      },
+      "created_at": "2026-10-22T02:05:03.626515+00:00",
+      "currency": "usd",
+      "decision": "allow",
+      "decision_id": "b03143c7-7595-41f5-a336-08e4b2034597",
+      "id": "b03143c7-7595-41f5-a336-08e4b2034597",
+      "ledger_transaction_ids": [
+        "4a1199a2-3ad2-4a70-940c-96d25a119240"
+      ],
+      "policy_decision": "allow",
+      "provider": {
+        "display_name": "Local fixture provider",
+        "id": "provider:local:fixture"
+      },
+      "purpose_reference": {
+        "digest": "sha256:8f64c60f6ecf27b5996d654f1cebe2e2571cc12c7dc19bd00f74153ba87e0136",
+        "redacted": true
+      },
+      "raw_evidence_redacted": true,
+      "receipt": {
+        "actual_vendor_cost": {
+          "amount": "30000",
+          "currency": "usd",
+          "scale": 6
+        },
+        "artifact_reference": {
+          "digest": "sha256:5d72b409f2aeba6bc5f1e739beaa30a1c0d1fa8b2a2d62793248589b47a5f00f",
+          "redacted": true
+        },
+        "authorized_max": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "authorized_max_cents": 3,
+        "budget_charge": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "budget_charge_cents": 3,
+        "created_at": "2026-10-22T02:05:03.882568+00:00",
+        "currency": "usd",
+        "overrun_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "overrun_amount_cents": 0,
+        "price_model_reference": {
+          "digest": "sha256:dac49c8e0e119f442e054f30356395ada299a6229ec8a09529320e8fea00a8d7",
+          "redacted": true
+        },
+        "provider_request_reference": {
+          "digest": "sha256:1bbd468aa3d10f58ef597e6f3d1c88a9b552511d70c60cdda897d028942b53ab",
+          "redacted": true
+        },
+        "released_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "released_amount_cents": 0,
+        "settlement_id": "2172d6fb-2558-4fe9-b0d5-ad291ae662cb"
+      },
+      "release_reason": null,
+      "revision": 1,
+      "status": "settled",
+      "task_reference": {
+        "digest": "sha256:8f64c60f6ecf27b5996d654f1cebe2e2571cc12c7dc19bd00f74153ba87e0136",
+        "redacted": true
+      }
+    },
+    {
+      "account_id": "aga_svgykn95n571",
+      "agent_id": "agt_qgxbfqebvp11",
+      "authorization_id": "481a18ef-49a0-4caf-b73d-131ef2e4f3c6",
+      "authorized_max": {
+        "currency": "usd",
+        "display": "0.03",
+        "scale": 6,
+        "units": "30000"
+      },
+      "authorized_max_cents": 3,
+      "billing_merchant": {
+        "display_name": "Local merchant",
+        "id": "merchant:local"
+      },
+      "budget_hold": {
+        "amount": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "amount_cents": 3,
+        "budget_id": "bgt_gpcm6mns6tkb",
+        "budget_version_id": "bgv_zxa5jw5wbjfq",
+        "currency": "usd",
+        "expires_at": "2026-10-22T02:20:03.641946+00:00",
+        "id": "be9c2588-6b98-4ffa-b615-97f2b0b0b74c",
+        "status": "settled"
+      },
+      "claim": {
+        "claimed_at": "2026-10-22T02:05:03.641946+00:00",
+        "expires_at": "2026-10-22T02:20:03.641946+00:00",
+        "finalized_at": "2026-10-22T02:05:03.866763+00:00",
+        "id": "19d22bac-c9d1-45e4-8d5a-8ddaa7550040",
+        "lease_profile_reference": {
+          "digest": "sha256:37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "redacted": true
+        },
+        "provider_reference": null,
+        "reconciled_at": null,
+        "reconciliation_evidence_reference": null,
+        "reconciliation_outcome": null,
+        "reconciliation_required": false,
+        "status": "settled"
+      },
+      "created_at": "2026-10-22T02:05:03.623641+00:00",
+      "currency": "usd",
+      "decision": "allow",
+      "decision_id": "481a18ef-49a0-4caf-b73d-131ef2e4f3c6",
+      "id": "481a18ef-49a0-4caf-b73d-131ef2e4f3c6",
+      "ledger_transaction_ids": [
+        "8603ee7f-5fe1-41cd-9964-432fd73bcaec"
+      ],
+      "policy_decision": "allow",
+      "provider": {
+        "display_name": "Local fixture provider",
+        "id": "provider:local:fixture"
+      },
+      "purpose_reference": {
+        "digest": "sha256:0df1d7d7134acc526d7ee4fff00a5d7decec185802186fba47395cabbc643b9e",
+        "redacted": true
+      },
+      "raw_evidence_redacted": true,
+      "receipt": {
+        "actual_vendor_cost": {
+          "amount": "30000",
+          "currency": "usd",
+          "scale": 6
+        },
+        "artifact_reference": {
+          "digest": "sha256:c570570f59f254c598c52ca66c2822a7cbca67eb7786b514e0f1be905f2dffbf",
+          "redacted": true
+        },
+        "authorized_max": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "authorized_max_cents": 3,
+        "budget_charge": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "budget_charge_cents": 3,
+        "created_at": "2026-10-22T02:05:03.866763+00:00",
+        "currency": "usd",
+        "overrun_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "overrun_amount_cents": 0,
+        "price_model_reference": {
+          "digest": "sha256:dac49c8e0e119f442e054f30356395ada299a6229ec8a09529320e8fea00a8d7",
+          "redacted": true
+        },
+        "provider_request_reference": {
+          "digest": "sha256:16d9ff0fe0fb32a3fbe6acad477986cb5760d60febb617e60691597bba4c4d6c",
+          "redacted": true
+        },
+        "released_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "released_amount_cents": 0,
+        "settlement_id": "fa1ee7fb-b1ef-4103-ba03-1daa9fef5949"
+      },
+      "release_reason": null,
+      "revision": 1,
+      "status": "settled",
+      "task_reference": {
+        "digest": "sha256:0df1d7d7134acc526d7ee4fff00a5d7decec185802186fba47395cabbc643b9e",
+        "redacted": true
+      }
+    },
+    {
+      "account_id": "aga_svgykn95n571",
+      "agent_id": "agt_qgxbfqebvp11",
+      "authorization_id": "13ce342f-15f9-489c-bfdc-c2587cedf01f",
+      "authorized_max": {
+        "currency": "usd",
+        "display": "0.03",
+        "scale": 6,
+        "units": "30000"
+      },
+      "authorized_max_cents": 3,
+      "billing_merchant": {
+        "display_name": "Local merchant",
+        "id": "merchant:local"
+      },
+      "budget_hold": {
+        "amount": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "amount_cents": 3,
+        "budget_id": "bgt_gpcm6mns6tkb",
+        "budget_version_id": "bgv_zxa5jw5wbjfq",
+        "currency": "usd",
+        "expires_at": "2026-10-22T02:20:03.640172+00:00",
+        "id": "b6e3d5eb-a663-4fd7-9017-411362e4b73c",
+        "status": "settled"
+      },
+      "claim": {
+        "claimed_at": "2026-10-22T02:05:03.640172+00:00",
+        "expires_at": "2026-10-22T02:20:03.640172+00:00",
+        "finalized_at": "2026-10-22T02:05:03.897862+00:00",
+        "id": "289fe2a3-a5c6-4a23-ba06-929cd50693a3",
+        "lease_profile_reference": {
+          "digest": "sha256:37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "redacted": true
+        },
+        "provider_reference": null,
+        "reconciled_at": null,
+        "reconciliation_evidence_reference": null,
+        "reconciliation_outcome": null,
+        "reconciliation_required": false,
+        "status": "settled"
+      },
+      "created_at": "2026-10-22T02:05:03.621778+00:00",
+      "currency": "usd",
+      "decision": "allow",
+      "decision_id": "13ce342f-15f9-489c-bfdc-c2587cedf01f",
+      "id": "13ce342f-15f9-489c-bfdc-c2587cedf01f",
+      "ledger_transaction_ids": [
+        "f8c5b5e4-c80f-41d1-b6b9-8ca6ae015bdc"
+      ],
+      "policy_decision": "allow",
+      "provider": {
+        "display_name": "Local fixture provider",
+        "id": "provider:local:fixture"
+      },
+      "purpose_reference": {
+        "digest": "sha256:db6782eb89bf29075e400fba8968e92468ee8ccbc2c179c984f61fde8799d41c",
+        "redacted": true
+      },
+      "raw_evidence_redacted": true,
+      "receipt": {
+        "actual_vendor_cost": {
+          "amount": "30000",
+          "currency": "usd",
+          "scale": 6
+        },
+        "artifact_reference": {
+          "digest": "sha256:baccac8b3151275abc46e6bbb703453916c79efd11c929546d006767b26e3607",
+          "redacted": true
+        },
+        "authorized_max": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "authorized_max_cents": 3,
+        "budget_charge": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "budget_charge_cents": 3,
+        "created_at": "2026-10-22T02:05:03.897862+00:00",
+        "currency": "usd",
+        "overrun_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "overrun_amount_cents": 0,
+        "price_model_reference": {
+          "digest": "sha256:dac49c8e0e119f442e054f30356395ada299a6229ec8a09529320e8fea00a8d7",
+          "redacted": true
+        },
+        "provider_request_reference": {
+          "digest": "sha256:ee3ec42dcd08b4ffb360fe1aa7bb979a1e94051c0b1dabeb2321495ac4e11009",
+          "redacted": true
+        },
+        "released_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "released_amount_cents": 0,
+        "settlement_id": "0ff6a2c3-5240-4050-881a-b05e7c67a88c"
+      },
+      "release_reason": null,
+      "revision": 1,
+      "status": "settled",
+      "task_reference": {
+        "digest": "sha256:db6782eb89bf29075e400fba8968e92468ee8ccbc2c179c984f61fde8799d41c",
+        "redacted": true
+      }
+    },
+    {
+      "account_id": "aga_svgykn95n571",
+      "agent_id": "agt_qgxbfqebvp11",
+      "authorization_id": "876bff90-fbf3-40e6-a0e1-5b968f415f9f",
+      "authorized_max": {
+        "currency": "usd",
+        "display": "0.03",
+        "scale": 6,
+        "units": "30000"
+      },
+      "authorized_max_cents": 3,
+      "billing_merchant": {
+        "display_name": "Local merchant",
+        "id": "merchant:local"
+      },
+      "budget_hold": {
+        "amount": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "amount_cents": 3,
+        "budget_id": "bgt_gpcm6mns6tkb",
+        "budget_version_id": "bgv_zxa5jw5wbjfq",
+        "currency": "usd",
+        "expires_at": "2026-10-22T02:20:03.641146+00:00",
+        "id": "8bfcce3f-8746-47c8-ae4f-2d821f2a6989",
+        "status": "settled"
+      },
+      "claim": {
+        "claimed_at": "2026-10-22T02:05:03.641146+00:00",
+        "expires_at": "2026-10-22T02:20:03.641146+00:00",
+        "finalized_at": "2026-10-22T02:05:03.860843+00:00",
+        "id": "56d874b2-32ce-43e8-a436-95e56cb9c397",
+        "lease_profile_reference": {
+          "digest": "sha256:37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "redacted": true
+        },
+        "provider_reference": null,
+        "reconciled_at": null,
+        "reconciliation_evidence_reference": null,
+        "reconciliation_outcome": null,
+        "reconciliation_required": false,
+        "status": "settled"
+      },
+      "created_at": "2026-10-22T02:05:03.619677+00:00",
+      "currency": "usd",
+      "decision": "allow",
+      "decision_id": "876bff90-fbf3-40e6-a0e1-5b968f415f9f",
+      "id": "876bff90-fbf3-40e6-a0e1-5b968f415f9f",
+      "ledger_transaction_ids": [
+        "4bfb88a8-6358-475e-98cd-a51bc0c9ee65"
+      ],
+      "policy_decision": "allow",
+      "provider": {
+        "display_name": "Local fixture provider",
+        "id": "provider:local:fixture"
+      },
+      "purpose_reference": {
+        "digest": "sha256:0b0aa7a81ad68db54413f4980c08d1087165305563f8144066d76da84ef44bef",
+        "redacted": true
+      },
+      "raw_evidence_redacted": true,
+      "receipt": {
+        "actual_vendor_cost": {
+          "amount": "30000",
+          "currency": "usd",
+          "scale": 6
+        },
+        "artifact_reference": {
+          "digest": "sha256:a8119da80c633e79cf66ac318cf32dee1fceb09718d04e63614dfa51ff77b91e",
+          "redacted": true
+        },
+        "authorized_max": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "authorized_max_cents": 3,
+        "budget_charge": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "budget_charge_cents": 3,
+        "created_at": "2026-10-22T02:05:03.860843+00:00",
+        "currency": "usd",
+        "overrun_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "overrun_amount_cents": 0,
+        "price_model_reference": {
+          "digest": "sha256:dac49c8e0e119f442e054f30356395ada299a6229ec8a09529320e8fea00a8d7",
+          "redacted": true
+        },
+        "provider_request_reference": {
+          "digest": "sha256:3cc9ffcf87d64e96317e5b41eef5459f5e4d57b5696dfde69ed2394f8e24b84d",
+          "redacted": true
+        },
+        "released_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "released_amount_cents": 0,
+        "settlement_id": "234501a0-4a2b-4dfa-86e5-46d9452e3b7a"
+      },
+      "release_reason": null,
+      "revision": 1,
+      "status": "settled",
+      "task_reference": {
+        "digest": "sha256:0b0aa7a81ad68db54413f4980c08d1087165305563f8144066d76da84ef44bef",
+        "redacted": true
+      }
+    }
+  ],
+  "next_cursor": null,
+  "schema_version": "hubu-history-v1"
+}

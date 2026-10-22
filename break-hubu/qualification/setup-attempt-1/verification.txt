@@ -1,0 +1,8 @@
+{
+  "verdict": "not tested",
+  "checks": [],
+  "episode": "smoke",
+  "execution": "incomplete",
+  "elapsed_seconds": 6.244,
+  "execution_error": "[Errno 1] Operation not permitted"
+}

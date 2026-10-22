@@ -225,7 +225,7 @@ await writeFile(
   `// Generated from content/engineering/posts.json and *.md. Do not edit.\nexport const engineeringPosts = ${JSON.stringify(engineeringPosts)} as const;\n`,
 );
 
-const sitemapPaths = ["/", "/architecture/", "/blogs", ...documents.map((document) => document.href), ...engineeringPosts.map((post) => post.href)];
+const sitemapPaths = ["/", "/architecture/", "/blogs", "/releases", "/releases/v0.2.4", "/releases/v0.2.4/report", ...documents.map((document) => document.href), ...engineeringPosts.map((post) => post.href)];
 await writeFile(
   path.join(siteRoot, "public/sitemap.xml"),
   `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${sitemapPaths

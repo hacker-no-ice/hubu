@@ -1,0 +1,64 @@
+{
+  "release": "v0.2.4",
+  "source_commit": "5344ab565171e1aa3d3ec628641cdbfce18372af",
+  "source_directory": "/private/tmp/break-hubu-public-cache/source",
+  "binary_directory": "/private/tmp/break-hubu-public-cache/target/release",
+  "binary_versions": {
+    "hubu": {
+      "product_version": "v0.2.4",
+      "source_commit": "5344ab565171e1aa3d3ec628641cdbfce18372af",
+      "executor_contract": "hubu-spend-executor-v4.5"
+    },
+    "hubu-server": {
+      "product_version": "v0.2.4",
+      "source_commit": "5344ab565171e1aa3d3ec628641cdbfce18372af",
+      "executor_contract": "hubu-spend-executor-v4.5"
+    }
+  },
+  "toolchain": "1.94.1",
+  "build_command": [
+    "rustup",
+    "run",
+    "1.94.1",
+    "cargo",
+    "build",
+    "--release",
+    "--locked",
+    "--target-dir",
+    "/private/tmp/break-hubu-public-cache/target",
+    "--bin",
+    "hubu",
+    "--bin",
+    "hubu-server"
+  ],
+  "build_log": "/private/tmp/break-hubu-public-cache/build.log",
+  "rustc_version": "rustc 1.94.1 (e408947bf 2026-03-25)",
+  "git_version": "git version 2.50.1 (Apple Git-155)",
+  "published_release_url": "https://github.com/hacker-no-ice/hubu/releases/tag/v0.2.4",
+  "published_at": "2026-10-19T22:09:24Z",
+  "episode": "ep03-crash-recovery",
+  "budget": "0.01",
+  "currency": "usd",
+  "lease_profile": "proof_short",
+  "claim_ttl_seconds": 30,
+  "kits_commit": "f280b3dc9488040ff9e6ea9b7b42e3447f7b1021",
+  "kits_worktree_dirty": false,
+  "platform": "macOS-26.4-arm64-arm-64bit",
+  "machine": "arm64",
+  "python": "3.9.6 (default, Mar  6 2026, 16:22:43) \n[Clang 21.0.0 (clang-2100.0.123.102)]",
+  "started_at": "2026-10-22T02:04:31.780470+00:00",
+  "ids": {
+    "agent_id": "agt_8qkzvcn6gb7y",
+    "account_id": "aga_wz9fvyg4rbgb",
+    "budget_id": "bgt_1hcfqkpj5s5h"
+  },
+  "invocation": [
+    "/tmp/break-hubu-public-clone/break-hubu/ep03-crash-recovery/attack.py",
+    "--release",
+    "v0.2.4",
+    "--output",
+    "/private/tmp/break-hubu-public-v024/ep03-crash-recovery",
+    "--cache",
+    "/tmp/break-hubu-public-cache"
+  ]
+}

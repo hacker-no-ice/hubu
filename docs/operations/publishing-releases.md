@@ -74,6 +74,11 @@ Apple silicon, archive verification, and native published-asset smoke tests.
 Ordinary release validation never supplies provider credentials or enables
 provider spend.
 
+For stable releases, follow the manual [Break Hubu release-card
+checklist](../../break-hubu/release-checklist.md) to record version-specific
+claims, known gaps and public reproduction evidence. This is a separate manual
+activity; it does not add a PR CI gate.
+
 ## Rollback and retention
 
 Rollback rebuilds from another validated unified release tag and its published

@@ -1,0 +1,4 @@
+  budget_id: bgt_1cx0nh5ht4eq  agent_id: agt_gg8a347bmse7  status: exhausted
+    limit: $0.10  consumed: $0.10  frozen: $0.00  remaining: $0.00
+    current_version_id: bgv_h6b37ft83dwj  current_revision: 1
+    period: 2026-10-21T19:03:57.947645-07:00 -> 2998-12-31T16:00:00-08:00

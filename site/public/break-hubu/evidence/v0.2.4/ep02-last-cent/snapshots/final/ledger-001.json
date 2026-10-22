@@ -1,0 +1,109 @@
+{
+  "coverage": {
+    "agent_id": "agt_fxr1hptmbnh4",
+    "budget_id": "bgt_2ds8zy84h7de",
+    "consumed_amount": {
+      "currency": "usd",
+      "display": "0.03",
+      "scale": 6,
+      "units": "30000"
+    },
+    "consumed_amount_cents": 3,
+    "currency": "usd",
+    "historical_wallet_reconciliation_complete": false,
+    "owner_transactions_without_budget_context": 0,
+    "pending_hold_count": 0,
+    "recorded_budget_charges": {
+      "currency": "usd",
+      "display": "0.03",
+      "scale": 6,
+      "units": "30000"
+    },
+    "recorded_budget_charges_cents": 3,
+    "unaccounted_consumption": {
+      "currency": "usd",
+      "display": "0.00",
+      "scale": 6,
+      "units": "0"
+    },
+    "unaccounted_consumption_cents": 0
+  },
+  "next_cursor": null,
+  "schema_version": "hubu-history-v1",
+  "transactions": [
+    {
+      "account_id": "aga_6t5tr371qn8t",
+      "adjustment_evidence_reference": null,
+      "agent_id": "agt_fxr1hptmbnh4",
+      "authorization_id": "ed431770-4d75-4803-835f-57d55c0dfcd8",
+      "billing_merchant": {
+        "display_name": "Local merchant",
+        "id": "merchant:local"
+      },
+      "budget_charge_delta": {
+        "scale": 6,
+        "units": "30000"
+      },
+      "budget_charge_delta_cents": 3,
+      "budget_id": "bgt_2ds8zy84h7de",
+      "budget_version_id": "bgv_m31n5kjgzb7d",
+      "claim_id": "b55d119d-bdbd-4363-93ef-7bbf567e98f1",
+      "cost_semantics": "original_total",
+      "coverage": {
+        "has_budget_context": true,
+        "missing_evidence": [],
+        "missing_evidence_count": 0,
+        "raw_evidence_redacted": true
+      },
+      "created_at": "2026-10-22T02:04:30.672348+00:00",
+      "effective_cost": {
+        "amount": "30000",
+        "currency": "usd",
+        "scale": 6
+      },
+      "entries": [
+        {
+          "account_id": "fa1d6959-76f3-4f54-a82b-d63a76767643",
+          "account_kind": "AgentSpendExpense",
+          "amount": {
+            "amount": "30000000000000000",
+            "currency": "usd",
+            "scale": 18
+          },
+          "direction": "debit",
+          "id": "181cd91e-b38c-4c66-add1-7101e58a2acb"
+        },
+        {
+          "account_id": "e59edb43-0d9b-4fc3-b13b-245e6aca27f3",
+          "account_kind": "ExternallyBilledClearing",
+          "amount": {
+            "amount": "30000000000000000",
+            "currency": "usd",
+            "scale": 18
+          },
+          "direction": "credit",
+          "id": "55ff154a-9136-4a38-801c-8e9a0f8f0b34"
+        }
+      ],
+      "id": "6714a617-77be-4bb9-a89e-7ceb10beacc4",
+      "kind": "external_provider",
+      "legacy_backfill": false,
+      "original_transaction_id": null,
+      "previous_transaction_id": null,
+      "provider": {
+        "display_name": "Local fixture provider",
+        "id": "provider:local:fixture"
+      },
+      "purpose_reference": {
+        "digest": "sha256:2a9729fd3750a887142e593cc5692ebde9a276aa7fb9b9d2f197c049671029ab",
+        "redacted": true
+      },
+      "rounding_delta_amount": "0",
+      "settlement_id": "2497a1d3-4fb2-40f2-96f5-3027d1bcbd91",
+      "source_reference": {
+        "digest": "sha256:0b85cb763f491595b46197374e1a5bf3c19917d652509c3a4701343572fc0742",
+        "redacted": true
+      }
+    }
+  ]
+}

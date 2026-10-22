@@ -1,0 +1,1162 @@
+[2026-10-22T02:04:00.351597+00:00] Release build: rustup run 1.94.1 cargo build --release --locked --target-dir /private/tmp/break-hubu-public-cache/target --bin hubu --bin hubu-server
+[2026-10-22T02:04:00.351820+00:00] Verified binary versions: {"hubu": {"product_version": "v0.2.4", "source_commit": "5344ab565171e1aa3d3ec628641cdbfce18372af", "executor_contract": "hubu-spend-executor-v4.5"}, "hubu-server": {"product_version": "v0.2.4", "source_commit": "5344ab565171e1aa3d3ec628641cdbfce18372af", "executor_contract": "hubu-spend-executor-v4.5"}}
+[2026-10-22T02:04:00.351890+00:00] $ /private/tmp/break-hubu-public-cache/target/release/hubu-server validate-config --config /private/var/folders/97/4n7lzm3j3jq5pb2y5syfqbr40000gn/T/ep02-last-cent-private-w_p5ctio/server.json
+[2026-10-22T02:04:00.357623+00:00] {"schema_version":1,"status":"valid"}
+
+[2026-10-22T02:04:00.357729+00:00] $ /private/tmp/break-hubu-public-cache/target/release/hubu-server serve --config /private/var/folders/97/4n7lzm3j3jq5pb2y5syfqbr40000gn/T/ep02-last-cent-private-w_p5ctio/server.json
+[2026-10-22T02:04:00.388677+00:00] $ /private/tmp/break-hubu-public-cache/target/release/hubu --url http://127.0.0.1:51747 register human --username proof-kit-owner --display-name 'Synthetic proof-kit owner'
+[2026-10-22T02:04:00.396177+00:00] Human registered
+  user_id: usr_qhq7zmyjjgrw
+  username: proof-kit-owner
+  display_name: Synthetic proof-kit owner
+CLI exit=0
+[2026-10-22T02:04:00.396264+00:00] $ /private/tmp/break-hubu-public-cache/target/release/hubu --url http://127.0.0.1:51747 register agent --name ep02-last-cent --version v0.2.4
+[2026-10-22T02:04:00.402702+00:00] Registration review
+  agent_name: ep02-last-cent
+  owner: Synthetic proof-kit owner (usr_qhq7zmyjjgrw)
+  agent_kind: codex_agent
+  version_label: v0.2.4
+  runtime.provider: codex
+  runtime.environment: development
+  identity_fingerprint: sha256:87df3379600cf60d...
+  version_fingerprint: sha256:b834c6cc015df697...
+Agent registered
+  agent_id: agt_fxr1hptmbnh4
+  version_id: agv_yhcw5ryy452g
+  account_id: aga_6t5tr371qn8t
+  session_id: ags_vp9eh9ay9e3n
+CLI exit=0
+[2026-10-22T02:04:00.403032+00:00] $ /private/tmp/break-hubu-public-cache/target/release/hubu --url http://127.0.0.1:51747 policy validate --path /private/var/folders/97/4n7lzm3j3jq5pb2y5syfqbr40000gn/T/ep02-last-cent-private-w_p5ctio/policy.yaml
+[2026-10-22T02:04:00.408091+00:00] Policy valid
+  path: /private/var/folders/97/4n7lzm3j3jq5pb2y5syfqbr40000gn/T/ep02-last-cent-private-w_p5ctio/policy.yaml
+  policy_id: break_hubu_fixture
+  policy_version: v1
+  default_decision: deny
+  rules: 1
+CLI exit=0
+[2026-10-22T02:04:00.408199+00:00] $ /private/tmp/break-hubu-public-cache/target/release/hubu --url http://127.0.0.1:51747 policy apply --path /private/var/folders/97/4n7lzm3j3jq5pb2y5syfqbr40000gn/T/ep02-last-cent-private-w_p5ctio/policy.yaml --name 'Synthetic fixture allow policy' --agent-id agt_fxr1hptmbnh4
+[2026-10-22T02:04:00.414287+00:00] Policy applied
+  scope: agent_override
+  agent_id: agt_fxr1hptmbnh4
+  policy_id: pol_xcg6r56xxqma
+  key: break_hubu_fixture
+  name: Synthetic fixture allow policy
+  revision: 1
+  payload_hash: sha256:ec70368bcf30132de24bdf0781000ea82104f4f5650e4f697f4c2d9566d35df6
+  policy_version: v1
+  default_decision: deny
+CLI exit=0
+[2026-10-22T02:04:00.414385+00:00] $ /private/tmp/break-hubu-public-cache/target/release/hubu --url http://127.0.0.1:51747 budget create --agent-id agt_fxr1hptmbnh4 --amount 0.01 --currency usd --ending-before 2999-01-01T00:00:00Z
+[2026-10-22T02:04:00.420086+00:00] Budget created
+  budget_id: bgt_2ds8zy84h7de  agent_id: agt_fxr1hptmbnh4  status: active
+    limit: $0.01  consumed: $0.00  frozen: $0.00  remaining: $0.01
+    current_version_id: bgv_m31n5kjgzb7d  current_revision: 1
+    period: 2026-10-21T19:04:00.418797-07:00 -> 2998-12-31T16:00:00-08:00
+CLI exit=0
+[2026-10-22T02:04:00.421187+00:00] setup-budget GET /budgets -> 200: {"budgets": [{"agent_id": "agt_fxr1hptmbnh4", "amount_limit": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_limit_cents": 1, "budget_id": "bgt_2ds8zy84h7de", "consumed_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "consumed_amount_cents": 0, "currency": "usd", "current_revision": 1, "current_version_id": "bgv_m31n5kjgzb7d", "ending_before": "2999-01-01T00:00:00+00:00", "frozen_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "frozen_amount_cents": 0, "remaining_amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "remaining_amount_cents": 1, "starting_at": "2026-10-22T02:04:00.418797+00:00", "status": "active"}]}
+[2026-10-22T02:04:00.422521+00:00] executor-guidance GET /.well-known/hubu-spend-executor.json -> 200: {"amounts": {"accounting_scale": 6, "contract_version": "validate and claim requests send contract_version \"hubu-spend-executor-v4.5\" with the exact amount that resolve returned", "currencies": ["usd", "usdc"], "exact": "an amount object {units, scale, currency}: units is an integer string of 10^-scale of currency; executors send scale 6 and never use floating point", "legacy": "a request without contract_version is hubu-spend-executor-v4.4: it sends amount_cents, the authorization rounded up to a whole cent, and is accepted during the transition", "rejected": ["a missing or unsupported amount.scale", "an unknown contract_version", "amount_cents together with the exact amount", "an exact amount or currency that differs from the authorization"], "responses": "executor responses carry the exact amount object and the amount_cents projection for every contract version"}, "authorization_request": {"optional": ["currency (usd or usdc; defaults to usd)", "task_id", "execution_scope", "merchant (legacy only)", "lease_profile"], "required": ["operation_key", "account_id", "amount (exact decimal string, at most 6 decimal places; amount_cents is deprecated)", "reason"], "task_id_compatibility": "missing maps reason into task_id for legacy clients; explicit null omits task correlation; an explicit string is preserved independently"}, "claim_request": {"currency": "the authorization's currency, usd or usdc; budgets are per currency", "legacy_v4_4_required": ["spend_auth_token_id", "account_id", "amount_cents"], "optional": ["currency (assertion only; must equal the authorization's currency)", "execution_scope", "merchant (legacy only)", "task_id (compatibility assertion only; Hubu uses the authorization snapshot)"], "rejected": ["operation_key", "agent_id"], "required": ["spend_auth_token_id", "account_id", "contract_version", "amount.units", "amount.scale", "amount.currency"]}, "execution_scope_catalog": [{"billing_merchant": {"display_name": "Google", "id": "merchant:google"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Google Gemini Developer API", "id": "provider:google:gemini-developer"}, "schema_version": 1}, {"billing_merchant": {"display_name": "Black Forest Labs", "id": "merchant:black-forest-labs"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Black Forest Labs FLUX", "id": "provider:black-forest-labs:flux"}, "schema_version": 1}, {"billing_merchant": {"display_name": "Ideogram", "id": "merchant:ideogram"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Ideogram", "id": "provider:ideogram"}, "schema_version": 1}, {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}], "execution_scope_schema_version": 1, "executor_flow": ["platform supplies one stable operation_key and requests POST /spend/authorize with merchant, task scope, and lease_profile", "Hubu durably records the authorization record under the agent-scoped operation_key", "when policy returns needs_approval, the client shows approval.review to the human and resolves the approval_request_id as approve or deny before continuing", "agent sends the spend_auth_token_id and execution intent to an executor", "executor resolves the authoritative authorization through POST /spend/executor/resolve and independently verifies its derived price and scope", "executor calls POST /spend/executor/claim with the spend_auth_token_id before irreversible work; Hubu derives the operation from the stored decision", "executor performs work with its own credentials", "executor settles by claim_id with a provider receipt after successful irreversible work, or releases by claim_id before work is performed; it never sends operation_key or agent_id"], "human_approval": {"approval_request_id": "the immutable spend decision id returned by needs_approval", "capability_header": "x-hubu-approval-capability", "mcp": "hubu_resolve_spend_approval is protected by the narrow spend-approval client gate", "resolve": "the owner-authenticated client submits approve or deny with the distinct human approval capability; approval reserves budget but never invokes a provider", "retry": "replay the exact authorization request or read approval status to recover the durable result", "review": "show the complete approval.review object before asking the human to approve or deny", "statuses": ["pending", "approved", "denied"]}, "lease": {"authorization_ttl_seconds": 300, "default_lease_profile": "default", "lease_profiles": {"default": {"claim_ttl_seconds": 900}, "proof_short": {"claim_ttl_seconds": 30}}}, "legacy_merchant": "accepted for migration and normalized to an explicit legacy-unresolved scope; new clients should send execution_scope", "operation_key_policy": {"corrected_scope_retry": {"actions": ["reuse_operation_key", "replay_exactly", "create_new_operation"], "admission": "only after every prior attempt is terminally denied and no token, approval, hold, claim, dispatch, payment, or settlement side effect exists", "attempts": "immutable monotonic revisions under the stable operation key", "authority": "an immediate SQLite transaction, not the process-local manager mutex"}, "generation": {"comparison": "case-sensitive after trimming surrounding whitespace", "fallback": "the platform adapter generates and persists an opaque operation key before the first authorization attempt", "preferred": "reuse the platform's durable tool-call, run-step, or operation id with a platform prefix"}, "namespace": ["agent_id", "operation_key"], "persistence": ["Hubu is the authoritative store for authorization record state under the agent-scoped operation_key", "the client must reuse its stable operation_key for every authorization retry; executors claim by spend_auth_token_id and finalize by claim_id instead", "do not rely on model conversation memory for the operation_key"], "prohibited": ["ask the autonomous model to invent the operation_key", "derive operation_key from mutable spend fields such as amount or merchant", "reuse one operation_key for different logical work by the same agent", "change scope when retry guidance says replay_exactly", "reuse a blocked key when retry guidance says create_new_operation"], "responsibility": "agent platform or orchestrator, not the autonomous model"}, "protocol_version": "hubu-spend-executor-v4.5", "reconciliation_request": {"human_gate": {"capability_header": "x-hubu-reconciliation-capability", "cli": "The CLI reads HUBU_RECONCILIATION_TOKEN or HUBU_RECONCILIATION_TOKEN_FILE and sends it only for reconciliation.", "mcp": "MCP reconciliation tools require both a trusted client approval prompt and the distinct reconciliation capability.", "requirement": "The server requires a reconciliation capability distinct from the normal API bearer token."}, "required": ["claim_id", "provider_reference", "evidence"], "routes": {"vendor_billed": "POST /spend/executor/settle", "vendor_did_not_bill": "POST /spend/executor/release"}, "vendor_billed_required": ["receipt.actual_vendor_cost.amount", "receipt.actual_vendor_cost.scale", "receipt.actual_vendor_cost.currency", "receipt.provider_request_id", "receipt.price_model_snapshot", "receipt.artifact_reference"]}, "release_request": {"identity": "claim_id", "rejected": ["spend_auth_token_id", "operation_key", "agent_id", "receipt"]}, "role_boundary": {"executor": ["hold vendor credentials outside Hubu", "perform work such as model calls or API operations", "claim authorization before vendor work and finalize the claim afterward"], "hubu": ["register agents and owners", "evaluate policy", "reserve one agent-budget hold per spend decision", "exclusively claim executor spend authorization", "settle actual vendor cost and release unused authorization, or release the full reserved budget"]}, "routes": {"approval_resolve": "POST /spend/approval/resolve", "approval_status": "GET /spend/approval?approval_request_id=DECISION_ID", "claim": "POST /spend/executor/claim", "claim_status": "GET /spend/executor/claim?claim_id=CLAIM_ID", "guidance": ["GET /spend/executor/guidance", "GET /.well-known/hubu-spend-executor.json"], "reconcile_vendor_billed": "POST /spend/executor/settle", "reconcile_vendor_did_not_bill": "POST /spend/executor/release", "reconciliation_queue": "GET /spend/executor/reconciliation", "release": "POST /spend/executor/release", "resolve": "POST /spend/executor/resolve", "settle": "POST /spend/executor/settle", "validate": "POST /spend/executor/validate", "void_unclaimed": "POST /spend/void"}, "scope_rules": ["operation_key is platform-assigned, immutable, and scoped to the authorized agent; authorization retries must use the same spend scope", "task_id is an optional trusted external correlation and reason is independent human-readable authorization context; neither must equal operation_key", "Hubu resolves task_id and reason from the authorization snapshot for executor and reconciliation evidence; a supplied executor task_id is only a compatibility assertion and must match", "account_id, the exact amount and currency (or, for v4.4, its whole-cent projection), complete canonical execution_scope, and legacy merchant must match the original authorized spend", "typed execution_scope identifiers resolve against Hubu's trusted catalog; unknown or ambiguous identifiers are rejected", "provider, executor, capability, and billing_merchant are independently policy-addressable stable identities", "lease_profile is selected during authorization and cannot be changed by the executor", "the spend auth token must be unexpired, unused, unrevoked, and unclaimed when a new claim starts", "authorization retries with the same operation_key and claim retries with the same spend_auth_token_id return stored authorization record state, including terminal state", "claiming moves the associated budget hold from frozen to claimed and extends it to claim_expires_at", "an active claim remains finalizable after the original authorization expires", "Hubu does not accept vendor API keys or model/provider payloads in this protocol", "executor route responses never include the private operation_key; executors identify work by spend_auth_token_id, claim_id, and the public decision_id"], "settle_request": {"identity": "claim_id", "legacy_v4_3_input": "receipt.actual_vendor_cost_cents maps exactly to amount with scale 2 and usd; price_model_snapshot remains the complete immutable JSON snapshot", "legacy_v4_3_response": "receipt.actual_vendor_cost_cents remains available as the conservative budget_charge_cents projection; actual_vendor_cost preserves the exact provider decimal", "rejected": ["spend_auth_token_id", "operation_key", "agent_id"], "required": ["receipt.actual_vendor_cost.amount", "receipt.actual_vendor_cost.scale", "receipt.actual_vendor_cost.currency", "receipt.provider_request_id", "receipt.price_model_snapshot", "receipt.artifact_reference"]}, "settlement_rules": ["settle only after the executor has performed irreversible billable work", "release only before irreversible billable work has occurred", "settlement atomically persists the immutable exact provider cost and full frozen pricing snapshot, marks the claim settled and token used, consumes the cost rounded up to the budget's micro-unit (scale 6), and releases the authorization remainder", "actual vendor cost is an integer major-unit decimal with scale at most 18 in the hold's own currency; Hubu never uses floating point and rounds only digits beyond scale 6 up", "normal settlement rejects a conservative budget charge above the authorized maximum; human vendor-billed reconciliation records an already-incurred overrun explicitly", "an identical settlement retry returns the original settlement_id and receipt without consuming budget twice; a changed receipt is rejected", "finalization resolves by claim_id; an executor that lost the claim response replays the identical claim, which returns the existing claim even after the authorization expires", "claim expiry is evaluated once when the settlement transaction starts", "release atomically marks the claim released and token revoked while returning the reserved amount", "settle and release serialize so the first terminal finalization wins", "expired claims keep their holds claimed for reconciliation instead of automatically releasing", "claim status lookup reports reconciliation_required once a claimed lease expires", "only expired claimed leases enter the reconciliation queue", "the normal API bearer token cannot authorize reconciliation", "a human-confirmed vendor_billed resolution settles the hold; vendor_did_not_bill releases it", "each reconciliation stores the provider reference, evidence, resolving user, outcome, and timestamp"], "supported_protocol_versions": ["hubu-spend-executor-v4.5", "hubu-spend-executor-v4.4"], "validate_request": {"legacy_v4_4_required": ["spend_auth_token_id", "account_id", "amount_cents"], "note": "read-only scope inspection; it never authorizes irreversible work", "rejected": ["operation_key", "agent_id"], "required": ["spend_auth_token_id", "account_id", "contract_version", "amount.units", "amount.scale", "amount.currency"]}, "void_unclaimed_request": {"caller": "trusted router", "reason": "executor_rejected_before_claim", "required": ["spend_auth_token_id", "account_id", "operation_key"], "rules": ["requires the backend bearer and the private operation key bound to this account and authorization; never exposed as an agent-facing MCP tool", "void and claim are mutually exclusive in one SQLite write transaction", "void requires an unused, unrevoked token with no claim and a frozen hold; exact void replay is idempotent", "no charge or ledger posting is created", "timeouts, ambiguous dispatch and retry exhaustion never justify voiding"]}}
+[2026-10-22T02:04:00.448267+00:00] PUBLIC SNAPSHOT initial (writers paused)
+[2026-10-22T02:04:00.449418+00:00] snapshot-initial-budgets GET /budgets -> 200: {"budgets": [{"agent_id": "agt_fxr1hptmbnh4", "amount_limit": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_limit_cents": 1, "budget_id": "bgt_2ds8zy84h7de", "consumed_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "consumed_amount_cents": 0, "currency": "usd", "current_revision": 1, "current_version_id": "bgv_m31n5kjgzb7d", "ending_before": "2999-01-01T00:00:00+00:00", "frozen_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "frozen_amount_cents": 0, "remaining_amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "remaining_amount_cents": 1, "starting_at": "2026-10-22T02:04:00.418797+00:00", "status": "active"}]}
+[2026-10-22T02:04:00.449607+00:00] $ /private/tmp/break-hubu-public-cache/target/release/hubu --url http://127.0.0.1:51747 budget list
+[2026-10-22T02:04:00.454829+00:00]   budget_id: bgt_2ds8zy84h7de  agent_id: agt_fxr1hptmbnh4  status: active
+    limit: $0.01  consumed: $0.00  frozen: $0.00  remaining: $0.01
+    current_version_id: bgv_m31n5kjgzb7d  current_revision: 1
+    period: 2026-10-21T19:04:00.418797-07:00 -> 2998-12-31T16:00:00-08:00
+CLI exit=0
+[2026-10-22T02:04:00.455024+00:00] $ /private/tmp/break-hubu-public-cache/target/release/hubu --url http://127.0.0.1:51747 policy show --agent-id agt_fxr1hptmbnh4
+[2026-10-22T02:04:00.459745+00:00] {
+  "assignments": [
+    {
+      "agent_id": "agt_fxr1hptmbnh4",
+      "attached_at": "2026-10-22T02:04:00.413186+00:00",
+      "scope": "agent_override",
+      "updated_at": "2026-10-22T02:04:00.413186+00:00"
+    }
+  ],
+  "created_at": "2026-10-22T02:04:00.413186+00:00",
+  "declarative_key": "break_hubu_fixture",
+  "display_name": "Synthetic fixture allow policy",
+  "payload_hash": "sha256:ec70368bcf30132de24bdf0781000ea82104f4f5650e4f697f4c2d9566d35df6",
+  "policy": {
+    "default_effect": "deny",
+    "id": "break_hubu_fixture",
+    "owner_user_id": "a10da919-b4fa-40fd-8bc6-e7fd3d29431c",
+    "rules": [
+      {
+        "effect": "allow",
+        "id": "allow_synthetic_fixture",
+        "reason": "synthetic local fixture only",
+        "when": {
+          "field": "provider",
+          "op": "eq",
+          "value": {
+            "string": "provider:local:fixture"
+          }
+        }
+      }
+    ],
+    "version": "v1"
+  },
+  "policy_id": "pol_xcg6r56xxqma",
+  "revision": 1,
+  "updated_at": "2026-10-22T02:04:00.413186+00:00"
+}
+CLI exit=0
+[2026-10-22T02:04:00.459928+00:00] $ /private/tmp/break-hubu-public-cache/target/release/hubu --url http://127.0.0.1:51747 ledger list --agent-id agt_fxr1hptmbnh4 --limit 100 --budget-id bgt_2ds8zy84h7de
+[2026-10-22T02:04:00.464840+00:00] {
+  "coverage": {
+    "agent_id": "agt_fxr1hptmbnh4",
+    "budget_id": "bgt_2ds8zy84h7de",
+    "consumed_amount": {
+      "currency": "usd",
+      "display": "0.00",
+      "scale": 6,
+      "units": "0"
+    },
+    "consumed_amount_cents": 0,
+    "currency": "usd",
+    "historical_wallet_reconciliation_complete": false,
+    "owner_transactions_without_budget_context": 0,
+    "pending_hold_count": 0,
+    "recorded_budget_charges": {
+      "currency": "usd",
+      "display": "0.00",
+      "scale": 6,
+      "units": "0"
+    },
+    "recorded_budget_charges_cents": 0,
+    "unaccounted_consumption": {
+      "currency": "usd",
+      "display": "0.00",
+      "scale": 6,
+      "units": "0"
+    },
+    "unaccounted_consumption_cents": 0
+  },
+  "next_cursor": null,
+  "schema_version": "hubu-history-v1",
+  "transactions": []
+}
+CLI exit=0
+[2026-10-22T02:04:00.465037+00:00] $ /private/tmp/break-hubu-public-cache/target/release/hubu --url http://127.0.0.1:51747 spend authorizations --agent-id agt_fxr1hptmbnh4 --limit 100
+[2026-10-22T02:04:00.469800+00:00] {
+  "authorization_records": [],
+  "next_cursor": null,
+  "schema_version": "hubu-history-v1"
+}
+CLI exit=0
+[2026-10-22T02:04:00.605679+00:00] billed-operation POST /spend/authorize -> 200: {"account_id": "aga_6t5tr371qn8t", "agent_id": "agt_fxr1hptmbnh4", "approval": null, "attempt_history": [{"actor": "a10da919-b4fa-40fd-8bc6-e7fd3d29431c", "decided_at": "2026-10-22T02:04:00.604216Z", "decision_id": "ed431770-4d75-4803-835f-57d55c0dfcd8", "final_decision": "allowed", "reasons": ["synthetic local fixture only"], "request": {"agent_account_id": "ff95faa0-b38a-4b26-b368-bac0ce1bd51a", "agent_id": "f2691f59-9aa0-40be-87f7-018db545d624", "amount_cents": 1, "category": null, "currency": "usd", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "lease_profile": "proof_short", "merchant": null, "owner_user_id": "a10da919-b4fa-40fd-8bc6-e7fd3d29431c", "reason": "Synthetic proof kit: billed-operation", "task_id": "Synthetic proof kit: billed-operation"}, "revision": 1, "submitted_at": "2026-10-22T02:04:00.603050Z"}], "auth_token_id": "[redacted]", "authorization_expires_at": "2026-10-22T02:09:00.603575+00:00", "budget_hold": {"amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_id": "bgt_2ds8zy84h7de", "consumed_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "consumed_amount_cents": 0, "frozen_amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "frozen_amount_cents": 1, "hold_id": "7cf3c8d5-5e7a-43fe-9baa-fbfd754c8402", "remaining_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "remaining_amount_cents": 0, "status": "frozen"}, "decision": "allow", "decision_id": "ed431770-4d75-4803-835f-57d55c0dfcd8", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "idempotent_replay": false, "lease_profile": "proof_short", "operation_key": "[redacted]", "payment": null, "policy_decision": {"decisive_conditions": [{"condition": "provider equals `provider:local:fixture`", "effect": "allow", "matched": true, "rule_id": "allow_synthetic_fixture"}], "summary": "policy returned allow from 1 matching condition"}, "reason": "Synthetic proof kit: billed-operation", "reasons": ["synthetic local fixture only"], "retry_guidance": {"action": "replay_exactly", "message": "replay this exact immutable scope to recover the original authorization", "operation_key": "[redacted]"}, "revision": 1, "scope_inputs": {"amount_minor": {"source": "supplied", "value": 1}, "billing_merchant": {"source": "supplied", "value": "merchant:local"}, "capability": {"source": "supplied", "value": "capability:image:generate"}, "currency": {"source": "supplied", "value": "usd"}, "executor": {"source": "supplied", "value": "executor:gongbu:image"}, "merchant": {"source": "omitted", "value": null}, "provider": {"source": "supplied", "value": "provider:local:fixture"}}, "task_id": "Synthetic proof kit: billed-operation"}
+[2026-10-22T02:04:00.606914+00:00] claim-billed-operation-resolve POST /spend/executor/resolve -> 200: {"account_id": "aga_6t5tr371qn8t", "agent_id": "agt_fxr1hptmbnh4", "amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_hold": {"amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_id": "bgt_2ds8zy84h7de", "consumed_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "consumed_amount_cents": 0, "frozen_amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "frozen_amount_cents": 1, "hold_id": "7cf3c8d5-5e7a-43fe-9baa-fbfd754c8402", "remaining_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "remaining_amount_cents": 0, "status": "frozen"}, "currency": "usd", "decision_id": "ed431770-4d75-4803-835f-57d55c0dfcd8", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "expires_at": "2026-10-22T02:09:00.603575+00:00", "lease_profile": "proof_short", "merchant": null, "reason": "Synthetic proof kit: billed-operation", "spend_auth_token_id": "[redacted]", "status": "available", "task_id": "Synthetic proof kit: billed-operation"}
+[2026-10-22T02:04:00.608510+00:00] claim-billed-operation POST /spend/executor/claim -> 200: {"claim_expires_at": "2026-10-22T02:04:30.607469+00:00", "claim_id": "b55d119d-bdbd-4363-93ef-7bbf567e98f1", "claimed_at": "2026-10-22T02:04:00.607469+00:00", "evidence": null, "finalized_at": null, "lease_profile": "proof_short", "provider_reference": null, "reconciled_at": null, "reconciled_by_user_id": null, "reconciliation_outcome": null, "reconciliation_required": false, "settlement_id": null, "spend": {"account_id": "aga_6t5tr371qn8t", "agent_id": "agt_fxr1hptmbnh4", "amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_hold": {"amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_id": "bgt_2ds8zy84h7de", "consumed_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "consumed_amount_cents": 0, "frozen_amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "frozen_amount_cents": 1, "hold_id": "7cf3c8d5-5e7a-43fe-9baa-fbfd754c8402", "remaining_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "remaining_amount_cents": 0, "status": "claimed"}, "currency": "usd", "decision_id": "ed431770-4d75-4803-835f-57d55c0dfcd8", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "expires_at": "2026-10-22T02:09:00.603575+00:00", "lease_profile": "proof_short", "merchant": null, "reason": "Synthetic proof kit: billed-operation", "spend_auth_token_id": "[redacted]", "status": "claimed", "task_id": "Synthetic proof kit: billed-operation"}, "status": "claimed"}
+[2026-10-22T02:04:00.608828+00:00] Durable synthetic fixture (not provider evidence): fixtures/last-cent-billed-receipt.json
+[2026-10-22T02:04:00.609004+00:00] Durable synthetic fixture (not provider evidence): fixtures/synthetic-receipt.json
+[2026-10-22T02:04:00.609046+00:00] Normal executor submits the immutable USD 0.03 fixture receipt.
+[2026-10-22T02:04:00.609790+00:00] normal-overrun POST /spend/executor/settle -> 400: {"error": "stored value is invalid: actual vendor cost exceeds the authorized maximum", "retry_guidance": null}
+[2026-10-22T02:04:00.609870+00:00] PUBLIC SNAPSHOT held-after-overrun (writers paused)
+[2026-10-22T02:04:00.610542+00:00] snapshot-held-after-overrun-budgets GET /budgets -> 200: {"budgets": [{"agent_id": "agt_fxr1hptmbnh4", "amount_limit": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_limit_cents": 1, "budget_id": "bgt_2ds8zy84h7de", "consumed_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "consumed_amount_cents": 0, "currency": "usd", "current_revision": 1, "current_version_id": "bgv_m31n5kjgzb7d", "ending_before": "2999-01-01T00:00:00+00:00", "frozen_amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "frozen_amount_cents": 1, "remaining_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "remaining_amount_cents": 0, "starting_at": "2026-10-22T02:04:00.418797+00:00", "status": "exhausted"}]}
+[2026-10-22T02:04:00.610717+00:00] $ /private/tmp/break-hubu-public-cache/target/release/hubu --url http://127.0.0.1:51747 budget list
+[2026-10-22T02:04:00.617186+00:00]   budget_id: bgt_2ds8zy84h7de  agent_id: agt_fxr1hptmbnh4  status: exhausted
+    limit: $0.01  consumed: $0.00  frozen: $0.01  remaining: $0.00
+    current_version_id: bgv_m31n5kjgzb7d  current_revision: 1
+    period: 2026-10-21T19:04:00.418797-07:00 -> 2998-12-31T16:00:00-08:00
+CLI exit=0
+[2026-10-22T02:04:00.618488+00:00] $ /private/tmp/break-hubu-public-cache/target/release/hubu --url http://127.0.0.1:51747 policy show --agent-id agt_fxr1hptmbnh4
+[2026-10-22T02:04:00.625000+00:00] {
+  "assignments": [
+    {
+      "agent_id": "agt_fxr1hptmbnh4",
+      "attached_at": "2026-10-22T02:04:00.413186+00:00",
+      "scope": "agent_override",
+      "updated_at": "2026-10-22T02:04:00.413186+00:00"
+    }
+  ],
+  "created_at": "2026-10-22T02:04:00.413186+00:00",
+  "declarative_key": "break_hubu_fixture",
+  "display_name": "Synthetic fixture allow policy",
+  "payload_hash": "sha256:ec70368bcf30132de24bdf0781000ea82104f4f5650e4f697f4c2d9566d35df6",
+  "policy": {
+    "default_effect": "deny",
+    "id": "break_hubu_fixture",
+    "owner_user_id": "a10da919-b4fa-40fd-8bc6-e7fd3d29431c",
+    "rules": [
+      {
+        "effect": "allow",
+        "id": "allow_synthetic_fixture",
+        "reason": "synthetic local fixture only",
+        "when": {
+          "field": "provider",
+          "op": "eq",
+          "value": {
+            "string": "provider:local:fixture"
+          }
+        }
+      }
+    ],
+    "version": "v1"
+  },
+  "policy_id": "pol_xcg6r56xxqma",
+  "revision": 1,
+  "updated_at": "2026-10-22T02:04:00.413186+00:00"
+}
+CLI exit=0
+[2026-10-22T02:04:00.625241+00:00] $ /private/tmp/break-hubu-public-cache/target/release/hubu --url http://127.0.0.1:51747 ledger list --agent-id agt_fxr1hptmbnh4 --limit 100 --budget-id bgt_2ds8zy84h7de
+[2026-10-22T02:04:00.631496+00:00] {
+  "coverage": {
+    "agent_id": "agt_fxr1hptmbnh4",
+    "budget_id": "bgt_2ds8zy84h7de",
+    "consumed_amount": {
+      "currency": "usd",
+      "display": "0.00",
+      "scale": 6,
+      "units": "0"
+    },
+    "consumed_amount_cents": 0,
+    "currency": "usd",
+    "historical_wallet_reconciliation_complete": false,
+    "owner_transactions_without_budget_context": 0,
+    "pending_hold_count": 1,
+    "recorded_budget_charges": {
+      "currency": "usd",
+      "display": "0.00",
+      "scale": 6,
+      "units": "0"
+    },
+    "recorded_budget_charges_cents": 0,
+    "unaccounted_consumption": {
+      "currency": "usd",
+      "display": "0.00",
+      "scale": 6,
+      "units": "0"
+    },
+    "unaccounted_consumption_cents": 0
+  },
+  "next_cursor": null,
+  "schema_version": "hubu-history-v1",
+  "transactions": []
+}
+CLI exit=0
+[2026-10-22T02:04:00.631753+00:00] $ /private/tmp/break-hubu-public-cache/target/release/hubu --url http://127.0.0.1:51747 spend authorizations --agent-id agt_fxr1hptmbnh4 --limit 100
+[2026-10-22T02:04:00.637577+00:00] {
+  "authorization_records": [
+    {
+      "account_id": "aga_6t5tr371qn8t",
+      "agent_id": "agt_fxr1hptmbnh4",
+      "authorization_id": "ed431770-4d75-4803-835f-57d55c0dfcd8",
+      "authorized_max": {
+        "currency": "usd",
+        "display": "0.01",
+        "scale": 6,
+        "units": "10000"
+      },
+      "authorized_max_cents": 1,
+      "billing_merchant": {
+        "display_name": "Local merchant",
+        "id": "merchant:local"
+      },
+      "budget_hold": {
+        "amount": {
+          "currency": "usd",
+          "display": "0.01",
+          "scale": 6,
+          "units": "10000"
+        },
+        "amount_cents": 1,
+        "budget_id": "bgt_2ds8zy84h7de",
+        "budget_version_id": "bgv_m31n5kjgzb7d",
+        "currency": "usd",
+        "expires_at": "2026-10-22T02:04:30.607469+00:00",
+        "id": "7cf3c8d5-5e7a-43fe-9baa-fbfd754c8402",
+        "status": "claimed"
+      },
+      "claim": {
+        "claimed_at": "2026-10-22T02:04:00.607469+00:00",
+        "expires_at": "2026-10-22T02:04:30.607469+00:00",
+        "finalized_at": null,
+        "id": "b55d119d-bdbd-4363-93ef-7bbf567e98f1",
+        "lease_profile_reference": {
+          "digest": "sha256:7cedcb0cb67088b05761db8374511198726c67c0797d012d0ea038364cc8b9e7",
+          "redacted": true
+        },
+        "provider_reference": null,
+        "reconciled_at": null,
+        "reconciliation_evidence_reference": null,
+        "reconciliation_outcome": null,
+        "reconciliation_required": false,
+        "status": "claimed"
+      },
+      "created_at": "2026-10-22T02:04:00.603573+00:00",
+      "currency": "usd",
+      "decision": "allow",
+      "decision_id": "ed431770-4d75-4803-835f-57d55c0dfcd8",
+      "id": "ed431770-4d75-4803-835f-57d55c0dfcd8",
+      "ledger_transaction_ids": [],
+      "policy_decision": "allow",
+      "provider": {
+        "display_name": "Local fixture provider",
+        "id": "provider:local:fixture"
+      },
+      "purpose_reference": {
+        "digest": "sha256:2a9729fd3750a887142e593cc5692ebde9a276aa7fb9b9d2f197c049671029ab",
+        "redacted": true
+      },
+      "raw_evidence_redacted": true,
+      "receipt": null,
+      "release_reason": null,
+      "revision": 1,
+      "status": "claimed",
+      "task_reference": {
+        "digest": "sha256:2a9729fd3750a887142e593cc5692ebde9a276aa7fb9b9d2f197c049671029ab",
+        "redacted": true
+      }
+    }
+  ],
+  "next_cursor": null,
+  "schema_version": "hubu-history-v1"
+}
+CLI exit=0
+[2026-10-22T02:04:00.640681+00:00] held-probe POST /spend/authorize -> 200: {"account_id": "aga_6t5tr371qn8t", "agent_id": "agt_fxr1hptmbnh4", "approval": null, "attempt_history": [{"actor": "a10da919-b4fa-40fd-8bc6-e7fd3d29431c", "decided_at": "2026-10-22T02:04:00.639572Z", "decision_id": "a71f50b4-6333-4c5f-a532-fe9fd8e925c6", "final_decision": "denied", "reasons": ["no active USD budget found for agent"], "request": {"agent_account_id": "ff95faa0-b38a-4b26-b368-bac0ce1bd51a", "agent_id": "f2691f59-9aa0-40be-87f7-018db545d624", "amount_cents": 1, "category": null, "currency": "usd", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "lease_profile": "proof_short", "merchant": null, "owner_user_id": "a10da919-b4fa-40fd-8bc6-e7fd3d29431c", "reason": "Synthetic proof kit: held-probe", "task_id": "Synthetic proof kit: held-probe"}, "revision": 1, "submitted_at": "2026-10-22T02:04:00.638560Z"}], "auth_token_id": null, "authorization_expires_at": null, "budget_hold": null, "decision": "deny", "decision_id": "a71f50b4-6333-4c5f-a532-fe9fd8e925c6", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "idempotent_replay": false, "lease_profile": "proof_short", "operation_key": "[redacted]", "payment": null, "policy_decision": {"decisive_conditions": [{"condition": "provider equals `provider:local:fixture`", "effect": "allow", "matched": true, "rule_id": "allow_synthetic_fixture"}], "summary": "policy returned allow from 1 matching condition"}, "reason": "Synthetic proof kit: held-probe", "reasons": ["no active USD budget found for agent"], "retry_guidance": {"action": "reuse_operation_key", "message": "this attempt was denied; reuse this operation key with corrected scope", "operation_key": "[redacted]"}, "revision": 1, "scope_inputs": {"amount_minor": {"source": "supplied", "value": 1}, "billing_merchant": {"source": "supplied", "value": "merchant:local"}, "capability": {"source": "supplied", "value": "capability:image:generate"}, "currency": {"source": "supplied", "value": "usd"}, "executor": {"source": "supplied", "value": "executor:gongbu:image"}, "merchant": {"source": "omitted", "value": null}, "provider": {"source": "supplied", "value": "provider:local:fixture"}}, "task_id": "Synthetic proof kit: held-probe"}
+[2026-10-22T02:04:00.641638+00:00] poll-expiry GET /spend/executor/claim?claim_id=b55d119d-bdbd-4363-93ef-7bbf567e98f1 -> 200: {"claim_expires_at": "2026-10-22T02:04:30.607469+00:00", "claim_id": "b55d119d-bdbd-4363-93ef-7bbf567e98f1", "claimed_at": "2026-10-22T02:04:00.607469+00:00", "evidence": null, "finalized_at": null, "lease_profile": "proof_short", "provider_reference": null, "reconciled_at": null, "reconciled_by_user_id": null, "reconciliation_outcome": null, "reconciliation_required": false, "settlement_id": null, "spend": {"account_id": "aga_6t5tr371qn8t", "agent_id": "agt_fxr1hptmbnh4", "amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_hold": {"amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_id": "bgt_2ds8zy84h7de", "consumed_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "consumed_amount_cents": 0, "frozen_amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "frozen_amount_cents": 1, "hold_id": "7cf3c8d5-5e7a-43fe-9baa-fbfd754c8402", "remaining_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "remaining_amount_cents": 0, "status": "claimed"}, "currency": "usd", "decision_id": "ed431770-4d75-4803-835f-57d55c0dfcd8", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "expires_at": "2026-10-22T02:09:00.603575+00:00", "lease_profile": "proof_short", "merchant": null, "reason": "Synthetic proof kit: billed-operation", "spend_auth_token_id": "[redacted]", "status": "claimed", "task_id": "Synthetic proof kit: billed-operation"}, "status": "claimed"}
+[2026-10-22T02:04:01.645491+00:00] poll-expiry GET /spend/executor/claim?claim_id=b55d119d-bdbd-4363-93ef-7bbf567e98f1 -> 200: {"claim_expires_at": "2026-10-22T02:04:30.607469+00:00", "claim_id": "b55d119d-bdbd-4363-93ef-7bbf567e98f1", "claimed_at": "2026-10-22T02:04:00.607469+00:00", "evidence": null, "finalized_at": null, "lease_profile": "proof_short", "provider_reference": null, "reconciled_at": null, "reconciled_by_user_id": null, "reconciliation_outcome": null, "reconciliation_required": false, "settlement_id": null, "spend": {"account_id": "aga_6t5tr371qn8t", "agent_id": "agt_fxr1hptmbnh4", "amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_hold": {"amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_id": "bgt_2ds8zy84h7de", "consumed_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "consumed_amount_cents": 0, "frozen_amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "frozen_amount_cents": 1, "hold_id": "7cf3c8d5-5e7a-43fe-9baa-fbfd754c8402", "remaining_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "remaining_amount_cents": 0, "status": "claimed"}, "currency": "usd", "decision_id": "ed431770-4d75-4803-835f-57d55c0dfcd8", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "expires_at": "2026-10-22T02:09:00.603575+00:00", "lease_profile": "proof_short", "merchant": null, "reason": "Synthetic proof kit: billed-operation", "spend_auth_token_id": "[redacted]", "status": "claimed", "task_id": "Synthetic proof kit: billed-operation"}, "status": "claimed"}
+[2026-10-22T02:04:02.651292+00:00] poll-expiry GET /spend/executor/claim?claim_id=b55d119d-bdbd-4363-93ef-7bbf567e98f1 -> 200: {"claim_expires_at": "2026-10-22T02:04:30.607469+00:00", "claim_id": "b55d119d-bdbd-4363-93ef-7bbf567e98f1", "claimed_at": "2026-10-22T02:04:00.607469+00:00", "evidence": null, "finalized_at": null, "lease_profile": "proof_short", "provider_reference": null, "reconciled_at": null, "reconciled_by_user_id": null, "reconciliation_outcome": null, "reconciliation_required": false, "settlement_id": null, "spend": {"account_id": "aga_6t5tr371qn8t", "agent_id": "agt_fxr1hptmbnh4", "amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_hold": {"amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_id": "bgt_2ds8zy84h7de", "consumed_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "consumed_amount_cents": 0, "frozen_amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "frozen_amount_cents": 1, "hold_id": "7cf3c8d5-5e7a-43fe-9baa-fbfd754c8402", "remaining_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "remaining_amount_cents": 0, "status": "claimed"}, "currency": "usd", "decision_id": "ed431770-4d75-4803-835f-57d55c0dfcd8", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "expires_at": "2026-10-22T02:09:00.603575+00:00", "lease_profile": "proof_short", "merchant": null, "reason": "Synthetic proof kit: billed-operation", "spend_auth_token_id": "[redacted]", "status": "claimed", "task_id": "Synthetic proof kit: billed-operation"}, "status": "claimed"}
+[2026-10-22T02:04:03.658086+00:00] poll-expiry GET /spend/executor/claim?claim_id=b55d119d-bdbd-4363-93ef-7bbf567e98f1 -> 200: {"claim_expires_at": "2026-10-22T02:04:30.607469+00:00", "claim_id": "b55d119d-bdbd-4363-93ef-7bbf567e98f1", "claimed_at": "2026-10-22T02:04:00.607469+00:00", "evidence": null, "finalized_at": null, "lease_profile": "proof_short", "provider_reference": null, "reconciled_at": null, "reconciled_by_user_id": null, "reconciliation_outcome": null, "reconciliation_required": false, "settlement_id": null, "spend": {"account_id": "aga_6t5tr371qn8t", "agent_id": "agt_fxr1hptmbnh4", "amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_hold": {"amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_id": "bgt_2ds8zy84h7de", "consumed_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "consumed_amount_cents": 0, "frozen_amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "frozen_amount_cents": 1, "hold_id": "7cf3c8d5-5e7a-43fe-9baa-fbfd754c8402", "remaining_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "remaining_amount_cents": 0, "status": "claimed"}, "currency": "usd", "decision_id": "ed431770-4d75-4803-835f-57d55c0dfcd8", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "expires_at": "2026-10-22T02:09:00.603575+00:00", "lease_profile": "proof_short", "merchant": null, "reason": "Synthetic proof kit: billed-operation", "spend_auth_token_id": "[redacted]", "status": "claimed", "task_id": "Synthetic proof kit: billed-operation"}, "status": "claimed"}
+[2026-10-22T02:04:04.665237+00:00] poll-expiry GET /spend/executor/claim?claim_id=b55d119d-bdbd-4363-93ef-7bbf567e98f1 -> 200: {"claim_expires_at": "2026-10-22T02:04:30.607469+00:00", "claim_id": "b55d119d-bdbd-4363-93ef-7bbf567e98f1", "claimed_at": "2026-10-22T02:04:00.607469+00:00", "evidence": null, "finalized_at": null, "lease_profile": "proof_short", "provider_reference": null, "reconciled_at": null, "reconciled_by_user_id": null, "reconciliation_outcome": null, "reconciliation_required": false, "settlement_id": null, "spend": {"account_id": "aga_6t5tr371qn8t", "agent_id": "agt_fxr1hptmbnh4", "amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_hold": {"amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_id": "bgt_2ds8zy84h7de", "consumed_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "consumed_amount_cents": 0, "frozen_amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "frozen_amount_cents": 1, "hold_id": "7cf3c8d5-5e7a-43fe-9baa-fbfd754c8402", "remaining_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "remaining_amount_cents": 0, "status": "claimed"}, "currency": "usd", "decision_id": "ed431770-4d75-4803-835f-57d55c0dfcd8", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "expires_at": "2026-10-22T02:09:00.603575+00:00", "lease_profile": "proof_short", "merchant": null, "reason": "Synthetic proof kit: billed-operation", "spend_auth_token_id": "[redacted]", "status": "claimed", "task_id": "Synthetic proof kit: billed-operation"}, "status": "claimed"}
+[2026-10-22T02:04:05.675058+00:00] poll-expiry GET /spend/executor/claim?claim_id=b55d119d-bdbd-4363-93ef-7bbf567e98f1 -> 200: {"claim_expires_at": "2026-10-22T02:04:30.607469+00:00", "claim_id": "b55d119d-bdbd-4363-93ef-7bbf567e98f1", "claimed_at": "2026-10-22T02:04:00.607469+00:00", "evidence": null, "finalized_at": null, "lease_profile": "proof_short", "provider_reference": null, "reconciled_at": null, "reconciled_by_user_id": null, "reconciliation_outcome": null, "reconciliation_required": false, "settlement_id": null, "spend": {"account_id": "aga_6t5tr371qn8t", "agent_id": "agt_fxr1hptmbnh4", "amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_hold": {"amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_id": "bgt_2ds8zy84h7de", "consumed_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "consumed_amount_cents": 0, "frozen_amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "frozen_amount_cents": 1, "hold_id": "7cf3c8d5-5e7a-43fe-9baa-fbfd754c8402", "remaining_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "remaining_amount_cents": 0, "status": "claimed"}, "currency": "usd", "decision_id": "ed431770-4d75-4803-835f-57d55c0dfcd8", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "expires_at": "2026-10-22T02:09:00.603575+00:00", "lease_profile": "proof_short", "merchant": null, "reason": "Synthetic proof kit: billed-operation", "spend_auth_token_id": "[redacted]", "status": "claimed", "task_id": "Synthetic proof kit: billed-operation"}, "status": "claimed"}
+[2026-10-22T02:04:06.681784+00:00] poll-expiry GET /spend/executor/claim?claim_id=b55d119d-bdbd-4363-93ef-7bbf567e98f1 -> 200: {"claim_expires_at": "2026-10-22T02:04:30.607469+00:00", "claim_id": "b55d119d-bdbd-4363-93ef-7bbf567e98f1", "claimed_at": "2026-10-22T02:04:00.607469+00:00", "evidence": null, "finalized_at": null, "lease_profile": "proof_short", "provider_reference": null, "reconciled_at": null, "reconciled_by_user_id": null, "reconciliation_outcome": null, "reconciliation_required": false, "settlement_id": null, "spend": {"account_id": "aga_6t5tr371qn8t", "agent_id": "agt_fxr1hptmbnh4", "amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_hold": {"amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_id": "bgt_2ds8zy84h7de", "consumed_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "consumed_amount_cents": 0, "frozen_amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "frozen_amount_cents": 1, "hold_id": "7cf3c8d5-5e7a-43fe-9baa-fbfd754c8402", "remaining_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "remaining_amount_cents": 0, "status": "claimed"}, "currency": "usd", "decision_id": "ed431770-4d75-4803-835f-57d55c0dfcd8", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "expires_at": "2026-10-22T02:09:00.603575+00:00", "lease_profile": "proof_short", "merchant": null, "reason": "Synthetic proof kit: billed-operation", "spend_auth_token_id": "[redacted]", "status": "claimed", "task_id": "Synthetic proof kit: billed-operation"}, "status": "claimed"}
+[2026-10-22T02:04:07.688919+00:00] poll-expiry GET /spend/executor/claim?claim_id=b55d119d-bdbd-4363-93ef-7bbf567e98f1 -> 200: {"claim_expires_at": "2026-10-22T02:04:30.607469+00:00", "claim_id": "b55d119d-bdbd-4363-93ef-7bbf567e98f1", "claimed_at": "2026-10-22T02:04:00.607469+00:00", "evidence": null, "finalized_at": null, "lease_profile": "proof_short", "provider_reference": null, "reconciled_at": null, "reconciled_by_user_id": null, "reconciliation_outcome": null, "reconciliation_required": false, "settlement_id": null, "spend": {"account_id": "aga_6t5tr371qn8t", "agent_id": "agt_fxr1hptmbnh4", "amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_hold": {"amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_id": "bgt_2ds8zy84h7de", "consumed_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "consumed_amount_cents": 0, "frozen_amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "frozen_amount_cents": 1, "hold_id": "7cf3c8d5-5e7a-43fe-9baa-fbfd754c8402", "remaining_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "remaining_amount_cents": 0, "status": "claimed"}, "currency": "usd", "decision_id": "ed431770-4d75-4803-835f-57d55c0dfcd8", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "expires_at": "2026-10-22T02:09:00.603575+00:00", "lease_profile": "proof_short", "merchant": null, "reason": "Synthetic proof kit: billed-operation", "spend_auth_token_id": "[redacted]", "status": "claimed", "task_id": "Synthetic proof kit: billed-operation"}, "status": "claimed"}
+[2026-10-22T02:04:08.691559+00:00] poll-expiry GET /spend/executor/claim?claim_id=b55d119d-bdbd-4363-93ef-7bbf567e98f1 -> 200: {"claim_expires_at": "2026-10-22T02:04:30.607469+00:00", "claim_id": "b55d119d-bdbd-4363-93ef-7bbf567e98f1", "claimed_at": "2026-10-22T02:04:00.607469+00:00", "evidence": null, "finalized_at": null, "lease_profile": "proof_short", "provider_reference": null, "reconciled_at": null, "reconciled_by_user_id": null, "reconciliation_outcome": null, "reconciliation_required": false, "settlement_id": null, "spend": {"account_id": "aga_6t5tr371qn8t", "agent_id": "agt_fxr1hptmbnh4", "amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_hold": {"amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_id": "bgt_2ds8zy84h7de", "consumed_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "consumed_amount_cents": 0, "frozen_amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "frozen_amount_cents": 1, "hold_id": "7cf3c8d5-5e7a-43fe-9baa-fbfd754c8402", "remaining_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "remaining_amount_cents": 0, "status": "claimed"}, "currency": "usd", "decision_id": "ed431770-4d75-4803-835f-57d55c0dfcd8", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "expires_at": "2026-10-22T02:09:00.603575+00:00", "lease_profile": "proof_short", "merchant": null, "reason": "Synthetic proof kit: billed-operation", "spend_auth_token_id": "[redacted]", "status": "claimed", "task_id": "Synthetic proof kit: billed-operation"}, "status": "claimed"}
+[2026-10-22T02:04:09.695240+00:00] poll-expiry GET /spend/executor/claim?claim_id=b55d119d-bdbd-4363-93ef-7bbf567e98f1 -> 200: {"claim_expires_at": "2026-10-22T02:04:30.607469+00:00", "claim_id": "b55d119d-bdbd-4363-93ef-7bbf567e98f1", "claimed_at": "2026-10-22T02:04:00.607469+00:00", "evidence": null, "finalized_at": null, "lease_profile": "proof_short", "provider_reference": null, "reconciled_at": null, "reconciled_by_user_id": null, "reconciliation_outcome": null, "reconciliation_required": false, "settlement_id": null, "spend": {"account_id": "aga_6t5tr371qn8t", "agent_id": "agt_fxr1hptmbnh4", "amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_hold": {"amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_id": "bgt_2ds8zy84h7de", "consumed_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "consumed_amount_cents": 0, "frozen_amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "frozen_amount_cents": 1, "hold_id": "7cf3c8d5-5e7a-43fe-9baa-fbfd754c8402", "remaining_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "remaining_amount_cents": 0, "status": "claimed"}, "currency": "usd", "decision_id": "ed431770-4d75-4803-835f-57d55c0dfcd8", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "expires_at": "2026-10-22T02:09:00.603575+00:00", "lease_profile": "proof_short", "merchant": null, "reason": "Synthetic proof kit: billed-operation", "spend_auth_token_id": "[redacted]", "status": "claimed", "task_id": "Synthetic proof kit: billed-operation"}, "status": "claimed"}
+[2026-10-22T02:04:10.703167+00:00] poll-expiry GET /spend/executor/claim?claim_id=b55d119d-bdbd-4363-93ef-7bbf567e98f1 -> 200: {"claim_expires_at": "2026-10-22T02:04:30.607469+00:00", "claim_id": "b55d119d-bdbd-4363-93ef-7bbf567e98f1", "claimed_at": "2026-10-22T02:04:00.607469+00:00", "evidence": null, "finalized_at": null, "lease_profile": "proof_short", "provider_reference": null, "reconciled_at": null, "reconciled_by_user_id": null, "reconciliation_outcome": null, "reconciliation_required": false, "settlement_id": null, "spend": {"account_id": "aga_6t5tr371qn8t", "agent_id": "agt_fxr1hptmbnh4", "amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_hold": {"amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_id": "bgt_2ds8zy84h7de", "consumed_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "consumed_amount_cents": 0, "frozen_amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "frozen_amount_cents": 1, "hold_id": "7cf3c8d5-5e7a-43fe-9baa-fbfd754c8402", "remaining_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "remaining_amount_cents": 0, "status": "claimed"}, "currency": "usd", "decision_id": "ed431770-4d75-4803-835f-57d55c0dfcd8", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "expires_at": "2026-10-22T02:09:00.603575+00:00", "lease_profile": "proof_short", "merchant": null, "reason": "Synthetic proof kit: billed-operation", "spend_auth_token_id": "[redacted]", "status": "claimed", "task_id": "Synthetic proof kit: billed-operation"}, "status": "claimed"}
+[2026-10-22T02:04:11.711345+00:00] poll-expiry GET /spend/executor/claim?claim_id=b55d119d-bdbd-4363-93ef-7bbf567e98f1 -> 200: {"claim_expires_at": "2026-10-22T02:04:30.607469+00:00", "claim_id": "b55d119d-bdbd-4363-93ef-7bbf567e98f1", "claimed_at": "2026-10-22T02:04:00.607469+00:00", "evidence": null, "finalized_at": null, "lease_profile": "proof_short", "provider_reference": null, "reconciled_at": null, "reconciled_by_user_id": null, "reconciliation_outcome": null, "reconciliation_required": false, "settlement_id": null, "spend": {"account_id": "aga_6t5tr371qn8t", "agent_id": "agt_fxr1hptmbnh4", "amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_hold": {"amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_id": "bgt_2ds8zy84h7de", "consumed_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "consumed_amount_cents": 0, "frozen_amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "frozen_amount_cents": 1, "hold_id": "7cf3c8d5-5e7a-43fe-9baa-fbfd754c8402", "remaining_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "remaining_amount_cents": 0, "status": "claimed"}, "currency": "usd", "decision_id": "ed431770-4d75-4803-835f-57d55c0dfcd8", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "expires_at": "2026-10-22T02:09:00.603575+00:00", "lease_profile": "proof_short", "merchant": null, "reason": "Synthetic proof kit: billed-operation", "spend_auth_token_id": "[redacted]", "status": "claimed", "task_id": "Synthetic proof kit: billed-operation"}, "status": "claimed"}
+[2026-10-22T02:04:12.715909+00:00] poll-expiry GET /spend/executor/claim?claim_id=b55d119d-bdbd-4363-93ef-7bbf567e98f1 -> 200: {"claim_expires_at": "2026-10-22T02:04:30.607469+00:00", "claim_id": "b55d119d-bdbd-4363-93ef-7bbf567e98f1", "claimed_at": "2026-10-22T02:04:00.607469+00:00", "evidence": null, "finalized_at": null, "lease_profile": "proof_short", "provider_reference": null, "reconciled_at": null, "reconciled_by_user_id": null, "reconciliation_outcome": null, "reconciliation_required": false, "settlement_id": null, "spend": {"account_id": "aga_6t5tr371qn8t", "agent_id": "agt_fxr1hptmbnh4", "amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_hold": {"amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_id": "bgt_2ds8zy84h7de", "consumed_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "consumed_amount_cents": 0, "frozen_amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "frozen_amount_cents": 1, "hold_id": "7cf3c8d5-5e7a-43fe-9baa-fbfd754c8402", "remaining_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "remaining_amount_cents": 0, "status": "claimed"}, "currency": "usd", "decision_id": "ed431770-4d75-4803-835f-57d55c0dfcd8", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "expires_at": "2026-10-22T02:09:00.603575+00:00", "lease_profile": "proof_short", "merchant": null, "reason": "Synthetic proof kit: billed-operation", "spend_auth_token_id": "[redacted]", "status": "claimed", "task_id": "Synthetic proof kit: billed-operation"}, "status": "claimed"}
+[2026-10-22T02:04:13.721206+00:00] poll-expiry GET /spend/executor/claim?claim_id=b55d119d-bdbd-4363-93ef-7bbf567e98f1 -> 200: {"claim_expires_at": "2026-10-22T02:04:30.607469+00:00", "claim_id": "b55d119d-bdbd-4363-93ef-7bbf567e98f1", "claimed_at": "2026-10-22T02:04:00.607469+00:00", "evidence": null, "finalized_at": null, "lease_profile": "proof_short", "provider_reference": null, "reconciled_at": null, "reconciled_by_user_id": null, "reconciliation_outcome": null, "reconciliation_required": false, "settlement_id": null, "spend": {"account_id": "aga_6t5tr371qn8t", "agent_id": "agt_fxr1hptmbnh4", "amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_hold": {"amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_id": "bgt_2ds8zy84h7de", "consumed_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "consumed_amount_cents": 0, "frozen_amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "frozen_amount_cents": 1, "hold_id": "7cf3c8d5-5e7a-43fe-9baa-fbfd754c8402", "remaining_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "remaining_amount_cents": 0, "status": "claimed"}, "currency": "usd", "decision_id": "ed431770-4d75-4803-835f-57d55c0dfcd8", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "expires_at": "2026-10-22T02:09:00.603575+00:00", "lease_profile": "proof_short", "merchant": null, "reason": "Synthetic proof kit: billed-operation", "spend_auth_token_id": "[redacted]", "status": "claimed", "task_id": "Synthetic proof kit: billed-operation"}, "status": "claimed"}
+[2026-10-22T02:04:14.726642+00:00] poll-expiry GET /spend/executor/claim?claim_id=b55d119d-bdbd-4363-93ef-7bbf567e98f1 -> 200: {"claim_expires_at": "2026-10-22T02:04:30.607469+00:00", "claim_id": "b55d119d-bdbd-4363-93ef-7bbf567e98f1", "claimed_at": "2026-10-22T02:04:00.607469+00:00", "evidence": null, "finalized_at": null, "lease_profile": "proof_short", "provider_reference": null, "reconciled_at": null, "reconciled_by_user_id": null, "reconciliation_outcome": null, "reconciliation_required": false, "settlement_id": null, "spend": {"account_id": "aga_6t5tr371qn8t", "agent_id": "agt_fxr1hptmbnh4", "amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_hold": {"amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_id": "bgt_2ds8zy84h7de", "consumed_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "consumed_amount_cents": 0, "frozen_amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "frozen_amount_cents": 1, "hold_id": "7cf3c8d5-5e7a-43fe-9baa-fbfd754c8402", "remaining_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "remaining_amount_cents": 0, "status": "claimed"}, "currency": "usd", "decision_id": "ed431770-4d75-4803-835f-57d55c0dfcd8", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "expires_at": "2026-10-22T02:09:00.603575+00:00", "lease_profile": "proof_short", "merchant": null, "reason": "Synthetic proof kit: billed-operation", "spend_auth_token_id": "[redacted]", "status": "claimed", "task_id": "Synthetic proof kit: billed-operation"}, "status": "claimed"}
+[2026-10-22T02:04:15.731936+00:00] poll-expiry GET /spend/executor/claim?claim_id=b55d119d-bdbd-4363-93ef-7bbf567e98f1 -> 200: {"claim_expires_at": "2026-10-22T02:04:30.607469+00:00", "claim_id": "b55d119d-bdbd-4363-93ef-7bbf567e98f1", "claimed_at": "2026-10-22T02:04:00.607469+00:00", "evidence": null, "finalized_at": null, "lease_profile": "proof_short", "provider_reference": null, "reconciled_at": null, "reconciled_by_user_id": null, "reconciliation_outcome": null, "reconciliation_required": false, "settlement_id": null, "spend": {"account_id": "aga_6t5tr371qn8t", "agent_id": "agt_fxr1hptmbnh4", "amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_hold": {"amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_id": "bgt_2ds8zy84h7de", "consumed_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "consumed_amount_cents": 0, "frozen_amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "frozen_amount_cents": 1, "hold_id": "7cf3c8d5-5e7a-43fe-9baa-fbfd754c8402", "remaining_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "remaining_amount_cents": 0, "status": "claimed"}, "currency": "usd", "decision_id": "ed431770-4d75-4803-835f-57d55c0dfcd8", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "expires_at": "2026-10-22T02:09:00.603575+00:00", "lease_profile": "proof_short", "merchant": null, "reason": "Synthetic proof kit: billed-operation", "spend_auth_token_id": "[redacted]", "status": "claimed", "task_id": "Synthetic proof kit: billed-operation"}, "status": "claimed"}
+[2026-10-22T02:04:16.737512+00:00] poll-expiry GET /spend/executor/claim?claim_id=b55d119d-bdbd-4363-93ef-7bbf567e98f1 -> 200: {"claim_expires_at": "2026-10-22T02:04:30.607469+00:00", "claim_id": "b55d119d-bdbd-4363-93ef-7bbf567e98f1", "claimed_at": "2026-10-22T02:04:00.607469+00:00", "evidence": null, "finalized_at": null, "lease_profile": "proof_short", "provider_reference": null, "reconciled_at": null, "reconciled_by_user_id": null, "reconciliation_outcome": null, "reconciliation_required": false, "settlement_id": null, "spend": {"account_id": "aga_6t5tr371qn8t", "agent_id": "agt_fxr1hptmbnh4", "amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_hold": {"amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_id": "bgt_2ds8zy84h7de", "consumed_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "consumed_amount_cents": 0, "frozen_amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "frozen_amount_cents": 1, "hold_id": "7cf3c8d5-5e7a-43fe-9baa-fbfd754c8402", "remaining_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "remaining_amount_cents": 0, "status": "claimed"}, "currency": "usd", "decision_id": "ed431770-4d75-4803-835f-57d55c0dfcd8", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "expires_at": "2026-10-22T02:09:00.603575+00:00", "lease_profile": "proof_short", "merchant": null, "reason": "Synthetic proof kit: billed-operation", "spend_auth_token_id": "[redacted]", "status": "claimed", "task_id": "Synthetic proof kit: billed-operation"}, "status": "claimed"}
+[2026-10-22T02:04:17.745108+00:00] poll-expiry GET /spend/executor/claim?claim_id=b55d119d-bdbd-4363-93ef-7bbf567e98f1 -> 200: {"claim_expires_at": "2026-10-22T02:04:30.607469+00:00", "claim_id": "b55d119d-bdbd-4363-93ef-7bbf567e98f1", "claimed_at": "2026-10-22T02:04:00.607469+00:00", "evidence": null, "finalized_at": null, "lease_profile": "proof_short", "provider_reference": null, "reconciled_at": null, "reconciled_by_user_id": null, "reconciliation_outcome": null, "reconciliation_required": false, "settlement_id": null, "spend": {"account_id": "aga_6t5tr371qn8t", "agent_id": "agt_fxr1hptmbnh4", "amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_hold": {"amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_id": "bgt_2ds8zy84h7de", "consumed_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "consumed_amount_cents": 0, "frozen_amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "frozen_amount_cents": 1, "hold_id": "7cf3c8d5-5e7a-43fe-9baa-fbfd754c8402", "remaining_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "remaining_amount_cents": 0, "status": "claimed"}, "currency": "usd", "decision_id": "ed431770-4d75-4803-835f-57d55c0dfcd8", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "expires_at": "2026-10-22T02:09:00.603575+00:00", "lease_profile": "proof_short", "merchant": null, "reason": "Synthetic proof kit: billed-operation", "spend_auth_token_id": "[redacted]", "status": "claimed", "task_id": "Synthetic proof kit: billed-operation"}, "status": "claimed"}
+[2026-10-22T02:04:18.751044+00:00] poll-expiry GET /spend/executor/claim?claim_id=b55d119d-bdbd-4363-93ef-7bbf567e98f1 -> 200: {"claim_expires_at": "2026-10-22T02:04:30.607469+00:00", "claim_id": "b55d119d-bdbd-4363-93ef-7bbf567e98f1", "claimed_at": "2026-10-22T02:04:00.607469+00:00", "evidence": null, "finalized_at": null, "lease_profile": "proof_short", "provider_reference": null, "reconciled_at": null, "reconciled_by_user_id": null, "reconciliation_outcome": null, "reconciliation_required": false, "settlement_id": null, "spend": {"account_id": "aga_6t5tr371qn8t", "agent_id": "agt_fxr1hptmbnh4", "amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_hold": {"amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_id": "bgt_2ds8zy84h7de", "consumed_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "consumed_amount_cents": 0, "frozen_amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "frozen_amount_cents": 1, "hold_id": "7cf3c8d5-5e7a-43fe-9baa-fbfd754c8402", "remaining_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "remaining_amount_cents": 0, "status": "claimed"}, "currency": "usd", "decision_id": "ed431770-4d75-4803-835f-57d55c0dfcd8", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "expires_at": "2026-10-22T02:09:00.603575+00:00", "lease_profile": "proof_short", "merchant": null, "reason": "Synthetic proof kit: billed-operation", "spend_auth_token_id": "[redacted]", "status": "claimed", "task_id": "Synthetic proof kit: billed-operation"}, "status": "claimed"}
+[2026-10-22T02:04:19.756484+00:00] poll-expiry GET /spend/executor/claim?claim_id=b55d119d-bdbd-4363-93ef-7bbf567e98f1 -> 200: {"claim_expires_at": "2026-10-22T02:04:30.607469+00:00", "claim_id": "b55d119d-bdbd-4363-93ef-7bbf567e98f1", "claimed_at": "2026-10-22T02:04:00.607469+00:00", "evidence": null, "finalized_at": null, "lease_profile": "proof_short", "provider_reference": null, "reconciled_at": null, "reconciled_by_user_id": null, "reconciliation_outcome": null, "reconciliation_required": false, "settlement_id": null, "spend": {"account_id": "aga_6t5tr371qn8t", "agent_id": "agt_fxr1hptmbnh4", "amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_hold": {"amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_id": "bgt_2ds8zy84h7de", "consumed_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "consumed_amount_cents": 0, "frozen_amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "frozen_amount_cents": 1, "hold_id": "7cf3c8d5-5e7a-43fe-9baa-fbfd754c8402", "remaining_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "remaining_amount_cents": 0, "status": "claimed"}, "currency": "usd", "decision_id": "ed431770-4d75-4803-835f-57d55c0dfcd8", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "expires_at": "2026-10-22T02:09:00.603575+00:00", "lease_profile": "proof_short", "merchant": null, "reason": "Synthetic proof kit: billed-operation", "spend_auth_token_id": "[redacted]", "status": "claimed", "task_id": "Synthetic proof kit: billed-operation"}, "status": "claimed"}
+[2026-10-22T02:04:20.764706+00:00] poll-expiry GET /spend/executor/claim?claim_id=b55d119d-bdbd-4363-93ef-7bbf567e98f1 -> 200: {"claim_expires_at": "2026-10-22T02:04:30.607469+00:00", "claim_id": "b55d119d-bdbd-4363-93ef-7bbf567e98f1", "claimed_at": "2026-10-22T02:04:00.607469+00:00", "evidence": null, "finalized_at": null, "lease_profile": "proof_short", "provider_reference": null, "reconciled_at": null, "reconciled_by_user_id": null, "reconciliation_outcome": null, "reconciliation_required": false, "settlement_id": null, "spend": {"account_id": "aga_6t5tr371qn8t", "agent_id": "agt_fxr1hptmbnh4", "amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_hold": {"amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_id": "bgt_2ds8zy84h7de", "consumed_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "consumed_amount_cents": 0, "frozen_amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "frozen_amount_cents": 1, "hold_id": "7cf3c8d5-5e7a-43fe-9baa-fbfd754c8402", "remaining_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "remaining_amount_cents": 0, "status": "claimed"}, "currency": "usd", "decision_id": "ed431770-4d75-4803-835f-57d55c0dfcd8", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "expires_at": "2026-10-22T02:09:00.603575+00:00", "lease_profile": "proof_short", "merchant": null, "reason": "Synthetic proof kit: billed-operation", "spend_auth_token_id": "[redacted]", "status": "claimed", "task_id": "Synthetic proof kit: billed-operation"}, "status": "claimed"}
+[2026-10-22T02:04:21.771623+00:00] poll-expiry GET /spend/executor/claim?claim_id=b55d119d-bdbd-4363-93ef-7bbf567e98f1 -> 200: {"claim_expires_at": "2026-10-22T02:04:30.607469+00:00", "claim_id": "b55d119d-bdbd-4363-93ef-7bbf567e98f1", "claimed_at": "2026-10-22T02:04:00.607469+00:00", "evidence": null, "finalized_at": null, "lease_profile": "proof_short", "provider_reference": null, "reconciled_at": null, "reconciled_by_user_id": null, "reconciliation_outcome": null, "reconciliation_required": false, "settlement_id": null, "spend": {"account_id": "aga_6t5tr371qn8t", "agent_id": "agt_fxr1hptmbnh4", "amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_hold": {"amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_id": "bgt_2ds8zy84h7de", "consumed_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "consumed_amount_cents": 0, "frozen_amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "frozen_amount_cents": 1, "hold_id": "7cf3c8d5-5e7a-43fe-9baa-fbfd754c8402", "remaining_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "remaining_amount_cents": 0, "status": "claimed"}, "currency": "usd", "decision_id": "ed431770-4d75-4803-835f-57d55c0dfcd8", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "expires_at": "2026-10-22T02:09:00.603575+00:00", "lease_profile": "proof_short", "merchant": null, "reason": "Synthetic proof kit: billed-operation", "spend_auth_token_id": "[redacted]", "status": "claimed", "task_id": "Synthetic proof kit: billed-operation"}, "status": "claimed"}
+[2026-10-22T02:04:22.780626+00:00] poll-expiry GET /spend/executor/claim?claim_id=b55d119d-bdbd-4363-93ef-7bbf567e98f1 -> 200: {"claim_expires_at": "2026-10-22T02:04:30.607469+00:00", "claim_id": "b55d119d-bdbd-4363-93ef-7bbf567e98f1", "claimed_at": "2026-10-22T02:04:00.607469+00:00", "evidence": null, "finalized_at": null, "lease_profile": "proof_short", "provider_reference": null, "reconciled_at": null, "reconciled_by_user_id": null, "reconciliation_outcome": null, "reconciliation_required": false, "settlement_id": null, "spend": {"account_id": "aga_6t5tr371qn8t", "agent_id": "agt_fxr1hptmbnh4", "amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_hold": {"amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_id": "bgt_2ds8zy84h7de", "consumed_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "consumed_amount_cents": 0, "frozen_amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "frozen_amount_cents": 1, "hold_id": "7cf3c8d5-5e7a-43fe-9baa-fbfd754c8402", "remaining_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "remaining_amount_cents": 0, "status": "claimed"}, "currency": "usd", "decision_id": "ed431770-4d75-4803-835f-57d55c0dfcd8", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "expires_at": "2026-10-22T02:09:00.603575+00:00", "lease_profile": "proof_short", "merchant": null, "reason": "Synthetic proof kit: billed-operation", "spend_auth_token_id": "[redacted]", "status": "claimed", "task_id": "Synthetic proof kit: billed-operation"}, "status": "claimed"}
+[2026-10-22T02:04:23.788154+00:00] poll-expiry GET /spend/executor/claim?claim_id=b55d119d-bdbd-4363-93ef-7bbf567e98f1 -> 200: {"claim_expires_at": "2026-10-22T02:04:30.607469+00:00", "claim_id": "b55d119d-bdbd-4363-93ef-7bbf567e98f1", "claimed_at": "2026-10-22T02:04:00.607469+00:00", "evidence": null, "finalized_at": null, "lease_profile": "proof_short", "provider_reference": null, "reconciled_at": null, "reconciled_by_user_id": null, "reconciliation_outcome": null, "reconciliation_required": false, "settlement_id": null, "spend": {"account_id": "aga_6t5tr371qn8t", "agent_id": "agt_fxr1hptmbnh4", "amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_hold": {"amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_id": "bgt_2ds8zy84h7de", "consumed_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "consumed_amount_cents": 0, "frozen_amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "frozen_amount_cents": 1, "hold_id": "7cf3c8d5-5e7a-43fe-9baa-fbfd754c8402", "remaining_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "remaining_amount_cents": 0, "status": "claimed"}, "currency": "usd", "decision_id": "ed431770-4d75-4803-835f-57d55c0dfcd8", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "expires_at": "2026-10-22T02:09:00.603575+00:00", "lease_profile": "proof_short", "merchant": null, "reason": "Synthetic proof kit: billed-operation", "spend_auth_token_id": "[redacted]", "status": "claimed", "task_id": "Synthetic proof kit: billed-operation"}, "status": "claimed"}
+[2026-10-22T02:04:24.793032+00:00] poll-expiry GET /spend/executor/claim?claim_id=b55d119d-bdbd-4363-93ef-7bbf567e98f1 -> 200: {"claim_expires_at": "2026-10-22T02:04:30.607469+00:00", "claim_id": "b55d119d-bdbd-4363-93ef-7bbf567e98f1", "claimed_at": "2026-10-22T02:04:00.607469+00:00", "evidence": null, "finalized_at": null, "lease_profile": "proof_short", "provider_reference": null, "reconciled_at": null, "reconciled_by_user_id": null, "reconciliation_outcome": null, "reconciliation_required": false, "settlement_id": null, "spend": {"account_id": "aga_6t5tr371qn8t", "agent_id": "agt_fxr1hptmbnh4", "amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_hold": {"amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_id": "bgt_2ds8zy84h7de", "consumed_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "consumed_amount_cents": 0, "frozen_amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "frozen_amount_cents": 1, "hold_id": "7cf3c8d5-5e7a-43fe-9baa-fbfd754c8402", "remaining_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "remaining_amount_cents": 0, "status": "claimed"}, "currency": "usd", "decision_id": "ed431770-4d75-4803-835f-57d55c0dfcd8", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "expires_at": "2026-10-22T02:09:00.603575+00:00", "lease_profile": "proof_short", "merchant": null, "reason": "Synthetic proof kit: billed-operation", "spend_auth_token_id": "[redacted]", "status": "claimed", "task_id": "Synthetic proof kit: billed-operation"}, "status": "claimed"}
+[2026-10-22T02:04:25.801081+00:00] poll-expiry GET /spend/executor/claim?claim_id=b55d119d-bdbd-4363-93ef-7bbf567e98f1 -> 200: {"claim_expires_at": "2026-10-22T02:04:30.607469+00:00", "claim_id": "b55d119d-bdbd-4363-93ef-7bbf567e98f1", "claimed_at": "2026-10-22T02:04:00.607469+00:00", "evidence": null, "finalized_at": null, "lease_profile": "proof_short", "provider_reference": null, "reconciled_at": null, "reconciled_by_user_id": null, "reconciliation_outcome": null, "reconciliation_required": false, "settlement_id": null, "spend": {"account_id": "aga_6t5tr371qn8t", "agent_id": "agt_fxr1hptmbnh4", "amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_hold": {"amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_id": "bgt_2ds8zy84h7de", "consumed_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "consumed_amount_cents": 0, "frozen_amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "frozen_amount_cents": 1, "hold_id": "7cf3c8d5-5e7a-43fe-9baa-fbfd754c8402", "remaining_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "remaining_amount_cents": 0, "status": "claimed"}, "currency": "usd", "decision_id": "ed431770-4d75-4803-835f-57d55c0dfcd8", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "expires_at": "2026-10-22T02:09:00.603575+00:00", "lease_profile": "proof_short", "merchant": null, "reason": "Synthetic proof kit: billed-operation", "spend_auth_token_id": "[redacted]", "status": "claimed", "task_id": "Synthetic proof kit: billed-operation"}, "status": "claimed"}
+[2026-10-22T02:04:26.810016+00:00] poll-expiry GET /spend/executor/claim?claim_id=b55d119d-bdbd-4363-93ef-7bbf567e98f1 -> 200: {"claim_expires_at": "2026-10-22T02:04:30.607469+00:00", "claim_id": "b55d119d-bdbd-4363-93ef-7bbf567e98f1", "claimed_at": "2026-10-22T02:04:00.607469+00:00", "evidence": null, "finalized_at": null, "lease_profile": "proof_short", "provider_reference": null, "reconciled_at": null, "reconciled_by_user_id": null, "reconciliation_outcome": null, "reconciliation_required": false, "settlement_id": null, "spend": {"account_id": "aga_6t5tr371qn8t", "agent_id": "agt_fxr1hptmbnh4", "amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_hold": {"amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_id": "bgt_2ds8zy84h7de", "consumed_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "consumed_amount_cents": 0, "frozen_amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "frozen_amount_cents": 1, "hold_id": "7cf3c8d5-5e7a-43fe-9baa-fbfd754c8402", "remaining_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "remaining_amount_cents": 0, "status": "claimed"}, "currency": "usd", "decision_id": "ed431770-4d75-4803-835f-57d55c0dfcd8", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "expires_at": "2026-10-22T02:09:00.603575+00:00", "lease_profile": "proof_short", "merchant": null, "reason": "Synthetic proof kit: billed-operation", "spend_auth_token_id": "[redacted]", "status": "claimed", "task_id": "Synthetic proof kit: billed-operation"}, "status": "claimed"}
+[2026-10-22T02:04:27.817472+00:00] poll-expiry GET /spend/executor/claim?claim_id=b55d119d-bdbd-4363-93ef-7bbf567e98f1 -> 200: {"claim_expires_at": "2026-10-22T02:04:30.607469+00:00", "claim_id": "b55d119d-bdbd-4363-93ef-7bbf567e98f1", "claimed_at": "2026-10-22T02:04:00.607469+00:00", "evidence": null, "finalized_at": null, "lease_profile": "proof_short", "provider_reference": null, "reconciled_at": null, "reconciled_by_user_id": null, "reconciliation_outcome": null, "reconciliation_required": false, "settlement_id": null, "spend": {"account_id": "aga_6t5tr371qn8t", "agent_id": "agt_fxr1hptmbnh4", "amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_hold": {"amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_id": "bgt_2ds8zy84h7de", "consumed_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "consumed_amount_cents": 0, "frozen_amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "frozen_amount_cents": 1, "hold_id": "7cf3c8d5-5e7a-43fe-9baa-fbfd754c8402", "remaining_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "remaining_amount_cents": 0, "status": "claimed"}, "currency": "usd", "decision_id": "ed431770-4d75-4803-835f-57d55c0dfcd8", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "expires_at": "2026-10-22T02:09:00.603575+00:00", "lease_profile": "proof_short", "merchant": null, "reason": "Synthetic proof kit: billed-operation", "spend_auth_token_id": "[redacted]", "status": "claimed", "task_id": "Synthetic proof kit: billed-operation"}, "status": "claimed"}
+[2026-10-22T02:04:28.823534+00:00] poll-expiry GET /spend/executor/claim?claim_id=b55d119d-bdbd-4363-93ef-7bbf567e98f1 -> 200: {"claim_expires_at": "2026-10-22T02:04:30.607469+00:00", "claim_id": "b55d119d-bdbd-4363-93ef-7bbf567e98f1", "claimed_at": "2026-10-22T02:04:00.607469+00:00", "evidence": null, "finalized_at": null, "lease_profile": "proof_short", "provider_reference": null, "reconciled_at": null, "reconciled_by_user_id": null, "reconciliation_outcome": null, "reconciliation_required": false, "settlement_id": null, "spend": {"account_id": "aga_6t5tr371qn8t", "agent_id": "agt_fxr1hptmbnh4", "amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_hold": {"amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_id": "bgt_2ds8zy84h7de", "consumed_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "consumed_amount_cents": 0, "frozen_amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "frozen_amount_cents": 1, "hold_id": "7cf3c8d5-5e7a-43fe-9baa-fbfd754c8402", "remaining_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "remaining_amount_cents": 0, "status": "claimed"}, "currency": "usd", "decision_id": "ed431770-4d75-4803-835f-57d55c0dfcd8", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "expires_at": "2026-10-22T02:09:00.603575+00:00", "lease_profile": "proof_short", "merchant": null, "reason": "Synthetic proof kit: billed-operation", "spend_auth_token_id": "[redacted]", "status": "claimed", "task_id": "Synthetic proof kit: billed-operation"}, "status": "claimed"}
+[2026-10-22T02:04:29.830187+00:00] poll-expiry GET /spend/executor/claim?claim_id=b55d119d-bdbd-4363-93ef-7bbf567e98f1 -> 200: {"claim_expires_at": "2026-10-22T02:04:30.607469+00:00", "claim_id": "b55d119d-bdbd-4363-93ef-7bbf567e98f1", "claimed_at": "2026-10-22T02:04:00.607469+00:00", "evidence": null, "finalized_at": null, "lease_profile": "proof_short", "provider_reference": null, "reconciled_at": null, "reconciled_by_user_id": null, "reconciliation_outcome": null, "reconciliation_required": false, "settlement_id": null, "spend": {"account_id": "aga_6t5tr371qn8t", "agent_id": "agt_fxr1hptmbnh4", "amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_hold": {"amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_id": "bgt_2ds8zy84h7de", "consumed_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "consumed_amount_cents": 0, "frozen_amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "frozen_amount_cents": 1, "hold_id": "7cf3c8d5-5e7a-43fe-9baa-fbfd754c8402", "remaining_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "remaining_amount_cents": 0, "status": "claimed"}, "currency": "usd", "decision_id": "ed431770-4d75-4803-835f-57d55c0dfcd8", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "expires_at": "2026-10-22T02:09:00.603575+00:00", "lease_profile": "proof_short", "merchant": null, "reason": "Synthetic proof kit: billed-operation", "spend_auth_token_id": "[redacted]", "status": "claimed", "task_id": "Synthetic proof kit: billed-operation"}, "status": "claimed"}
+[2026-10-22T02:04:30.615704+00:00] poll-expiry GET /spend/executor/claim?claim_id=b55d119d-bdbd-4363-93ef-7bbf567e98f1 -> 200: {"claim_expires_at": "2026-10-22T02:04:30.607469+00:00", "claim_id": "b55d119d-bdbd-4363-93ef-7bbf567e98f1", "claimed_at": "2026-10-22T02:04:00.607469+00:00", "evidence": null, "finalized_at": null, "lease_profile": "proof_short", "provider_reference": null, "reconciled_at": null, "reconciled_by_user_id": null, "reconciliation_outcome": null, "reconciliation_required": true, "settlement_id": null, "spend": {"account_id": "aga_6t5tr371qn8t", "agent_id": "agt_fxr1hptmbnh4", "amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_hold": {"amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_id": "bgt_2ds8zy84h7de", "consumed_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "consumed_amount_cents": 0, "frozen_amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "frozen_amount_cents": 1, "hold_id": "7cf3c8d5-5e7a-43fe-9baa-fbfd754c8402", "remaining_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "remaining_amount_cents": 0, "status": "claimed"}, "currency": "usd", "decision_id": "ed431770-4d75-4803-835f-57d55c0dfcd8", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "expires_at": "2026-10-22T02:09:00.603575+00:00", "lease_profile": "proof_short", "merchant": null, "reason": "Synthetic proof kit: billed-operation", "spend_auth_token_id": "[redacted]", "status": "claimed", "task_id": "Synthetic proof kit: billed-operation"}, "status": "claimed"}
+[2026-10-22T02:04:30.617682+00:00] reconciliation-visible GET /spend/executor/reconciliation -> 200: {"claims": [{"claim_expires_at": "2026-10-22T02:04:30.607469+00:00", "claim_id": "b55d119d-bdbd-4363-93ef-7bbf567e98f1", "claimed_at": "2026-10-22T02:04:00.607469+00:00", "evidence": null, "finalized_at": null, "lease_profile": "proof_short", "provider_reference": null, "reconciled_at": null, "reconciled_by_user_id": null, "reconciliation_outcome": null, "reconciliation_required": true, "settlement_id": null, "spend": {"account_id": "aga_6t5tr371qn8t", "agent_id": "agt_fxr1hptmbnh4", "amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_hold": {"amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_cents": 1, "budget_id": "bgt_2ds8zy84h7de", "consumed_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "consumed_amount_cents": 0, "frozen_amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "frozen_amount_cents": 1, "hold_id": "7cf3c8d5-5e7a-43fe-9baa-fbfd754c8402", "remaining_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "remaining_amount_cents": 0, "status": "claimed"}, "currency": "usd", "decision_id": "ed431770-4d75-4803-835f-57d55c0dfcd8", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "expires_at": "2026-10-22T02:09:00.603575+00:00", "lease_profile": "proof_short", "merchant": null, "reason": "Synthetic proof kit: billed-operation", "spend_auth_token_id": "[redacted]", "status": "claimed", "task_id": "Synthetic proof kit: billed-operation"}, "status": "claimed"}]}
+[2026-10-22T02:04:30.617875+00:00] PUBLIC SNAPSHOT expired (writers paused)
+[2026-10-22T02:04:30.619270+00:00] snapshot-expired-budgets GET /budgets -> 200: {"budgets": [{"agent_id": "agt_fxr1hptmbnh4", "amount_limit": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_limit_cents": 1, "budget_id": "bgt_2ds8zy84h7de", "consumed_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "consumed_amount_cents": 0, "currency": "usd", "current_revision": 1, "current_version_id": "bgv_m31n5kjgzb7d", "ending_before": "2999-01-01T00:00:00+00:00", "frozen_amount": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "frozen_amount_cents": 1, "remaining_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "remaining_amount_cents": 0, "starting_at": "2026-10-22T02:04:00.418797+00:00", "status": "exhausted"}]}
+[2026-10-22T02:04:30.619627+00:00] $ /private/tmp/break-hubu-public-cache/target/release/hubu --url http://127.0.0.1:51747 budget list
+[2026-10-22T02:04:30.631325+00:00]   budget_id: bgt_2ds8zy84h7de  agent_id: agt_fxr1hptmbnh4  status: exhausted
+    limit: $0.01  consumed: $0.00  frozen: $0.01  remaining: $0.00
+    current_version_id: bgv_m31n5kjgzb7d  current_revision: 1
+    period: 2026-10-21T19:04:00.418797-07:00 -> 2998-12-31T16:00:00-08:00
+CLI exit=0
+[2026-10-22T02:04:30.631678+00:00] $ /private/tmp/break-hubu-public-cache/target/release/hubu --url http://127.0.0.1:51747 policy show --agent-id agt_fxr1hptmbnh4
+[2026-10-22T02:04:30.640775+00:00] {
+  "assignments": [
+    {
+      "agent_id": "agt_fxr1hptmbnh4",
+      "attached_at": "2026-10-22T02:04:00.413186+00:00",
+      "scope": "agent_override",
+      "updated_at": "2026-10-22T02:04:00.413186+00:00"
+    }
+  ],
+  "created_at": "2026-10-22T02:04:00.413186+00:00",
+  "declarative_key": "break_hubu_fixture",
+  "display_name": "Synthetic fixture allow policy",
+  "payload_hash": "sha256:ec70368bcf30132de24bdf0781000ea82104f4f5650e4f697f4c2d9566d35df6",
+  "policy": {
+    "default_effect": "deny",
+    "id": "break_hubu_fixture",
+    "owner_user_id": "a10da919-b4fa-40fd-8bc6-e7fd3d29431c",
+    "rules": [
+      {
+        "effect": "allow",
+        "id": "allow_synthetic_fixture",
+        "reason": "synthetic local fixture only",
+        "when": {
+          "field": "provider",
+          "op": "eq",
+          "value": {
+            "string": "provider:local:fixture"
+          }
+        }
+      }
+    ],
+    "version": "v1"
+  },
+  "policy_id": "pol_xcg6r56xxqma",
+  "revision": 1,
+  "updated_at": "2026-10-22T02:04:00.413186+00:00"
+}
+CLI exit=0
+[2026-10-22T02:04:30.641071+00:00] $ /private/tmp/break-hubu-public-cache/target/release/hubu --url http://127.0.0.1:51747 ledger list --agent-id agt_fxr1hptmbnh4 --limit 100 --budget-id bgt_2ds8zy84h7de
+[2026-10-22T02:04:30.655569+00:00] {
+  "coverage": {
+    "agent_id": "agt_fxr1hptmbnh4",
+    "budget_id": "bgt_2ds8zy84h7de",
+    "consumed_amount": {
+      "currency": "usd",
+      "display": "0.00",
+      "scale": 6,
+      "units": "0"
+    },
+    "consumed_amount_cents": 0,
+    "currency": "usd",
+    "historical_wallet_reconciliation_complete": false,
+    "owner_transactions_without_budget_context": 0,
+    "pending_hold_count": 1,
+    "recorded_budget_charges": {
+      "currency": "usd",
+      "display": "0.00",
+      "scale": 6,
+      "units": "0"
+    },
+    "recorded_budget_charges_cents": 0,
+    "unaccounted_consumption": {
+      "currency": "usd",
+      "display": "0.00",
+      "scale": 6,
+      "units": "0"
+    },
+    "unaccounted_consumption_cents": 0
+  },
+  "next_cursor": null,
+  "schema_version": "hubu-history-v1",
+  "transactions": []
+}
+CLI exit=0
+[2026-10-22T02:04:30.655930+00:00] $ /private/tmp/break-hubu-public-cache/target/release/hubu --url http://127.0.0.1:51747 spend authorizations --agent-id agt_fxr1hptmbnh4 --limit 100
+[2026-10-22T02:04:30.665412+00:00] {
+  "authorization_records": [
+    {
+      "account_id": "aga_6t5tr371qn8t",
+      "agent_id": "agt_fxr1hptmbnh4",
+      "authorization_id": "ed431770-4d75-4803-835f-57d55c0dfcd8",
+      "authorized_max": {
+        "currency": "usd",
+        "display": "0.01",
+        "scale": 6,
+        "units": "10000"
+      },
+      "authorized_max_cents": 1,
+      "billing_merchant": {
+        "display_name": "Local merchant",
+        "id": "merchant:local"
+      },
+      "budget_hold": {
+        "amount": {
+          "currency": "usd",
+          "display": "0.01",
+          "scale": 6,
+          "units": "10000"
+        },
+        "amount_cents": 1,
+        "budget_id": "bgt_2ds8zy84h7de",
+        "budget_version_id": "bgv_m31n5kjgzb7d",
+        "currency": "usd",
+        "expires_at": "2026-10-22T02:04:30.607469+00:00",
+        "id": "7cf3c8d5-5e7a-43fe-9baa-fbfd754c8402",
+        "status": "claimed"
+      },
+      "claim": {
+        "claimed_at": "2026-10-22T02:04:00.607469+00:00",
+        "expires_at": "2026-10-22T02:04:30.607469+00:00",
+        "finalized_at": null,
+        "id": "b55d119d-bdbd-4363-93ef-7bbf567e98f1",
+        "lease_profile_reference": {
+          "digest": "sha256:7cedcb0cb67088b05761db8374511198726c67c0797d012d0ea038364cc8b9e7",
+          "redacted": true
+        },
+        "provider_reference": null,
+        "reconciled_at": null,
+        "reconciliation_evidence_reference": null,
+        "reconciliation_outcome": null,
+        "reconciliation_required": true,
+        "status": "claimed"
+      },
+      "created_at": "2026-10-22T02:04:00.603573+00:00",
+      "currency": "usd",
+      "decision": "allow",
+      "decision_id": "ed431770-4d75-4803-835f-57d55c0dfcd8",
+      "id": "ed431770-4d75-4803-835f-57d55c0dfcd8",
+      "ledger_transaction_ids": [],
+      "policy_decision": "allow",
+      "provider": {
+        "display_name": "Local fixture provider",
+        "id": "provider:local:fixture"
+      },
+      "purpose_reference": {
+        "digest": "sha256:2a9729fd3750a887142e593cc5692ebde9a276aa7fb9b9d2f197c049671029ab",
+        "redacted": true
+      },
+      "raw_evidence_redacted": true,
+      "receipt": null,
+      "release_reason": null,
+      "revision": 1,
+      "status": "reconciliation_required",
+      "task_reference": {
+        "digest": "sha256:2a9729fd3750a887142e593cc5692ebde9a276aa7fb9b9d2f197c049671029ab",
+        "redacted": true
+      }
+    }
+  ],
+  "next_cursor": null,
+  "schema_version": "hubu-history-v1"
+}
+CLI exit=0
+[2026-10-22T02:04:30.665710+00:00] OPERATOR: confirm the saved synthetic bill through the owner CLI capability.
+[2026-10-22T02:04:30.666123+00:00] OWNER STEP: explicit reconciliation of a synthetic known bill; capability stays in parent
+[2026-10-22T02:04:30.666295+00:00] $ /private/tmp/break-hubu-public-cache/target/release/hubu --url http://127.0.0.1:51747 spend reconcile billed --claim-id b55d119d-bdbd-4363-93ef-7bbf567e98f1 --provider-reference synthetic:last-cent-billed --evidence 'Synthetic last-cent fixture confirms a USD 0.03 bill; no real provider billing.' --actual-vendor-cost-amount 30000 --actual-vendor-cost-scale 6 --currency usd --provider-request-id synthetic:last-cent-billed --price-model-snapshot-json '{"provider": "provider:local:fixture", "model": "synthetic-no-provider", "pricing_unit": "operation", "currency": "usd", "synthetic": true}' --artifact-reference fixture://ep02-last-cent/last-cent-billed
+[2026-10-22T02:04:30.674566+00:00] Claim reconciled: vendor billed; hold settled
+Executor claim
+  claim_id: b55d119d-bdbd-4363-93ef-7bbf567e98f1
+  status: settled
+  reconciliation_required: false
+  authorization_id: ed431770-4d75-4803-835f-57d55c0dfcd8
+  claim_expires_at: 2026-10-21T19:04:30.607469-07:00
+  settlement_id: 2497a1d3-4fb2-40f2-96f5-3027d1bcbd91
+  reconciliation_outcome: vendor_billed
+  provider_reference: synthetic:last-cent-billed
+  evidence: Synthetic last-cent fixture confirms a USD 0.03 bill; no real provider billing.
+  reconciled_at: 2026-10-22T02:04:30.672348+00:00
+  reconciled_by_user_id: usr_qhq7zmyjjgrw
+  account_id: aga_6t5tr371qn8t
+  agent_id: agt_fxr1hptmbnh4
+  amount: $0.01
+  execution_scope_schema: 1
+  provider: Local fixture provider [provider:local:fixture]
+  executor: Gongbu image executor [executor:gongbu:image]
+  capability: Generate image [capability:image:generate]
+  billing_merchant: Local merchant [merchant:local]
+  hold_status: settled
+  frozen_amount: $0.00
+CLI exit=0
+[2026-10-22T02:04:30.674871+00:00] PUBLIC SNAPSHOT reconciled (writers paused)
+[2026-10-22T02:04:30.676072+00:00] snapshot-reconciled-budgets GET /budgets -> 200: {"budgets": [{"agent_id": "agt_fxr1hptmbnh4", "amount_limit": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_limit_cents": 1, "budget_id": "bgt_2ds8zy84h7de", "consumed_amount": {"currency": "usd", "display": "0.03", "scale": 6, "units": "30000"}, "consumed_amount_cents": 3, "currency": "usd", "current_revision": 1, "current_version_id": "bgv_m31n5kjgzb7d", "ending_before": "2999-01-01T00:00:00+00:00", "frozen_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "frozen_amount_cents": 0, "remaining_amount": {"currency": "usd", "display": "-0.02", "scale": 6, "units": "-20000"}, "remaining_amount_cents": -2, "starting_at": "2026-10-22T02:04:00.418797+00:00", "status": "exhausted"}]}
+[2026-10-22T02:04:30.676288+00:00] $ /private/tmp/break-hubu-public-cache/target/release/hubu --url http://127.0.0.1:51747 budget list
+[2026-10-22T02:04:30.682677+00:00]   budget_id: bgt_2ds8zy84h7de  agent_id: agt_fxr1hptmbnh4  status: exhausted
+    limit: $0.01  consumed: $0.03  frozen: $0.00  remaining: -$0.02
+    current_version_id: bgv_m31n5kjgzb7d  current_revision: 1
+    period: 2026-10-21T19:04:00.418797-07:00 -> 2998-12-31T16:00:00-08:00
+CLI exit=0
+[2026-10-22T02:04:30.682896+00:00] $ /private/tmp/break-hubu-public-cache/target/release/hubu --url http://127.0.0.1:51747 policy show --agent-id agt_fxr1hptmbnh4
+[2026-10-22T02:04:30.688642+00:00] {
+  "assignments": [
+    {
+      "agent_id": "agt_fxr1hptmbnh4",
+      "attached_at": "2026-10-22T02:04:00.413186+00:00",
+      "scope": "agent_override",
+      "updated_at": "2026-10-22T02:04:00.413186+00:00"
+    }
+  ],
+  "created_at": "2026-10-22T02:04:00.413186+00:00",
+  "declarative_key": "break_hubu_fixture",
+  "display_name": "Synthetic fixture allow policy",
+  "payload_hash": "sha256:ec70368bcf30132de24bdf0781000ea82104f4f5650e4f697f4c2d9566d35df6",
+  "policy": {
+    "default_effect": "deny",
+    "id": "break_hubu_fixture",
+    "owner_user_id": "a10da919-b4fa-40fd-8bc6-e7fd3d29431c",
+    "rules": [
+      {
+        "effect": "allow",
+        "id": "allow_synthetic_fixture",
+        "reason": "synthetic local fixture only",
+        "when": {
+          "field": "provider",
+          "op": "eq",
+          "value": {
+            "string": "provider:local:fixture"
+          }
+        }
+      }
+    ],
+    "version": "v1"
+  },
+  "policy_id": "pol_xcg6r56xxqma",
+  "revision": 1,
+  "updated_at": "2026-10-22T02:04:00.413186+00:00"
+}
+CLI exit=0
+[2026-10-22T02:04:30.688839+00:00] $ /private/tmp/break-hubu-public-cache/target/release/hubu --url http://127.0.0.1:51747 ledger list --agent-id agt_fxr1hptmbnh4 --limit 100 --budget-id bgt_2ds8zy84h7de
+[2026-10-22T02:04:30.694348+00:00] {
+  "coverage": {
+    "agent_id": "agt_fxr1hptmbnh4",
+    "budget_id": "bgt_2ds8zy84h7de",
+    "consumed_amount": {
+      "currency": "usd",
+      "display": "0.03",
+      "scale": 6,
+      "units": "30000"
+    },
+    "consumed_amount_cents": 3,
+    "currency": "usd",
+    "historical_wallet_reconciliation_complete": false,
+    "owner_transactions_without_budget_context": 0,
+    "pending_hold_count": 0,
+    "recorded_budget_charges": {
+      "currency": "usd",
+      "display": "0.03",
+      "scale": 6,
+      "units": "30000"
+    },
+    "recorded_budget_charges_cents": 3,
+    "unaccounted_consumption": {
+      "currency": "usd",
+      "display": "0.00",
+      "scale": 6,
+      "units": "0"
+    },
+    "unaccounted_consumption_cents": 0
+  },
+  "next_cursor": null,
+  "schema_version": "hubu-history-v1",
+  "transactions": [
+    {
+      "account_id": "aga_6t5tr371qn8t",
+      "adjustment_evidence_reference": null,
+      "agent_id": "agt_fxr1hptmbnh4",
+      "authorization_id": "ed431770-4d75-4803-835f-57d55c0dfcd8",
+      "billing_merchant": {
+        "display_name": "Local merchant",
+        "id": "merchant:local"
+      },
+      "budget_charge_delta": {
+        "scale": 6,
+        "units": "30000"
+      },
+      "budget_charge_delta_cents": 3,
+      "budget_id": "bgt_2ds8zy84h7de",
+      "budget_version_id": "bgv_m31n5kjgzb7d",
+      "claim_id": "b55d119d-bdbd-4363-93ef-7bbf567e98f1",
+      "cost_semantics": "original_total",
+      "coverage": {
+        "has_budget_context": true,
+        "missing_evidence": [],
+        "missing_evidence_count": 0,
+        "raw_evidence_redacted": true
+      },
+      "created_at": "2026-10-22T02:04:30.672348+00:00",
+      "effective_cost": {
+        "amount": "30000",
+        "currency": "usd",
+        "scale": 6
+      },
+      "entries": [
+        {
+          "account_id": "fa1d6959-76f3-4f54-a82b-d63a76767643",
+          "account_kind": "AgentSpendExpense",
+          "amount": {
+            "amount": "30000000000000000",
+            "currency": "usd",
+            "scale": 18
+          },
+          "direction": "debit",
+          "id": "181cd91e-b38c-4c66-add1-7101e58a2acb"
+        },
+        {
+          "account_id": "e59edb43-0d9b-4fc3-b13b-245e6aca27f3",
+          "account_kind": "ExternallyBilledClearing",
+          "amount": {
+            "amount": "30000000000000000",
+            "currency": "usd",
+            "scale": 18
+          },
+          "direction": "credit",
+          "id": "55ff154a-9136-4a38-801c-8e9a0f8f0b34"
+        }
+      ],
+      "id": "6714a617-77be-4bb9-a89e-7ceb10beacc4",
+      "kind": "external_provider",
+      "legacy_backfill": false,
+      "original_transaction_id": null,
+      "previous_transaction_id": null,
+      "provider": {
+        "display_name": "Local fixture provider",
+        "id": "provider:local:fixture"
+      },
+      "purpose_reference": {
+        "digest": "sha256:2a9729fd3750a887142e593cc5692ebde9a276aa7fb9b9d2f197c049671029ab",
+        "redacted": true
+      },
+      "rounding_delta_amount": "0",
+      "settlement_id": "2497a1d3-4fb2-40f2-96f5-3027d1bcbd91",
+      "source_reference": {
+        "digest": "sha256:0b85cb763f491595b46197374e1a5bf3c19917d652509c3a4701343572fc0742",
+        "redacted": true
+      }
+    }
+  ]
+}
+CLI exit=0
+[2026-10-22T02:04:30.694590+00:00] $ /private/tmp/break-hubu-public-cache/target/release/hubu --url http://127.0.0.1:51747 spend authorizations --agent-id agt_fxr1hptmbnh4 --limit 100
+[2026-10-22T02:04:30.700587+00:00] {
+  "authorization_records": [
+    {
+      "account_id": "aga_6t5tr371qn8t",
+      "agent_id": "agt_fxr1hptmbnh4",
+      "authorization_id": "ed431770-4d75-4803-835f-57d55c0dfcd8",
+      "authorized_max": {
+        "currency": "usd",
+        "display": "0.01",
+        "scale": 6,
+        "units": "10000"
+      },
+      "authorized_max_cents": 1,
+      "billing_merchant": {
+        "display_name": "Local merchant",
+        "id": "merchant:local"
+      },
+      "budget_hold": {
+        "amount": {
+          "currency": "usd",
+          "display": "0.01",
+          "scale": 6,
+          "units": "10000"
+        },
+        "amount_cents": 1,
+        "budget_id": "bgt_2ds8zy84h7de",
+        "budget_version_id": "bgv_m31n5kjgzb7d",
+        "currency": "usd",
+        "expires_at": "2026-10-22T02:04:30.607469+00:00",
+        "id": "7cf3c8d5-5e7a-43fe-9baa-fbfd754c8402",
+        "status": "settled"
+      },
+      "claim": {
+        "claimed_at": "2026-10-22T02:04:00.607469+00:00",
+        "expires_at": "2026-10-22T02:04:30.607469+00:00",
+        "finalized_at": "2026-10-22T02:04:30.672348+00:00",
+        "id": "b55d119d-bdbd-4363-93ef-7bbf567e98f1",
+        "lease_profile_reference": {
+          "digest": "sha256:7cedcb0cb67088b05761db8374511198726c67c0797d012d0ea038364cc8b9e7",
+          "redacted": true
+        },
+        "provider_reference": {
+          "digest": "sha256:7f95c26e851afc558acac36039a109cfb2fdbccb73cfdb2b405df962a06ecd91",
+          "redacted": true
+        },
+        "reconciled_at": "2026-10-22T02:04:30.672348+00:00",
+        "reconciliation_evidence_reference": {
+          "digest": "sha256:617585a13902251b3425841c37981db8855f60a2a43e5e0c04a1672ea2a22477",
+          "redacted": true
+        },
+        "reconciliation_outcome": "vendor_billed",
+        "reconciliation_required": false,
+        "status": "settled"
+      },
+      "created_at": "2026-10-22T02:04:00.603573+00:00",
+      "currency": "usd",
+      "decision": "allow",
+      "decision_id": "ed431770-4d75-4803-835f-57d55c0dfcd8",
+      "id": "ed431770-4d75-4803-835f-57d55c0dfcd8",
+      "ledger_transaction_ids": [
+        "6714a617-77be-4bb9-a89e-7ceb10beacc4"
+      ],
+      "policy_decision": "allow",
+      "provider": {
+        "display_name": "Local fixture provider",
+        "id": "provider:local:fixture"
+      },
+      "purpose_reference": {
+        "digest": "sha256:2a9729fd3750a887142e593cc5692ebde9a276aa7fb9b9d2f197c049671029ab",
+        "redacted": true
+      },
+      "raw_evidence_redacted": true,
+      "receipt": {
+        "actual_vendor_cost": {
+          "amount": "30000",
+          "currency": "usd",
+          "scale": 6
+        },
+        "artifact_reference": {
+          "digest": "sha256:af819ef24ab19922d0777649e09656256022e1748fc1c447826c805110ceb1a8",
+          "redacted": true
+        },
+        "authorized_max": {
+          "currency": "usd",
+          "display": "0.01",
+          "scale": 6,
+          "units": "10000"
+        },
+        "authorized_max_cents": 1,
+        "budget_charge": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "budget_charge_cents": 3,
+        "created_at": "2026-10-22T02:04:30.672348+00:00",
+        "currency": "usd",
+        "overrun_amount": {
+          "currency": "usd",
+          "display": "0.02",
+          "scale": 6,
+          "units": "20000"
+        },
+        "overrun_amount_cents": 2,
+        "price_model_reference": {
+          "digest": "sha256:dac49c8e0e119f442e054f30356395ada299a6229ec8a09529320e8fea00a8d7",
+          "redacted": true
+        },
+        "provider_request_reference": {
+          "digest": "sha256:7f95c26e851afc558acac36039a109cfb2fdbccb73cfdb2b405df962a06ecd91",
+          "redacted": true
+        },
+        "released_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "released_amount_cents": 0,
+        "settlement_id": "2497a1d3-4fb2-40f2-96f5-3027d1bcbd91"
+      },
+      "release_reason": null,
+      "revision": 1,
+      "status": "settled",
+      "task_reference": {
+        "digest": "sha256:2a9729fd3750a887142e593cc5692ebde9a276aa7fb9b9d2f197c049671029ab",
+        "redacted": true
+      }
+    }
+  ],
+  "next_cursor": null,
+  "schema_version": "hubu-history-v1"
+}
+CLI exit=0
+[2026-10-22T02:04:30.701000+00:00] OWNER STEP: explicit reconciliation of a synthetic known bill; capability stays in parent
+[2026-10-22T02:04:30.701129+00:00] $ /private/tmp/break-hubu-public-cache/target/release/hubu --url http://127.0.0.1:51747 spend reconcile billed --claim-id b55d119d-bdbd-4363-93ef-7bbf567e98f1 --provider-reference synthetic:last-cent-billed --evidence 'Synthetic last-cent fixture confirms a USD 0.03 bill; no real provider billing.' --actual-vendor-cost-amount 30000 --actual-vendor-cost-scale 6 --currency usd --provider-request-id synthetic:last-cent-billed --price-model-snapshot-json '{"provider": "provider:local:fixture", "model": "synthetic-no-provider", "pricing_unit": "operation", "currency": "usd", "synthetic": true}' --artifact-reference fixture://ep02-last-cent/last-cent-billed
+[2026-10-22T02:04:30.707472+00:00] Claim reconciled: vendor billed; hold settled
+Executor claim
+  claim_id: b55d119d-bdbd-4363-93ef-7bbf567e98f1
+  status: settled
+  reconciliation_required: false
+  authorization_id: ed431770-4d75-4803-835f-57d55c0dfcd8
+  claim_expires_at: 2026-10-21T19:04:30.607469-07:00
+  settlement_id: 2497a1d3-4fb2-40f2-96f5-3027d1bcbd91
+  reconciliation_outcome: vendor_billed
+  provider_reference: synthetic:last-cent-billed
+  evidence: Synthetic last-cent fixture confirms a USD 0.03 bill; no real provider billing.
+  reconciled_at: 2026-10-22T02:04:30.672348+00:00
+  reconciled_by_user_id: usr_qhq7zmyjjgrw
+  account_id: aga_6t5tr371qn8t
+  agent_id: agt_fxr1hptmbnh4
+  amount: $0.01
+  execution_scope_schema: 1
+  provider: Local fixture provider [provider:local:fixture]
+  executor: Gongbu image executor [executor:gongbu:image]
+  capability: Generate image [capability:image:generate]
+  billing_merchant: Local merchant [merchant:local]
+  hold_status: settled
+  frozen_amount: $0.00
+CLI exit=0
+[2026-10-22T02:04:30.710514+00:00] after-reconcile-01 POST /spend/authorize -> 200: {"account_id": "aga_6t5tr371qn8t", "agent_id": "agt_fxr1hptmbnh4", "approval": null, "attempt_history": [{"actor": "a10da919-b4fa-40fd-8bc6-e7fd3d29431c", "decided_at": "2026-10-22T02:04:30.709445Z", "decision_id": "366d93eb-a4fd-4e0b-8753-b3310fa70340", "final_decision": "denied", "reasons": ["no active USD budget found for agent"], "request": {"agent_account_id": "ff95faa0-b38a-4b26-b368-bac0ce1bd51a", "agent_id": "f2691f59-9aa0-40be-87f7-018db545d624", "amount_cents": 1, "category": null, "currency": "usd", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "lease_profile": "proof_short", "merchant": null, "owner_user_id": "a10da919-b4fa-40fd-8bc6-e7fd3d29431c", "reason": "Synthetic proof kit: after-reconcile-01", "task_id": "Synthetic proof kit: after-reconcile-01"}, "revision": 1, "submitted_at": "2026-10-22T02:04:30.708486Z"}], "auth_token_id": null, "authorization_expires_at": null, "budget_hold": null, "decision": "deny", "decision_id": "366d93eb-a4fd-4e0b-8753-b3310fa70340", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "idempotent_replay": false, "lease_profile": "proof_short", "operation_key": "[redacted]", "payment": null, "policy_decision": {"decisive_conditions": [{"condition": "provider equals `provider:local:fixture`", "effect": "allow", "matched": true, "rule_id": "allow_synthetic_fixture"}], "summary": "policy returned allow from 1 matching condition"}, "reason": "Synthetic proof kit: after-reconcile-01", "reasons": ["no active USD budget found for agent"], "retry_guidance": {"action": "reuse_operation_key", "message": "this attempt was denied; reuse this operation key with corrected scope", "operation_key": "[redacted]"}, "revision": 1, "scope_inputs": {"amount_minor": {"source": "supplied", "value": 1}, "billing_merchant": {"source": "supplied", "value": "merchant:local"}, "capability": {"source": "supplied", "value": "capability:image:generate"}, "currency": {"source": "supplied", "value": "usd"}, "executor": {"source": "supplied", "value": "executor:gongbu:image"}, "merchant": {"source": "omitted", "value": null}, "provider": {"source": "supplied", "value": "provider:local:fixture"}}, "task_id": "Synthetic proof kit: after-reconcile-01"}
+[2026-10-22T02:04:30.713029+00:00] after-reconcile-02 POST /spend/authorize -> 200: {"account_id": "aga_6t5tr371qn8t", "agent_id": "agt_fxr1hptmbnh4", "approval": null, "attempt_history": [{"actor": "a10da919-b4fa-40fd-8bc6-e7fd3d29431c", "decided_at": "2026-10-22T02:04:30.712021Z", "decision_id": "3db8fc61-5d0f-4c0f-ba46-a868767e9aa5", "final_decision": "denied", "reasons": ["no active USD budget found for agent"], "request": {"agent_account_id": "ff95faa0-b38a-4b26-b368-bac0ce1bd51a", "agent_id": "f2691f59-9aa0-40be-87f7-018db545d624", "amount_cents": 1, "category": null, "currency": "usd", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "lease_profile": "proof_short", "merchant": null, "owner_user_id": "a10da919-b4fa-40fd-8bc6-e7fd3d29431c", "reason": "Synthetic proof kit: after-reconcile-02", "task_id": "Synthetic proof kit: after-reconcile-02"}, "revision": 1, "submitted_at": "2026-10-22T02:04:30.711081Z"}], "auth_token_id": null, "authorization_expires_at": null, "budget_hold": null, "decision": "deny", "decision_id": "3db8fc61-5d0f-4c0f-ba46-a868767e9aa5", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "idempotent_replay": false, "lease_profile": "proof_short", "operation_key": "[redacted]", "payment": null, "policy_decision": {"decisive_conditions": [{"condition": "provider equals `provider:local:fixture`", "effect": "allow", "matched": true, "rule_id": "allow_synthetic_fixture"}], "summary": "policy returned allow from 1 matching condition"}, "reason": "Synthetic proof kit: after-reconcile-02", "reasons": ["no active USD budget found for agent"], "retry_guidance": {"action": "reuse_operation_key", "message": "this attempt was denied; reuse this operation key with corrected scope", "operation_key": "[redacted]"}, "revision": 1, "scope_inputs": {"amount_minor": {"source": "supplied", "value": 1}, "billing_merchant": {"source": "supplied", "value": "merchant:local"}, "capability": {"source": "supplied", "value": "capability:image:generate"}, "currency": {"source": "supplied", "value": "usd"}, "executor": {"source": "supplied", "value": "executor:gongbu:image"}, "merchant": {"source": "omitted", "value": null}, "provider": {"source": "supplied", "value": "provider:local:fixture"}}, "task_id": "Synthetic proof kit: after-reconcile-02"}
+[2026-10-22T02:04:30.715217+00:00] after-reconcile-03 POST /spend/authorize -> 200: {"account_id": "aga_6t5tr371qn8t", "agent_id": "agt_fxr1hptmbnh4", "approval": null, "attempt_history": [{"actor": "a10da919-b4fa-40fd-8bc6-e7fd3d29431c", "decided_at": "2026-10-22T02:04:30.714298Z", "decision_id": "1e168371-4ae6-4eef-bfbb-b046e751cb4a", "final_decision": "denied", "reasons": ["no active USD budget found for agent"], "request": {"agent_account_id": "ff95faa0-b38a-4b26-b368-bac0ce1bd51a", "agent_id": "f2691f59-9aa0-40be-87f7-018db545d624", "amount_cents": 1, "category": null, "currency": "usd", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "lease_profile": "proof_short", "merchant": null, "owner_user_id": "a10da919-b4fa-40fd-8bc6-e7fd3d29431c", "reason": "Synthetic proof kit: after-reconcile-03", "task_id": "Synthetic proof kit: after-reconcile-03"}, "revision": 1, "submitted_at": "2026-10-22T02:04:30.713562Z"}], "auth_token_id": null, "authorization_expires_at": null, "budget_hold": null, "decision": "deny", "decision_id": "1e168371-4ae6-4eef-bfbb-b046e751cb4a", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "idempotent_replay": false, "lease_profile": "proof_short", "operation_key": "[redacted]", "payment": null, "policy_decision": {"decisive_conditions": [{"condition": "provider equals `provider:local:fixture`", "effect": "allow", "matched": true, "rule_id": "allow_synthetic_fixture"}], "summary": "policy returned allow from 1 matching condition"}, "reason": "Synthetic proof kit: after-reconcile-03", "reasons": ["no active USD budget found for agent"], "retry_guidance": {"action": "reuse_operation_key", "message": "this attempt was denied; reuse this operation key with corrected scope", "operation_key": "[redacted]"}, "revision": 1, "scope_inputs": {"amount_minor": {"source": "supplied", "value": 1}, "billing_merchant": {"source": "supplied", "value": "merchant:local"}, "capability": {"source": "supplied", "value": "capability:image:generate"}, "currency": {"source": "supplied", "value": "usd"}, "executor": {"source": "supplied", "value": "executor:gongbu:image"}, "merchant": {"source": "omitted", "value": null}, "provider": {"source": "supplied", "value": "provider:local:fixture"}}, "task_id": "Synthetic proof kit: after-reconcile-03"}
+[2026-10-22T02:04:30.717265+00:00] after-reconcile-04 POST /spend/authorize -> 200: {"account_id": "aga_6t5tr371qn8t", "agent_id": "agt_fxr1hptmbnh4", "approval": null, "attempt_history": [{"actor": "a10da919-b4fa-40fd-8bc6-e7fd3d29431c", "decided_at": "2026-10-22T02:04:30.716398Z", "decision_id": "c2cbe0cd-b3b3-4884-a827-0a53addcaeb9", "final_decision": "denied", "reasons": ["no active USD budget found for agent"], "request": {"agent_account_id": "ff95faa0-b38a-4b26-b368-bac0ce1bd51a", "agent_id": "f2691f59-9aa0-40be-87f7-018db545d624", "amount_cents": 1, "category": null, "currency": "usd", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "lease_profile": "proof_short", "merchant": null, "owner_user_id": "a10da919-b4fa-40fd-8bc6-e7fd3d29431c", "reason": "Synthetic proof kit: after-reconcile-04", "task_id": "Synthetic proof kit: after-reconcile-04"}, "revision": 1, "submitted_at": "2026-10-22T02:04:30.715693Z"}], "auth_token_id": null, "authorization_expires_at": null, "budget_hold": null, "decision": "deny", "decision_id": "c2cbe0cd-b3b3-4884-a827-0a53addcaeb9", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "idempotent_replay": false, "lease_profile": "proof_short", "operation_key": "[redacted]", "payment": null, "policy_decision": {"decisive_conditions": [{"condition": "provider equals `provider:local:fixture`", "effect": "allow", "matched": true, "rule_id": "allow_synthetic_fixture"}], "summary": "policy returned allow from 1 matching condition"}, "reason": "Synthetic proof kit: after-reconcile-04", "reasons": ["no active USD budget found for agent"], "retry_guidance": {"action": "reuse_operation_key", "message": "this attempt was denied; reuse this operation key with corrected scope", "operation_key": "[redacted]"}, "revision": 1, "scope_inputs": {"amount_minor": {"source": "supplied", "value": 1}, "billing_merchant": {"source": "supplied", "value": "merchant:local"}, "capability": {"source": "supplied", "value": "capability:image:generate"}, "currency": {"source": "supplied", "value": "usd"}, "executor": {"source": "supplied", "value": "executor:gongbu:image"}, "merchant": {"source": "omitted", "value": null}, "provider": {"source": "supplied", "value": "provider:local:fixture"}}, "task_id": "Synthetic proof kit: after-reconcile-04"}
+[2026-10-22T02:04:30.719333+00:00] after-reconcile-05 POST /spend/authorize -> 200: {"account_id": "aga_6t5tr371qn8t", "agent_id": "agt_fxr1hptmbnh4", "approval": null, "attempt_history": [{"actor": "a10da919-b4fa-40fd-8bc6-e7fd3d29431c", "decided_at": "2026-10-22T02:04:30.718462Z", "decision_id": "9df4ee60-c731-4511-a344-b017c89aee1d", "final_decision": "denied", "reasons": ["no active USD budget found for agent"], "request": {"agent_account_id": "ff95faa0-b38a-4b26-b368-bac0ce1bd51a", "agent_id": "f2691f59-9aa0-40be-87f7-018db545d624", "amount_cents": 1, "category": null, "currency": "usd", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "lease_profile": "proof_short", "merchant": null, "owner_user_id": "a10da919-b4fa-40fd-8bc6-e7fd3d29431c", "reason": "Synthetic proof kit: after-reconcile-05", "task_id": "Synthetic proof kit: after-reconcile-05"}, "revision": 1, "submitted_at": "2026-10-22T02:04:30.717769Z"}], "auth_token_id": null, "authorization_expires_at": null, "budget_hold": null, "decision": "deny", "decision_id": "9df4ee60-c731-4511-a344-b017c89aee1d", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "idempotent_replay": false, "lease_profile": "proof_short", "operation_key": "[redacted]", "payment": null, "policy_decision": {"decisive_conditions": [{"condition": "provider equals `provider:local:fixture`", "effect": "allow", "matched": true, "rule_id": "allow_synthetic_fixture"}], "summary": "policy returned allow from 1 matching condition"}, "reason": "Synthetic proof kit: after-reconcile-05", "reasons": ["no active USD budget found for agent"], "retry_guidance": {"action": "reuse_operation_key", "message": "this attempt was denied; reuse this operation key with corrected scope", "operation_key": "[redacted]"}, "revision": 1, "scope_inputs": {"amount_minor": {"source": "supplied", "value": 1}, "billing_merchant": {"source": "supplied", "value": "merchant:local"}, "capability": {"source": "supplied", "value": "capability:image:generate"}, "currency": {"source": "supplied", "value": "usd"}, "executor": {"source": "supplied", "value": "executor:gongbu:image"}, "merchant": {"source": "omitted", "value": null}, "provider": {"source": "supplied", "value": "provider:local:fixture"}}, "task_id": "Synthetic proof kit: after-reconcile-05"}
+[2026-10-22T02:04:30.721369+00:00] after-reconcile-06 POST /spend/authorize -> 200: {"account_id": "aga_6t5tr371qn8t", "agent_id": "agt_fxr1hptmbnh4", "approval": null, "attempt_history": [{"actor": "a10da919-b4fa-40fd-8bc6-e7fd3d29431c", "decided_at": "2026-10-22T02:04:30.720540Z", "decision_id": "b4dde420-232d-4608-92aa-871ebabf399d", "final_decision": "denied", "reasons": ["no active USD budget found for agent"], "request": {"agent_account_id": "ff95faa0-b38a-4b26-b368-bac0ce1bd51a", "agent_id": "f2691f59-9aa0-40be-87f7-018db545d624", "amount_cents": 1, "category": null, "currency": "usd", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "lease_profile": "proof_short", "merchant": null, "owner_user_id": "a10da919-b4fa-40fd-8bc6-e7fd3d29431c", "reason": "Synthetic proof kit: after-reconcile-06", "task_id": "Synthetic proof kit: after-reconcile-06"}, "revision": 1, "submitted_at": "2026-10-22T02:04:30.719819Z"}], "auth_token_id": null, "authorization_expires_at": null, "budget_hold": null, "decision": "deny", "decision_id": "b4dde420-232d-4608-92aa-871ebabf399d", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "idempotent_replay": false, "lease_profile": "proof_short", "operation_key": "[redacted]", "payment": null, "policy_decision": {"decisive_conditions": [{"condition": "provider equals `provider:local:fixture`", "effect": "allow", "matched": true, "rule_id": "allow_synthetic_fixture"}], "summary": "policy returned allow from 1 matching condition"}, "reason": "Synthetic proof kit: after-reconcile-06", "reasons": ["no active USD budget found for agent"], "retry_guidance": {"action": "reuse_operation_key", "message": "this attempt was denied; reuse this operation key with corrected scope", "operation_key": "[redacted]"}, "revision": 1, "scope_inputs": {"amount_minor": {"source": "supplied", "value": 1}, "billing_merchant": {"source": "supplied", "value": "merchant:local"}, "capability": {"source": "supplied", "value": "capability:image:generate"}, "currency": {"source": "supplied", "value": "usd"}, "executor": {"source": "supplied", "value": "executor:gongbu:image"}, "merchant": {"source": "omitted", "value": null}, "provider": {"source": "supplied", "value": "provider:local:fixture"}}, "task_id": "Synthetic proof kit: after-reconcile-06"}
+[2026-10-22T02:04:30.723367+00:00] after-reconcile-07 POST /spend/authorize -> 200: {"account_id": "aga_6t5tr371qn8t", "agent_id": "agt_fxr1hptmbnh4", "approval": null, "attempt_history": [{"actor": "a10da919-b4fa-40fd-8bc6-e7fd3d29431c", "decided_at": "2026-10-22T02:04:30.722501Z", "decision_id": "bdf9cebf-cbd9-49c2-aa6c-080a3e7f412a", "final_decision": "denied", "reasons": ["no active USD budget found for agent"], "request": {"agent_account_id": "ff95faa0-b38a-4b26-b368-bac0ce1bd51a", "agent_id": "f2691f59-9aa0-40be-87f7-018db545d624", "amount_cents": 1, "category": null, "currency": "usd", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "lease_profile": "proof_short", "merchant": null, "owner_user_id": "a10da919-b4fa-40fd-8bc6-e7fd3d29431c", "reason": "Synthetic proof kit: after-reconcile-07", "task_id": "Synthetic proof kit: after-reconcile-07"}, "revision": 1, "submitted_at": "2026-10-22T02:04:30.721819Z"}], "auth_token_id": null, "authorization_expires_at": null, "budget_hold": null, "decision": "deny", "decision_id": "bdf9cebf-cbd9-49c2-aa6c-080a3e7f412a", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "idempotent_replay": false, "lease_profile": "proof_short", "operation_key": "[redacted]", "payment": null, "policy_decision": {"decisive_conditions": [{"condition": "provider equals `provider:local:fixture`", "effect": "allow", "matched": true, "rule_id": "allow_synthetic_fixture"}], "summary": "policy returned allow from 1 matching condition"}, "reason": "Synthetic proof kit: after-reconcile-07", "reasons": ["no active USD budget found for agent"], "retry_guidance": {"action": "reuse_operation_key", "message": "this attempt was denied; reuse this operation key with corrected scope", "operation_key": "[redacted]"}, "revision": 1, "scope_inputs": {"amount_minor": {"source": "supplied", "value": 1}, "billing_merchant": {"source": "supplied", "value": "merchant:local"}, "capability": {"source": "supplied", "value": "capability:image:generate"}, "currency": {"source": "supplied", "value": "usd"}, "executor": {"source": "supplied", "value": "executor:gongbu:image"}, "merchant": {"source": "omitted", "value": null}, "provider": {"source": "supplied", "value": "provider:local:fixture"}}, "task_id": "Synthetic proof kit: after-reconcile-07"}
+[2026-10-22T02:04:30.725263+00:00] after-reconcile-08 POST /spend/authorize -> 200: {"account_id": "aga_6t5tr371qn8t", "agent_id": "agt_fxr1hptmbnh4", "approval": null, "attempt_history": [{"actor": "a10da919-b4fa-40fd-8bc6-e7fd3d29431c", "decided_at": "2026-10-22T02:04:30.724458Z", "decision_id": "ffa50662-c754-4d30-9a90-8f1fe8da1d68", "final_decision": "denied", "reasons": ["no active USD budget found for agent"], "request": {"agent_account_id": "ff95faa0-b38a-4b26-b368-bac0ce1bd51a", "agent_id": "f2691f59-9aa0-40be-87f7-018db545d624", "amount_cents": 1, "category": null, "currency": "usd", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "lease_profile": "proof_short", "merchant": null, "owner_user_id": "a10da919-b4fa-40fd-8bc6-e7fd3d29431c", "reason": "Synthetic proof kit: after-reconcile-08", "task_id": "Synthetic proof kit: after-reconcile-08"}, "revision": 1, "submitted_at": "2026-10-22T02:04:30.723781Z"}], "auth_token_id": null, "authorization_expires_at": null, "budget_hold": null, "decision": "deny", "decision_id": "ffa50662-c754-4d30-9a90-8f1fe8da1d68", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "idempotent_replay": false, "lease_profile": "proof_short", "operation_key": "[redacted]", "payment": null, "policy_decision": {"decisive_conditions": [{"condition": "provider equals `provider:local:fixture`", "effect": "allow", "matched": true, "rule_id": "allow_synthetic_fixture"}], "summary": "policy returned allow from 1 matching condition"}, "reason": "Synthetic proof kit: after-reconcile-08", "reasons": ["no active USD budget found for agent"], "retry_guidance": {"action": "reuse_operation_key", "message": "this attempt was denied; reuse this operation key with corrected scope", "operation_key": "[redacted]"}, "revision": 1, "scope_inputs": {"amount_minor": {"source": "supplied", "value": 1}, "billing_merchant": {"source": "supplied", "value": "merchant:local"}, "capability": {"source": "supplied", "value": "capability:image:generate"}, "currency": {"source": "supplied", "value": "usd"}, "executor": {"source": "supplied", "value": "executor:gongbu:image"}, "merchant": {"source": "omitted", "value": null}, "provider": {"source": "supplied", "value": "provider:local:fixture"}}, "task_id": "Synthetic proof kit: after-reconcile-08"}
+[2026-10-22T02:04:30.727225+00:00] after-reconcile-09 POST /spend/authorize -> 200: {"account_id": "aga_6t5tr371qn8t", "agent_id": "agt_fxr1hptmbnh4", "approval": null, "attempt_history": [{"actor": "a10da919-b4fa-40fd-8bc6-e7fd3d29431c", "decided_at": "2026-10-22T02:04:30.726431Z", "decision_id": "b0a4ec8a-5953-452a-9857-fc8f627eb8b2", "final_decision": "denied", "reasons": ["no active USD budget found for agent"], "request": {"agent_account_id": "ff95faa0-b38a-4b26-b368-bac0ce1bd51a", "agent_id": "f2691f59-9aa0-40be-87f7-018db545d624", "amount_cents": 1, "category": null, "currency": "usd", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "lease_profile": "proof_short", "merchant": null, "owner_user_id": "a10da919-b4fa-40fd-8bc6-e7fd3d29431c", "reason": "Synthetic proof kit: after-reconcile-09", "task_id": "Synthetic proof kit: after-reconcile-09"}, "revision": 1, "submitted_at": "2026-10-22T02:04:30.725726Z"}], "auth_token_id": null, "authorization_expires_at": null, "budget_hold": null, "decision": "deny", "decision_id": "b0a4ec8a-5953-452a-9857-fc8f627eb8b2", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "idempotent_replay": false, "lease_profile": "proof_short", "operation_key": "[redacted]", "payment": null, "policy_decision": {"decisive_conditions": [{"condition": "provider equals `provider:local:fixture`", "effect": "allow", "matched": true, "rule_id": "allow_synthetic_fixture"}], "summary": "policy returned allow from 1 matching condition"}, "reason": "Synthetic proof kit: after-reconcile-09", "reasons": ["no active USD budget found for agent"], "retry_guidance": {"action": "reuse_operation_key", "message": "this attempt was denied; reuse this operation key with corrected scope", "operation_key": "[redacted]"}, "revision": 1, "scope_inputs": {"amount_minor": {"source": "supplied", "value": 1}, "billing_merchant": {"source": "supplied", "value": "merchant:local"}, "capability": {"source": "supplied", "value": "capability:image:generate"}, "currency": {"source": "supplied", "value": "usd"}, "executor": {"source": "supplied", "value": "executor:gongbu:image"}, "merchant": {"source": "omitted", "value": null}, "provider": {"source": "supplied", "value": "provider:local:fixture"}}, "task_id": "Synthetic proof kit: after-reconcile-09"}
+[2026-10-22T02:04:30.729227+00:00] after-reconcile-10 POST /spend/authorize -> 200: {"account_id": "aga_6t5tr371qn8t", "agent_id": "agt_fxr1hptmbnh4", "approval": null, "attempt_history": [{"actor": "a10da919-b4fa-40fd-8bc6-e7fd3d29431c", "decided_at": "2026-10-22T02:04:30.728412Z", "decision_id": "f711d44d-d978-4602-905c-6c345c472fcf", "final_decision": "denied", "reasons": ["no active USD budget found for agent"], "request": {"agent_account_id": "ff95faa0-b38a-4b26-b368-bac0ce1bd51a", "agent_id": "f2691f59-9aa0-40be-87f7-018db545d624", "amount_cents": 1, "category": null, "currency": "usd", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "lease_profile": "proof_short", "merchant": null, "owner_user_id": "a10da919-b4fa-40fd-8bc6-e7fd3d29431c", "reason": "Synthetic proof kit: after-reconcile-10", "task_id": "Synthetic proof kit: after-reconcile-10"}, "revision": 1, "submitted_at": "2026-10-22T02:04:30.727662Z"}], "auth_token_id": null, "authorization_expires_at": null, "budget_hold": null, "decision": "deny", "decision_id": "f711d44d-d978-4602-905c-6c345c472fcf", "execution_scope": {"billing_merchant": {"display_name": "Local merchant", "id": "merchant:local"}, "capability": {"display_name": "Generate image", "id": "capability:image:generate"}, "executor": {"display_name": "Gongbu image executor", "id": "executor:gongbu:image"}, "provider": {"display_name": "Local fixture provider", "id": "provider:local:fixture"}, "schema_version": 1}, "idempotent_replay": false, "lease_profile": "proof_short", "operation_key": "[redacted]", "payment": null, "policy_decision": {"decisive_conditions": [{"condition": "provider equals `provider:local:fixture`", "effect": "allow", "matched": true, "rule_id": "allow_synthetic_fixture"}], "summary": "policy returned allow from 1 matching condition"}, "reason": "Synthetic proof kit: after-reconcile-10", "reasons": ["no active USD budget found for agent"], "retry_guidance": {"action": "reuse_operation_key", "message": "this attempt was denied; reuse this operation key with corrected scope", "operation_key": "[redacted]"}, "revision": 1, "scope_inputs": {"amount_minor": {"source": "supplied", "value": 1}, "billing_merchant": {"source": "supplied", "value": "merchant:local"}, "capability": {"source": "supplied", "value": "capability:image:generate"}, "currency": {"source": "supplied", "value": "usd"}, "executor": {"source": "supplied", "value": "executor:gongbu:image"}, "merchant": {"source": "omitted", "value": null}, "provider": {"source": "supplied", "value": "provider:local:fixture"}}, "task_id": "Synthetic proof kit: after-reconcile-10"}
+[2026-10-22T02:04:30.729300+00:00] PUBLIC SNAPSHOT final (writers paused)
+[2026-10-22T02:04:30.729903+00:00] snapshot-final-budgets GET /budgets -> 200: {"budgets": [{"agent_id": "agt_fxr1hptmbnh4", "amount_limit": {"currency": "usd", "display": "0.01", "scale": 6, "units": "10000"}, "amount_limit_cents": 1, "budget_id": "bgt_2ds8zy84h7de", "consumed_amount": {"currency": "usd", "display": "0.03", "scale": 6, "units": "30000"}, "consumed_amount_cents": 3, "currency": "usd", "current_revision": 1, "current_version_id": "bgv_m31n5kjgzb7d", "ending_before": "2999-01-01T00:00:00+00:00", "frozen_amount": {"currency": "usd", "display": "0.00", "scale": 6, "units": "0"}, "frozen_amount_cents": 0, "remaining_amount": {"currency": "usd", "display": "-0.02", "scale": 6, "units": "-20000"}, "remaining_amount_cents": -2, "starting_at": "2026-10-22T02:04:00.418797+00:00", "status": "exhausted"}]}
+[2026-10-22T02:04:30.730061+00:00] $ /private/tmp/break-hubu-public-cache/target/release/hubu --url http://127.0.0.1:51747 budget list
+[2026-10-22T02:04:30.736063+00:00]   budget_id: bgt_2ds8zy84h7de  agent_id: agt_fxr1hptmbnh4  status: exhausted
+    limit: $0.01  consumed: $0.03  frozen: $0.00  remaining: -$0.02
+    current_version_id: bgv_m31n5kjgzb7d  current_revision: 1
+    period: 2026-10-21T19:04:00.418797-07:00 -> 2998-12-31T16:00:00-08:00
+CLI exit=0
+[2026-10-22T02:04:30.736229+00:00] $ /private/tmp/break-hubu-public-cache/target/release/hubu --url http://127.0.0.1:51747 policy show --agent-id agt_fxr1hptmbnh4
+[2026-10-22T02:04:30.741517+00:00] {
+  "assignments": [
+    {
+      "agent_id": "agt_fxr1hptmbnh4",
+      "attached_at": "2026-10-22T02:04:00.413186+00:00",
+      "scope": "agent_override",
+      "updated_at": "2026-10-22T02:04:00.413186+00:00"
+    }
+  ],
+  "created_at": "2026-10-22T02:04:00.413186+00:00",
+  "declarative_key": "break_hubu_fixture",
+  "display_name": "Synthetic fixture allow policy",
+  "payload_hash": "sha256:ec70368bcf30132de24bdf0781000ea82104f4f5650e4f697f4c2d9566d35df6",
+  "policy": {
+    "default_effect": "deny",
+    "id": "break_hubu_fixture",
+    "owner_user_id": "a10da919-b4fa-40fd-8bc6-e7fd3d29431c",
+    "rules": [
+      {
+        "effect": "allow",
+        "id": "allow_synthetic_fixture",
+        "reason": "synthetic local fixture only",
+        "when": {
+          "field": "provider",
+          "op": "eq",
+          "value": {
+            "string": "provider:local:fixture"
+          }
+        }
+      }
+    ],
+    "version": "v1"
+  },
+  "policy_id": "pol_xcg6r56xxqma",
+  "revision": 1,
+  "updated_at": "2026-10-22T02:04:00.413186+00:00"
+}
+CLI exit=0
+[2026-10-22T02:04:30.741746+00:00] $ /private/tmp/break-hubu-public-cache/target/release/hubu --url http://127.0.0.1:51747 ledger list --agent-id agt_fxr1hptmbnh4 --limit 100 --budget-id bgt_2ds8zy84h7de
+[2026-10-22T02:04:30.746981+00:00] {
+  "coverage": {
+    "agent_id": "agt_fxr1hptmbnh4",
+    "budget_id": "bgt_2ds8zy84h7de",
+    "consumed_amount": {
+      "currency": "usd",
+      "display": "0.03",
+      "scale": 6,
+      "units": "30000"
+    },
+    "consumed_amount_cents": 3,
+    "currency": "usd",
+    "historical_wallet_reconciliation_complete": false,
+    "owner_transactions_without_budget_context": 0,
+    "pending_hold_count": 0,
+    "recorded_budget_charges": {
+      "currency": "usd",
+      "display": "0.03",
+      "scale": 6,
+      "units": "30000"
+    },
+    "recorded_budget_charges_cents": 3,
+    "unaccounted_consumption": {
+      "currency": "usd",
+      "display": "0.00",
+      "scale": 6,
+      "units": "0"
+    },
+    "unaccounted_consumption_cents": 0
+  },
+  "next_cursor": null,
+  "schema_version": "hubu-history-v1",
+  "transactions": [
+    {
+      "account_id": "aga_6t5tr371qn8t",
+      "adjustment_evidence_reference": null,
+      "agent_id": "agt_fxr1hptmbnh4",
+      "authorization_id": "ed431770-4d75-4803-835f-57d55c0dfcd8",
+      "billing_merchant": {
+        "display_name": "Local merchant",
+        "id": "merchant:local"
+      },
+      "budget_charge_delta": {
+        "scale": 6,
+        "units": "30000"
+      },
+      "budget_charge_delta_cents": 3,
+      "budget_id": "bgt_2ds8zy84h7de",
+      "budget_version_id": "bgv_m31n5kjgzb7d",
+      "claim_id": "b55d119d-bdbd-4363-93ef-7bbf567e98f1",
+      "cost_semantics": "original_total",
+      "coverage": {
+        "has_budget_context": true,
+        "missing_evidence": [],
+        "missing_evidence_count": 0,
+        "raw_evidence_redacted": true
+      },
+      "created_at": "2026-10-22T02:04:30.672348+00:00",
+      "effective_cost": {
+        "amount": "30000",
+        "currency": "usd",
+        "scale": 6
+      },
+      "entries": [
+        {
+          "account_id": "fa1d6959-76f3-4f54-a82b-d63a76767643",
+          "account_kind": "AgentSpendExpense",
+          "amount": {
+            "amount": "30000000000000000",
+            "currency": "usd",
+            "scale": 18
+          },
+          "direction": "debit",
+          "id": "181cd91e-b38c-4c66-add1-7101e58a2acb"
+        },
+        {
+          "account_id": "e59edb43-0d9b-4fc3-b13b-245e6aca27f3",
+          "account_kind": "ExternallyBilledClearing",
+          "amount": {
+            "amount": "30000000000000000",
+            "currency": "usd",
+            "scale": 18
+          },
+          "direction": "credit",
+          "id": "55ff154a-9136-4a38-801c-8e9a0f8f0b34"
+        }
+      ],
+      "id": "6714a617-77be-4bb9-a89e-7ceb10beacc4",
+      "kind": "external_provider",
+      "legacy_backfill": false,
+      "original_transaction_id": null,
+      "previous_transaction_id": null,
+      "provider": {
+        "display_name": "Local fixture provider",
+        "id": "provider:local:fixture"
+      },
+      "purpose_reference": {
+        "digest": "sha256:2a9729fd3750a887142e593cc5692ebde9a276aa7fb9b9d2f197c049671029ab",
+        "redacted": true
+      },
+      "rounding_delta_amount": "0",
+      "settlement_id": "2497a1d3-4fb2-40f2-96f5-3027d1bcbd91",
+      "source_reference": {
+        "digest": "sha256:0b85cb763f491595b46197374e1a5bf3c19917d652509c3a4701343572fc0742",
+        "redacted": true
+      }
+    }
+  ]
+}
+CLI exit=0
+[2026-10-22T02:04:30.747216+00:00] $ /private/tmp/break-hubu-public-cache/target/release/hubu --url http://127.0.0.1:51747 spend authorizations --agent-id agt_fxr1hptmbnh4 --limit 100
+[2026-10-22T02:04:30.752888+00:00] {
+  "authorization_records": [
+    {
+      "account_id": "aga_6t5tr371qn8t",
+      "agent_id": "agt_fxr1hptmbnh4",
+      "authorization_id": "ed431770-4d75-4803-835f-57d55c0dfcd8",
+      "authorized_max": {
+        "currency": "usd",
+        "display": "0.01",
+        "scale": 6,
+        "units": "10000"
+      },
+      "authorized_max_cents": 1,
+      "billing_merchant": {
+        "display_name": "Local merchant",
+        "id": "merchant:local"
+      },
+      "budget_hold": {
+        "amount": {
+          "currency": "usd",
+          "display": "0.01",
+          "scale": 6,
+          "units": "10000"
+        },
+        "amount_cents": 1,
+        "budget_id": "bgt_2ds8zy84h7de",
+        "budget_version_id": "bgv_m31n5kjgzb7d",
+        "currency": "usd",
+        "expires_at": "2026-10-22T02:04:30.607469+00:00",
+        "id": "7cf3c8d5-5e7a-43fe-9baa-fbfd754c8402",
+        "status": "settled"
+      },
+      "claim": {
+        "claimed_at": "2026-10-22T02:04:00.607469+00:00",
+        "expires_at": "2026-10-22T02:04:30.607469+00:00",
+        "finalized_at": "2026-10-22T02:04:30.672348+00:00",
+        "id": "b55d119d-bdbd-4363-93ef-7bbf567e98f1",
+        "lease_profile_reference": {
+          "digest": "sha256:7cedcb0cb67088b05761db8374511198726c67c0797d012d0ea038364cc8b9e7",
+          "redacted": true
+        },
+        "provider_reference": {
+          "digest": "sha256:7f95c26e851afc558acac36039a109cfb2fdbccb73cfdb2b405df962a06ecd91",
+          "redacted": true
+        },
+        "reconciled_at": "2026-10-22T02:04:30.672348+00:00",
+        "reconciliation_evidence_reference": {
+          "digest": "sha256:617585a13902251b3425841c37981db8855f60a2a43e5e0c04a1672ea2a22477",
+          "redacted": true
+        },
+        "reconciliation_outcome": "vendor_billed",
+        "reconciliation_required": false,
+        "status": "settled"
+      },
+      "created_at": "2026-10-22T02:04:00.603573+00:00",
+      "currency": "usd",
+      "decision": "allow",
+      "decision_id": "ed431770-4d75-4803-835f-57d55c0dfcd8",
+      "id": "ed431770-4d75-4803-835f-57d55c0dfcd8",
+      "ledger_transaction_ids": [
+        "6714a617-77be-4bb9-a89e-7ceb10beacc4"
+      ],
+      "policy_decision": "allow",
+      "provider": {
+        "display_name": "Local fixture provider",
+        "id": "provider:local:fixture"
+      },
+      "purpose_reference": {
+        "digest": "sha256:2a9729fd3750a887142e593cc5692ebde9a276aa7fb9b9d2f197c049671029ab",
+        "redacted": true
+      },
+      "raw_evidence_redacted": true,
+      "receipt": {
+        "actual_vendor_cost": {
+          "amount": "30000",
+          "currency": "usd",
+          "scale": 6
+        },
+        "artifact_reference": {
+          "digest": "sha256:af819ef24ab19922d0777649e09656256022e1748fc1c447826c805110ceb1a8",
+          "redacted": true
+        },
+        "authorized_max": {
+          "currency": "usd",
+          "display": "0.01",
+          "scale": 6,
+          "units": "10000"
+        },
+        "authorized_max_cents": 1,
+        "budget_charge": {
+          "currency": "usd",
+          "display": "0.03",
+          "scale": 6,
+          "units": "30000"
+        },
+        "budget_charge_cents": 3,
+        "created_at": "2026-10-22T02:04:30.672348+00:00",
+        "currency": "usd",
+        "overrun_amount": {
+          "currency": "usd",
+          "display": "0.02",
+          "scale": 6,
+          "units": "20000"
+        },
+        "overrun_amount_cents": 2,
+        "price_model_reference": {
+          "digest": "sha256:dac49c8e0e119f442e054f30356395ada299a6229ec8a09529320e8fea00a8d7",
+          "redacted": true
+        },
+        "provider_request_reference": {
+          "digest": "sha256:7f95c26e851afc558acac36039a109cfb2fdbccb73cfdb2b405df962a06ecd91",
+          "redacted": true
+        },
+        "released_amount": {
+          "currency": "usd",
+          "display": "0.00",
+          "scale": 6,
+          "units": "0"
+        },
+        "released_amount_cents": 0,
+        "settlement_id": "2497a1d3-4fb2-40f2-96f5-3027d1bcbd91"
+      },
+      "release_reason": null,
+      "revision": 1,
+      "status": "settled",
+      "task_reference": {
+        "digest": "sha256:2a9729fd3750a887142e593cc5692ebde9a276aa7fb9b9d2f197c049671029ab",
+        "redacted": true
+      }
+    }
+  ],
+  "next_cursor": null,
+  "schema_version": "hubu-history-v1"
+}
+CLI exit=0

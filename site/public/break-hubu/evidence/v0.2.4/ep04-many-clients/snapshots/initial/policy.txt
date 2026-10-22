@@ -1,0 +1,37 @@
+{
+  "assignments": [
+    {
+      "agent_id": "agt_qgxbfqebvp11",
+      "attached_at": "2026-10-22T02:05:03.179292+00:00",
+      "scope": "agent_override",
+      "updated_at": "2026-10-22T02:05:03.179292+00:00"
+    }
+  ],
+  "created_at": "2026-10-22T02:05:03.179292+00:00",
+  "declarative_key": "break_hubu_fixture",
+  "display_name": "Synthetic fixture allow policy",
+  "payload_hash": "sha256:247be4d1fb380a301b7a94a43f53d2c0411be1148d0233a51cb9bb7ef7109367",
+  "policy": {
+    "default_effect": "deny",
+    "id": "break_hubu_fixture",
+    "owner_user_id": "d4a97bf8-095d-4a95-8e27-99e7346e82b3",
+    "rules": [
+      {
+        "effect": "allow",
+        "id": "allow_synthetic_fixture",
+        "reason": "synthetic local fixture only",
+        "when": {
+          "field": "provider",
+          "op": "eq",
+          "value": {
+            "string": "provider:local:fixture"
+          }
+        }
+      }
+    ],
+    "version": "v1"
+  },
+  "policy_id": "pol_mhpfrqarzgxz",
+  "revision": 1,
+  "updated_at": "2026-10-22T02:05:03.179292+00:00"
+}

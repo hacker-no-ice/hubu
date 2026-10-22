@@ -1,0 +1,8 @@
+{
+  "verdict": "not tested",
+  "checks": [],
+  "episode": "smoke",
+  "execution": "incomplete",
+  "elapsed_seconds": 0.767,
+  "execution_error": "CLI failed: policy show --agent-id agt_dg6vz1vfe1f1: error: server returned HTTP 400: no policy assignment found for requested scope; retry_guidance=null\n"
+}

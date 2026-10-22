@@ -1,0 +1,42 @@
+{
+  "budgets": [
+    {
+      "agent_id": "agt_8qkzvcn6gb7y",
+      "amount_limit": {
+        "currency": "usd",
+        "display": "0.01",
+        "scale": 6,
+        "units": "10000"
+      },
+      "amount_limit_cents": 1,
+      "budget_id": "bgt_1hcfqkpj5s5h",
+      "consumed_amount": {
+        "currency": "usd",
+        "display": "0.01",
+        "scale": 6,
+        "units": "10000"
+      },
+      "consumed_amount_cents": 1,
+      "currency": "usd",
+      "current_revision": 1,
+      "current_version_id": "bgv_91nd8hk9qv5f",
+      "ending_before": "2999-01-01T00:00:00+00:00",
+      "frozen_amount": {
+        "currency": "usd",
+        "display": "0.00",
+        "scale": 6,
+        "units": "0"
+      },
+      "frozen_amount_cents": 0,
+      "remaining_amount": {
+        "currency": "usd",
+        "display": "0.00",
+        "scale": 6,
+        "units": "0"
+      },
+      "remaining_amount_cents": 0,
+      "starting_at": "2026-10-22T02:04:31.749634+00:00",
+      "status": "exhausted"
+    }
+  ]
+}

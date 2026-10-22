@@ -1,0 +1,77 @@
+{
+  "authorization_records": [
+    {
+      "account_id": "aga_6t5tr371qn8t",
+      "agent_id": "agt_fxr1hptmbnh4",
+      "authorization_id": "ed431770-4d75-4803-835f-57d55c0dfcd8",
+      "authorized_max": {
+        "currency": "usd",
+        "display": "0.01",
+        "scale": 6,
+        "units": "10000"
+      },
+      "authorized_max_cents": 1,
+      "billing_merchant": {
+        "display_name": "Local merchant",
+        "id": "merchant:local"
+      },
+      "budget_hold": {
+        "amount": {
+          "currency": "usd",
+          "display": "0.01",
+          "scale": 6,
+          "units": "10000"
+        },
+        "amount_cents": 1,
+        "budget_id": "bgt_2ds8zy84h7de",
+        "budget_version_id": "bgv_m31n5kjgzb7d",
+        "currency": "usd",
+        "expires_at": "2026-10-22T02:04:30.607469+00:00",
+        "id": "7cf3c8d5-5e7a-43fe-9baa-fbfd754c8402",
+        "status": "claimed"
+      },
+      "claim": {
+        "claimed_at": "2026-10-22T02:04:00.607469+00:00",
+        "expires_at": "2026-10-22T02:04:30.607469+00:00",
+        "finalized_at": null,
+        "id": "b55d119d-bdbd-4363-93ef-7bbf567e98f1",
+        "lease_profile_reference": {
+          "digest": "sha256:7cedcb0cb67088b05761db8374511198726c67c0797d012d0ea038364cc8b9e7",
+          "redacted": true
+        },
+        "provider_reference": null,
+        "reconciled_at": null,
+        "reconciliation_evidence_reference": null,
+        "reconciliation_outcome": null,
+        "reconciliation_required": false,
+        "status": "claimed"
+      },
+      "created_at": "2026-10-22T02:04:00.603573+00:00",
+      "currency": "usd",
+      "decision": "allow",
+      "decision_id": "ed431770-4d75-4803-835f-57d55c0dfcd8",
+      "id": "ed431770-4d75-4803-835f-57d55c0dfcd8",
+      "ledger_transaction_ids": [],
+      "policy_decision": "allow",
+      "provider": {
+        "display_name": "Local fixture provider",
+        "id": "provider:local:fixture"
+      },
+      "purpose_reference": {
+        "digest": "sha256:2a9729fd3750a887142e593cc5692ebde9a276aa7fb9b9d2f197c049671029ab",
+        "redacted": true
+      },
+      "raw_evidence_redacted": true,
+      "receipt": null,
+      "release_reason": null,
+      "revision": 1,
+      "status": "claimed",
+      "task_reference": {
+        "digest": "sha256:2a9729fd3750a887142e593cc5692ebde9a276aa7fb9b9d2f197c049671029ab",
+        "redacted": true
+      }
+    }
+  ],
+  "next_cursor": null,
+  "schema_version": "hubu-history-v1"
+}

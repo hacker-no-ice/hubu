@@ -1,0 +1,25 @@
+{
+  "fixture": true,
+  "description": "Synthetic executor bill; no provider was called or paid.",
+  "authorized_max": {
+    "amount": 10000,
+    "scale": 6,
+    "currency": "usd"
+  },
+  "receipt": {
+    "actual_vendor_cost": {
+      "amount": 30000,
+      "scale": 6,
+      "currency": "usd"
+    },
+    "provider_request_id": "synthetic:last-cent-billed",
+    "price_model_snapshot": {
+      "provider": "provider:local:fixture",
+      "model": "synthetic-no-provider",
+      "pricing_unit": "operation",
+      "currency": "usd",
+      "synthetic": true
+    },
+    "artifact_reference": "fixture://ep02-last-cent/last-cent-billed"
+  }
+}
