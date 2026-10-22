@@ -59,7 +59,7 @@ test("release notes lead from the landing page to one concise stable release and
   const hero = home.match(/<section class="hero">[\s\S]*?<\/section>/)?.[0];
   assert.ok(header);
   assert.ok(hero);
-  assert.match(header, /class="header-version" href="https:\/\/github\.com\/hacker-no-ice\/hubu\/releases\/tag\/v0\.2\.4" aria-label="Read Hubu v0.2.4 release notes on GitHub"/);
+  assert.match(header, /class="header-version" href="\/releases\/v0\.2\.4" aria-label="Read Hubu v0.2.4 release notes and system card"/);
   assert.match(header, /v0\.2\.4 <span aria-hidden="true">↗<\/span>/);
   assert.doesNotMatch(header, /\/ docs/);
   assert.doesNotMatch(hero, /v0\.2\.4|hero-version/);

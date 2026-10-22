@@ -46,7 +46,7 @@ export default function Home() {
           <a className="brand" href="/" aria-label="Hubu home">
             <HubuWordmark className="brand-wordmark" decorative />
           </a>
-          <a className="header-version" href="https://github.com/hacker-no-ice/hubu/releases/tag/v0.2.4" aria-label="Read Hubu v0.2.4 release notes on GitHub">v0.2.4 <span aria-hidden="true">↗</span></a>
+          <a className="header-version" href="/releases/v0.2.4" aria-label="Read Hubu v0.2.4 release notes and system card">v0.2.4 <span aria-hidden="true">↗</span></a>
         </div>
         <details className="site-menu">
           <summary>Menu</summary>

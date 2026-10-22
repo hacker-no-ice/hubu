@@ -25,7 +25,7 @@ CI job or required gate. Product regression tests remain in normal bug-fix PRs.
    summary of the repository changelog, claims and system card, with a link to
    the full analysis. Add the release to `/releases`, linked from the landing
    page, and update the version badge beside the small navbar logo to link to
-   the corresponding GitHub release. Start with v0.2.4; earlier releases are
+   the corresponding native release page. Start with v0.2.4; earlier releases are
    not backfilled. Record release
    source and kits commit separately. Keep failures, known identity and
    bearer limitations, shortened leases, mock execution and untested surfaces
