@@ -74,6 +74,79 @@ provider request.
 Gongbu's production validator compares the rendered schema-v3 binding, target,
 and pricing against this shipped contract before serving.
 
+## Contract v2: aspect ratios and per-megapixel pricing
+
+`hubu.flux-2-pro.text-to-image/v2` is a second revision of the same
+`flux` / `flux2_api` / `flux-2-pro` target. It keeps v1's API, polling,
+delivery, recovery and options, and adds:
+
+- **Aspect ratios.** `aspect_ratio` (`1:1` by default, `16:9`, `9:16`, `3:2`,
+  `2:3` or `4:5`) together with `image_size` selects one certified size.
+- **Per-megapixel pricing** from BFL's FLUX.2 [pro] rates, reviewed on
+  2026-10-21 (pricing version `bfl-flux-2-pro-usd-2026-10-21-v2`): USD 0.03
+  for each image's first megapixel and USD 0.015 for each additional one. A
+  megapixel is 1,048,576 pixels and partial megapixels round up, as BFL bills
+  them.
+
+| Tier | `1:1` | `16:9` | `9:16` | `3:2` | `2:3` | `4:5` | Billed, cents |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `1k` | 1024 × 1024 | 1344 × 768 | 768 × 1344 | 1248 × 832 | 832 × 1248 | 896 × 1120 | 1 MP: 3 |
+| `2k` | 1440 × 1440 | 1920 × 1088 | 1088 × 1920 | 1728 × 1152 | 1152 × 1728 | 1280 × 1600 | 2 MP: 4.5 |
+| `4k` | 2048 × 2048 | 2688 × 1536 | 1536 × 2688 | 2496 × 1664 | 1664 × 2496 | 1792 × 2240 | 4 MP: 7.5 |
+
+Every size is a multiple of 16 on each side and at most 2048 × 2048 pixels in
+all, and every size in a tier bills the same megapixels. Each tier therefore
+costs exactly what v1 charges for it, at any ratio; `1k` `1:1` and `2k`
+`16:9` are v1's `1k` and `2k` sizes. The estimate is frozen from the
+certified size. Settlement bills the decoded size of the delivered image: a
+larger image than was held is an overage and goes to reconciliation, never a
+larger charge.
+
+Under v2, Gongbu sends only `width` and `height`. `options.width` and
+`options.height` are optional; if sent, they must equal the certified size.
+Gongbu doesn't write a size into the stored input as it does for v1.
+Discovery lists the sizes as `output_sizes` and the rounding rule as
+`megapixels`, so an agent can compute the exact estimate before it asks for
+authorization.
+
+v1 and v2 are revisions of one target, so a profile binds one of them;
+binding both is refused. Switching follows the same rule as any target
+revision change: drain unfinished FLUX work first (see
+[upgrading to v0.2.5](upgrading-to-v0.2.5.md)). The v2 sizes other than v1's
+three have not yet been checked with a live call, and redaction attestation
+covers v1 executions only.
+
+## FLUX 3 Image contract
+
+`hubu.flux-3-image.text-to-image/v1` runs BFL's
+[FLUX 3 Image](https://docs.bfl.ai/flux_3/flux3_image_overview) model
+(`flux-3-image`) from the verified pack `packs/verified/bfl-flux-3-image.toml`.
+It is a separate target from FLUX.2 [pro] (`flux` / `flux2_api` /
+`flux-3-image`), so a profile can bind it beside either FLUX.2 contract, with
+the same BFL key.
+
+- **Request:** `POST https://api.bfl.ai/v1/flux-3-image` with `prompt`,
+  `resolution` (from `image_size`), `aspect_ratio`, the optional
+  `options.safety_tolerance` (0 to 5), and `grounding = false`. FLUX 3 can
+  search the web to ground a prompt; this contract always turns that off, so
+  prompts never go to search. FLUX 3 takes no seed, width or height.
+- **Sizes:** `image_size` is `1k` or `2k`. `aspect_ratio` is one of BFL's
+  fixed ratios from `21:9` to `9:21`, `1:1` by default; `auto` is not offered,
+  so the agent always chooses the ratio. BFL doesn't publish the exact pixel
+  size of each tier and ratio, so the contract certifies the tier and ratio it
+  sends, not a size, and its presets carry no width or height.
+- **Pricing:** by tier, at any aspect ratio, from BFL's FLUX 3 Image rates
+  reviewed on 2026-10-21 (pricing version `bfl-flux-3-image-usd-2026-10-21-v1`):
+  USD 0.048 per `1k` image and USD 0.10 per `2k` image. BFL's reported credits
+  settle the actual cost, as for FLUX.2.
+- **Polling, statuses, delivery and recovery:** the same as FLUX.2.
+
+BFL also offers `768sq`, `1.5k` and `4k`. `768sq` and `1.5k` need Gongbu's
+`image_size` values widened. `4k` (about 16.8 MP) waits on a live check that
+BFL's 4k output fits the 20 MiB artifact bound, so a paid image is never
+refused at delivery. No live FLUX 3 call has been made yet; one guarded call
+per tier is still needed before relying on the contract.
+
 ## Certified output dimensions
 
 The `flux2_api` adapter pins the non-preview `flux-2-pro` model, and its

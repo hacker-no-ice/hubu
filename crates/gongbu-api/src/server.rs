@@ -1426,7 +1426,13 @@ mod tests {
             "../../../contracts/provider-contracts-v1.json"
         ))
         .unwrap();
-        let contracts = document["contracts"].as_array().unwrap();
+        // One revision per target: the v1 contracts, which share no target.
+        let contracts: Vec<&serde_json::Value> = document["contracts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|contract| contract["contract"].as_str().unwrap().ends_with("/v1"))
+            .collect();
         let bindings = contracts.iter().map(|contract| {
             let policies = &contract["policies"];
             serde_json::json!({"contract":contract["contract"],"pricing_version":contract["pricing_version"],"poll_policy":policies["poll"],"artifact_delivery_policy":policies["artifact_delivery"],"recovery_policy":policies["recovery"],"generation_retries":policies["generation_retries"],"fallback":policies["fallback"]})
@@ -1475,8 +1481,8 @@ mod tests {
 
         let validated = validate_runtime_inputs(&path).unwrap();
         let catalog = validated_provider_catalog(&validated).unwrap();
-        assert_eq!(catalog.provider_contracts().len(), 5);
-        assert_eq!(catalog.targets().revisions().count(), 5);
+        assert_eq!(catalog.provider_contracts().len(), 6);
+        assert_eq!(catalog.targets().revisions().count(), 6);
         assert!(
             !catalog.provider_contracts()[0]
                 .readiness

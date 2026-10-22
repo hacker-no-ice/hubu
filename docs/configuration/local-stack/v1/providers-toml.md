@@ -110,7 +110,10 @@ The exact string is a deliberate safety gate, not a customizable description. It
 
 A contract-binding selection expands one named immutable contract into its
 exact provider target, adapter settings, and pricing rules. The shipped
-contracts can be bound independently:
+contracts can be bound independently, except that successive versions of one
+target, such as `hubu.flux-2-pro.text-to-image/v1` and its
+[`/v2`](../../../operations/flux-provider-contract.md#contract-v2-aspect-ratios-and-per-megapixel-pricing),
+are alternatives: bind one of them.
 
 ```toml
 [[contract_bindings]]
