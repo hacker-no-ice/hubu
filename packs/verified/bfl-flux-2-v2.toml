@@ -1,0 +1,216 @@
+# Verified provider pack: Black Forest Labs FLUX.2 [pro] image generation, v2
+# contract (HUB-256).
+#
+# Same BFL API, polling and delivery rules as bfl-flux-2.toml (the v1 contract,
+# kept as is). v2 adds aspect-ratio presets and prices by output megapixel, as
+# BFL bills: 3 cents for the first megapixel and 1.5 cents for each additional
+# one, where a megapixel is 1,048,576 pixels and partial megapixels round up.
+# Pricing reviewed 2026-10-21 against BFL's published FLUX.2 [pro] rates.
+# contracts/provider-contracts-v1.json carries this pack's checked-in
+# projection, and Gongbu's tests fail if the two ever disagree.
+schema_version = 1
+pack_id = "bfl-flux-2"
+pack_version = "2026-10-21.1"
+provider = "flux"
+display_name = "Black Forest Labs FLUX.2"
+billing_merchant = "merchant:black-forest-labs"
+capability = "capability:image:generate"
+workload_type = "image_generation"
+archetype = "async_poll"
+adapter = "flux2_api"
+pricing_trust = "verified"
+
+[transport]
+endpoint = "https://api.bfl.ai"
+api_version = "v1"
+# Regional API hosts receive the credential when BFL returns them for polling.
+allowed_hosts = ["api.bfl.ai", "api.*.bfl.ai"]
+auth_header = "x-key"
+credential = "bfl_flux2_pro"
+timeout_ms = 270000
+
+[request]
+path = "/v1/flux-2-pro"
+
+[request.body]
+prompt = "{{prompt}}"
+width = "{{output_width}}"
+height = "{{output_height}}"
+seed = "{{options.seed}}"
+safety_tolerance = "{{options.safety_tolerance}}"
+output_format = "{{options.output_format}}"
+
+[[parameters]]
+name = "prompt"
+type = "string"
+required = true
+max_length = 32000
+
+[[parameters]]
+name = "image_count"
+type = "integer"
+min = 1
+max = 1
+default = 1
+quantity = "image_count"
+
+[[parameters]]
+name = "image_size"
+type = "enum"
+values = ["1k", "2k", "4k"]
+required = true
+
+[[parameters]]
+name = "aspect_ratio"
+type = "enum"
+values = ["1:1", "16:9", "9:16", "3:2", "2:3", "4:5"]
+default = "1:1"
+
+# Optional; when sent they must equal the certified size.
+[[parameters]]
+name = "options.width"
+type = "integer"
+equals = "output_width"
+
+[[parameters]]
+name = "options.height"
+type = "integer"
+equals = "output_height"
+
+[[parameters]]
+name = "options.seed"
+type = "integer"
+min = 0
+max = 9223372036854775807
+
+[[parameters]]
+name = "options.safety_tolerance"
+type = "integer"
+min = 0
+max = 5
+
+[[parameters]]
+name = "options.output_format"
+type = "enum"
+values = ["png", "jpeg"]
+
+# Certified output sizes: about 1, 2 and 4 megapixels per tier, each side a
+# multiple of 16 and at most 2048 x 2048 pixels in all. Every size in a tier
+# bills the same whole megapixels.
+
+[[size_presets]]
+when = { image_size = "1k", aspect_ratio = "1:1" }
+size = [1024, 1024]
+
+[[size_presets]]
+when = { image_size = "1k", aspect_ratio = "16:9" }
+size = [1344, 768]
+
+[[size_presets]]
+when = { image_size = "1k", aspect_ratio = "9:16" }
+size = [768, 1344]
+
+[[size_presets]]
+when = { image_size = "1k", aspect_ratio = "3:2" }
+size = [1248, 832]
+
+[[size_presets]]
+when = { image_size = "1k", aspect_ratio = "2:3" }
+size = [832, 1248]
+
+[[size_presets]]
+when = { image_size = "1k", aspect_ratio = "4:5" }
+size = [896, 1120]
+
+[[size_presets]]
+when = { image_size = "2k", aspect_ratio = "1:1" }
+size = [1440, 1440]
+
+[[size_presets]]
+when = { image_size = "2k", aspect_ratio = "16:9" }
+size = [1920, 1088]
+
+[[size_presets]]
+when = { image_size = "2k", aspect_ratio = "9:16" }
+size = [1088, 1920]
+
+[[size_presets]]
+when = { image_size = "2k", aspect_ratio = "3:2" }
+size = [1728, 1152]
+
+[[size_presets]]
+when = { image_size = "2k", aspect_ratio = "2:3" }
+size = [1152, 1728]
+
+[[size_presets]]
+when = { image_size = "2k", aspect_ratio = "4:5" }
+size = [1280, 1600]
+
+[[size_presets]]
+when = { image_size = "4k", aspect_ratio = "1:1" }
+size = [2048, 2048]
+
+[[size_presets]]
+when = { image_size = "4k", aspect_ratio = "16:9" }
+size = [2688, 1536]
+
+[[size_presets]]
+when = { image_size = "4k", aspect_ratio = "9:16" }
+size = [1536, 2688]
+
+[[size_presets]]
+when = { image_size = "4k", aspect_ratio = "3:2" }
+size = [2496, 1664]
+
+[[size_presets]]
+when = { image_size = "4k", aspect_ratio = "2:3" }
+size = [1664, 2496]
+
+[[size_presets]]
+when = { image_size = "4k", aspect_ratio = "4:5" }
+size = [1792, 2240]
+
+[megapixels]
+rounding = "ceil"
+pixels_per_megapixel = 1048576
+
+[poll]
+job_id = "/id"
+path = "/v1/get_result"
+query = { id = "{{job_id}}" }
+url = "/polling_url"
+hosts = ["api.bfl.ai", "api.*.bfl.ai"]
+interval_ms = 500
+status = "/status"
+pending = ["pending", "reasoning", "generating"]
+ready = ["ready", "succeeded", "completed"]
+rejected = { "request moderated" = "provider_request_moderated", "content moderated" = "provider_content_moderated", "error" = "provider_error", "failed" = "provider_error", "rejected" = "provider_rejected" }
+ambiguous = { "task not found" = "provider_task_not_found" }
+
+[response]
+request_id_headers = ["x-request-id", "x-bfl-request-id"]
+provider_request_id = "/request_id"
+# BFL reports settled cost in credits; one credit is exactly USD 0.01.
+reported_cost = "/cost"
+reported_cost_scale = 2
+artifact_items = "/result"
+artifact_url = "/sample"
+
+[artifacts]
+media_types = ["image/png", "image/jpeg"]
+hosts = ["delivery.*.bfl.ai"]
+
+[[models]]
+model = "flux-2-pro"
+provider_config_version = "hubu-flux-2-pro-t2i-2026-10-21-v2"
+pricing_version = "bfl-flux-2-pro-usd-2026-10-21-v2"
+pricing_reviewed_on = "2026-10-21"
+
+# USD 0.03 for each image's first megapixel, USD 0.015 for each one after it.
+[[models.pricing_rules]]
+rule_id = "bfl-flux-2-pro-mp-2026-10-21-v2"
+currency = "USD"
+components = [
+  { unit = "image", rate_numerator_minor = 3, rate_denominator = 1 },
+  { unit = "additional_megapixel", rate_numerator_minor = 3, rate_denominator = 2 },
+]

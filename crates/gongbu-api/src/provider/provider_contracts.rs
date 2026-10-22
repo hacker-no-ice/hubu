@@ -2,16 +2,17 @@
 
 use super::{
     contract::{PricingCatalog, PricingRule, PricingUnit},
+    pack::MegapixelRule,
     targets::{AdapterSettings, ProviderContractBinding, ProviderTargetConfig},
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 const CONTRACT_DOCUMENT: &str = include_str!("../../../../contracts/provider-contracts-v1.json");
 const CONTRACT_DOCUMENT_SHA256: &str =
-    "f016d273c246807bc2b1dfdb75e71965ad18fc1343fe736cc2ae6c7056aa71f5";
+    "43b7098e601bb8b20cb3b72ca710d175605e098284a5d1fdb7f9acbbe9eba3c9";
 
 #[derive(Debug, Error)]
 pub(crate) enum Error {
@@ -67,6 +68,9 @@ struct Capability {
     image_count: u32,
     output_formats: Vec<String>,
     presets: Vec<Preset>,
+    /// Set when the contract prices each image by its billed megapixels.
+    #[serde(default)]
+    megapixels: Option<MegapixelRule>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -75,6 +79,10 @@ struct Preset {
     name: String,
     width: u32,
     height: u32,
+    /// The input values that select this size, when more than `image_size`
+    /// does (an aspect ratio, for example).
+    #[serde(default)]
+    when: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -111,6 +119,8 @@ pub struct CatalogCapability {
     pub image_count: u32,
     pub output_formats: Vec<String>,
     pub presets: Vec<CatalogPreset>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub megapixels: Option<MegapixelRule>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -118,6 +128,8 @@ pub struct CatalogPreset {
     pub name: String,
     pub width: u32,
     pub height: u32,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub when: BTreeMap<String, String>,
     pub currency: String,
     pub rate_numerator_minor: i64,
     pub rate_denominator: i64,
@@ -193,10 +205,14 @@ fn validate_and_project_with_mode(
         let known_pricing_present = pricing.rules().iter().any(|rule| {
             rule.provider == definition.target.provider && rule.model == definition.target.model
         });
-        if require_shipped_bindings
-            && known_pricing_present
-            && !selected.contains(definition.contract.as_str())
-        {
+        // Successive contract versions share one target; binding any one
+        // of them accounts for that target's pricing.
+        let target_selected = document.contracts.iter().any(|other| {
+            selected.contains(other.contract.as_str())
+                && other.target.provider == definition.target.provider
+                && other.target.model == definition.target.model
+        });
+        if require_shipped_bindings && known_pricing_present && !target_selected {
             return Err(Error::UnknownContract);
         }
     }
@@ -326,29 +342,19 @@ fn project(contract_definition: &ContractDefinition) -> Result<CatalogContract, 
         .presets
         .iter()
         .map(|preset| {
-            let rule = contract_definition
-                .pricing_rules
-                .iter()
-                .find(|rule| {
-                    rule.selector
-                        .as_ref()
-                        .is_some_and(|selector| selector.image_size() == Some(preset.name.as_str()))
-                })
-                .ok_or(Error::InvalidDocument)?;
-            let component = rule
-                .components
-                .first()
-                .filter(|component| {
-                    rule.components.len() == 1 && component.unit == PricingUnit::Image
-                })
-                .ok_or(Error::InvalidDocument)?;
+            let (currency, (rate_numerator_minor, rate_denominator)) =
+                match &contract_definition.capability.megapixels {
+                    Some(rule) => megapixel_preset_price(contract_definition, rule, preset)?,
+                    None => size_preset_price(contract_definition, preset)?,
+                };
             Ok(CatalogPreset {
                 name: preset.name.clone(),
                 width: preset.width,
                 height: preset.height,
-                currency: rule.currency.clone(),
-                rate_numerator_minor: component.rate_numerator_minor,
-                rate_denominator: component.rate_denominator,
+                when: preset.when.clone(),
+                currency,
+                rate_numerator_minor,
+                rate_denominator,
             })
         })
         .collect::<Result<Vec<_>, Error>>()?;
@@ -366,6 +372,7 @@ fn project(contract_definition: &ContractDefinition) -> Result<CatalogContract, 
             image_count: contract_definition.capability.image_count,
             output_formats: contract_definition.capability.output_formats.clone(),
             presets,
+            megapixels: contract_definition.capability.megapixels.clone(),
         },
         policies: CatalogPolicies {
             generation_retries: contract_definition.policies.generation_retries,
@@ -382,6 +389,76 @@ fn project(contract_definition: &ContractDefinition) -> Result<CatalogContract, 
             live_qualification: "not_performed".into(),
         },
     })
+}
+
+/// A v1 preset's price: the one image component of the rule its size selects.
+fn size_preset_price(
+    contract_definition: &ContractDefinition,
+    preset: &Preset,
+) -> Result<(String, (i64, i64)), Error> {
+    let rule = contract_definition
+        .pricing_rules
+        .iter()
+        .find(|rule| {
+            rule.selector
+                .as_ref()
+                .is_some_and(|selector| selector.image_size() == Some(preset.name.as_str()))
+        })
+        .ok_or(Error::InvalidDocument)?;
+    let component = rule
+        .components
+        .first()
+        .filter(|component| rule.components.len() == 1 && component.unit == PricingUnit::Image)
+        .ok_or(Error::InvalidDocument)?;
+    Ok((
+        rule.currency.clone(),
+        (component.rate_numerator_minor, component.rate_denominator),
+    ))
+}
+
+/// A megapixel-priced preset's exact price for one image of its size, from
+/// the contract's single unselected rule, as a reduced fraction of minor units.
+fn megapixel_preset_price(
+    contract_definition: &ContractDefinition,
+    rule: &MegapixelRule,
+    preset: &Preset,
+) -> Result<(String, (i64, i64)), Error> {
+    let [pricing] = contract_definition.pricing_rules.as_slice() else {
+        return Err(Error::InvalidDocument);
+    };
+    if pricing.selector.is_some() || preset.when.is_empty() {
+        return Err(Error::InvalidDocument);
+    }
+    let billed = i128::from(rule.billed(preset.width, preset.height));
+    let (mut numerator, mut denominator) = (0_i128, 1_i128);
+    for component in &pricing.components {
+        let quantity = match component.unit {
+            PricingUnit::Image => 1,
+            PricingUnit::Megapixel => billed,
+            PricingUnit::AdditionalMegapixel => billed - 1,
+            _ => return Err(Error::InvalidDocument),
+        };
+        let rate_denominator = i128::from(component.rate_denominator);
+        numerator = numerator * rate_denominator
+            + i128::from(component.rate_numerator_minor) * quantity * denominator;
+        denominator *= rate_denominator;
+    }
+    let divisor = gcd(numerator, denominator).max(1);
+    Ok((
+        pricing.currency.clone(),
+        (
+            i64::try_from(numerator / divisor).map_err(|_| Error::InvalidDocument)?,
+            i64::try_from(denominator / divisor).map_err(|_| Error::InvalidDocument)?,
+        ),
+    ))
+}
+
+fn gcd(a: i128, b: i128) -> i128 {
+    if b == 0 {
+        a.abs()
+    } else {
+        gcd(b, a % b)
+    }
 }
 
 #[cfg(test)]
@@ -438,7 +515,13 @@ mod tests {
 
     fn mixed_contract_inputs(shared_credential: bool) -> (ProviderTargetConfig, PricingCatalog) {
         let document: Value = serde_json::from_str(CONTRACT_DOCUMENT).unwrap();
-        let contracts = document["contracts"].as_array().unwrap();
+        // One revision per target: the v1 contracts, which share no target.
+        let contracts: Vec<&Value> = document["contracts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|contract| contract["contract"].as_str().unwrap().ends_with("/v1"))
+            .collect();
         let bindings = contracts
             .iter()
             .rev()
@@ -506,6 +589,138 @@ mod tests {
         assert_eq!(contracts[0].capability.presets[1].rate_numerator_minor, 45);
         assert!(!contracts[0].readiness.credential_reference_present);
         assert!(!contracts[0].readiness.live_qualified);
+    }
+
+    /// Targets that bind the shipped contracts named in `ids` (the first
+    /// active), and a catalog of the pricing rules of those named in `priced`.
+    fn bound(
+        ids: &[&str],
+        priced: &[&str],
+    ) -> (
+        ProviderTargetConfig,
+        Result<PricingCatalog, crate::provider::contract::ContractError>,
+    ) {
+        let document: Value = serde_json::from_str(CONTRACT_DOCUMENT).unwrap();
+        let find = |id: &&str| {
+            document["contracts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|contract| contract["contract"] == *id)
+                .unwrap()
+                .clone()
+        };
+        let contracts: Vec<Value> = ids.iter().map(find).collect();
+        let bindings: Vec<Value> = contracts
+            .iter()
+            .map(|contract| {
+                let policies = &contract["policies"];
+                json!({
+                    "contract":contract["contract"],
+                    "pricing_version":contract["pricing_version"],
+                    "poll_policy":policies["poll"],
+                    "artifact_delivery_policy":policies["artifact_delivery"],
+                    "recovery_policy":policies["recovery"],
+                    "generation_retries":policies["generation_retries"],
+                    "fallback":policies["fallback"]
+                })
+            })
+            .collect();
+        let configs: Vec<Value> = contracts
+            .iter()
+            .enumerate()
+            .map(|(index, contract)| {
+                let mut target = contract["target"].clone();
+                target["secret_service"] = json!("gongbu.bfl");
+                target["secret_account"] = json!("operator");
+                // Two revisions of one target: only the first is active.
+                target["active"] = json!(index == 0);
+                target
+            })
+            .collect();
+        let priced: Vec<Value> = priced.iter().map(find).collect();
+        let rules: Vec<Value> = priced
+            .iter()
+            .flat_map(|contract| contract["pricing_rules"].as_array().unwrap().clone())
+            .collect();
+        let targets = serde_json::from_value(json!({
+            "schema_version":3,
+            "contract_bindings":bindings,
+            "provider_configs":configs
+        }))
+        .unwrap();
+        let pricing = PricingCatalog::from_json(
+            &serde_json::to_vec(&json!({
+                "schema_version":2,
+                "catalog_version":priced[0]["pricing_version"],
+                "rules":rules
+            }))
+            .unwrap(),
+        );
+        (targets, pricing)
+    }
+
+    const FLUX_V1: &str = "hubu.flux-2-pro.text-to-image/v1";
+    const FLUX_V2: &str = "hubu.flux-2-pro.text-to-image/v2";
+
+    #[test]
+    fn flux_v2_contract_projects_aspect_ratio_presets_at_megapixel_prices() {
+        let (targets, pricing) = bound(&[FLUX_V2], &[FLUX_V2]);
+        let contracts = validate_and_project(&targets, &pricing.unwrap()).unwrap();
+        let [contract] = contracts.as_slice() else {
+            panic!("one contract");
+        };
+        assert_eq!(contract.contract, FLUX_V2);
+        assert_eq!(contract.capability.presets.len(), 18);
+        assert_eq!(
+            contract
+                .capability
+                .megapixels
+                .as_ref()
+                .unwrap()
+                .pixels_per_megapixel,
+            1_048_576
+        );
+        let header = contract
+            .capability
+            .presets
+            .iter()
+            .find(|preset| preset.name == "2k-16:9")
+            .unwrap();
+        assert_eq!((header.width, header.height), (1920, 1088));
+        assert_eq!(header.when["aspect_ratio"], "16:9");
+        // Each tier keeps its v1 price at every ratio: 3¢, 9/2¢ and 15/2¢.
+        for preset in &contract.capability.presets {
+            let expected = match preset.when["image_size"].as_str() {
+                "1k" => (3, 1),
+                "2k" => (9, 2),
+                _ => (15, 2),
+            };
+            assert_eq!(
+                (preset.rate_numerator_minor, preset.rate_denominator),
+                expected,
+                "{}",
+                preset.name
+            );
+        }
+        // The v1 contract alone still binds, unchanged.
+        let (targets, pricing) = bound(&[FLUX_V1], &[FLUX_V1]);
+        assert!(validate_and_project(&targets, &pricing.unwrap()).is_ok());
+    }
+
+    #[test]
+    fn flux_v1_and_v2_cannot_both_be_bound() {
+        for ids in [[FLUX_V1, FLUX_V2], [FLUX_V2, FLUX_V1]] {
+            // Their rules cannot share one catalog: the unselected v2 rule
+            // and v1's size-selected rules would be ambiguous.
+            assert!(bound(&ids, &ids).1.is_err());
+            // Priced for only one of them, the other binding fails.
+            let (targets, pricing) = bound(&ids, &ids[..1]);
+            assert!(matches!(
+                validate_and_project(&targets, &pricing.unwrap()),
+                Err(Error::PricingMismatch)
+            ));
+        }
     }
 
     #[test]

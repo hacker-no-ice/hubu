@@ -10,7 +10,9 @@ use super::{
     pack_async::AsyncPollEngine,
     pack_sync::SyncFixedEngine,
     provider_contracts::{self, CatalogContract},
-    targets::{AdapterSettings, ProviderConfigVersion, ProviderTargetConfig, TargetKey},
+    targets::{
+        AdapterSettings, PackTargetConfig, ProviderConfigVersion, ProviderTargetConfig, TargetKey,
+    },
     verified_packs::verified_packs,
 };
 use crate::{artifact::ArtifactLimits, execution_scope::for_target, secrets::ProviderSecret};
@@ -85,8 +87,9 @@ pub struct ProviderRegistry {
     factories: BTreeMap<(String, String), Arc<Factory>>,
     /// Archetype engines keyed by engine ID; they run pack targets.
     pack_engines: BTreeMap<String, Arc<PackEngineFactory>>,
-    /// Validated packs keyed by pack ID.
-    packs: BTreeMap<String, Arc<Pack>>,
+    /// Validated packs keyed by pack ID and version, so successive
+    /// versions of one pack can back different contract revisions.
+    packs: BTreeMap<(String, String), Arc<Pack>>,
     require_shipped_contracts: bool,
 }
 
@@ -147,7 +150,15 @@ impl ProviderRegistry {
 
     /// Make a validated pack available to targets that name it.
     pub fn register_pack(&mut self, pack: Pack) {
-        self.packs.insert(pack.pack_id().to_owned(), Arc::new(pack));
+        self.packs.insert(
+            (pack.pack_id().to_owned(), pack.pack_version().to_owned()),
+            Arc::new(pack),
+        );
+    }
+
+    fn pack_for(&self, config: &PackTargetConfig) -> Option<&Arc<Pack>> {
+        self.packs
+            .get(&(config.pack_id.clone(), config.pack_version.clone()))
     }
 
     /// Bind an archetype engine. Pack targets are bound by engine, never by a
@@ -177,8 +188,7 @@ impl ProviderRegistry {
             return factory(target).map_err(|_| RegistryError::BindingFailed(canonical()));
         };
         let pack = self
-            .packs
-            .get(&config.pack_id)
+            .pack_for(config)
             .ok_or_else(|| RegistryError::MissingFactory(canonical()))?;
         // The revision pins one exact pack; any drift is a binding failure.
         let model = pack.model(&target.model);
@@ -323,9 +333,16 @@ impl ValidatedProviderCatalog {
             if !pricing.supports_target(&target.target_key()) {
                 return Err(RegistryError::MissingPricing(canonical));
             }
+            // The v1 FLUX contract prices each certified preset by size; a
+            // pack that certifies its own sizes prices them itself.
+            let certifies_sizes = target
+                .pack()
+                .and_then(|config| registry.pack_for(config))
+                .is_some_and(|pack| pack.has_size_presets());
             if target.provider == FLUX_PROVIDER_ID
                 && target.adapter == FLUX_ADAPTER_ID
                 && target.model == FLUX_MODEL_ID
+                && !certifies_sizes
                 && !FLUX_SUPPORTED_PRESETS
                     .iter()
                     .all(|preset| pricing.supports_image_size(&target.target_key(), preset))
@@ -339,10 +356,7 @@ impl ValidatedProviderCatalog {
                 ));
             }
             let revision = (target.target_key(), target.provider_config_version.clone());
-            if let Some(pack) = target
-                .pack()
-                .and_then(|config| registry.packs.get(&config.pack_id))
-            {
+            if let Some(pack) = target.pack().and_then(|config| registry.pack_for(config)) {
                 packs.insert(revision.clone(), Arc::clone(pack));
             }
             adapters.insert(revision, adapter);
@@ -724,7 +738,13 @@ mod tests {
             "../../../../contracts/provider-contracts-v1.json"
         ))
         .unwrap();
-        let contracts = document["contracts"].as_array().unwrap();
+        // One revision per target: the v1 contracts, which share no target.
+        let contracts: Vec<&serde_json::Value> = document["contracts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|contract| contract["contract"].as_str().unwrap().ends_with("/v1"))
+            .collect();
         let bindings = contracts.iter().map(|contract| {
             let policies = &contract["policies"];
             json!({"contract":contract["contract"],"pricing_version":contract["pricing_version"],"poll_policy":policies["poll"],"artifact_delivery_policy":policies["artifact_delivery"],"recovery_policy":policies["recovery"],"generation_retries":0,"fallback":false})

@@ -23,7 +23,7 @@ and must not contact a provider.
 | Integration | Gongbu identity | Provider-specific behavior |
 | --- | --- | --- |
 | Gemini Developer API | `google` / `gemini_developer_image` through the Lite and non-Lite Gemini 3.1 Flash Image contracts | AI Studio API key, synchronous inline response; Lite is 1K-only, non-Lite supports 1K/2K/4K |
-| FLUX.2 Pro | `flux` / `flux2_api` through `hubu.flux-2-pro.text-to-image/v1` | Managed target and prices, asynchronous submit and polling, BFL artifact delivery and durable resume |
+| FLUX.2 Pro | `flux` / `flux2_api` through `hubu.flux-2-pro.text-to-image/v1`, or `/v2` for aspect ratios and per-megapixel pricing | Managed target and prices, asynchronous submit and polling, BFL artifact delivery and durable resume |
 
 Other adapter IDs can remain available for operator-managed configurations,
 but they are not additional supported integrations in this guide.

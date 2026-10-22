@@ -2170,7 +2170,13 @@ mod tests {
         ))
         .unwrap();
         let mut rules = Vec::new();
-        for contract in contracts["contracts"].as_array().unwrap() {
+        // The baseline predates v2 contracts; v1 must stay byte identical.
+        for contract in contracts["contracts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|contract| contract["contract"].as_str().unwrap().ends_with("/v1"))
+        {
             rules.extend(
                 contract["pricing_rules"]
                     .as_array()
@@ -2193,7 +2199,13 @@ mod tests {
             baseline["catalog_digest"].as_str().unwrap()
         );
         let mut checked = 0;
-        for contract in contracts["contracts"].as_array().unwrap() {
+        // The baseline predates v2 contracts; v1 must stay byte identical.
+        for contract in contracts["contracts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|contract| contract["contract"].as_str().unwrap().ends_with("/v1"))
+        {
             let provider = contract["target"]["provider"].as_str().unwrap();
             let model = contract["target"]["model"].as_str().unwrap();
             for preset in contract["capability"]["presets"].as_array().unwrap() {

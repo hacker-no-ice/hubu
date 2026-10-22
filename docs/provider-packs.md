@@ -18,7 +18,9 @@ settings say `type = "pack"` is that pack's checked-in projection: the same
 `provider_config_version`, pricing version, review date and pricing rules,
 pinned to the pack's content digest. Gongbu's tests fail if a pack and its
 contract entries disagree, so a pack change ships with a matching contract
-update.
+update. Successive versions of one pack can ship side by side, each backing
+its own contract revision: `bfl-flux-2.toml` backs FLUX.2 [pro] v1 and
+`bfl-flux-2-v2.toml` backs v2.
 
 ## What a pack declares and what engines own
 

@@ -74,6 +74,48 @@ provider request.
 Gongbu's production validator compares the rendered schema-v3 binding, target,
 and pricing against this shipped contract before serving.
 
+## Contract v2: aspect ratios and per-megapixel pricing
+
+`hubu.flux-2-pro.text-to-image/v2` is a second revision of the same
+`flux` / `flux2_api` / `flux-2-pro` target. It keeps v1's API, polling,
+delivery, recovery and options, and adds:
+
+- **Aspect ratios.** `aspect_ratio` (`1:1` by default, `16:9`, `9:16`, `3:2`,
+  `2:3` or `4:5`) together with `image_size` selects one certified size.
+- **Per-megapixel pricing** from BFL's FLUX.2 [pro] rates, reviewed on
+  2026-10-21 (pricing version `bfl-flux-2-pro-usd-2026-10-21-v2`): USD 0.03
+  for each image's first megapixel and USD 0.015 for each additional one. A
+  megapixel is 1,048,576 pixels and partial megapixels round up, as BFL bills
+  them.
+
+| Tier | `1:1` | `16:9` | `9:16` | `3:2` | `2:3` | `4:5` | Billed, cents |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `1k` | 1024 × 1024 | 1344 × 768 | 768 × 1344 | 1248 × 832 | 832 × 1248 | 896 × 1120 | 1 MP: 3 |
+| `2k` | 1440 × 1440 | 1920 × 1088 | 1088 × 1920 | 1728 × 1152 | 1152 × 1728 | 1280 × 1600 | 2 MP: 4.5 |
+| `4k` | 2048 × 2048 | 2688 × 1536 | 1536 × 2688 | 2496 × 1664 | 1664 × 2496 | 1792 × 2240 | 4 MP: 7.5 |
+
+Every size is a multiple of 16 on each side and at most 2048 × 2048 pixels in
+all, and every size in a tier bills the same megapixels. Each tier therefore
+costs exactly what v1 charges for it, at any ratio; `1k` `1:1` and `2k`
+`16:9` are v1's `1k` and `2k` sizes. The estimate is frozen from the
+certified size. Settlement bills the decoded size of the delivered image: a
+larger image than was held is an overage and goes to reconciliation, never a
+larger charge.
+
+Under v2, Gongbu sends only `width` and `height`. `options.width` and
+`options.height` are optional; if sent, they must equal the certified size.
+Gongbu doesn't write a size into the stored input as it does for v1.
+Discovery lists the sizes as `output_sizes` and the rounding rule as
+`megapixels`, so an agent can compute the exact estimate before it asks for
+authorization.
+
+v1 and v2 are revisions of one target, so a profile binds one of them;
+binding both is refused. Switching follows the same rule as any target
+revision change: drain unfinished FLUX work first (see
+[upgrading to v0.2.5](upgrading-to-v0.2.5.md)). The v2 sizes other than v1's
+three have not yet been checked with a live call, and redaction attestation
+covers v1 executions only.
+
 ## Certified output dimensions
 
 The `flux2_api` adapter pins the non-preview `flux-2-pro` model, and its
