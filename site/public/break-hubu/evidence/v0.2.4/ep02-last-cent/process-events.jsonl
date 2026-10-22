@@ -1,0 +1,3 @@
+{"event":"restart","at":"2026-10-22T02:04:00.388267+00:00","pid":64581}
+{"event":"fixture_saved","at":"2026-10-22T02:04:00.608769+00:00","path":"fixtures/last-cent-billed-receipt.json"}
+{"event":"fixture_saved","at":"2026-10-22T02:04:00.608951+00:00","path":"fixtures/synthetic-receipt.json"}

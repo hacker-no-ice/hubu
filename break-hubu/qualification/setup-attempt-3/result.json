@@ -1,0 +1,8 @@
+{
+  "verdict": "not tested",
+  "checks": [],
+  "episode": "smoke",
+  "execution": "incomplete",
+  "elapsed_seconds": 0.927,
+  "execution_error": "Attack process exited 1: Traceback (most recent call last):\n  File \"/private/tmp/break-hubu-smoke.py\", line 14, in <module>\n    if __name__=='__main__':run_episode(attack,verify,episode='smoke',budget='0.10')\n  File \"/Users/yizhengz/.codex/worktrees/2588/hubu/break-hubu/runtime.py\", line 264, in run_episode\n    attack(Runtime(json.loads(Path(args.attack_context).read_text())))\n  File \"/private/tmp/break-hubu-smoke.py\", line 7, in attack\n    if a['body'].get('decision')!='allow':raise RuntimeError(a)\nRuntimeError: {'status': 400, 'body': {'error': 'unknown execution scope identifier', 'retry_guidance': None}}\n"
+}

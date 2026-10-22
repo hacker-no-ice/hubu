@@ -1,0 +1,34 @@
+{
+  "coverage": {
+    "agent_id": "agt_qgxbfqebvp11",
+    "budget_id": "bgt_gpcm6mns6tkb",
+    "consumed_amount": {
+      "currency": "usd",
+      "display": "0.00",
+      "scale": 6,
+      "units": "0"
+    },
+    "consumed_amount_cents": 0,
+    "currency": "usd",
+    "historical_wallet_reconciliation_complete": false,
+    "owner_transactions_without_budget_context": 0,
+    "pending_hold_count": 33,
+    "recorded_budget_charges": {
+      "currency": "usd",
+      "display": "0.00",
+      "scale": 6,
+      "units": "0"
+    },
+    "recorded_budget_charges_cents": 0,
+    "unaccounted_consumption": {
+      "currency": "usd",
+      "display": "0.00",
+      "scale": 6,
+      "units": "0"
+    },
+    "unaccounted_consumption_cents": 0
+  },
+  "next_cursor": null,
+  "schema_version": "hubu-history-v1",
+  "transactions": []
+}

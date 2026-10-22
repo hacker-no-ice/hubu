@@ -168,6 +168,8 @@ The implementation is intentionally inspectable: scenario steps live in each
 [runtime.py](runtime.py), [bootstrap.py](bootstrap.py), [run-all.sh](run-all.sh)
 and [verification.py](verification.py). Those four shared files total about
 650 lines, in addition to scenario code and episode assertions; the shared work
-is not hidden from episode-size accounting. Run verifiers with ordinary Python,
+is not hidden from episode-size accounting. The separate
+[report renderer](render-report.py) only turns captured public evidence into
+website data and a plain ZIP; it is not part of the attack runtime. Run verifiers with ordinary Python,
 without `-O`, `-OO` or `PYTHONOPTIMIZE`; optimized mode cannot produce a passing verdict.
 There is no automatic PR proof-kit job or custom replay viewer.
