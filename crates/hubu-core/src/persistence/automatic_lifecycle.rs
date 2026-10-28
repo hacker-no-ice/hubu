@@ -334,8 +334,11 @@ pub(super) fn save_denied(
         validate_before(&tx, before, budget_checked_at)?;
     }
     if cause == AdmissionDenialReason::InsufficientTaskBudget {
+        // An open task budget, or a proposal still waiting for a human.
         let has_open_task_budget: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM task_budgets WHERE agent_id = ?1 AND currency = ?2 AND state = 'open')",
+            "SELECT EXISTS(SELECT 1 FROM task_budgets WHERE agent_id = ?1 AND currency = ?2 AND state = 'open')
+                 OR EXISTS(SELECT 1 FROM task_budget_approvals
+                           WHERE agent_id = ?1 AND currency = ?2 AND kind = 'open' AND status = 'pending')",
             params![
                 decision.request.agent_id.to_string(),
                 decision.request.currency.to_string()

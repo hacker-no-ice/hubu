@@ -18,7 +18,9 @@ use routing::{
     public_spend_result, route_tool_call_v1, tool_error_result_v1, tool_result_v1,
     validate_model_spend_arguments,
 };
-pub(crate) use task_budget::{status_task_budget, ActiveTaskBudget};
+pub(crate) use task_budget::{
+    observe_approval as observe_task_budget_approval, status_task_budget, ActiveTaskBudget,
+};
 pub use transport::RoutingConfig;
 
 pub(crate) use catalog::{

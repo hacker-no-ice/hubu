@@ -2044,20 +2044,26 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
         }
         ("POST", task_budget::OPEN_ROUTE) => task_budget::open(request.body, state, request_now),
         ("POST", task_budget::CLOSE_ROUTE) => task_budget::close(request.body, state, request_now),
+        ("POST", task_budget::PROPOSAL_ROUTE) => {
+            task_budget::propose(request.body, state, request_now)
+        }
+        ("POST", task_budget::CLOSE_REQUEST_ROUTE) => {
+            task_budget::request_close(request.body, state, request_now)
+        }
         ("GET", task_budget::OPEN_ROUTE) => task_budget::list(&request, state),
         ("GET", task_budget::SHOW_ROUTE) => task_budget::show(&request, state),
         ("POST", "/spend/authorize") => {
             authorize_spend_at(request.body, state, request_now).map(to_json)
         }
-        ("GET", "/spend/approval") => get_spend_approval(
-            request.query.get("approval_request_id").map(String::as_str),
-            state,
-        )
-        .map(to_json),
+        ("GET", "/spend/approval") => match request.query.get("approval_request_id") {
+            Some(id) if task_budget::is_approval_request_id(id) => {
+                task_budget::get_approval(id, state, request_now)
+            }
+            id => get_spend_approval(id.map(String::as_str), state).map(to_json),
+        },
         ("POST", "/spend/approval/resolve") => {
-            authenticate_approval_capability(approval_capability, state).and_then(|()| {
-                resolve_spend_approval_at(request.body, state, request_now).map(to_json)
-            })
+            authenticate_approval_capability(approval_capability, state)
+                .and_then(|()| resolve_approval_at(request.body, state, request_now))
         }
         ("GET", "/spend/executor/guidance") | ("GET", "/.well-known/hubu-spend-executor.json") => {
             Ok(spend_executor_guidance(state))
@@ -4269,6 +4275,21 @@ fn get_spend_approval(
     }
     let status = approval_status_for_decision(&decision, state)?;
     approval_http_response(&decision, status, state)
+}
+
+/// Resolve a request on the shared approval link: a task budget approval
+/// for a `tba_` id, otherwise a spend approval.
+fn resolve_approval_at(body: String, state: &ServerState, now: DateTime<Utc>) -> Result<Value> {
+    let request: ResolveSpendApprovalHttpRequest = serde_json::from_str(&body)?;
+    if task_budget::is_approval_request_id(&request.approval_request_id) {
+        return task_budget::resolve_approval(
+            &request.approval_request_id,
+            matches!(request.decision, HumanApprovalHttpDecision::Approve),
+            state,
+            now,
+        );
+    }
+    resolve_spend_approval_at(body, state, now).map(to_json)
 }
 
 fn resolve_spend_approval_at(
@@ -10737,6 +10758,206 @@ lease_profiles:
         let after = authorize("draft-3", "2.00");
         assert_eq!(after.decision, "allow");
         assert!(after.budget_hold.as_ref().unwrap().task_budget_id.is_none());
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn agent_task_budget_requests_wait_for_a_human_on_the_approval_link() {
+        let path = std::env::temp_dir().join(format!(
+            "hubu-api-task-budget-approval-{}.sqlite",
+            UserId::new()
+        ));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        init(
+            json!({"display_name": "Alice Example", "email": "alice@example.com"}).to_string(),
+            &state,
+        )
+        .unwrap();
+        let agent = register_agent(
+            json!({"name": "designer", "version": "v1"}).to_string(),
+            &state,
+        )
+        .unwrap();
+        add_policy(
+            json!({"agent_id": agent.agent_id, "daily_limit_cents": 1_000}).to_string(),
+            &state,
+        )
+        .unwrap();
+        create_test_agent_budget(&state, &agent.agent_id, 1_000);
+        let authorize = |operation_key: &str, amount: &str| {
+            authorize_spend(
+                json!({
+                    "operation_key": operation_key,
+                    "account_id": agent.account_id,
+                    "amount": amount,
+                    "reason": "landing page draft",
+                    "merchant": "gongbu.image",
+                    "task_id": "landing-page",
+                })
+                .to_string(),
+                &state,
+            )
+            .expect("authorization should not error")
+        };
+        let review = |id: &str| {
+            route(
+                authenticated_get_request(&format!("/spend/approval?approval_request_id={id}")),
+                &state,
+            )
+        };
+
+        let proposed = route(
+            authenticated_json_request(
+                "/task-budgets/proposals",
+                json!({
+                    "agent_id": agent.agent_id,
+                    "task_id": "landing-page",
+                    "amount": "3.00",
+                    "reason": "design this landing page for $3",
+                    "source": "hubu-unified-mcp",
+                }),
+            ),
+            &state,
+        );
+        assert_eq!(proposed.status, 200, "{}", proposed.body);
+        assert!(proposed.body["task_budget"].is_null());
+        let proposal = &proposed.body["approval"];
+        let proposal_id = proposal["approval_request_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(proposal_id.starts_with("tba_"));
+        assert_eq!(proposal["kind"], "task_budget_open");
+        assert_eq!(proposal["status"], "pending");
+        assert_eq!(proposal["review"]["amount_limit"]["units"], "3000000");
+        assert!(proposal["review"].get("amount_limit_cents").is_none());
+
+        // Unapproved: the task's spend is denied and nothing is reserved.
+        let early = authorize("early", "1.00");
+        assert_eq!(early.decision, "deny");
+        assert_eq!(
+            early.reasons,
+            vec![hubu_core::app::TASK_BUDGET_PROPOSAL_PENDING.to_string()]
+        );
+        let listed = route(authenticated_get_request("/task-budgets"), &state);
+        assert!(listed.body["task_budgets"].as_array().unwrap().is_empty());
+        assert_eq!(
+            listed.body["pending_approvals"][0]["approval_request_id"],
+            proposal_id.as_str()
+        );
+
+        // The review is readable with the bearer; resolving needs the human
+        // approval capability.
+        let shown = review(&proposal_id);
+        assert_eq!(shown.status, 200, "{}", shown.body);
+        assert_eq!(shown.body["review"]["task_id"], "landing-page");
+        let mut bearer_only = approval_json_request(
+            json!({"approval_request_id": proposal_id, "decision": "approve"}),
+        );
+        bearer_only.headers.remove(APPROVAL_CAPABILITY_HEADER);
+        assert_ne!(route(bearer_only, &state).status, 200);
+        let opened = route(
+            approval_json_request(
+                json!({"approval_request_id": proposal_id, "decision": "approve"}),
+            ),
+            &state,
+        );
+        assert_eq!(opened.status, 200, "{}", opened.body);
+        assert_eq!(opened.body["status"], "approved");
+        assert_eq!(opened.body["task_budget"]["state"], "open");
+        let task_budget_id = opened.body["task_budget"]["task_budget_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let draft = authorize("draft-1", "1.00");
+        assert_eq!(draft.decision, "allow");
+        assert_eq!(
+            draft
+                .budget_hold
+                .as_ref()
+                .unwrap()
+                .task_budget_id
+                .as_deref(),
+            Some(task_budget_id.as_str())
+        );
+
+        let requested = route(
+            authenticated_json_request(
+                "/task-budgets/close-requests",
+                json!({"task_budget_id": task_budget_id, "reason": "landing page shipped"}),
+            ),
+            &state,
+        );
+        assert_eq!(requested.status, 200, "{}", requested.body);
+        let close_id = requested.body["approval"]["approval_request_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(requested.body["approval"]["kind"], "task_budget_close");
+        assert_eq!(requested.body["task_budget"]["state"], "open");
+        assert_eq!(
+            requested.body["task_budget"]["close_approval_request_id"],
+            close_id.as_str()
+        );
+        let blocked = authorize("draft-2", "0.50");
+        assert_eq!(blocked.decision, "deny");
+        assert_eq!(
+            blocked.reasons,
+            vec![hubu_core::app::TASK_BUDGET_CLOSE_PENDING.to_string()]
+        );
+
+        // The outstanding draft must settle or release before the close.
+        let refused = route(
+            approval_json_request(json!({"approval_request_id": close_id, "decision": "approve"})),
+            &state,
+        );
+        assert_eq!(refused.status, 409);
+        assert_eq!(
+            refused.body["error_code"],
+            "task_budget_outstanding_authorizations"
+        );
+        assert_eq!(review(&close_id).body["status"], "pending");
+        let voided = route(
+            authenticated_json_request(
+                "/spend/void",
+                json!({
+                    "spend_auth_token_id": draft.auth_token_id,
+                    "account_id": agent.account_id,
+                    "operation_key": "draft-1",
+                }),
+            ),
+            &state,
+        );
+        assert_eq!(voided.status, 200, "{}", voided.body);
+        let closed = route(
+            approval_json_request(json!({"approval_request_id": close_id, "decision": "approve"})),
+            &state,
+        );
+        assert_eq!(closed.status, 200, "{}", closed.body);
+        assert_eq!(closed.body["status"], "approved");
+        assert_eq!(closed.body["task_budget"]["state"], "closed");
+        assert_eq!(
+            closed.body["task_budget"]["returned_amount"]["units"],
+            "3000000"
+        );
+        let replay = route(
+            approval_json_request(json!({"approval_request_id": close_id, "decision": "approve"})),
+            &state,
+        );
+        assert_eq!(replay.body["idempotent_replay"], true);
+        let conflicting = route(
+            approval_json_request(json!({"approval_request_id": close_id, "decision": "deny"})),
+            &state,
+        );
+        assert_eq!(conflicting.status, 409);
+        assert_eq!(
+            conflicting.body["error_code"],
+            "task_budget_approval_resolved"
+        );
+        let unknown = review("tba_000000000000");
+        assert_eq!(unknown.status, 404);
+        assert_eq!(unknown.body["error_code"], "unknown_task_budget_approval");
         std::fs::remove_file(path).ok();
     }
 

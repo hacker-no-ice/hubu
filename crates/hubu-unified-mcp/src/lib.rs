@@ -922,6 +922,24 @@ impl Server {
         if !same_approval_request_id(&approval_request_id, response_approval_request_id) {
             return error_response(id, -32000, "Hubu returned a conflicting approval identity");
         }
+        // Task budget approvals have no harness operation to synchronize.
+        if approval
+            .get("kind")
+            .and_then(Value::as_str)
+            .is_some_and(|kind| kind.starts_with("task_budget_"))
+        {
+            if !approval
+                .get("status")
+                .and_then(Value::as_str)
+                .is_some_and(|status| {
+                    matches!(status, "pending" | "approved" | "denied" | "expired")
+                })
+            {
+                return error_response(id, -32000, "Hubu returned an invalid approval result");
+            }
+            hubu::observe_task_budget_approval(self, approval);
+            return response;
+        }
         let Some(status) = approval
             .get("status")
             .and_then(Value::as_str)
@@ -1109,14 +1127,14 @@ impl Server {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(task_budget);
     }
 
-    pub(crate) fn unbind_task_budget(&self, task_budget_id: &str) {
+    pub(crate) fn unbind_task_budget(&self, task_id: &str) {
         let mut active = self
             .active_task_budget
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if active
             .as_ref()
-            .is_some_and(|active| active.task_budget_id == task_budget_id)
+            .is_some_and(|active| active.task_id == task_id)
         {
             *active = None;
         }

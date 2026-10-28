@@ -10,10 +10,14 @@ use super::*;
 use crate::budget::{
     public_task_budget_id, task_budget_open_fingerprint, validate_task_id, CloseTaskBudgetRequest,
     CloseTaskBudgetResponse, OpenTaskBudgetRequest, OpenTaskBudgetResponse, TaskBudget,
-    TaskBudgetError, TaskBudgetSnapshot, TaskBudgetState, TaskBudgetUsage,
+    TaskBudgetApprovalKind, TaskBudgetError, TaskBudgetSnapshot, TaskBudgetState, TaskBudgetUsage,
 };
 use hubu_common::ids::TaskBudgetId;
 use hubu_ledger::TransactionMetadata;
+
+use super::task_budget_approval::{
+    approve_pending_close_request, pending_open_proposal_for, pending_task_budget_approval_for_task,
+};
 
 /// Reads the task budgets a spend reservation must respect. Writes go through
 /// the inherent open/close commands, which run in their own transactions.
@@ -31,6 +35,17 @@ pub trait TaskBudgetRepository {
         &self,
         parent_budget_id: &BudgetId,
     ) -> Result<Vec<TaskBudgetSnapshot>, StorageError>;
+
+    /// The request for `task_id` still waiting on a human at `now`, if any:
+    /// a proposal to open it, or a request to close its open task budget.
+    /// Spend for the task is refused while either is pending.
+    fn pending_task_budget_approval_for_spend(
+        &self,
+        agent_id: &AgentId,
+        task_id: &str,
+        currency: Currency,
+        now: DateTime<Utc>,
+    ) -> Result<Option<TaskBudgetApprovalKind>, StorageError>;
 }
 
 const TASK_BUDGET_COLUMNS: &str = "id, owner_user_id, agent_id, parent_budget_id, task_id,
@@ -91,7 +106,7 @@ impl SqliteGovernanceRepository {
             "CREATE INDEX IF NOT EXISTS budget_holds_by_task_budget
                 ON budget_holds(task_budget_id) WHERE task_budget_id IS NOT NULL;",
         )?;
-        Ok(())
+        self.init_task_budget_approval_schema()
     }
 
     /// Open a task budget drawn from `parent`, the agent's available budget
@@ -120,6 +135,7 @@ impl SqliteGovernanceRepository {
             request.currency,
             request.amount_limit,
         );
+        self.expire_task_budget_approvals(now)?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -137,83 +153,23 @@ impl SqliteGovernanceRepository {
                 replayed: true,
             });
         }
-
-        let balance = load_budget_balance_by_id(&tx, &parent.budget.id)?.ok_or(
-            TaskBudgetError::NoAvailableBudget {
-                currency: request.currency,
-            },
-        )?;
-        let allocated = open_task_budgets_for_parent(&tx, &parent.budget.id)?
-            .iter()
-            .try_fold(Amount::ZERO, |total, snapshot| {
-                total.checked_add(snapshot.allocated_headroom())
-            })
-            .ok_or_else(|| StorageError::InvalidData("task allocation overflow".into()))?;
-        let available = balance
-            .remaining_amount
-            .checked_sub(allocated)
-            .ok_or_else(|| StorageError::InvalidData("task allocation overflow".into()))?;
-        if available < request.amount_limit {
-            return Err(TaskBudgetError::InsufficientUnallocatedBudget {
-                available: if available.is_negative() {
-                    Amount::ZERO
-                } else {
-                    available
-                },
-                requested: request.amount_limit,
-            });
+        // The human approves or denies the agent's proposal instead.
+        if pending_open_proposal_for(&tx, &request.agent_id, &request.task_id, request.currency)?
+            .is_some()
+        {
+            return Err(TaskBudgetError::ProposalPending);
         }
-
-        let budget = TaskBudget {
-            id: TaskBudgetId::new(),
-            owner_user_id: request.owner_user_id.clone(),
-            agent_id: request.agent_id.clone(),
-            parent_budget_id: parent.budget.id.clone(),
-            task_id: request.task_id.clone(),
-            currency: request.currency,
-            amount_limit: request.amount_limit,
-            state: TaskBudgetState::Open,
-            opened_at: now,
-            opened_by: request.actor.clone(),
-            source: request.source.clone(),
-            reason: request
-                .reason
-                .as_deref()
-                .map(str::trim)
-                .filter(|reason| !reason.is_empty())
-                .map(str::to_string),
-            request_fingerprint: fingerprint,
-            closed_at: None,
-            closed_by: None,
-        };
-        tx.execute(
-            "INSERT INTO task_budgets
-             (id, public_id, owner_user_id, agent_id, parent_budget_id, task_id, currency,
-              amount_limit, amount_scale, state, opened_at, opened_by, source, reason,
-              request_fingerprint)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 6, 'open', ?9, ?10, ?11, ?12, ?13)",
-            params![
-                budget.id.to_string(),
-                public_task_budget_id(&budget.id),
-                budget.owner_user_id.to_string(),
-                budget.agent_id.to_string(),
-                budget.parent_budget_id.to_string(),
-                budget.task_id,
-                budget.currency.to_string(),
-                budget.amount_limit.units(),
-                budget.opened_at.to_rfc3339(),
-                budget.opened_by,
-                budget.source,
-                budget.reason,
-                budget.request_fingerprint,
-            ],
+        let task_budget = insert_open_task_budget(
+            &tx,
+            request,
+            &parent.budget.id,
+            fingerprint,
+            request.actor.clone(),
+            now,
         )?;
         tx.commit()?;
         Ok(OpenTaskBudgetResponse {
-            task_budget: TaskBudgetSnapshot {
-                budget,
-                usage: TaskBudgetUsage::NONE,
-            },
+            task_budget,
             replayed: false,
         })
     }
@@ -225,6 +181,7 @@ impl SqliteGovernanceRepository {
         request: &CloseTaskBudgetRequest,
         now: DateTime<Utc>,
     ) -> Result<CloseTaskBudgetResponse, TaskBudgetError> {
+        self.expire_task_budget_approvals(now)?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -244,28 +201,10 @@ impl SqliteGovernanceRepository {
                 replayed: true,
             });
         }
-        if existing.usage.outstanding_hold_count > 0 {
-            return Err(TaskBudgetError::OutstandingHolds {
-                count: existing.usage.outstanding_hold_count,
-            });
-        }
-        require_one_updated_row(
-            tx.execute(
-                "UPDATE task_budgets SET state = 'closed', closed_at = ?2, closed_by = ?3
-                 WHERE id = ?1 AND state = 'open'",
-                params![
-                    request.task_budget_id.to_string(),
-                    now.to_rfc3339(),
-                    request.actor
-                ],
-            )?,
-            "task budget changed while closing",
-        )?;
+        let task_budget = close_open_task_budget(&tx, existing, &request.actor, now)?;
+        // A human closing directly also settles the agent's pending request.
+        approve_pending_close_request(&tx, &task_budget.budget.id, &request.actor, now)?;
         tx.commit()?;
-        let mut task_budget = existing;
-        task_budget.budget.state = TaskBudgetState::Closed;
-        task_budget.budget.closed_at = Some(now);
-        task_budget.budget.closed_by = Some(request.actor.clone());
         Ok(CloseTaskBudgetResponse {
             task_budget,
             replayed: false,
@@ -341,9 +280,141 @@ impl TaskBudgetRepository for SqliteGovernanceRepository {
     ) -> Result<Vec<TaskBudgetSnapshot>, StorageError> {
         open_task_budgets_for_parent(&self.conn, parent_budget_id)
     }
+
+    fn pending_task_budget_approval_for_spend(
+        &self,
+        agent_id: &AgentId,
+        task_id: &str,
+        currency: Currency,
+        now: DateTime<Utc>,
+    ) -> Result<Option<TaskBudgetApprovalKind>, StorageError> {
+        pending_task_budget_approval_for_task(&self.conn, agent_id, task_id, currency, now)
+    }
 }
 
-fn open_task_budget_for(
+/// Check the parent's unallocated balance and insert an open task budget.
+pub(super) fn insert_open_task_budget(
+    tx: &Connection,
+    request: &OpenTaskBudgetRequest,
+    parent_budget_id: &BudgetId,
+    fingerprint: String,
+    opened_by: String,
+    now: DateTime<Utc>,
+) -> Result<TaskBudgetSnapshot, TaskBudgetError> {
+    require_unallocated(tx, parent_budget_id, request.currency, request.amount_limit)?;
+    let budget = TaskBudget {
+        id: TaskBudgetId::new(),
+        owner_user_id: request.owner_user_id.clone(),
+        agent_id: request.agent_id.clone(),
+        parent_budget_id: parent_budget_id.clone(),
+        task_id: request.task_id.clone(),
+        currency: request.currency,
+        amount_limit: request.amount_limit,
+        state: TaskBudgetState::Open,
+        opened_at: now,
+        opened_by,
+        source: request.source.clone(),
+        reason: trimmed_reason(request.reason.as_deref()),
+        request_fingerprint: fingerprint,
+        closed_at: None,
+        closed_by: None,
+    };
+    tx.execute(
+        "INSERT INTO task_budgets
+         (id, public_id, owner_user_id, agent_id, parent_budget_id, task_id, currency,
+          amount_limit, amount_scale, state, opened_at, opened_by, source, reason,
+          request_fingerprint)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 6, 'open', ?9, ?10, ?11, ?12, ?13)",
+        params![
+            budget.id.to_string(),
+            public_task_budget_id(&budget.id),
+            budget.owner_user_id.to_string(),
+            budget.agent_id.to_string(),
+            budget.parent_budget_id.to_string(),
+            budget.task_id,
+            budget.currency.to_string(),
+            budget.amount_limit.units(),
+            budget.opened_at.to_rfc3339(),
+            budget.opened_by,
+            budget.source,
+            budget.reason,
+            budget.request_fingerprint,
+        ],
+    )?;
+    Ok(TaskBudgetSnapshot {
+        budget,
+        usage: TaskBudgetUsage::NONE,
+    })
+}
+
+/// Fail unless `amount` fits the parent's remaining balance minus the unused
+/// part of its open task budgets.
+pub(super) fn require_unallocated(
+    conn: &Connection,
+    parent_budget_id: &BudgetId,
+    currency: Currency,
+    amount: Amount,
+) -> Result<(), TaskBudgetError> {
+    let balance = load_budget_balance_by_id(conn, parent_budget_id)?
+        .ok_or(TaskBudgetError::NoAvailableBudget { currency })?;
+    let allocated = open_task_budgets_for_parent(conn, parent_budget_id)?
+        .iter()
+        .try_fold(Amount::ZERO, |total, snapshot| {
+            total.checked_add(snapshot.allocated_headroom())
+        })
+        .ok_or_else(|| StorageError::InvalidData("task allocation overflow".into()))?;
+    let available = balance
+        .remaining_amount
+        .checked_sub(allocated)
+        .ok_or_else(|| StorageError::InvalidData("task allocation overflow".into()))?;
+    if available < amount {
+        return Err(TaskBudgetError::InsufficientUnallocatedBudget {
+            available: if available.is_negative() {
+                Amount::ZERO
+            } else {
+                available
+            },
+            requested: amount,
+        });
+    }
+    Ok(())
+}
+
+/// Close an open task budget once no attributed authorization is outstanding.
+pub(super) fn close_open_task_budget(
+    tx: &Connection,
+    existing: TaskBudgetSnapshot,
+    actor: &str,
+    now: DateTime<Utc>,
+) -> Result<TaskBudgetSnapshot, TaskBudgetError> {
+    if existing.usage.outstanding_hold_count > 0 {
+        return Err(TaskBudgetError::OutstandingHolds {
+            count: existing.usage.outstanding_hold_count,
+        });
+    }
+    require_one_updated_row(
+        tx.execute(
+            "UPDATE task_budgets SET state = 'closed', closed_at = ?2, closed_by = ?3
+             WHERE id = ?1 AND state = 'open'",
+            params![existing.budget.id.to_string(), now.to_rfc3339(), actor],
+        )?,
+        "task budget changed while closing",
+    )?;
+    let mut task_budget = existing;
+    task_budget.budget.state = TaskBudgetState::Closed;
+    task_budget.budget.closed_at = Some(now);
+    task_budget.budget.closed_by = Some(actor.to_string());
+    Ok(task_budget)
+}
+
+pub(super) fn trimmed_reason(reason: Option<&str>) -> Option<String> {
+    reason
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+        .map(str::to_string)
+}
+
+pub(super) fn open_task_budget_for(
     conn: &Connection,
     agent_id: &AgentId,
     task_id: &str,
@@ -356,7 +427,7 @@ fn open_task_budget_for(
     )
 }
 
-fn open_task_budgets_for_parent(
+pub(super) fn open_task_budgets_for_parent(
     conn: &Connection,
     parent_budget_id: &BudgetId,
 ) -> Result<Vec<TaskBudgetSnapshot>, StorageError> {
@@ -370,7 +441,7 @@ fn open_task_budgets_for_parent(
     with_usage(conn, budgets)
 }
 
-fn load_task_budget_where(
+pub(super) fn load_task_budget_where(
     conn: &Connection,
     predicate: &str,
     params: impl rusqlite::Params,

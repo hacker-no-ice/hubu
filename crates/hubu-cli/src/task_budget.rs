@@ -91,7 +91,22 @@ fn list(client: &CliContext, mut args: Vec<String>) -> Result<()> {
     let include_all = take_flag(&mut args, "--all");
     let agent_id = take_value(&mut args, "--agent-id");
     ensure_no_args(args)?;
-    let task_budgets = fetch(client, agent_id.as_deref(), include_all)?;
+    let response = get_json(client, &list_path(agent_id.as_deref(), include_all)?)?;
+    let task_budgets = task_budgets_at(&response)?;
+    let pending = response
+        .get("pending_approvals")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if !pending.is_empty() {
+        println!(
+            "{}",
+            terminal::stdout().heading("Waiting for your approval")
+        );
+        for approval in &pending {
+            print_task_budget_approval_summary(approval)?;
+        }
+    }
     if task_budgets.is_empty() {
         let message = if include_all {
             "No task budgets."
@@ -140,6 +155,11 @@ pub(crate) fn fetch(
     agent_id: Option<&str>,
     include_all: bool,
 ) -> Result<Vec<Value>> {
+    let response = get_json(client, &list_path(agent_id, include_all)?)?;
+    task_budgets_at(&response)
+}
+
+fn list_path(agent_id: Option<&str>, include_all: bool) -> Result<String> {
     let mut query = Vec::new();
     if let Some(agent_id) = agent_id {
         if !agent_id
@@ -153,12 +173,14 @@ pub(crate) fn fetch(
     if include_all {
         query.push("all=true".to_string());
     }
-    let path = if query.is_empty() {
+    Ok(if query.is_empty() {
         "/task-budgets".to_string()
     } else {
         format!("/task-budgets?{}", query.join("&"))
-    };
-    let response = get_json(client, &path)?;
+    })
+}
+
+fn task_budgets_at(response: &Value) -> Result<Vec<Value>> {
     response
         .get("task_budgets")
         .and_then(Value::as_array)
@@ -203,6 +225,88 @@ pub(crate) fn print_task_budget(task_budget: &Value) -> Result<()> {
         ),
         None => println!("    opened: {opened_at}"),
     }
+    if let Some(close) = task_budget
+        .get("close_approval_request_id")
+        .and_then(Value::as_str)
+    {
+        println!("    close requested: {close} (waiting for approval)");
+    }
+    Ok(())
+}
+
+/// Whether an approval link response is a task budget approval request.
+pub(crate) fn is_task_budget_approval(approval: &Value) -> bool {
+    approval
+        .get("kind")
+        .and_then(Value::as_str)
+        .is_some_and(|kind| kind.starts_with("task_budget_"))
+}
+
+fn print_task_budget_approval_summary(approval: &Value) -> Result<()> {
+    let review = approval
+        .get("review")
+        .ok_or_else(|| anyhow!("server response missing `review`"))?;
+    let action = match string_at(approval, "kind")? {
+        "task_budget_open" => "open",
+        _ => "close",
+    };
+    println!(
+        "  {}  {action} task {}  limit: {}  agent_id: {}  expires: {}",
+        string_at(approval, "approval_request_id")?,
+        terminal_safe_text(string_at(review, "task_id")?),
+        money_at(review, "amount_limit_cents")?,
+        string_at(review, "agent_id")?,
+        local_timestamp(string_at(review, "expires_at")?)
+    );
+    Ok(())
+}
+
+/// The human review of a task budget proposal or close request.
+pub(crate) fn print_task_budget_approval(approval: &Value) -> Result<()> {
+    let style = terminal::stdout();
+    let kind = string_at(approval, "kind")?;
+    println!(
+        "{}",
+        style.heading(if kind == "task_budget_open" {
+            "Task budget proposal"
+        } else {
+            "Task budget close request"
+        })
+    );
+    println!(
+        "  approval_request_id: {}",
+        string_at(approval, "approval_request_id")?
+    );
+    println!(
+        "  status: {}",
+        style.semantic(string_at(approval, "status")?)
+    );
+    let review = approval
+        .get("review")
+        .ok_or_else(|| anyhow!("server response missing `review`"))?;
+    println!("  agent_id: {}", string_at(review, "agent_id")?);
+    println!(
+        "  task: {}",
+        terminal_safe_text(string_at(review, "task_id")?)
+    );
+    println!("  limit: {}", money_at(review, "amount_limit_cents")?);
+    if let Some(reason) = review.get("reason").and_then(Value::as_str) {
+        println!("  reason: {}", terminal_safe_text(reason));
+    }
+    println!(
+        "  requested: {}  expires: {}",
+        local_timestamp(string_at(review, "requested_at")?),
+        local_timestamp(string_at(review, "expires_at")?)
+    );
+    if kind == "task_budget_close" {
+        println!("  Approve only after checking that the task is done.");
+    }
+    if let Some(task_budget) = approval
+        .get("task_budget")
+        .filter(|value| value.is_object())
+    {
+        print_task_budget(task_budget)?;
+    }
     Ok(())
 }
 
@@ -214,6 +318,10 @@ A task budget reserves part of the agent's budget for one task. Spend that
 carries the task's trusted task_id must fit the task budget; other spend
 cannot use its unused part. Closing returns the unused part to the agent
 budget. Closing is refused while an authorization is outstanding.
+
+You open and close directly. An agent instead proposes a task budget or asks
+to close one; `list` shows those requests, and you resolve them with
+`hubu spend approval approve|deny --approval-request-id tba_...`.
 
 Usage:
   hubu budget task open --agent-id ID --task-id TASK --amount DECIMAL [--currency usd|usdc] [--reason TEXT]

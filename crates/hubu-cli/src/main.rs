@@ -2353,6 +2353,9 @@ fn spend_approval(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
                 base_url,
                 &format!("/spend/approval?approval_request_id={approval_request_id}"),
             )?;
+            if task_budget::is_task_budget_approval(&response) {
+                return task_budget::print_task_budget_approval(&response);
+            }
             print_spend_approval_response(&response)
         }
         "approve" | "deny" => {
@@ -2364,6 +2367,9 @@ fn spend_approval(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
                     "decision": action,
                 }),
             )?;
+            if task_budget::is_task_budget_approval(&response) {
+                return task_budget::print_task_budget_approval(&response);
+            }
             print_spend_response(&response)
         }
         _ => bail!("unknown spend approval action `{action}`; use get, approve, or deny"),
@@ -4178,7 +4184,9 @@ Usage:
   hubu spend approval approve --approval-request-id ID
   hubu spend approval deny --approval-request-id ID
 
-The review is immutable. Approving reserves budget and returns an authorization token; it does not invoke a provider. Denial is terminal for that request. Repeating the same decision is idempotent, while a conflicting decision is rejected."
+The review is immutable. Approving reserves budget and returns an authorization token; it does not invoke a provider. Denial is terminal for that request. Repeating the same decision is idempotent, while a conflicting decision is rejected.
+
+A tba_ ID is an agent's task budget request. Approving a proposal opens the task budget and reserves its limit; approving a close request closes it and returns the unused amount, so check that the task is done first. Denying a close request keeps the task budget open. Requests expire after 24 hours."
     );
 }
 

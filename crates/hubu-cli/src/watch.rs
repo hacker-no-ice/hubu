@@ -665,6 +665,8 @@ fn render(
 
 /// One line per open task budget under its agent: spend so far against the
 /// task's cap and what is left. Spend includes outstanding reservations.
+/// Budgets with a pending close request, and proposals waiting for a human,
+/// say so.
 fn task_budget_lines(
     out: &mut String,
     row: &Value,
@@ -690,14 +692,42 @@ fn task_budget_lines(
             })
             .map(|used| money::format_money(used, money::Direction::Up))
             .unwrap_or_else(|| "—".into());
+        let close = if task["close_approval_request_id"].is_string() {
+            " · close requested"
+        } else {
+            ""
+        };
         let detail = format!(
-            "  {used} of {} · {} left",
+            "  {used} of {} · {} left{close}",
             shown(task, "limit_cents"),
             shown(task, "remaining_cents")
         );
         let prefix = format!("{indent}↳ task ");
         let task_id = text(
             &task["task_id"],
+            content
+                .saturating_sub(display_width(&prefix) + display_width(&detail))
+                .max(4),
+        );
+        line(
+            out,
+            &[(format!("{prefix}{task_id}{detail}"), None)],
+            style,
+            width,
+        );
+    }
+    for proposal in row["task_budget_proposals"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        let detail = format!(
+            "  {} proposed · awaiting approval",
+            shown(proposal, "limit_cents")
+        );
+        let prefix = format!("{indent}↳ task ");
+        let task_id = text(
+            &proposal["task_id"],
             content
                 .saturating_sub(display_width(&prefix) + display_width(&detail))
                 .max(4),
@@ -808,6 +838,19 @@ mod tests {
         assert!(task_line.contains("landing-page"));
         assert!(!task_line.contains('\u{1b}'));
         assert!(task_line.contains("$1.734 of $3.00 · $1.266 left"));
+        s["rows"][0]["task_budgets"][0]["close_approval_request_id"] = json!("tba_0123456789ab");
+        s["rows"][0]["task_budget_proposals"] = json!([{
+            "approval_request_id": "tba_abcdefghijkl", "task_id": "hero-image",
+            "limit": money("2000000"),
+        }]);
+        let pending = output(&s, &o);
+        assert!(pending
+            .lines()
+            .any(|line| line.contains("↳ task lan") && line.contains("close requested")));
+        assert!(pending.lines().any(|line| line.contains("hero-image")
+            && line.contains("$2.00 proposed · awaiting approval")));
+        s["rows"][0]["task_budgets"][0]["close_approval_request_id"] = Value::Null;
+        s["rows"][0]["task_budget_proposals"] = json!([]);
         let mut second = s["rows"][0].clone();
         second["agent_id"] = json!("b");
         second["name"] = json!("research-bot");

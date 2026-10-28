@@ -8,6 +8,7 @@ mod human_lifecycle;
 mod lifecycle;
 mod lifecycle_coverage;
 mod task_budget;
+mod task_budget_approval;
 pub use authorization_void::{AuthorizationVoidError, AuthorizationVoidResult};
 pub use automatic_lifecycle::SelectedSpendPolicy;
 pub use history::HistorySnapshot;

@@ -130,7 +130,7 @@ fn all_tool_definitions() -> Vec<Value> {
         ),
         agent_write_tool(
             "hubu_open_task_budget",
-            "Open a task budget: reserve part of the agent's budget for one task, such as \"design this landing page for $3\". Spend from this session then draws from it and is denied once it would exceed it. Repeating the same request returns the open budget. Close it when the task ends to return the unused amount.",
+            "Propose a task budget for one task, such as \"design this landing page for $3\". A human must approve it on the returned approval_request_id before it opens; until then it reserves nothing and this session's spend is denied. Once open, it reserves the amount and caps this session's spend; each request still goes through the normal approval policy. Repeating the same request returns the pending proposal or the open budget. Ask to close it when the task is done.",
             json_schema_required(json!({
                 "agent_id": { "type": "string", "minLength": 1 },
                 "task_id": {
@@ -146,14 +146,18 @@ fn all_tool_definitions() -> Vec<Value> {
         ),
         agent_write_tool(
             "hubu_close_task_budget",
-            "Close a task budget when its task ends. The unused amount returns to the agent budget. Refused while an authorization under it is outstanding.",
+            "Ask a human to close a task budget when you believe its task is done. The human checks the work and approves or rejects the returned approval_request_id. While the request is pending, new spend in this session is refused; outstanding authorizations can still settle. Approval returns the unused amount to the agent budget; rejection keeps the task budget open.",
             json_schema_required(json!({
-                "task_budget_id": { "type": "string", "minLength": 1 }
+                "task_budget_id": { "type": "string", "minLength": 1 },
+                "reason": {
+                    "type": "string",
+                    "description": "What was done, for the human who checks the task"
+                }
             }), &["task_budget_id"]),
         ),
         read_tool(
             "hubu_list_task_budgets",
-            "List open task budgets with spend so far (settled plus frozen) and remaining; include_all adds closed ones.",
+            "List open task budgets with spend so far (settled plus frozen) and remaining, plus proposals and close requests waiting for a human; include_all adds closed ones.",
             json_schema(json!({
                 "agent_id": { "type": "string" },
                 "include_all": { "type": "boolean", "default": false }
@@ -222,14 +226,14 @@ fn all_tool_definitions() -> Vec<Value> {
         ),
         read_tool(
             "hubu_get_spend_approval",
-            "Get the durable pending, approved, or denied state and immutable human review payload for one spend approval request.",
+            "Get the durable state and immutable human review payload for one approval request: a spend approval, or a tba_ task budget proposal or close request.",
             json_schema_required(json!({
                 "approval_request_id": { "type": "string" }
             }), &["approval_request_id"]),
         ),
         approval_resolution_tool(
             "hubu_resolve_spend_approval",
-            "Resolve a pending spend approval after the human explicitly chooses approve or deny in chat. The native client prompt confirms or cancels this formed resolver call; cancelling does not submit a denial.",
+            "Resolve a pending approval request (a spend approval, or a tba_ task budget proposal or close request) after the human explicitly chooses approve or deny in chat. The native client prompt confirms or cancels this formed resolver call; cancelling does not submit a denial.",
             json_schema_required(json!({
                 "approval_request_id": { "type": "string" },
                 "decision": { "type": "string", "enum": ["approve", "deny"] }

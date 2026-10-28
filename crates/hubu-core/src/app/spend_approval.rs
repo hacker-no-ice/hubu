@@ -16,6 +16,7 @@ use crate::{
     budget::{
         BudgetBalance, BudgetHold, BudgetManager, BudgetManagerError, ReleaseBudgetResponse,
         ReservationAllocation, ReserveBudgetRequest, ReserveBudgetResponse, SettleBudgetResponse,
+        TaskBudgetApprovalKind,
     },
     persistence::{
         BudgetRepository, SelectedSpendPolicy, SpendAttemptAdmission, SpendRepository,
@@ -686,6 +687,7 @@ impl SpendApprovalService {
             request.currency,
             &budget_id,
             request.amount,
+            now,
         ) {
             Ok(TaskAllocation::Allowed(allocation)) => allocation,
             Ok(TaskAllocation::Denied(reason)) => {
@@ -1025,6 +1027,7 @@ impl SpendApprovalService {
                     decision_record.request.currency,
                     &budget_id,
                     decision_record.request.amount,
+                    now,
                 )? {
                     TaskAllocation::Allowed(allocation) => allocation,
                     // The request stays pending: the human may close or
@@ -1448,6 +1451,13 @@ pub const TASK_BUDGET_ALLOCATION_HELD: &str = "budget balance is held for open t
 /// available budget (for example, its period ended).
 pub const TASK_BUDGET_PARENT_UNAVAILABLE: &str =
     "task budget is drawn from an agent budget that is no longer available";
+/// Denial reason while the task's proposed task budget waits for a human.
+/// A proposal reserves nothing, so its task's spend does not fall through
+/// to the agent budget.
+pub const TASK_BUDGET_PROPOSAL_PENDING: &str = "task budget proposal is waiting for human approval";
+/// Denial reason while a request to close the task's budget waits for a human.
+pub const TASK_BUDGET_CLOSE_PENDING: &str =
+    "task budget close request is waiting for human approval";
 
 enum TaskAllocation {
     Allowed(ReservationAllocation),
@@ -1457,9 +1467,11 @@ enum TaskAllocation {
 /// Apply open task budgets to one reservation from `budget_id`.
 ///
 /// Spend carrying the `task_id` of an open task budget must fit that task's
-/// remaining balance and is attributed to it. Any spend must leave the unused
-/// headroom of the budget's other open task budgets untouched. Spend whose
-/// `task_id` has no open task budget draws from the agent budget as before.
+/// remaining balance and is attributed to it. Spend for a task whose proposal
+/// or close request is waiting for a human is denied. Any spend must leave
+/// the unused headroom of the budget's other open task budgets untouched.
+/// Spend whose `task_id` has no open task budget draws from the agent budget
+/// as before.
 fn task_allocation_for_spend<G: TaskBudgetRepository>(
     governance: &G,
     agent_id: &AgentId,
@@ -1467,7 +1479,19 @@ fn task_allocation_for_spend<G: TaskBudgetRepository>(
     currency: Currency,
     budget_id: &BudgetId,
     amount: Amount,
+    now: DateTime<Utc>,
 ) -> Result<TaskAllocation, SpendApprovalError> {
+    if let Some(task_id) = task_id {
+        match governance.pending_task_budget_approval_for_spend(agent_id, task_id, currency, now)? {
+            Some(TaskBudgetApprovalKind::Open) => {
+                return Ok(TaskAllocation::Denied(TASK_BUDGET_PROPOSAL_PENDING))
+            }
+            Some(TaskBudgetApprovalKind::Close) => {
+                return Ok(TaskAllocation::Denied(TASK_BUDGET_CLOSE_PENDING))
+            }
+            None => {}
+        }
+    }
     let task_budget = match task_id {
         Some(task_id) => governance.open_task_budget_for_spend(agent_id, task_id, currency)?,
         None => None,
@@ -2206,5 +2230,331 @@ mod tests {
             .find(|hold| hold.id == authorization.budget_reservation.hold.id)
             .unwrap();
         assert_eq!(hold.task_budget_id, Some(opened.task_budget.budget.id));
+    }
+
+    impl ServiceHarness {
+        fn propose_task_budget(
+            &mut self,
+            task_id: &str,
+            amount: i64,
+            now: DateTime<Utc>,
+        ) -> Result<crate::budget::ProposeTaskBudgetResponse, crate::budget::TaskBudgetError>
+        {
+            crate::app::TaskBudgetService.propose(
+                crate::budget::OpenTaskBudgetRequest {
+                    owner_user_id: self.user.user_id.clone(),
+                    agent_id: self.agent_id.clone(),
+                    task_id: task_id.to_string(),
+                    currency: Currency::Usd,
+                    amount_limit: cents(amount),
+                    actor: "agent:test".to_string(),
+                    source: "hubu-unified-mcp".to_string(),
+                    reason: Some("landing page".to_string()),
+                },
+                &self.budget_manager,
+                &mut self.governance,
+                now,
+            )
+        }
+
+        fn request_close(
+            &mut self,
+            id: &hubu_common::ids::TaskBudgetId,
+            now: DateTime<Utc>,
+        ) -> Result<crate::budget::RequestTaskBudgetCloseResponse, crate::budget::TaskBudgetError>
+        {
+            crate::app::TaskBudgetService.request_close(
+                crate::budget::RequestTaskBudgetCloseRequest {
+                    owner_user_id: self.user.user_id.clone(),
+                    task_budget_id: id.clone(),
+                    actor: "agent:test".to_string(),
+                    source: "hubu-unified-mcp".to_string(),
+                    reason: Some("landing page shipped".to_string()),
+                },
+                &mut self.governance,
+                now,
+            )
+        }
+
+        fn resolve_task_budget_approval(
+            &mut self,
+            id: &hubu_common::ids::TaskBudgetApprovalId,
+            decision: crate::budget::TaskBudgetApprovalDecision,
+            now: DateTime<Utc>,
+        ) -> Result<crate::budget::ResolveTaskBudgetApprovalResponse, crate::budget::TaskBudgetError>
+        {
+            crate::app::TaskBudgetService.resolve(
+                crate::budget::ResolveTaskBudgetApprovalRequest {
+                    owner_user_id: self.user.user_id.clone(),
+                    approval_id: id.clone(),
+                    decision,
+                    actor: "human:test".to_string(),
+                },
+                &self.budget_manager,
+                &mut self.governance,
+                now,
+            )
+        }
+    }
+
+    #[test]
+    fn proposed_task_budget_reserves_nothing_and_denies_its_task_until_approved() {
+        use crate::budget::{TaskBudgetApprovalDecision, TaskBudgetApprovalStatus};
+        let mut harness = ServiceHarness::new(1_000);
+        let now = Utc::now();
+        let proposed = harness.propose_task_budget("design", 300, now).unwrap();
+        assert!(!proposed.replayed);
+        assert!(proposed.task_budget.is_none());
+        let proposal = proposed.approval.expect("proposal is pending");
+        assert_eq!(proposal.status, TaskBudgetApprovalStatus::Pending);
+        assert_eq!(
+            proposal.expires_at,
+            now + Duration::hours(crate::budget::TASK_BUDGET_APPROVAL_TTL_HOURS)
+        );
+
+        // The task's spend is denied, not passed through to the agent budget.
+        assert_eq!(
+            rejected_reasons(harness.authorize_for_task("early", 100, Some("design"))),
+            vec![TASK_BUDGET_PROPOSAL_PENDING.to_string()]
+        );
+        // Nothing is reserved: other spend can still use the whole budget.
+        assert!(harness
+            .governance
+            .list_task_budgets(&harness.user.user_id, None, true)
+            .unwrap()
+            .is_empty());
+
+        // Identical proposals replay; a different limit or a direct open conflicts.
+        let replay = harness.propose_task_budget("design", 300, now).unwrap();
+        assert!(replay.replayed);
+        assert_eq!(replay.approval.unwrap().id, proposal.id);
+        assert!(matches!(
+            harness.propose_task_budget("design", 400, now),
+            Err(crate::budget::TaskBudgetError::OpenTaskBudgetConflict)
+        ));
+        assert!(matches!(
+            harness.open_task_budget("design", 300),
+            Err(crate::budget::TaskBudgetError::ProposalPending)
+        ));
+
+        let approved_open = harness
+            .resolve_task_budget_approval(&proposal.id, TaskBudgetApprovalDecision::Approve, now)
+            .unwrap();
+        assert!(!approved_open.replayed);
+        assert_eq!(
+            approved_open.approval.approval.status,
+            TaskBudgetApprovalStatus::Approved
+        );
+        let task_budget = approved_open.approval.task_budget.expect("budget opened");
+        assert_eq!(task_budget.budget.opened_by, "human:test");
+        assert_eq!(task_budget.budget.source, "hubu-unified-mcp");
+        assert_eq!(task_budget.budget.amount_limit, cents(300));
+        assert!(
+            harness
+                .resolve_task_budget_approval(
+                    &proposal.id,
+                    TaskBudgetApprovalDecision::Approve,
+                    now
+                )
+                .unwrap()
+                .replayed
+        );
+        assert!(matches!(
+            harness.resolve_task_budget_approval(
+                &proposal.id,
+                TaskBudgetApprovalDecision::Deny,
+                now
+            ),
+            Err(crate::budget::TaskBudgetError::ApprovalResolved { status: "approved" })
+        ));
+
+        // Spend now draws from the task budget, under the normal policy.
+        let spend = approved(harness.authorize_for_task("draft", 100, Some("design")));
+        assert_eq!(
+            spend.budget_reservation.hold.task_budget_id.as_ref(),
+            Some(&task_budget.budget.id)
+        );
+        // An identical proposal now replays the open task budget.
+        let reopened = harness.propose_task_budget("design", 300, now).unwrap();
+        assert!(reopened.replayed && reopened.approval.is_none());
+        assert_eq!(
+            reopened.task_budget.unwrap().budget.id,
+            task_budget.budget.id
+        );
+    }
+
+    #[test]
+    fn close_request_blocks_new_task_spend_until_a_human_closes_or_rejects_it() {
+        use crate::budget::{TaskBudgetApprovalDecision, TaskBudgetApprovalStatus};
+        let mut harness = ServiceHarness::new(1_000);
+        let now = Utc::now();
+        let task_budget_id = harness
+            .open_task_budget("design", 300)
+            .unwrap()
+            .task_budget
+            .budget
+            .id;
+        let outstanding = approved(harness.authorize_for_task("draft-1", 120, Some("design")));
+
+        let requested = harness.request_close(&task_budget_id, now).unwrap();
+        let close = requested.approval.expect("close request is pending");
+        assert_eq!(
+            requested.task_budget.budget.state,
+            crate::budget::TaskBudgetState::Open
+        );
+        assert!(
+            harness
+                .request_close(&task_budget_id, now)
+                .unwrap()
+                .replayed
+        );
+        assert_eq!(
+            rejected_reasons(harness.authorize_for_task("draft-2", 50, Some("design"))),
+            vec![TASK_BUDGET_CLOSE_PENDING.to_string()]
+        );
+
+        // Rejecting the close keeps the budget open and spending resumes.
+        harness
+            .resolve_task_budget_approval(&close.id, TaskBudgetApprovalDecision::Deny, now)
+            .unwrap();
+        let resumed = approved(harness.authorize_for_task("draft-3", 50, Some("design")));
+
+        // Outstanding requests can still settle while a close is pending, and
+        // approval waits for them.
+        let second = harness
+            .request_close(&task_budget_id, now)
+            .unwrap()
+            .approval
+            .unwrap();
+        assert_ne!(second.id, close.id);
+        harness.submit_payment(&outstanding);
+        assert!(matches!(
+            harness.resolve_task_budget_approval(
+                &second.id,
+                TaskBudgetApprovalDecision::Approve,
+                now
+            ),
+            Err(crate::budget::TaskBudgetError::OutstandingHolds { count: 1 })
+        ));
+        let pending = harness
+            .governance
+            .pending_task_budget_close_request(&task_budget_id, now)
+            .unwrap();
+        assert_eq!(pending.map(|approval| approval.id), Some(second.id.clone()));
+
+        // A human's direct close settles the agent's request as approved.
+        harness.submit_payment(&resumed);
+        let closed = harness.close_task_budget(&task_budget_id).unwrap();
+        assert_eq!(closed.task_budget.usage.consumed_amount, cents(170));
+        let resolved = harness
+            .governance
+            .load_task_budget_approval_by_id(&harness.user.user_id, &second.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved.status, TaskBudgetApprovalStatus::Approved);
+    }
+
+    #[test]
+    fn approving_a_close_request_closes_and_returns_the_unused_amount() {
+        use crate::budget::TaskBudgetApprovalDecision;
+        let mut harness = ServiceHarness::new(1_000);
+        let now = Utc::now();
+        let task_budget_id = harness
+            .open_task_budget("design", 300)
+            .unwrap()
+            .task_budget
+            .budget
+            .id;
+        let spend = approved(harness.authorize_for_task("draft", 120, Some("design")));
+        harness.submit_payment(&spend);
+        let close = harness
+            .request_close(&task_budget_id, now)
+            .unwrap()
+            .approval
+            .unwrap();
+        let resolved = harness
+            .resolve_task_budget_approval(&close.id, TaskBudgetApprovalDecision::Approve, now)
+            .unwrap();
+        let task_budget = resolved.approval.task_budget.unwrap();
+        assert_eq!(
+            task_budget.budget.state,
+            crate::budget::TaskBudgetState::Closed
+        );
+        assert_eq!(task_budget.budget.closed_by.as_deref(), Some("human:test"));
+        assert_eq!(task_budget.returned_amount(), cents(180));
+        // A later close request for a closed budget replays it unchanged.
+        let replay = harness.request_close(&task_budget_id, now).unwrap();
+        assert!(replay.replayed && replay.approval.is_none());
+        // The task's later spend draws from the agent budget again.
+        let after = approved(harness.authorize_for_task("after", 100, Some("design")));
+        assert_eq!(after.budget_reservation.hold.task_budget_id, None);
+    }
+
+    #[test]
+    fn denied_and_expired_requests_stop_gating_their_task() {
+        use crate::budget::{TaskBudgetApprovalDecision, TaskBudgetApprovalStatus};
+        let mut harness = ServiceHarness::new(1_000);
+        let now = Utc::now();
+        let later = now + Duration::hours(crate::budget::TASK_BUDGET_APPROVAL_TTL_HOURS);
+
+        let denied = harness
+            .propose_task_budget("copy", 200, now)
+            .unwrap()
+            .approval
+            .unwrap();
+        harness
+            .resolve_task_budget_approval(&denied.id, TaskBudgetApprovalDecision::Deny, now)
+            .unwrap();
+        let fallthrough = approved(harness.authorize_for_task("copy", 100, Some("copy")));
+        assert_eq!(fallthrough.budget_reservation.hold.task_budget_id, None);
+
+        let expiring = harness
+            .propose_task_budget("design", 300, now)
+            .unwrap()
+            .approval
+            .unwrap();
+        assert_eq!(
+            harness
+                .governance
+                .pending_task_budget_approval_for_spend(
+                    &harness.agent_id,
+                    "design",
+                    Currency::Usd,
+                    later - Duration::seconds(1)
+                )
+                .unwrap(),
+            Some(crate::budget::TaskBudgetApprovalKind::Open)
+        );
+        assert_eq!(
+            harness
+                .governance
+                .pending_task_budget_approval_for_spend(
+                    &harness.agent_id,
+                    "design",
+                    Currency::Usd,
+                    later
+                )
+                .unwrap(),
+            None
+        );
+        assert!(harness
+            .governance
+            .list_pending_task_budget_approvals(&harness.user.user_id, None, later)
+            .unwrap()
+            .is_empty());
+        assert!(matches!(
+            harness.resolve_task_budget_approval(
+                &expiring.id,
+                TaskBudgetApprovalDecision::Approve,
+                later
+            ),
+            Err(crate::budget::TaskBudgetError::ApprovalResolved { status: "expired" })
+        ));
+        let stored = harness
+            .governance
+            .load_task_budget_approval_by_id(&harness.user.user_id, &expiring.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, TaskBudgetApprovalStatus::Expired);
     }
 }

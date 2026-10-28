@@ -6,8 +6,8 @@
 //! the parent budget, attributed to the task budget. Closing a task budget
 //! ends the allocation, which returns the unused remainder to the parent.
 
-use chrono::{DateTime, Utc};
-use hubu_common::ids::{AgentId, BudgetId, TaskBudgetId, UserId};
+use chrono::{DateTime, Duration, Utc};
+use hubu_common::ids::{AgentId, BudgetId, TaskBudgetApprovalId, TaskBudgetId, UserId};
 use hubu_common::money::{Amount, Currency, ACCOUNTING_SCALE};
 use sha2::{Digest, Sha256};
 
@@ -16,6 +16,14 @@ use crate::storage::StorageError;
 /// Longest accepted trusted task correlation, matching the MCP operation
 /// registry's `task_id` bound.
 pub const MAX_TASK_ID_BYTES: usize = 512;
+
+/// How long an agent's proposal or close request waits for a human before
+/// it expires. Task budgets themselves never expire.
+pub const TASK_BUDGET_APPROVAL_TTL_HOURS: i64 = 24;
+
+pub fn task_budget_approval_expires_at(requested_at: DateTime<Utc>) -> DateTime<Utc> {
+    requested_at + Duration::hours(TASK_BUDGET_APPROVAL_TTL_HOURS)
+}
 
 /// Persisted lifecycle of a task budget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,6 +174,173 @@ pub struct CloseTaskBudgetResponse {
     pub replayed: bool,
 }
 
+/// What an agent asks a human to approve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskBudgetApprovalKind {
+    /// Open a proposed task budget.
+    Open,
+    /// Close an open task budget.
+    Close,
+}
+
+impl TaskBudgetApprovalKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Close => "close",
+        }
+    }
+}
+
+impl std::str::FromStr for TaskBudgetApprovalKind {
+    type Err = StorageError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "open" => Ok(Self::Open),
+            "close" => Ok(Self::Close),
+            other => Err(StorageError::InvalidData(format!(
+                "unknown task budget approval kind {other}"
+            ))),
+        }
+    }
+}
+
+/// Persisted state of a task budget approval request. A pending request
+/// past its `expires_at` reads as expired before any sweep persists it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskBudgetApprovalStatus {
+    Pending,
+    Approved,
+    Denied,
+    Expired,
+}
+
+impl TaskBudgetApprovalStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Approved => "approved",
+            Self::Denied => "denied",
+            Self::Expired => "expired",
+        }
+    }
+}
+
+impl std::str::FromStr for TaskBudgetApprovalStatus {
+    type Err = StorageError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "pending" => Ok(Self::Pending),
+            "approved" => Ok(Self::Approved),
+            "denied" => Ok(Self::Denied),
+            "expired" => Ok(Self::Expired),
+            other => Err(StorageError::InvalidData(format!(
+                "unknown task budget approval status {other}"
+            ))),
+        }
+    }
+}
+
+/// An agent's request for a human to open or close a task budget.
+///
+/// An open request carries the proposed task, currency and limit; its
+/// `task_budget_id` is set once a human approves it. A close request names
+/// the open task budget it would close.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskBudgetApproval {
+    pub id: TaskBudgetApprovalId,
+    pub kind: TaskBudgetApprovalKind,
+    pub owner_user_id: UserId,
+    pub agent_id: AgentId,
+    pub task_id: String,
+    pub currency: Currency,
+    pub amount_limit: Amount,
+    pub task_budget_id: Option<TaskBudgetId>,
+    pub status: TaskBudgetApprovalStatus,
+    pub requested_at: DateTime<Utc>,
+    pub requested_by: String,
+    pub source: String,
+    pub reason: Option<String>,
+    pub request_fingerprint: String,
+    pub expires_at: DateTime<Utc>,
+    pub resolved_at: Option<DateTime<Utc>>,
+    pub resolved_by: Option<String>,
+}
+
+impl TaskBudgetApproval {
+    /// Status as of `now`: a pending request past its expiry is expired.
+    pub fn status_at(&self, now: DateTime<Utc>) -> TaskBudgetApprovalStatus {
+        if self.status == TaskBudgetApprovalStatus::Pending && self.expires_at <= now {
+            TaskBudgetApprovalStatus::Expired
+        } else {
+            self.status
+        }
+    }
+}
+
+/// An approval request together with the task budget it opened or would close.
+#[derive(Debug, Clone)]
+pub struct TaskBudgetApprovalSnapshot {
+    pub approval: TaskBudgetApproval,
+    pub task_budget: Option<TaskBudgetSnapshot>,
+}
+
+/// Outcome of an agent's proposal to open a task budget (an
+/// [`OpenTaskBudgetRequest`] that waits for a human). Nothing is reserved
+/// until a human approves it.
+#[derive(Debug, Clone)]
+pub struct ProposeTaskBudgetResponse {
+    /// The pending proposal, unless an identical task budget is already open.
+    pub approval: Option<TaskBudgetApproval>,
+    /// The identical task budget that is already open, if any.
+    pub task_budget: Option<TaskBudgetSnapshot>,
+    /// True when the request recovered an existing proposal or open budget.
+    pub replayed: bool,
+}
+
+/// An agent's request for a human to close an open task budget.
+#[derive(Debug, Clone)]
+pub struct RequestTaskBudgetCloseRequest {
+    pub owner_user_id: UserId,
+    pub task_budget_id: TaskBudgetId,
+    pub actor: String,
+    pub source: String,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RequestTaskBudgetCloseResponse {
+    pub task_budget: TaskBudgetSnapshot,
+    /// The pending close request; absent when the budget is already closed.
+    pub approval: Option<TaskBudgetApproval>,
+    /// True when the request recovered a pending close request or a closed budget.
+    pub replayed: bool,
+}
+
+/// A human decision on a task budget approval request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskBudgetApprovalDecision {
+    Approve,
+    Deny,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolveTaskBudgetApprovalRequest {
+    pub owner_user_id: UserId,
+    pub approval_id: TaskBudgetApprovalId,
+    pub decision: TaskBudgetApprovalDecision,
+    pub actor: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolveTaskBudgetApprovalResponse {
+    pub approval: TaskBudgetApprovalSnapshot,
+    /// True when the request had already been resolved the same way.
+    pub replayed: bool,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum TaskBudgetError {
     #[error("task_id must be 1 to {MAX_TASK_ID_BYTES} bytes without surrounding whitespace or control characters")]
@@ -185,6 +360,14 @@ pub enum TaskBudgetError {
     UnknownTaskBudget,
     #[error("task budget has {count} outstanding authorization(s); settle or release them before closing")]
     OutstandingHolds { count: u64 },
+    #[error("a proposal for this task is waiting for human approval")]
+    ProposalPending,
+    #[error("unknown task budget approval request")]
+    UnknownApproval,
+    #[error("task budget approval request is already {status}")]
+    ApprovalResolved { status: &'static str },
+    #[error("task budget is not open")]
+    TaskBudgetNotOpen,
     #[error(transparent)]
     Storage(#[from] StorageError),
 }
@@ -228,6 +411,14 @@ pub fn task_budget_open_fingerprint(
 /// Public identifier for a task budget (`tbg_` plus the shared public suffix).
 pub fn public_task_budget_id(id: &TaskBudgetId) -> String {
     format!("tbg_{}", id.public_suffix())
+}
+
+/// Prefix that marks a task budget approval request on the shared approval link.
+pub const TASK_BUDGET_APPROVAL_ID_PREFIX: &str = "tba_";
+
+/// Public identifier for a task budget approval request (`tba_` plus suffix).
+pub fn public_task_budget_approval_id(id: &TaskBudgetApprovalId) -> String {
+    format!("{TASK_BUDGET_APPROVAL_ID_PREFIX}{}", id.public_suffix())
 }
 
 #[cfg(test)]

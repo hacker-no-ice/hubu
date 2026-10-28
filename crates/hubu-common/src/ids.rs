@@ -169,6 +169,16 @@ impl TaskBudgetId {
     }
 }
 
+/// A human approval request to open or close a task budget.
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub struct TaskBudgetApprovalId(Uuid);
+
+impl TaskBudgetApprovalId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
+
 macro_rules! default_uuid_id {
     ($($id:ty),+ $(,)?) => {
         $(
@@ -200,6 +210,7 @@ default_uuid_id!(
     UserId,
     BudgetHoldId,
     TaskBudgetId,
+    TaskBudgetApprovalId,
 );
 
 macro_rules! public_uuid_suffix {
@@ -225,6 +236,7 @@ public_uuid_suffix!(
     PolicyId,
     UserId,
     TaskBudgetId,
+    TaskBudgetApprovalId,
 );
 
 fn public_suffix_from_uuid(uuid: Uuid) -> String {
@@ -270,6 +282,7 @@ display_uuid_id!(
     UserId,
     BudgetHoldId,
     TaskBudgetId,
+    TaskBudgetApprovalId,
 );
 
 macro_rules! parse_uuid_id {
@@ -305,4 +318,5 @@ parse_uuid_id!(
     UserId,
     BudgetHoldId,
     TaskBudgetId,
+    TaskBudgetApprovalId,
 );

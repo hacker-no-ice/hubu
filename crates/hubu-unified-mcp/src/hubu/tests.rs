@@ -2597,7 +2597,7 @@ fn request_body(raw: &str) -> Value {
 }
 
 #[test]
-fn opened_task_budget_binds_session_spend_and_shows_in_operation_status() {
+fn proposed_task_budget_binds_session_spend_until_a_human_closes_it() {
     let money =
         |units: &str| json!({"units": units, "scale": 6, "currency": "usd", "display": "x"});
     let task_budget = |state: &str, consumed: &str| {
@@ -2608,8 +2608,19 @@ fn opened_task_budget_binds_session_spend_and_shows_in_operation_status() {
             "frozen_amount": money("0"), "remaining_amount": money("1766000"),
         })
     };
+    let approval = |id: &str, kind: &str, status: &str, budget: Value| {
+        json!({
+            "approval_request_id": id, "kind": kind, "status": status,
+            "review": {"agent_id": "agt_1", "task_id": "landing-page", "currency": "usd",
+                "amount_limit": money("3000000")},
+            "task_budget": budget,
+        })
+    };
     let responses = vec![
-        (200, json!({"task_budget": task_budget("open", "0"), "idempotent_replay": false}).to_string()),
+        (200, json!({"approval": approval("tba_open00000000", "task_budget_open", "pending", Value::Null),
+            "task_budget": null, "idempotent_replay": false}).to_string()),
+        (200, json!({"decision": "deny", "reasons": ["task budget proposal is waiting for human approval"],
+            "payment": null}).to_string()),
         (200, json!({"decision": "allow", "decision_id": "decision-1", "auth_token_id": "token-1",
             "authorization_expires_at": "2999-01-01T00:00:00Z", "payment": null}).to_string()),
         (200, json!({"authorization_record": {"authorization_id": "decision-1", "status": "authorized",
@@ -2621,14 +2632,19 @@ fn opened_task_budget_binds_session_spend_and_shows_in_operation_status() {
                 Value::Object(other)
             }).unwrap(),
             task_budget("open", "1234000"),
-        ]}).to_string()),
-        (200, json!({"task_budget": task_budget("closed", "1234000"), "idempotent_replay": false}).to_string()),
+        ], "pending_approvals": []}).to_string()),
+        (200, json!({"approval": approval("tba_close0000000", "task_budget_close", "pending", Value::Null),
+            "task_budget": task_budget("open", "1234000"), "idempotent_replay": false}).to_string()),
+        (200, json!({"decision": "deny", "reasons": ["task budget close request is waiting for human approval"],
+            "payment": null}).to_string()),
+        (200, approval("tba_close0000000", "task_budget_close", "approved",
+            task_budget("closed", "1234000")).to_string()),
         (200, json!({"decision": "deny", "reasons": ["policy"], "payment": null}).to_string()),
     ];
     let (endpoint, requests, handle) = scripted_http_server(responses);
     let server = server_with_backends(&endpoint, None, false, None);
 
-    let opened = tool_call(
+    let proposed = tool_call(
         &server,
         "hubu_open_task_budget",
         json!({"agent_id": "agt_1", "task_id": "landing-page", "amount": "3"}),
@@ -2636,13 +2652,13 @@ fn opened_task_budget_binds_session_spend_and_shows_in_operation_status() {
     );
     let raw = requests
         .recv_timeout(Duration::from_secs(2))
-        .unwrap_or_else(|_| panic!("open did not reach Hubu: {opened}"));
-    assert!(raw.starts_with("POST /task-budgets HTTP/1.1"));
+        .unwrap_or_else(|_| panic!("proposal did not reach Hubu: {proposed}"));
+    assert!(raw.starts_with("POST /task-budgets/proposals HTTP/1.1"));
     assert_eq!(request_body(&raw)["source"], "hubu-unified-mcp");
-    assert!(opened["result"]["structuredContent"]["session_binding"]
+    assert!(proposed["result"]["structuredContent"]["session_binding"]
         .as_str()
         .unwrap()
-        .contains("draw from this task budget"));
+        .contains("A human must approve this proposal"));
 
     let spend = |tool_use_id: &str| {
         tool_call(
@@ -2652,9 +2668,14 @@ fn opened_task_budget_binds_session_spend_and_shows_in_operation_status() {
             Some(json!({"claudecode/toolUseId": tool_use_id})),
         )
     };
-    let authorized = spend("toolu_1");
+    // While the proposal waits, spend carries the task so Hubu denies it.
+    spend("toolu_0");
     let raw = requests.recv_timeout(Duration::from_secs(2)).unwrap();
     assert!(raw.starts_with("POST /spend/authorize HTTP/1.1"));
+    assert_eq!(request_body(&raw)["task_id"], "landing-page");
+
+    let authorized = spend("toolu_1");
+    let raw = requests.recv_timeout(Duration::from_secs(2)).unwrap();
     assert_eq!(request_body(&raw)["task_id"], "landing-page");
     let handle_id = authorized["result"]["structuredContent"]["operation_handle"]
         .as_str()
@@ -2672,30 +2693,46 @@ fn opened_task_budget_binds_session_spend_and_shows_in_operation_status() {
     let projected = &status["result"]["structuredContent"]["task_budget"];
     assert_eq!(projected["task_budget_id"], "tbg_0123456789ab");
     assert_eq!(projected["spent_amount"]["units"], "1234000");
-    assert!(status["result"]["content"][0]["text"]
-        .as_str()
-        .unwrap()
-        .contains("spent_amount"));
 
-    let closed = tool_call(
+    let requested = tool_call(
         &server,
         "hubu_close_task_budget",
-        json!({"task_budget_id": "tbg_0123456789ab"}),
+        json!({"task_budget_id": "tbg_0123456789ab", "reason": "landing page shipped"}),
         None,
     );
     let raw = requests.recv_timeout(Duration::from_secs(2)).unwrap();
-    assert!(raw.starts_with("POST /task-budgets/close HTTP/1.1"));
-    assert!(closed["result"]["structuredContent"]["session_binding"]
+    assert!(raw.starts_with("POST /task-budgets/close-requests HTTP/1.1"));
+    assert_eq!(request_body(&raw)["reason"], "landing page shipped");
+    assert!(requested["result"]["structuredContent"]["session_binding"]
         .as_str()
         .unwrap()
-        .contains("closed"));
+        .contains("must approve closing"));
 
+    // The binding stays while the close is pending, so Hubu refuses new spend.
     spend("toolu_2");
+    let raw = requests.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert_eq!(request_body(&raw)["task_id"], "landing-page");
+
+    // Seeing the human's approved close ends the binding.
+    let reviewed = tool_call(
+        &server,
+        "hubu_get_spend_approval",
+        json!({"approval_request_id": "tba_close0000000"}),
+        None,
+    );
+    let raw = requests.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(raw.starts_with("GET /spend/approval?approval_request_id=tba_close0000000 HTTP/1.1"));
+    assert_eq!(
+        reviewed["result"]["structuredContent"]["status"],
+        "approved"
+    );
+
+    spend("toolu_3");
     let raw = requests.recv_timeout(Duration::from_secs(2)).unwrap();
     assert_eq!(request_body(&raw)["task_id"], Value::Null);
     handle.join().unwrap();
 
-    // Redelivering the first call after the task closed keeps its recorded task.
+    // Redelivering an earlier call after the task closed keeps its recorded task.
     let replay = spend("toolu_1");
     assert_eq!(
         replay["result"]["structuredContent"]["operation_handle"],
@@ -2716,6 +2753,10 @@ fn task_budget_tool_arguments_fail_before_network() {
             json!({"agent_id": "agt_1", "task_id": "t", "amount": "1", "operation_key": "x"}),
         ),
         ("hubu_close_task_budget", json!({})),
+        (
+            "hubu_close_task_budget",
+            json!({"task_budget_id": "tbg_1", "reason": 3}),
+        ),
         (
             "hubu_close_task_budget",
             json!({"task_budget_id": "tbg_1&all=true"}),

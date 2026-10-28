@@ -800,11 +800,16 @@ pub(super) fn watch(request: &HttpRequest, state: &ServerState) -> Result<Value>
             .checked_add(expired)
             .ok_or_else(|| anyhow!("WATCH available balance overflow"))?;
     }
-    let open_task_budgets = state
-        .governance
-        .lock()
-        .map_err(|_| anyhow!("governance store lock poisoned"))?
-        .list_task_budgets(&user.user_id, None, false)?;
+    let (open_task_budgets, pending_task_budget_approvals) = {
+        let governance = state
+            .governance
+            .lock()
+            .map_err(|_| anyhow!("governance store lock poisoned"))?;
+        (
+            governance.list_task_budgets(&user.user_id, None, false)?,
+            governance.list_pending_task_budget_approvals(&user.user_id, None, now)?,
+        )
+    };
     let mut rows = Vec::new();
     let mut candidates = Vec::new();
     for agent in agents {
@@ -815,10 +820,29 @@ pub(super) fn watch(request: &HttpRequest, state: &ServerState) -> Result<Value>
             .filter(|t| t.budget.agent_id == internal && t.budget.currency.to_string() == currency)
             .map(|t| {
                 let c = t.budget.currency;
+                let close_request = pending_task_budget_approvals.iter().find(|p| {
+                    p.approval.task_budget_id.as_ref() == Some(&t.budget.id)
+                });
                 json!({"task_budget_id":hubu_core::budget::public_task_budget_id(&t.budget.id),
                     "task_id":t.budget.task_id, "budget_id":public_budget_id(&t.budget.parent_budget_id),
                     "limit":money(t.budget.amount_limit,c), "consumed":money(t.usage.consumed_amount,c),
-                    "frozen":money(t.usage.frozen_amount,c), "remaining":money(t.remaining_amount(),c)})
+                    "frozen":money(t.usage.frozen_amount,c), "remaining":money(t.remaining_amount(),c),
+                    "close_approval_request_id":close_request.map(|p| hubu_core::budget::public_task_budget_approval_id(&p.approval.id))})
+            })
+            .collect();
+        // Proposals waiting for a human; they reserve nothing yet.
+        let task_budget_proposals: Vec<_> = pending_task_budget_approvals
+            .iter()
+            .map(|p| &p.approval)
+            .filter(|a| {
+                a.kind == hubu_core::budget::TaskBudgetApprovalKind::Open
+                    && a.agent_id == internal
+                    && a.currency.to_string() == currency
+            })
+            .map(|a| {
+                json!({"approval_request_id":hubu_core::budget::public_task_budget_approval_id(&a.id),
+                    "task_id":a.task_id, "limit":money(a.amount_limit,a.currency),
+                    "expires_at":a.expires_at.to_rfc3339()})
             })
             .collect();
         let budgets: Vec<_> = data
@@ -887,6 +911,7 @@ pub(super) fn watch(request: &HttpRequest, state: &ServerState) -> Result<Value>
             "frozen_cents":selected.map(|(_,v)|v.frozen_amount.legacy_cents_ceil()),
             "consumed_cents":selected.map(|(_,v)|v.consumed_amount.legacy_cents_ceil()),
             "task_budgets":task_budgets,
+            "task_budget_proposals":task_budget_proposals,
             "state":if pending {"APPROVAL"} else if blocked || selected.is_none() || agent.status != "active" || agent.account_status != "active" {"BLOCKED"} else {"ALLOW"}}));
     }
     rows.sort_by_key(|row| row["agent_id"].as_str().unwrap_or_default().to_owned());
