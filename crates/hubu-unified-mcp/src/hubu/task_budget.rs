@@ -135,9 +135,8 @@ pub(super) fn observe_result(server: &Server, name: &str, mut result: Value) -> 
     result
 }
 
-/// The task budget an operation's trusted `task_id` draws from: this
-/// session's bound budget when it matches, else the open one for that task.
-pub(crate) fn status_task_budget(server: &Server, task_id: &str) -> Option<Value> {
+/// Spend so far against the task budget with this exact public id.
+pub(crate) fn status_task_budget(server: &Server, task_budget_id: &str) -> Option<Value> {
     let response = super::call_tool(
         server,
         Value::Null,
@@ -147,28 +146,13 @@ pub(crate) fn status_task_budget(server: &Server, task_id: &str) -> Option<Value
             meta: None,
         },
     );
-    let task_budgets = response
+    response
         .get("result")
         .filter(|result| result.get("isError") != Some(&Value::Bool(true)))
         .and_then(|result| result.pointer("/structuredContent/task_budgets"))
-        .and_then(Value::as_array)?;
-    let bound = server.active_task_budget();
-    let matching = |candidate: &&Value| candidate["task_id"].as_str() == Some(task_id);
-    task_budgets
+        .and_then(Value::as_array)?
         .iter()
-        .filter(matching)
-        .find(|candidate| {
-            bound.as_ref().is_some_and(|bound| {
-                candidate["task_budget_id"].as_str() == Some(bound.task_budget_id.as_str())
-            })
-        })
-        .or_else(|| {
-            task_budgets
-                .iter()
-                .filter(matching)
-                .find(|candidate| candidate["state"] == "open")
-        })
-        .or_else(|| task_budgets.iter().find(matching))
+        .find(|candidate| candidate["task_budget_id"].as_str() == Some(task_budget_id))
         .map(|task_budget| {
             json!({
                 "task_budget_id": task_budget["task_budget_id"],

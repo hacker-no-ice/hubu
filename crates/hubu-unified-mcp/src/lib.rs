@@ -1123,18 +1123,56 @@ impl Server {
     }
 
     /// Spend so far against the task budget an operation drew from, if any.
-    fn operation_task_budget(&self, operation_handle: &str) -> Option<Value> {
+    ///
+    /// The task budget is the one Hubu recorded on the operation's hold, read
+    /// from its authorization record (reusing `observed` when the status path
+    /// already fetched it), never a lookup by task name.
+    fn operation_task_budget(
+        &self,
+        operation_handle: &str,
+        observed: Option<&StandaloneAuthorizationObservation>,
+    ) -> Option<Value> {
         let OperationRegistryCapability::Available(registry) = self.operation_registry.as_ref()
         else {
             return None;
         };
-        let task_id = registry
+        let authorization_id = registry
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .operation_task_id(operation_handle)
+            .task_operation_authorization_id(operation_handle)
             .ok()
             .flatten()?;
-        hubu::status_task_budget(self, &task_id)
+        let fetched;
+        let record = match observed {
+            Some(StandaloneAuthorizationObservation::Verified(record)) => record,
+            _ => {
+                let response = hubu::call_tool(
+                    self,
+                    Value::Null,
+                    ToolCall {
+                        name: "hubu_get_authorization_record".into(),
+                        arguments: json!({"authorization_id": authorization_id}),
+                        meta: None,
+                    },
+                );
+                fetched = response
+                    .get("result")
+                    .filter(|result| result.get("isError") != Some(&Value::Bool(true)))
+                    .and_then(|result| result.pointer("/structuredContent/authorization_record"))
+                    .filter(|record| {
+                        record
+                            .get("authorization_id")
+                            .and_then(Value::as_str)
+                            .is_some_and(|returned| {
+                                same_approval_request_id(&authorization_id, returned)
+                            })
+                    })
+                    .cloned()?;
+                &fetched
+            }
+        };
+        let task_budget_id = record.pointer("/budget_hold/task_budget_id")?.as_str()?;
+        hubu::status_task_budget(self, task_budget_id)
     }
 
     fn mark_harness_operation_dispatch_started(
@@ -1408,16 +1446,16 @@ impl Server {
         self.synchronize_pending_approval_for_handle(operation_handle);
         match self.durable_operation_status(operation_handle) {
             Ok(status) => {
-                let result = match self.observe_standalone_authorization(operation_handle) {
+                let observation = self.observe_standalone_authorization(operation_handle);
+                let result = match &observation {
                     Some(observation) => {
-                        standalone_authorization_status_result(&status, &observation)
+                        standalone_authorization_status_result(&status, observation)
                     }
                     None => operation_status_result(&status),
                 };
-                success_response(
-                    id,
-                    with_task_budget(result, self.operation_task_budget(operation_handle)),
-                )
+                let task_budget =
+                    self.operation_task_budget(operation_handle, observation.as_ref());
+                success_response(id, with_task_budget(result, task_budget))
             }
             Err(_) => error_response(
                 id,

@@ -115,7 +115,9 @@ keeps its own trusted `task_id`.
 
 `hubu_operation_status` adds a `task_budget` projection to an operation that
 drew from one: the limit, `spent_amount`, `frozen_amount` and
-`remaining_amount`.
+`remaining_amount`. The projection uses the task budget recorded on the
+operation's hold, which the authorization record reports as
+`budget_hold.task_budget_id`. It never looks the budget up by task name.
 
 ## Storage and locking
 

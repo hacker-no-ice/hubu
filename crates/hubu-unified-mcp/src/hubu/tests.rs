@@ -2610,8 +2610,18 @@ fn opened_task_budget_binds_session_spend_and_shows_in_operation_status() {
     };
     let responses = vec![
         (200, json!({"task_budget": task_budget("open", "0"), "idempotent_replay": false}).to_string()),
-        (200, json!({"decision": "deny", "reasons": ["task budget does not have enough remaining balance"], "payment": null}).to_string()),
-        (200, json!({"task_budgets": [task_budget("open", "1234000")]}).to_string()),
+        (200, json!({"decision": "allow", "decision_id": "decision-1", "auth_token_id": "token-1",
+            "authorization_expires_at": "2999-01-01T00:00:00Z", "payment": null}).to_string()),
+        (200, json!({"authorization_record": {"authorization_id": "decision-1", "status": "authorized",
+            "budget_hold": {"task_budget_id": "tbg_0123456789ab"}}}).to_string()),
+        (200, json!({"task_budgets": [
+            // Another agent's budget for the same task name must not be chosen.
+            task_budget("open", "999000").as_object().cloned().map(|mut other| {
+                other.insert("task_budget_id".into(), json!("tbg_other0000000"));
+                Value::Object(other)
+            }).unwrap(),
+            task_budget("open", "1234000"),
+        ]}).to_string()),
         (200, json!({"task_budget": task_budget("closed", "1234000"), "idempotent_replay": false}).to_string()),
         (200, json!({"decision": "deny", "reasons": ["policy"], "payment": null}).to_string()),
     ];
@@ -2642,11 +2652,11 @@ fn opened_task_budget_binds_session_spend_and_shows_in_operation_status() {
             Some(json!({"claudecode/toolUseId": tool_use_id})),
         )
     };
-    let denied = spend("toolu_1");
+    let authorized = spend("toolu_1");
     let raw = requests.recv_timeout(Duration::from_secs(2)).unwrap();
     assert!(raw.starts_with("POST /spend/authorize HTTP/1.1"));
     assert_eq!(request_body(&raw)["task_id"], "landing-page");
-    let handle_id = denied["result"]["structuredContent"]["operation_handle"]
+    let handle_id = authorized["result"]["structuredContent"]["operation_handle"]
         .as_str()
         .unwrap()
         .to_string();
@@ -2655,6 +2665,8 @@ fn opened_task_budget_binds_session_spend_and_shows_in_operation_status() {
         json!(8),
         json!({"name": "hubu_operation_status", "arguments": {"operation_handle": handle_id}}),
     );
+    let raw = requests.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(raw.starts_with("GET /spend/authorizations/show?"), "{raw}");
     let raw = requests.recv_timeout(Duration::from_secs(2)).unwrap();
     assert!(raw.starts_with("GET /task-budgets?all=true HTTP/1.1"));
     let projected = &status["result"]["structuredContent"]["task_budget"];
@@ -2687,7 +2699,7 @@ fn opened_task_budget_binds_session_spend_and_shows_in_operation_status() {
     let replay = spend("toolu_1");
     assert_eq!(
         replay["result"]["structuredContent"]["operation_handle"],
-        denied["result"]["structuredContent"]["operation_handle"]
+        authorized["result"]["structuredContent"]["operation_handle"]
     );
 }
 

@@ -1712,17 +1712,23 @@ impl OperationRegistry {
         })
     }
 
-    /// The trusted task correlation recorded for one public operation.
-    pub(crate) fn operation_task_id(&self, operation_handle: &str) -> Result<Option<String>> {
+    /// The Hubu authorization record id of an operation that carries a
+    /// trusted task correlation; `None` when it has no task or no record yet.
+    pub(crate) fn task_operation_authorization_id(
+        &self,
+        operation_handle: &str,
+    ) -> Result<Option<String>> {
         validate_public_operation_handle(operation_handle)?;
         self.connection
             .query_row(
-                "SELECT task_id FROM harness_operations WHERE operation_handle = ?1",
+                "SELECT COALESCE(decision_id, approval_request_id) FROM harness_operations
+                 WHERE operation_handle = ?1 AND task_id IS NOT NULL",
                 [operation_handle],
                 |row| row.get::<_, Option<String>>(0),
             )
-            .optional()?
-            .ok_or_else(|| anyhow!("public operation handle is unknown"))
+            .optional()
+            .map(Option::flatten)
+            .map_err(Into::into)
     }
 
     pub(crate) fn fail_pre_execution_operation(

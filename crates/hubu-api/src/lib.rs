@@ -10651,6 +10651,18 @@ lease_profiles:
             hold.task_budget_id.as_deref(),
             Some(task_budget_id.as_str())
         );
+        let record = route(
+            authenticated_get_request(&format!(
+                "/spend/authorizations/show?authorization_id={}",
+                draft.decision_id
+            )),
+            &state,
+        );
+        assert_eq!(record.status, 200, "{}", record.body);
+        assert_eq!(
+            record.body["authorization_record"]["budget_hold"]["task_budget_id"],
+            task_budget_id.as_str()
+        );
 
         let claim = claim_executor_spend(
             json!({
