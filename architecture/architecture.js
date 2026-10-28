@@ -53,6 +53,7 @@ const sharedLinks = {
   budgetModel: ["Budget model", "crates/hubu-core/src/budget/model.rs"],
   taskBudget: ["Task budget model", "crates/hubu-core/src/budget/task.rs"],
   taskBudgetStore: ["Task budget store", "crates/hubu-core/src/persistence/task_budget.rs"],
+  taskBudgetApprovalStore: ["Task budget approval store", "crates/hubu-core/src/persistence/task_budget_approval.rs"],
   taskBudgetHttp: ["Task budget HTTP routes", "crates/hubu-api/src/task_budget.rs"],
   taskBudgetMcp: ["Task budget MCP session binding", "crates/hubu-unified-mcp/src/hubu/task_budget.rs"],
   spendingTarget: ["Spending target model", "crates/hubu-core/src/spending_target.rs"],
@@ -517,8 +518,9 @@ const components = {
       ["Replay-safe", "Authorizations, claims, and settlements are keyed by agent and operation; identical retries return stored state."],
       ["Advisory targets", "Owner spending targets are separate records. Exceeding one produces a warning, never a block."],
       ["Task budgets", "A task budget caps spend carrying its trusted task_id and holds its unused part back from other spend in the same agent budget. Holds stay on the agent budget and record the task; spend so far is derived from those holds and ledger charges. Closing returns the unused part."],
+      ["Task budget approvals", "An agent's proposal reserves nothing and denies its task's spend until a human approves it; an agent's close request refuses new task spend until a human approves or rejects it. Both are tba_ requests on the spend approval link and expire after 24 hours. Human CLI/HTTP opens and closes stay direct."],
     ],
-    links: [["Budget boundary and lock order", "docs/budget-architecture.md"], ["Task budgets", "docs/task-budgets.md"], sharedLinks.taskBudget, sharedLinks.taskBudgetStore, sharedLinks.budget, sharedLinks.budgetState, sharedLinks.budgetModel, sharedLinks.spendingTarget, sharedLinks.budgetCoordinator, sharedLinks.appSpend, sharedLinks.appClaims, sharedLinks.spendExecutor, sharedLinks.persistence, ["Budget DTOs", "crates/hubu-core/src/budget/dto.rs"]],
+    links: [["Budget boundary and lock order", "docs/budget-architecture.md"], ["Task budgets", "docs/task-budgets.md"], sharedLinks.taskBudget, sharedLinks.taskBudgetStore, sharedLinks.taskBudgetApprovalStore, sharedLinks.taskBudgetHttp, sharedLinks.budget, sharedLinks.budgetState, sharedLinks.budgetModel, sharedLinks.spendingTarget, sharedLinks.budgetCoordinator, sharedLinks.appSpend, sharedLinks.appClaims, sharedLinks.spendExecutor, sharedLinks.persistence, ["Budget DTOs", "crates/hubu-core/src/budget/dto.rs"]],
     nodes: [
       { id: "create", label: "Admin commands", sub: "create / update / revoke", x: 36, y: 76, w: 200, h: 92, tone: "human" },
       { id: "periods", label: "BudgetManager", sub: "sole public facade", x: 295, y: 76, w: 210, h: 92, tone: "core", path: "crates/hubu-core/src/budget/manager.rs" },
@@ -549,7 +551,7 @@ const components = {
       ["settle", "store", "one transaction"],
       ["periods", "reserve", "derive availability"],
       ["reserve", "taskBudget", "task cap", { fromSide: "top", toSide: "top", waypoints: [{ x: 525, y: 222 }, { x: 1115, y: 222 }], labelSegment: 1 }],
-      ["taskBudget", "store", "open / close", { fromSide: "bottom", toSide: "right", waypoints: [{ x: 1115, y: 360 }], labelSegment: 1 }],
+      ["taskBudget", "store", "approve open / close", { fromSide: "bottom", toSide: "right", waypoints: [{ x: 1115, y: 360 }], labelSegment: 1 }],
     ],
   },
   payment: {
@@ -769,7 +771,7 @@ const components = {
       ["Human gates", "Approval and reconciliation capabilities are sent only on those mutations, and tools carry approval annotations."],
       ["Result delivery", "Returns PNG or JPEG artifacts up to 8 MiB, with timing that never labels waiting as provider time. Native gallery export downloads up to 64 MiB directly from Gongbu to a local directory, verifies Hubu settlement and registry binding, and avoids passing image bytes through the model."],
       ["Allowlisted save", "`hubu_save_artifact` writes one verified artifact plus a receipt (artifact ID, digest, settled cost) into a human-allowlisted folder named by the agent, never a path, and never exposes Gongbu storage paths."],
-      ["Task budget binding", "`hubu_open_task_budget` binds a task budget to the session; new Codex or Claude Code spend operations then carry its task_id, and `hubu_operation_status` shows the task's spend so far. Envelope invocations keep their own task_id."],
+      ["Task budget binding", "`hubu_open_task_budget` proposes a task budget and binds its task to the session; new Codex or Claude Code spend operations then carry its task_id, which Hubu denies until a human approves the proposal. `hubu_close_task_budget` only requests close, and `hubu_operation_status` shows the task's spend so far. Envelope invocations keep their own task_id."],
     ],
     links: [sharedLinks.taskBudgetMcp, sharedLinks.lifecycleContract, sharedLinks.governanceHttp, sharedLinks.governanceMcp, sharedLinks.lifecycleQuery, sharedLinks.artifactSave, sharedLinks.gallery, sharedLinks.galleryCli, sharedLinks.feedback, sharedLinks.unifiedMcp, sharedLinks.unifiedGovernedExecution, sharedLinks.unifiedResumeOperation, sharedLinks.unifiedMcpStdio, sharedLinks.unifiedMcpNotifications, sharedLinks.unifiedHubuCatalog, sharedLinks.unifiedHubuRouting, sharedLinks.unifiedOperationRegistry, sharedLinks.unifiedOperationWorker, sharedLinks.unifiedGongbuCatalog, sharedLinks.unifiedGongbuFixture, sharedLinks.unifiedMcpContract, sharedLinks.operationKeySkill, sharedLinks.operationKeyHelper, sharedLinks.liveProviders, sharedLinks.fluxProviderContract, sharedLinks.gongbuProviderContracts, sharedLinks.api, sharedLinks.gongbuApplication],
     zones: [
@@ -858,7 +860,7 @@ const components = {
       ["Decide explicitly", "Says approve or deny in chat, then confirms the prompt; canceling leaves the request pending."],
       ["Safe decisions", "Repeating a decision is harmless, conflicting decisions are rejected, and approval never calls a provider by itself."],
       ["Save destinations", "Chooses which project folders agents may save artifacts into with `hubu folders allow`."],
-      ["Task budgets", "Gives one task a cap, such as $3 for a landing page, with `hubu budget task open`; agents can open one through MCP. Closing returns the unused part."],
+      ["Task budgets", "Gives one task a cap, such as $3 for a landing page, with `hubu budget task open`. Agents propose one and ask to close it through MCP; the human approves each request on the approval link, checking the task is done before a close. Closing returns the unused part."],
     ],
     links: [sharedLinks.saveFolders, sharedLinks.galleryCli, sharedLinks.gallery, sharedLinks.cli, sharedLinks.unifiedMcp, sharedLinks.registrationProtocol, sharedLinks.budget],
     nodes: [
@@ -928,7 +930,7 @@ const sidebarHighlights = {
     "Agent budgets are hard limits; owner targets are advisory.",
     "Authorization freezes one execution-scoped hold.",
     "Exact costs round up once to micro-units in the budget's own currency (USD or USDC); overruns wait for human reconciliation.",
-    "Task budgets cap one task's spend inside an agent budget and return the unused part on close.",
+    "Task budgets cap one task's spend inside an agent budget and return the unused part on close; a human approves an agent's open and close.",
   ],
   payment: [
     "Requests validate idempotency, spend token, and scope.",

@@ -208,6 +208,8 @@ conversion rules are in
 A [task budget](task-budgets.md) caps the spend for one task inside an agent
 budget. While open, it holds back its unused part from other spend. Spend that
 carries its trusted `task_id` must fit it. Closing it returns the unused part.
+An agent's proposal or close request waits for a human, and the task's spend
+is denied while it waits.
 
 An executor cannot settle above its maximum. After the claim lease expires, a
 human reviewing provider evidence may confirm a legitimate billed overrun; Hubu

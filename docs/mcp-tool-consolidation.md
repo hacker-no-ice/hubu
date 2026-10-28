@@ -73,9 +73,9 @@ not forwarded as a backend query parameter.
 | `hubu_update_budget` | Hubu | Version-pinned cap change; human gate |
 | `hubu_budget_history` | Hubu | Inspect immutable revisions |
 | `hubu_revoke_budget` | Hubu | Emergency owner control; human gate |
-| `hubu_open_task_budget` | Hubu | Reserve part of the agent budget for one task and bind it to this session; no human gate ([task budgets](task-budgets.md)) |
-| `hubu_close_task_budget` | Hubu | End a task and return its unused amount; no human gate |
-| `hubu_list_task_budgets` | Hubu | Task spend so far and remaining |
+| `hubu_open_task_budget` | Hubu | Propose a task budget for one task and bind the task to this session; a human approves the returned `tba_` request before it opens ([task budgets](task-budgets.md)) |
+| `hubu_close_task_budget` | Hubu | Ask to close a finished task; a human approves the returned `tba_` request, which returns the unused amount |
+| `hubu_list_task_budgets` | Hubu | Task spend so far and remaining, plus requests waiting for a human |
 | `hubu_show_spending_targets` | Hubu | Advisory targets and allocations |
 | `hubu_set_spending_target` | Hubu | Advisory target administration; human gate |
 | `hubu_revoke_spending_target` | Hubu | Advisory target administration; human gate |
@@ -107,7 +107,7 @@ they remain available through authenticated Gongbu operator endpoints.
 | Tool | Prerequisites | Purpose |
 | --- | --- | --- |
 | `hubu_get_spend_approval` | Hubu | Immutable approval review |
-| `hubu_resolve_spend_approval` | Hubu | Explicit human approve/deny gate |
+| `hubu_resolve_spend_approval` | Hubu | Explicit human approve/deny gate for spend and `tba_` task budget requests |
 | `hubu_operation_status` | store | Observe a public operation handle in the MCP store |
 | `hubu_resume_operation` | Hubu + store | Resume the stored, approved intent |
 

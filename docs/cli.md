@@ -134,6 +134,18 @@ shows spend so far, frozen, remaining and the agent budget it draws from. A
 closed one also shows the amount returned. `hubu watch` shows open task budgets
 under their agent.
 
+These commands act directly. An agent instead proposes a task budget or asks
+to close one. `list` shows those requests first, and you resolve each `tba_`
+request on the approval link:
+
+```bash
+hubu spend approval get --approval-request-id tba_0123456789ab
+hubu spend approval approve --approval-request-id tba_0123456789ab
+```
+
+Approve a close request only after checking that the task is done. Denying it
+keeps the task budget open. Requests expire after 24 hours.
+
 ## Amounts
 
 Every amount the CLI accepts (`--amount` on `budget create`, `budget update`,

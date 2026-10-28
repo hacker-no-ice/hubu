@@ -230,10 +230,14 @@ only when the human answers yes at its one-time prompt or passes
 `--trust-client-approval`, and keeps the setting on re-runs unless
 `--no-trust-client-approval` is passed.
 
-`hubu_open_task_budget` and `hubu_close_task_budget` need no human prompt or
-trust gate. They only re-partition the agent's own budget and never authorize
-spend. Opening one binds it to the MCP session, so later spend operations in
-that session carry its task. See [task budgets](task-budgets.md).
+`hubu_open_task_budget` and `hubu_close_task_budget` need no client prompt
+because they change nothing on their own. The first proposes a task budget and
+the second requests its close. Each returns a `tba_` approval request that a
+human resolves on the same approval link as spend approvals, through
+`hubu_resolve_spend_approval` or `hubu spend approval`. Proposing binds the
+task to the MCP session, so later spend operations in that session carry it:
+Hubu denies them until the proposal is approved and while a close request is
+pending. See [task budgets](task-budgets.md).
 
 Spend approval resolution uses the narrower
 `HUBU_MCP_TRUST_SPEND_APPROVAL=1` gate. `hubu init codex` always renders that
@@ -299,6 +303,8 @@ trusted harness identity and a newly allocated private operation key.
   later calls can project an approved or completed durable state.
 - `hubu_get_spend_approval` reads the owner-scoped immutable review and durable
   `pending`, `approved`, or `denied` status without using approval authority.
+  For a `tba_` task budget request it returns that request's `kind`, review and
+  status, which can also be `expired`.
 - `hubu_resolve_spend_approval` submits exactly one explicit human `approve` or
   `deny` decision behind the client prompt and the separate Hubu approval
   capability. It never starts Gongbu execution or provider work.
