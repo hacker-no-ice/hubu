@@ -1,10 +1,12 @@
 # Gemini Developer API provider contract
 
-Hubu ships two deliberately narrow Gemini Developer API text-to-image
-contracts beside the FLUX contract, and two image-edit contracts on the same
-models (see [image editing](#image-editing)). Operators select either or both contracts and provide only an
-opaque Keychain credential reference; the renderer supplies each immutable
-target, transport, capability, policy, and price.
+Hubu ships deliberately narrow Gemini Developer API contracts beside the FLUX
+contracts: the v1 text-to-image and [image-edit](#image-editing) contracts for
+Gemini 3.1 Flash Image and Flash Lite Image, and the
+[v2 contracts](#v2-contracts-aspect-ratios-and-gemini-3-pro-image), which add
+aspect ratios and Gemini 3 Pro Image. Operators select contracts and provide
+only an opaque Keychain credential reference; the renderer supplies each
+immutable target, transport, capability, policy, and price.
 
 Start with [live provider operations](live-providers.md) for the shared
 credential, governance, pricing, spend, retry, reconciliation, artifact, and
@@ -69,6 +71,82 @@ credential alias:
 contract = "hubu.gemini-3.1-flash-image.image-edit/v1"
 credential = "google_gemini"
 ```
+
+## v2 contracts: aspect ratios and Gemini 3 Pro Image
+
+| Frozen field | Value |
+| --- | --- |
+| Text-to-image contracts | `hubu.gemini-3.1-flash-lite-image.text-to-image/v2`; `hubu.gemini-3.1-flash-image.text-to-image/v2`; `hubu.gemini-3-pro-image.text-to-image/v1` |
+| Image-edit contracts | `hubu.gemini-3.1-flash-lite-image.image-edit/v2`; `hubu.gemini-3.1-flash-image.image-edit/v2`; `hubu.gemini-3-pro-image.image-edit/v1` |
+| Pro target | `google` / `gemini_developer_image` / `gemini-3-pro-image` (Nano Banana Pro) |
+| Input | `image_size` (`1k`, `2k`, `4k`; Lite `1k` only) and `aspect_ratio`: `1:1`, `2:3`, `3:2`, `3:4`, `4:3`, `4:5`, `5:4`, `9:16`, `16:9` or `21:9`. Text-to-image defaults to `1:1`; edits must name a ratio |
+| Certified sizes | Google's published size for each ratio at each tier, for example `16:9` is 1376×768 at 1K, 2752×1536 at 2K and 5504×3072 at 4K |
+| Pro output price | USD $0.134 (`134/10` cents) per 1K or 2K image; $0.24 (`24/1` cents) per 4K image |
+| Flash and Lite output prices | unchanged from v1 |
+| Pro input image price (edits) | 560 input tokens at $2.00 per 1M: USD $0.00112 (`112/1000` cents) per input image |
+| Price review | 2026-10-28 |
+| Implementation | verified packs `packs/verified/google-gemini-developer-image-v2.toml` and `packs/verified/google-gemini-developer-image-edit-v2.toml` |
+
+Gemini bills per output image by size tier, so every aspect ratio in a tier
+costs the same; the ratio only selects the certified output size. Gongbu
+sends both fields in the request's `response_format`, freezes the size with
+the price at admission, and rejects a ratio the target does not certify
+before anything is authorized. Flash and Pro publish identical sizes for
+these ratios. Google publishes no size table for Flash Lite Image, so Lite is
+certified at the 1K sizes Flash publishes; the first live round confirms
+them. Flash's extra `1:4`, `4:1`, `1:8`, `8:1` ratios and its 512px tier are
+not offered yet.
+
+The v2 contracts are new revisions of the v1 targets: a profile binds either
+the v1 or the v2 contract of a model, not both. Pro is a separate model, so it
+gets its own `v1` contracts, and a profile binds it only when the operator
+names it.
+
+### What a frozen price covers
+
+A frozen price is the output images plus, for an edit, its input images. It
+is not the whole Google bill. Google also bills the text prompt's input
+tokens and the response's text and thinking output tokens (Pro: $2.00 and
+$12.00 per 1M tokens; Flash: $0.50 and $3; Lite: $0.25 and $1.50); Gongbu
+does not price them, as in v1, but records the reported
+`usage.total_input_tokens` and `usage.total_output_tokens` as settlement
+evidence. Batch, Flex and Priority rates do not apply: Gongbu uses the
+standard synchronous API. The packs enable no Google Search grounding, which
+Google bills separately.
+
+Sources, reviewed 2026-10-28:
+[Developer API pricing](https://ai.google.dev/gemini-api/docs/pricing#gemini-3-pro-image),
+[image generation guide](https://ai.google.dev/gemini-api/docs/image-generation)
+(model IDs, the Lite 1K limit, aspect ratios and sizes) and the
+[Interactions API reference](https://ai.google.dev/api/interactions-api)
+(`response_format.aspect_ratio`, usage fields).
+
+### Enable Gemini 3 Pro Image
+
+Pro is never a default. Flash and Lite stay the inexpensive choices for
+exploration, and nothing upgrades an agent to Pro:
+
+1. Bind the Pro contract explicitly, beside the others, with the same Google
+   credential alias:
+
+   ```toml
+   [[contract_bindings]]
+   contract = "hubu.gemini-3-pro-image.text-to-image/v1"
+   credential = "google_gemini"
+   ```
+
+2. Keep `maximum_spend_minor` at or above the largest price you allow; a 4K
+   Pro image is 24 cents.
+3. Let your Hubu policy decide Pro spend. The
+   [`creative-tiers.yaml`](../../policies/creative-tiers.yaml) cookbook denies
+   models it does not list, so Pro stays denied until you add
+   `gemini-3-pro-image` to its approved models. Even then every Pro request
+   needs a human: 2K and 4K are final renders, and a 13.4-cent 1K draft is
+   above the cookbook's 10-cent draft allowance. An amount policy works the same way: a 1K Pro request
+   authorizes exactly USD 0.134, which a policy that asks for approval above
+   10 cents sends to a human before any token exists.
+4. Agents discover the Pro target by model in `gongbu_list_execution_targets`
+   and submit its `target_id`; a Flash target ID never runs on Pro.
 
 ## Configure
 

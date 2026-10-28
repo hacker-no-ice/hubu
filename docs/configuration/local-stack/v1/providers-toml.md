@@ -113,7 +113,11 @@ exact provider target, adapter settings, and pricing rules. The shipped
 contracts can be bound independently, except that successive versions of one
 target, such as `hubu.flux-2-pro.text-to-image/v1` and its
 [`/v2`](../../../operations/flux-provider-contract.md#contract-v2-aspect-ratios-and-per-megapixel-pricing),
-are alternatives: bind one of them.
+or `hubu.gemini-3.1-flash-image.text-to-image/v1` and its
+[`/v2`](../../../operations/gemini-provider-contract.md#v2-contracts-aspect-ratios-and-gemini-3-pro-image),
+are alternatives: bind one of them. Gemini 3 Pro Image is a separate model
+with its own contracts (`hubu.gemini-3-pro-image.text-to-image/v1` and
+`hubu.gemini-3-pro-image.image-edit/v1`); it is available only when bound.
 
 ```toml
 [[contract_bindings]]

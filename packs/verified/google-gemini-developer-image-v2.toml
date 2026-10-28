@@ -1,0 +1,276 @@
+# Verified provider pack: Google Gemini Developer API image generation, v2
+# contracts (HUB-252).
+#
+# Same Interactions API, credential and delivery rules as
+# google-gemini-developer-image.toml (the v1 contracts, kept as is). v2 adds
+# an explicit aspect ratio, certifies the exact output size of each aspect
+# ratio at each image size, and adds Gemini 3 Pro Image. Gemini bills per
+# output image by size tier, so the aspect ratio sets the certified size, not
+# the price.
+#
+# Reviewed 2026-10-28 against:
+# - https://ai.google.dev/gemini-api/docs/pricing (standard paid tier):
+#   Flash Lite Image $0.0336 per 1K image; Flash Image $0.067 / $0.101 /
+#   $0.151 per 1K / 2K / 4K image; Pro Image $0.134 per 1K or 2K image and
+#   $0.24 per 4K image. Flash and Lite rates are unchanged since 2026-09-01.
+# - https://ai.google.dev/gemini-api/docs/image-generation: model IDs, the
+#   1K-only Lite limit, the aspect ratios and the output size of each aspect
+#   ratio at each image size. Flash and Pro publish the same sizes for these
+#   ratios; Lite publishes no table of its own and is certified at the 1K
+#   sizes Flash publishes.
+#
+# The rules price output images only. Text prompt input tokens and text and
+# thinking output tokens (Pro: $2.00 and $12.00 per 1M tokens) are billed by
+# Google but not priced here, as in v1, so a frozen price is not the whole
+# request cost. The pack enables no Google Search grounding, which Google
+# bills separately. contracts/provider-contracts-v1.json carries this pack's
+# checked-in projection, and Gongbu's tests fail if the two ever disagree.
+schema_version = 1
+pack_id = "google-gemini-developer-image"
+pack_version = "2026-10-28.1"
+provider = "google"
+display_name = "Google Gemini Developer API"
+billing_merchant = "merchant:google"
+capability = "capability:image:generate"
+workload_type = "image_generation"
+archetype = "sync_fixed"
+adapter = "gemini_developer_image"
+pricing_trust = "verified"
+
+[transport]
+endpoint = "https://generativelanguage.googleapis.com"
+api_version = "v1beta"
+allowed_hosts = ["generativelanguage.googleapis.com"]
+auth_header = "x-goog-api-key"
+credential = "gemini"
+timeout_ms = 30000
+
+[request]
+path = "/v1beta/interactions"
+
+[request.body]
+model = "{{model}}"
+input = [{ type = "text", text = "{{prompt}}" }]
+response_format = { type = "image", image_size = "{{image_size|upper}}", aspect_ratio = "{{aspect_ratio}}" }
+
+[[parameters]]
+name = "prompt"
+type = "string"
+required = true
+max_length = 32000
+
+[[parameters]]
+name = "image_count"
+type = "integer"
+min = 1
+max = 1
+default = 1
+quantity = "image_count"
+
+[[parameters]]
+name = "image_size"
+type = "enum"
+values = ["1k", "2k", "4k"]
+required = true
+selector = "image_size"
+
+# Google's default for text-to-image is a square.
+[[parameters]]
+name = "aspect_ratio"
+type = "enum"
+values = ["1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"]
+default = "1:1"
+
+[[size_presets]]
+when = { image_size = "1k", aspect_ratio = "1:1" }
+size = [1024, 1024]
+
+[[size_presets]]
+when = { image_size = "1k", aspect_ratio = "2:3" }
+size = [848, 1264]
+
+[[size_presets]]
+when = { image_size = "1k", aspect_ratio = "3:2" }
+size = [1264, 848]
+
+[[size_presets]]
+when = { image_size = "1k", aspect_ratio = "3:4" }
+size = [896, 1200]
+
+[[size_presets]]
+when = { image_size = "1k", aspect_ratio = "4:3" }
+size = [1200, 896]
+
+[[size_presets]]
+when = { image_size = "1k", aspect_ratio = "4:5" }
+size = [928, 1152]
+
+[[size_presets]]
+when = { image_size = "1k", aspect_ratio = "5:4" }
+size = [1152, 928]
+
+[[size_presets]]
+when = { image_size = "1k", aspect_ratio = "9:16" }
+size = [768, 1376]
+
+[[size_presets]]
+when = { image_size = "1k", aspect_ratio = "16:9" }
+size = [1376, 768]
+
+[[size_presets]]
+when = { image_size = "1k", aspect_ratio = "21:9" }
+size = [1584, 672]
+
+[[size_presets]]
+when = { image_size = "2k", aspect_ratio = "1:1" }
+size = [2048, 2048]
+
+[[size_presets]]
+when = { image_size = "2k", aspect_ratio = "2:3" }
+size = [1696, 2528]
+
+[[size_presets]]
+when = { image_size = "2k", aspect_ratio = "3:2" }
+size = [2528, 1696]
+
+[[size_presets]]
+when = { image_size = "2k", aspect_ratio = "3:4" }
+size = [1792, 2400]
+
+[[size_presets]]
+when = { image_size = "2k", aspect_ratio = "4:3" }
+size = [2400, 1792]
+
+[[size_presets]]
+when = { image_size = "2k", aspect_ratio = "4:5" }
+size = [1856, 2304]
+
+[[size_presets]]
+when = { image_size = "2k", aspect_ratio = "5:4" }
+size = [2304, 1856]
+
+[[size_presets]]
+when = { image_size = "2k", aspect_ratio = "9:16" }
+size = [1536, 2752]
+
+[[size_presets]]
+when = { image_size = "2k", aspect_ratio = "16:9" }
+size = [2752, 1536]
+
+[[size_presets]]
+when = { image_size = "2k", aspect_ratio = "21:9" }
+size = [3168, 1344]
+
+[[size_presets]]
+when = { image_size = "4k", aspect_ratio = "1:1" }
+size = [4096, 4096]
+
+[[size_presets]]
+when = { image_size = "4k", aspect_ratio = "2:3" }
+size = [3392, 5056]
+
+[[size_presets]]
+when = { image_size = "4k", aspect_ratio = "3:2" }
+size = [5056, 3392]
+
+[[size_presets]]
+when = { image_size = "4k", aspect_ratio = "3:4" }
+size = [3584, 4800]
+
+[[size_presets]]
+when = { image_size = "4k", aspect_ratio = "4:3" }
+size = [4800, 3584]
+
+[[size_presets]]
+when = { image_size = "4k", aspect_ratio = "4:5" }
+size = [3712, 4608]
+
+[[size_presets]]
+when = { image_size = "4k", aspect_ratio = "5:4" }
+size = [4608, 3712]
+
+[[size_presets]]
+when = { image_size = "4k", aspect_ratio = "9:16" }
+size = [3072, 5504]
+
+[[size_presets]]
+when = { image_size = "4k", aspect_ratio = "16:9" }
+size = [5504, 3072]
+
+[[size_presets]]
+when = { image_size = "4k", aspect_ratio = "21:9" }
+size = [6336, 2688]
+
+[response]
+request_id_headers = ["x-goog-request-id", "x-request-id"]
+provider_request_id = "/id"
+usage = { images = "/steps[type=model_output]/content[type=image]", input_tokens = "/usage/total_input_tokens", output_tokens = "/usage/total_output_tokens" }
+optional_usage = ["input_tokens", "output_tokens"]
+artifact_items = "/steps[type=model_output]/content[type=image]"
+artifact_base64 = "/data"
+
+[artifacts]
+media_types = ["image/png", "image/jpeg"]
+
+[[models]]
+model = "gemini-3.1-flash-lite-image"
+provider_config_version = "hubu-gemini-3.1-flash-lite-image-t2i-2026-10-28-v2"
+pricing_version = "google-gemini-3.1-flash-lite-image-usd-2026-10-28-v2"
+pricing_reviewed_on = "2026-10-28"
+parameter_values = { image_size = ["1k"] }
+
+[[models.pricing_rules]]
+rule_id = "google-gemini-3.1-flash-lite-image-1k-2026-10-28-v2"
+currency = "USD"
+selector = { image_size = "1k" }
+components = [{ unit = "image", rate_numerator_minor = 336, rate_denominator = 100 }]
+
+[[models]]
+model = "gemini-3.1-flash-image"
+provider_config_version = "hubu-gemini-3.1-flash-image-t2i-2026-10-28-v2"
+pricing_version = "google-gemini-3.1-flash-image-usd-2026-10-28-v2"
+pricing_reviewed_on = "2026-10-28"
+
+[[models.pricing_rules]]
+rule_id = "google-gemini-3.1-flash-image-1k-2026-10-28-v2"
+currency = "USD"
+selector = { image_size = "1k" }
+components = [{ unit = "image", rate_numerator_minor = 67, rate_denominator = 10 }]
+
+[[models.pricing_rules]]
+rule_id = "google-gemini-3.1-flash-image-2k-2026-10-28-v2"
+currency = "USD"
+selector = { image_size = "2k" }
+components = [{ unit = "image", rate_numerator_minor = 101, rate_denominator = 10 }]
+
+[[models.pricing_rules]]
+rule_id = "google-gemini-3.1-flash-image-4k-2026-10-28-v2"
+currency = "USD"
+selector = { image_size = "4k" }
+components = [{ unit = "image", rate_numerator_minor = 151, rate_denominator = 10 }]
+
+# Gemini 3 Pro Image (Nano Banana Pro). Never a default: an operator binds its
+# contract explicitly and an agent selects its target by model.
+[[models]]
+model = "gemini-3-pro-image"
+provider_config_version = "hubu-gemini-3-pro-image-t2i-2026-10-28-v1"
+pricing_version = "google-gemini-3-pro-image-usd-2026-10-28-v1"
+pricing_reviewed_on = "2026-10-28"
+
+[[models.pricing_rules]]
+rule_id = "google-gemini-3-pro-image-1k-2026-10-28-v1"
+currency = "USD"
+selector = { image_size = "1k" }
+components = [{ unit = "image", rate_numerator_minor = 134, rate_denominator = 10 }]
+
+[[models.pricing_rules]]
+rule_id = "google-gemini-3-pro-image-2k-2026-10-28-v1"
+currency = "USD"
+selector = { image_size = "2k" }
+components = [{ unit = "image", rate_numerator_minor = 134, rate_denominator = 10 }]
+
+[[models.pricing_rules]]
+rule_id = "google-gemini-3-pro-image-4k-2026-10-28-v1"
+currency = "USD"
+selector = { image_size = "4k" }
+components = [{ unit = "image", rate_numerator_minor = 24, rate_denominator = 1 }]

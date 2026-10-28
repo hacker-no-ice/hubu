@@ -794,6 +794,7 @@ mod tests {
                 "gemini-3.1-flash-lite-image",
             ),
             ("google", "gemini_developer_image", "gemini-3.1-flash-image"),
+            ("google", "gemini_developer_image", "gemini-3-pro-image"),
             ("flux", "flux2_api", "flux-2-pro"),
             ("flux", "flux2_api", "flux-3-image"),
         ] {
@@ -801,7 +802,17 @@ mod tests {
             assert_eq!(catalog.resolve_active(&key).unwrap().adapter, adapter);
         }
         let execution_targets = catalog.execution_targets();
-        assert_eq!(execution_targets.len(), 6);
+        assert_eq!(execution_targets.len(), 8);
+        // Pro is its own target, discovered by model beside Flash and Lite,
+        // with an aspect-ratio certified size at every tier.
+        let pro = execution_targets
+            .iter()
+            .find(|target| {
+                target.model == "gemini-3-pro-image" && target.workload_type == "image_generation"
+            })
+            .unwrap();
+        assert_eq!(pro.image_sizes, ["1k", "2k", "4k"]);
+        assert_eq!(pro.output_sizes.len(), 30);
         let flux_3 = execution_targets
             .iter()
             .find(|target| target.model == "flux-3-image")

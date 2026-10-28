@@ -6,7 +6,7 @@ becomes a pack change instead of Rust code and a release.
 
 > **Status.** Schema v1 is defined, Gongbu validates and loads packs, and the
 > `sync_fixed` and `async_poll` engines run them. Every shipped contract
-> (Gemini and FLUX.2) runs from a verified pack in `packs/verified/`. The
+> (Gemini, FLUX.2 and FLUX 3) runs from a verified pack in `packs/verified/`. The
 > `hubu provider` commands that activate your own packs arrive in a later
 > release.
 
@@ -21,6 +21,14 @@ contract entries disagree, so a pack change ships with a matching contract
 update. Successive versions of one pack can ship side by side, each backing
 its own contract revision: `bfl-flux-2.toml` backs FLUX.2 [pro] v1 and
 `bfl-flux-2-v2.toml` backs v2. `bfl-flux-3-image.toml` backs FLUX 3 Image.
+`google-gemini-developer-image.toml` and `google-gemini-developer-image-edit.toml`
+back the Gemini v1 contracts; their `-v2.toml` successors back the Flash and
+Lite `/v2` contracts, which add aspect ratios, and Gemini 3 Pro Image.
+
+A pack with `size_presets` may still price by a selector: the Gemini v2 packs
+certify a size for every `image_size` and `aspect_ratio` pair but price per
+image by the `image_size` selector alone, so a contract preset named
+`2k-16:9` carries the price of the `2k` rule.
 
 ## What a pack declares and what engines own
 

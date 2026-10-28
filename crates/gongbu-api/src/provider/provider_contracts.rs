@@ -12,7 +12,7 @@ use thiserror::Error;
 
 const CONTRACT_DOCUMENT: &str = include_str!("../../../../contracts/provider-contracts-v1.json");
 const CONTRACT_DOCUMENT_SHA256: &str =
-    "160f81a950924beb58c2b5e0f452751b4cd1daa4517999606b495510d7588ae1";
+    "ab28ebbbd2cdf0de6118dafcbd180c906966b4826f8bf637e41c731665f4c4c8";
 
 #[derive(Debug, Error)]
 pub(crate) enum Error {
@@ -401,17 +401,20 @@ fn project(contract_definition: &ContractDefinition) -> Result<CatalogContract, 
 }
 
 /// A size-selected preset's output price; edit rules also price input images.
+/// A preset that names its image size in `when` (an aspect-ratio preset) is
+/// priced by that size; otherwise its name is the size.
 fn size_preset_price(
     contract_definition: &ContractDefinition,
     preset: &Preset,
 ) -> Result<(String, (i64, i64)), Error> {
+    let image_size = preset.when.get("image_size").unwrap_or(&preset.name);
     let rule = contract_definition
         .pricing_rules
         .iter()
         .find(|rule| {
             rule.selector
                 .as_ref()
-                .is_some_and(|selector| selector.image_size() == Some(preset.name.as_str()))
+                .is_some_and(|selector| selector.image_size() == Some(image_size.as_str()))
         })
         .ok_or(Error::InvalidDocument)?;
     let component = rule
@@ -744,7 +747,40 @@ mod tests {
     fn mixed_contracts_are_order_independent_and_credentials_are_isolated() {
         let (targets, pricing) = mixed_contract_inputs(false);
         let projected = validate_and_project(&targets, &pricing).unwrap();
-        assert_eq!(projected.len(), 6);
+        assert_eq!(projected.len(), 8);
+        // Pro prices per image by tier at every aspect ratio: 13.4¢ at 1k
+        // and 2k, 24¢ at 4k, beside Flash and Lite.
+        let pro = projected
+            .iter()
+            .find(|contract| contract.contract == "hubu.gemini-3-pro-image.text-to-image/v1")
+            .unwrap();
+        assert_eq!(pro.target.model, "gemini-3-pro-image");
+        assert_eq!(
+            pro.pricing_version,
+            "google-gemini-3-pro-image-usd-2026-10-28-v1"
+        );
+        assert_eq!(pro.pricing_reviewed_on, "2026-10-28");
+        assert_eq!(pro.capability.presets.len(), 30);
+        for preset in &pro.capability.presets {
+            let expected = if preset.when["image_size"] == "4k" {
+                (24, 1)
+            } else {
+                (134, 10)
+            };
+            assert_eq!(
+                (preset.rate_numerator_minor, preset.rate_denominator),
+                expected,
+                "{}",
+                preset.name
+            );
+        }
+        let banner = pro
+            .capability
+            .presets
+            .iter()
+            .find(|preset| preset.name == "2k-21:9")
+            .unwrap();
+        assert_eq!((banner.width, banner.height), (Some(3168), Some(1344)));
         // An edit contract on the same model keeps its own prices.
         assert!(projected.iter().any(|contract| {
             contract.contract == "hubu.gemini-3.1-flash-image.image-edit/v1"

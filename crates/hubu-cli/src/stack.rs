@@ -32,7 +32,7 @@ const MANAGED_GONGBU_CALLER_ACCOUNT: &str = "gongbu-caller";
 const PROVIDER_CONTRACTS_DOCUMENT: &str =
     include_str!("../../../contracts/provider-contracts-v1.json");
 const PROVIDER_CONTRACTS_DOCUMENT_SHA256: &str =
-    "160f81a950924beb58c2b5e0f452751b4cd1daa4517999606b495510d7588ae1";
+    "ab28ebbbd2cdf0de6118dafcbd180c906966b4826f8bf637e41c731665f4c4c8";
 const MANAGED_CREDENTIAL_IGNORE: &[u8] =
     b"# Hubu-managed credentials. Do not edit or remove.\n*\n!.gitignore\n";
 
@@ -659,10 +659,14 @@ fn provider_contract_catalog_entries(
                                 preset,
                             )?,
                             None => {
+                                // An aspect-ratio preset names its size in
+                                // `when`; otherwise its name is the size.
+                                let image_size =
+                                    preset.when.get("image_size").unwrap_or(&preset.name);
                                 let rule =
                                     contract_definition.pricing_rules.iter().find(|rule| {
                                         rule.pointer("/selector/image_size").and_then(Value::as_str)
-                                            == Some(preset.name.as_str())
+                                            == Some(image_size.as_str())
                                     })?;
                                 let component =
                                     rule.get("components").and_then(Value::as_array)?.first()?;
@@ -5397,6 +5401,88 @@ credential = "bfl"
         assert_eq!(prices, [("1k", None, 48, 10), ("2k", None, 10, 1)]);
         let rendered = serde_json::to_string(&flux_3.capability).unwrap();
         assert!(!rendered.contains("width"));
+    }
+
+    #[test]
+    fn gemini_pro_binds_explicitly_beside_flash_and_lite_v2_with_per_image_prices() {
+        let source = |contracts: &[&str]| {
+            let bindings: String = contracts
+                .iter()
+                .map(|contract| {
+                    format!(
+                        "[[contract_bindings]]\ncontract = \"{contract}\"\ncredential = \"google\"\n"
+                    )
+                })
+                .collect();
+            toml::from_str::<ProvidersSource>(&format!(
+                r#"schema_version = 1
+mode = "live"
+catalog_version = "operator-gemini-2026-10-28-v1"
+maximum_spend_minor = 25
+live_spend_acknowledgement = "{LIVE_SPEND_ACKNOWLEDGEMENT}"
+{bindings}"#
+            ))
+            .unwrap()
+        };
+        // Pro is a separate model, so it binds only when the operator names
+        // its contract; one Google credential serves all three models.
+        let providers = source(&[
+            "hubu.gemini-3.1-flash-lite-image.text-to-image/v2",
+            "hubu.gemini-3.1-flash-image.text-to-image/v2",
+            "hubu.gemini-3-pro-image.text-to-image/v1",
+            "hubu.gemini-3-pro-image.image-edit/v1",
+        ]);
+        validate_provider_source(&providers).unwrap();
+        let pricing = render_pricing_catalog(&providers).unwrap();
+        assert!(pricing["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|rule| rule["rule_id"] == "google-gemini-3-pro-image-4k-2026-10-28-v1"));
+        let entries = provider_contract_catalog_entries(&providers, true);
+        assert_eq!(entries.len(), 4);
+        let entry = |contract: &str| {
+            entries
+                .iter()
+                .find(|entry| entry.contract == contract)
+                .unwrap()
+        };
+        let lite = entry("hubu.gemini-3.1-flash-lite-image.text-to-image/v2");
+        assert_eq!(lite.capability.presets.len(), 10);
+        assert!(lite.capability.presets.iter().all(|preset| {
+            (preset.rate_numerator_minor, preset.rate_denominator) == (336, 100)
+        }));
+        let pro = entry("hubu.gemini-3-pro-image.text-to-image/v1");
+        assert_eq!(
+            pro.pricing_version,
+            "google-gemini-3-pro-image-usd-2026-10-28-v1"
+        );
+        let price = |name: &str| {
+            let preset = pro
+                .capability
+                .presets
+                .iter()
+                .find(|preset| preset.name == name)
+                .unwrap();
+            (
+                preset.width,
+                preset.height,
+                preset.rate_numerator_minor,
+                preset.rate_denominator,
+            )
+        };
+        assert_eq!(price("1k-16:9"), (Some(1376), Some(768), 134, 10));
+        assert_eq!(price("2k-1:1"), (Some(2048), Some(2048), 134, 10));
+        assert_eq!(price("4k-21:9"), (Some(6336), Some(2688), 24, 1));
+        // An edit preset shows the output image's price.
+        let pro_edit = entry("hubu.gemini-3-pro-image.image-edit/v1");
+        assert_eq!(pro_edit.capability.presets.len(), 30);
+        // v1 and v2 are revisions of one target; a profile binds one.
+        let both = source(&[
+            "hubu.gemini-3.1-flash-image.text-to-image/v1",
+            "hubu.gemini-3.1-flash-image.text-to-image/v2",
+        ]);
+        assert!(validate_provider_source(&both).is_err());
     }
 
     #[test]

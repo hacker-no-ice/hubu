@@ -1881,9 +1881,10 @@ mod tests {
             draft: png([1, 2, 3, 255]),
             edited: png([0, 0, 255, 255]),
         });
+        // The v1 packs: one revision per target.
         let packs: Vec<Pack> = verified_packs()
             .into_iter()
-            .filter(|pack| pack.provider() == "google")
+            .filter(|pack| pack.provider() == "google" && !pack.has_size_presets())
             .collect();
         let secret = SecretReference::new("gongbu.google", "fixture").unwrap();
         let targets: ProviderTargetConfig = serde_json::from_value(json!({
