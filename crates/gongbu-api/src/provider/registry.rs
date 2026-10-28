@@ -521,7 +521,7 @@ mod tests {
     use super::*;
     use crate::{
         provider_contract::{
-            AdapterCapabilities, AdapterOutcome, NormalizedRequest, ProviderFailure,
+            AdapterCapabilities, AdapterOutcome, NormalizedRequest, PricingUnit, ProviderFailure,
         },
         secrets::ProviderSecret,
     };
@@ -796,12 +796,36 @@ mod tests {
             ("google", "gemini_developer_image", "gemini-3.1-flash-image"),
             ("flux", "flux2_api", "flux-2-pro"),
             ("flux", "flux2_api", "flux-3-image"),
+            ("flux", "flux2_api", "flux-2-klein-4b"),
+            ("flux", "flux2_api", "flux-2-klein-9b"),
+            ("flux", "flux2_api", "flux-2-flex"),
+            ("flux", "flux2_api", "flux-2-max"),
         ] {
             let key = TargetKey::new("image_generation", provider, adapter, model).unwrap();
             assert_eq!(catalog.resolve_active(&key).unwrap().adapter, adapter);
         }
         let execution_targets = catalog.execution_targets();
-        assert_eq!(execution_targets.len(), 6);
+        assert_eq!(execution_targets.len(), 10);
+        // The new FLUX.2 models are explicit targets with megapixel pricing
+        // and the shared aspect-ratio sizes; none stands in for another.
+        for model in [
+            "flux-2-klein-4b",
+            "flux-2-klein-9b",
+            "flux-2-flex",
+            "flux-2-max",
+        ] {
+            let target = execution_targets
+                .iter()
+                .find(|target| target.model == model)
+                .unwrap();
+            assert_eq!(target.output_sizes.len(), 18, "{model}");
+            assert!(target.megapixels.is_some(), "{model}");
+            assert_eq!(target.pricing.len(), 1, "{model}");
+            assert_eq!(
+                target.pricing[0].components[1].unit,
+                PricingUnit::AdditionalMegapixel
+            );
+        }
         let flux_3 = execution_targets
             .iter()
             .find(|target| target.model == "flux-3-image")

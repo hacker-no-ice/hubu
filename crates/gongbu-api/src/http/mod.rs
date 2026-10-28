@@ -2431,6 +2431,10 @@ mod tests {
         assert_eq!(
             ids,
             std::collections::BTreeSet::from([
+                "hubu.flux-2-flex.text-to-image/v1",
+                "hubu.flux-2-klein-4b.text-to-image/v1",
+                "hubu.flux-2-klein-9b.text-to-image/v1",
+                "hubu.flux-2-max.text-to-image/v1",
                 "hubu.flux-2-pro.text-to-image/v1",
                 "hubu.flux-3-image.text-to-image/v1",
                 "hubu.gemini-3.1-flash-image.image-edit/v1",
