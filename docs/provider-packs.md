@@ -18,7 +18,9 @@ settings say `type = "pack"` is that pack's checked-in projection: the same
 `provider_config_version`, pricing version, review date and pricing rules,
 pinned to the pack's content digest. Gongbu's tests fail if a pack and its
 contract entries disagree, so a pack change ships with a matching contract
-update.
+update. Successive versions of one pack can ship side by side, each backing
+its own contract revision: `bfl-flux-2.toml` backs FLUX.2 [pro] v1 and
+`bfl-flux-2-v2.toml` backs v2. `bfl-flux-3-image.toml` backs FLUX 3 Image.
 
 ## What a pack declares and what engines own
 
@@ -254,15 +256,15 @@ spend is reserved.
 | Field | Rules |
 | --- | --- |
 | `name` | Required lowercase identifier the agent uses. `model`, `output_width` and `output_height` are reserved for the selected target's model ID and certified output dimensions. |
-| `type` | Required: `string`, `integer`, `boolean` or `enum`. |
+| `type` | Required: `string`, `integer`, `boolean`, `enum` or `images` (see [input images](#input-images)). |
 | `field` | Optional provider request field. Defaults to `name`. |
 | `required` / `default` | A required parameter has no default. A default must satisfy the bounds. |
 | `max_length` | Required on `string` parameters. |
-| `min` / `max` | `integer` only. |
+| `min` / `max` | `integer`, or the image count of an `images` parameter. |
 | `values` | `enum` only: unique, lowercase selector values. |
-| `quantity` | `integer` only: the priced quantity it sets (`image_count`, `input_tokens`, `max_output_tokens`, `results`, `pages`, `seconds`). Needs `min >= 0` and a `max`, so every hold is bounded. |
+| `quantity` | `integer` only: the priced quantity it sets (`image_count`, `input_tokens`, `max_output_tokens`, `results`, `pages`, `seconds`). Needs `min >= 0` and a `max`, so every hold is bounded. `megapixels` and `additional_megapixels` are derived from the certified size, never set by a parameter. `input_images` is set only by an `images` parameter. |
 | `selector` | `enum` only: the pricing selector key it sets. |
-| `output_dimensions` | `enum` with a `selector` only: the certified `[width, height]` for each value, such as `{ "1k" = [1024, 1024] }`. The chosen size is frozen into the request and available to the body template as `{{output_width}}` and `{{output_height}}`. |
+| `output_dimensions` | `enum` with a `selector` only: the certified `[width, height]` for each value, such as `{ "1k" = [1024, 1024] }`. The chosen size is frozen into the request and available to the body template as `{{output_width}}` and `{{output_height}}`. For sizes set by more than one parameter, use [`[[size_presets]]`](#size_presets) instead. |
 | `equals` | `integer` only: `output_width` or `output_height`. The value must equal the size the preset certifies, and the parameter is sent as that size. |
 
 A parameter name may sit in one input group, such as `options.seed`: the agent
@@ -274,6 +276,110 @@ Grouped names such as `options.output_width` remain separate from the reserved
 A priced parameter (`quantity` or `selector`) must be required or have a
 default. `[fixed]` fields are sent with every request and can't collide with a
 parameter's field.
+
+#### Input images
+
+An `images` parameter takes the artifact IDs of images that earlier governed
+executions of the same account delivered, so an edit pack never accepts bytes
+or URLs from an agent. Gongbu checks every ID at admission and again before
+the claim, then the engine loads the verified bytes and sends one rendered
+`item` per image.
+
+| Field | Rules |
+| --- | --- |
+| `required` | Must be `true`, with no default. |
+| `min` / `max` | Image count, from 1 to 16. `min` defaults to 1. |
+| `quantity` | Optional; only `input_images`, which an `input_image` price component prices. |
+| `item` | Required provider shape for one image. It must send `{{image.data}}` (base64 bytes) and may use `{{image.media_type}}`. |
+
+The parameter needs a body template, where its placeholder must be a whole
+element of an array; the engine replaces that element with the rendered items.
+Only the `sync_fixed` engine loads input images today. The verified Gemini edit
+pack declares:
+
+```toml
+[request.body]
+model = "{{model}}"
+input = [{ type = "text", text = "{{prompt}}" }, "{{input_images}}"]
+
+[[parameters]]
+name = "input_images"
+type = "images"
+required = true
+max = 4
+quantity = "input_images"
+item = { type = "image", mime_type = "{{image.media_type}}", data = "{{image.data}}" }
+```
+
+### `[[size_presets]]`
+
+Certified output sizes for combinations of enum parameters, such as an image
+size and an aspect ratio. A pack uses either `size_presets` or one parameter's
+`output_dimensions`, not both.
+
+```toml
+[[size_presets]]
+when = { image_size = "2k", aspect_ratio = "16:9" }
+size = [2688, 1536]
+```
+
+| Field | Rules |
+| --- | --- |
+| `when` | The value of each preset parameter. Every preset names the same enum parameters, each of which must be required or have a default. |
+| `size` | The `[width, height]` the provider returns for that combination, each 1 to 65535. |
+
+Every combination of values a model accepts (honoring its `parameter_values`)
+must have exactly one preset, and no two presets may certify the same size.
+The selected size is frozen into the request as its output dimensions and is
+available to the body template as `{{output_width}}` and `{{output_height}}`.
+Because a size identifies its preset, the preset parameters themselves don't
+have to be sent when the template sends the size.
+
+Discovery (`GET /v2/execution-targets`) lists a target's presets as
+`output_sizes`, each with its `when` values, `width` and `height`.
+
+### `[megapixels]`
+
+How billed megapixels are counted, required when a pricing rule uses the
+`megapixel` or `additional_megapixel` unit, and refused otherwise. It needs a
+certified size for every input, from `size_presets` or `output_dimensions`.
+
+```toml
+[megapixels]
+rounding = "floor"
+pixels_per_megapixel = 1000000
+```
+
+| Field | Rules |
+| --- | --- |
+| `rounding` | Required: `floor` (partial megapixels are free), `ceil` (any partial megapixel is billed whole), or `nearest` (half a megapixel or more is billed whole). |
+| `pixels_per_megapixel` | Positive integer. Defaults to 1,000,000; use 1048576 for a binary megapixel. |
+| `minimum` | Billed megapixels for any image, at least 1. Defaults to 1. |
+
+Each image bills `max(minimum, round(width × height ÷ pixels_per_megapixel))`
+megapixels, with integer arithmetic only. `additional_megapixels` is that
+number minus one. Both are multiplied by `image_count`.
+
+The estimate uses the certified size. Settlement decodes the size of each
+delivered image and bills its megapixels under the same rule. A smaller image
+than requested settles less; a larger one than was held is a settlement
+overage, never a larger charge.
+
+A "first megapixel, then each additional one" price is an `image` component
+for the first plus an `additional_megapixel` component:
+
+```toml
+components = [
+  { unit = "image", rate_numerator_minor = 3, rate_denominator = 1 },
+  { unit = "additional_megapixel", rate_numerator_minor = 3, rate_denominator = 2 },
+]
+```
+
+At those rates, a 2688 × 1536 image is 4 billed megapixels under `floor`, so
+it costs 3¢ + 3 × 1.5¢ = 7.5¢ exactly. Discovery publishes the rule as
+`megapixels`, so an agent can compute the same exact estimate before it asks
+Hubu for authorization. `fixtures/packs/megapixel-image.toml` is a complete
+example.
 
 ### `[response]`
 
@@ -320,6 +426,7 @@ work, so the engine sends it to reconciliation and never releases the claim.
 | Outcome | Claim |
 | --- | --- |
 | Input fails the declared parameters, or a retry is requested | Released; nothing was sent |
+| An input image can't be loaded | Released as `input_artifact_unavailable`; nothing was sent |
 | The request couldn't be sent | Released |
 | HTTP 4xx | Released as `provider_rejected` |
 | Timeout or lost response after sending | Reconciliation (`timeout_unknown_outcome`) |
@@ -361,7 +468,7 @@ checkpointed host under the original deadline and never resubmits.
 | `provider_config_version` | Required unique slug, frozen into every execution. |
 | `pricing_version` | Required slug. |
 | `pricing_reviewed_on` | `YYYY-MM-DD`. Required for verified packs. |
-| `pricing_rules` | Required. Same rule format as [`providers.toml` pricing rules](configuration/local-stack/v1/providers-toml.md#pricing_rules), without `provider` and `model`, which come from the pack. |
+| `pricing_rules` | Required. Same rule format as [`providers.toml` pricing rules](configuration/local-stack/v1/providers-toml.md#pricing_rules), without `provider` and `model`, which come from the pack. A pack whose `workload_type` isn't `image_generation` projects its rules with that `workload_type`, so a model's edit prices never replace its generation prices. |
 
 Every combination of selector parameter values must be priced by exactly one
 rule, and every priced unit must be set by a bounded parameter. Every explicit

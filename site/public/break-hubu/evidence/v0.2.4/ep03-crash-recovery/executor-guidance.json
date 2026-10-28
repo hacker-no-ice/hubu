@@ -1,0 +1,368 @@
+{
+  "amounts": {
+    "accounting_scale": 6,
+    "contract_version": "validate and claim requests send contract_version \"hubu-spend-executor-v4.5\" with the exact amount that resolve returned",
+    "currencies": [
+      "usd",
+      "usdc"
+    ],
+    "exact": "an amount object {units, scale, currency}: units is an integer string of 10^-scale of currency; executors send scale 6 and never use floating point",
+    "legacy": "a request without contract_version is hubu-spend-executor-v4.4: it sends amount_cents, the authorization rounded up to a whole cent, and is accepted during the transition",
+    "rejected": [
+      "a missing or unsupported amount.scale",
+      "an unknown contract_version",
+      "amount_cents together with the exact amount",
+      "an exact amount or currency that differs from the authorization"
+    ],
+    "responses": "executor responses carry the exact amount object and the amount_cents projection for every contract version"
+  },
+  "authorization_request": {
+    "optional": [
+      "currency (usd or usdc; defaults to usd)",
+      "task_id",
+      "execution_scope",
+      "merchant (legacy only)",
+      "lease_profile"
+    ],
+    "required": [
+      "operation_key",
+      "account_id",
+      "amount (exact decimal string, at most 6 decimal places; amount_cents is deprecated)",
+      "reason"
+    ],
+    "task_id_compatibility": "missing maps reason into task_id for legacy clients; explicit null omits task correlation; an explicit string is preserved independently"
+  },
+  "claim_request": {
+    "currency": "the authorization's currency, usd or usdc; budgets are per currency",
+    "legacy_v4_4_required": [
+      "spend_auth_token_id",
+      "account_id",
+      "amount_cents"
+    ],
+    "optional": [
+      "currency (assertion only; must equal the authorization's currency)",
+      "execution_scope",
+      "merchant (legacy only)",
+      "task_id (compatibility assertion only; Hubu uses the authorization snapshot)"
+    ],
+    "rejected": [
+      "operation_key",
+      "agent_id"
+    ],
+    "required": [
+      "spend_auth_token_id",
+      "account_id",
+      "contract_version",
+      "amount.units",
+      "amount.scale",
+      "amount.currency"
+    ]
+  },
+  "execution_scope_catalog": [
+    {
+      "billing_merchant": {
+        "display_name": "Google",
+        "id": "merchant:google"
+      },
+      "capability": {
+        "display_name": "Generate image",
+        "id": "capability:image:generate"
+      },
+      "executor": {
+        "display_name": "Gongbu image executor",
+        "id": "executor:gongbu:image"
+      },
+      "provider": {
+        "display_name": "Google Gemini Developer API",
+        "id": "provider:google:gemini-developer"
+      },
+      "schema_version": 1
+    },
+    {
+      "billing_merchant": {
+        "display_name": "Black Forest Labs",
+        "id": "merchant:black-forest-labs"
+      },
+      "capability": {
+        "display_name": "Generate image",
+        "id": "capability:image:generate"
+      },
+      "executor": {
+        "display_name": "Gongbu image executor",
+        "id": "executor:gongbu:image"
+      },
+      "provider": {
+        "display_name": "Black Forest Labs FLUX",
+        "id": "provider:black-forest-labs:flux"
+      },
+      "schema_version": 1
+    },
+    {
+      "billing_merchant": {
+        "display_name": "Ideogram",
+        "id": "merchant:ideogram"
+      },
+      "capability": {
+        "display_name": "Generate image",
+        "id": "capability:image:generate"
+      },
+      "executor": {
+        "display_name": "Gongbu image executor",
+        "id": "executor:gongbu:image"
+      },
+      "provider": {
+        "display_name": "Ideogram",
+        "id": "provider:ideogram"
+      },
+      "schema_version": 1
+    },
+    {
+      "billing_merchant": {
+        "display_name": "Local merchant",
+        "id": "merchant:local"
+      },
+      "capability": {
+        "display_name": "Generate image",
+        "id": "capability:image:generate"
+      },
+      "executor": {
+        "display_name": "Gongbu image executor",
+        "id": "executor:gongbu:image"
+      },
+      "provider": {
+        "display_name": "Local fixture provider",
+        "id": "provider:local:fixture"
+      },
+      "schema_version": 1
+    }
+  ],
+  "execution_scope_schema_version": 1,
+  "executor_flow": [
+    "platform supplies one stable operation_key and requests POST /spend/authorize with merchant, task scope, and lease_profile",
+    "Hubu durably records the authorization record under the agent-scoped operation_key",
+    "when policy returns needs_approval, the client shows approval.review to the human and resolves the approval_request_id as approve or deny before continuing",
+    "agent sends the spend_auth_token_id and execution intent to an executor",
+    "executor resolves the authoritative authorization through POST /spend/executor/resolve and independently verifies its derived price and scope",
+    "executor calls POST /spend/executor/claim with the spend_auth_token_id before irreversible work; Hubu derives the operation from the stored decision",
+    "executor performs work with its own credentials",
+    "executor settles by claim_id with a provider receipt after successful irreversible work, or releases by claim_id before work is performed; it never sends operation_key or agent_id"
+  ],
+  "human_approval": {
+    "approval_request_id": "the immutable spend decision id returned by needs_approval",
+    "capability_header": "x-hubu-approval-capability",
+    "mcp": "hubu_resolve_spend_approval is protected by the narrow spend-approval client gate",
+    "resolve": "the owner-authenticated client submits approve or deny with the distinct human approval capability; approval reserves budget but never invokes a provider",
+    "retry": "replay the exact authorization request or read approval status to recover the durable result",
+    "review": "show the complete approval.review object before asking the human to approve or deny",
+    "statuses": [
+      "pending",
+      "approved",
+      "denied"
+    ]
+  },
+  "lease": {
+    "authorization_ttl_seconds": 300,
+    "default_lease_profile": "default",
+    "lease_profiles": {
+      "default": {
+        "claim_ttl_seconds": 900
+      },
+      "proof_short": {
+        "claim_ttl_seconds": 30
+      }
+    }
+  },
+  "legacy_merchant": "accepted for migration and normalized to an explicit legacy-unresolved scope; new clients should send execution_scope",
+  "operation_key_policy": {
+    "corrected_scope_retry": {
+      "actions": [
+        "reuse_operation_key",
+        "replay_exactly",
+        "create_new_operation"
+      ],
+      "admission": "only after every prior attempt is terminally denied and no token, approval, hold, claim, dispatch, payment, or settlement side effect exists",
+      "attempts": "immutable monotonic revisions under the stable operation key",
+      "authority": "an immediate SQLite transaction, not the process-local manager mutex"
+    },
+    "generation": {
+      "comparison": "case-sensitive after trimming surrounding whitespace",
+      "fallback": "the platform adapter generates and persists an opaque operation key before the first authorization attempt",
+      "preferred": "reuse the platform's durable tool-call, run-step, or operation id with a platform prefix"
+    },
+    "namespace": [
+      "agent_id",
+      "operation_key"
+    ],
+    "persistence": [
+      "Hubu is the authoritative store for authorization record state under the agent-scoped operation_key",
+      "the client must reuse its stable operation_key for every authorization retry; executors claim by spend_auth_token_id and finalize by claim_id instead",
+      "do not rely on model conversation memory for the operation_key"
+    ],
+    "prohibited": [
+      "ask the autonomous model to invent the operation_key",
+      "derive operation_key from mutable spend fields such as amount or merchant",
+      "reuse one operation_key for different logical work by the same agent",
+      "change scope when retry guidance says replay_exactly",
+      "reuse a blocked key when retry guidance says create_new_operation"
+    ],
+    "responsibility": "agent platform or orchestrator, not the autonomous model"
+  },
+  "protocol_version": "hubu-spend-executor-v4.5",
+  "reconciliation_request": {
+    "human_gate": {
+      "capability_header": "x-hubu-reconciliation-capability",
+      "cli": "The CLI reads HUBU_RECONCILIATION_TOKEN or HUBU_RECONCILIATION_TOKEN_FILE and sends it only for reconciliation.",
+      "mcp": "MCP reconciliation tools require both a trusted client approval prompt and the distinct reconciliation capability.",
+      "requirement": "The server requires a reconciliation capability distinct from the normal API bearer token."
+    },
+    "required": [
+      "claim_id",
+      "provider_reference",
+      "evidence"
+    ],
+    "routes": {
+      "vendor_billed": "POST /spend/executor/settle",
+      "vendor_did_not_bill": "POST /spend/executor/release"
+    },
+    "vendor_billed_required": [
+      "receipt.actual_vendor_cost.amount",
+      "receipt.actual_vendor_cost.scale",
+      "receipt.actual_vendor_cost.currency",
+      "receipt.provider_request_id",
+      "receipt.price_model_snapshot",
+      "receipt.artifact_reference"
+    ]
+  },
+  "release_request": {
+    "identity": "claim_id",
+    "rejected": [
+      "spend_auth_token_id",
+      "operation_key",
+      "agent_id",
+      "receipt"
+    ]
+  },
+  "role_boundary": {
+    "executor": [
+      "hold vendor credentials outside Hubu",
+      "perform work such as model calls or API operations",
+      "claim authorization before vendor work and finalize the claim afterward"
+    ],
+    "hubu": [
+      "register agents and owners",
+      "evaluate policy",
+      "reserve one agent-budget hold per spend decision",
+      "exclusively claim executor spend authorization",
+      "settle actual vendor cost and release unused authorization, or release the full reserved budget"
+    ]
+  },
+  "routes": {
+    "approval_resolve": "POST /spend/approval/resolve",
+    "approval_status": "GET /spend/approval?approval_request_id=DECISION_ID",
+    "claim": "POST /spend/executor/claim",
+    "claim_status": "GET /spend/executor/claim?claim_id=CLAIM_ID",
+    "guidance": [
+      "GET /spend/executor/guidance",
+      "GET /.well-known/hubu-spend-executor.json"
+    ],
+    "reconcile_vendor_billed": "POST /spend/executor/settle",
+    "reconcile_vendor_did_not_bill": "POST /spend/executor/release",
+    "reconciliation_queue": "GET /spend/executor/reconciliation",
+    "release": "POST /spend/executor/release",
+    "resolve": "POST /spend/executor/resolve",
+    "settle": "POST /spend/executor/settle",
+    "validate": "POST /spend/executor/validate",
+    "void_unclaimed": "POST /spend/void"
+  },
+  "scope_rules": [
+    "operation_key is platform-assigned, immutable, and scoped to the authorized agent; authorization retries must use the same spend scope",
+    "task_id is an optional trusted external correlation and reason is independent human-readable authorization context; neither must equal operation_key",
+    "Hubu resolves task_id and reason from the authorization snapshot for executor and reconciliation evidence; a supplied executor task_id is only a compatibility assertion and must match",
+    "account_id, the exact amount and currency (or, for v4.4, its whole-cent projection), complete canonical execution_scope, and legacy merchant must match the original authorized spend",
+    "typed execution_scope identifiers resolve against Hubu's trusted catalog; unknown or ambiguous identifiers are rejected",
+    "provider, executor, capability, and billing_merchant are independently policy-addressable stable identities",
+    "lease_profile is selected during authorization and cannot be changed by the executor",
+    "the spend auth token must be unexpired, unused, unrevoked, and unclaimed when a new claim starts",
+    "authorization retries with the same operation_key and claim retries with the same spend_auth_token_id return stored authorization record state, including terminal state",
+    "claiming moves the associated budget hold from frozen to claimed and extends it to claim_expires_at",
+    "an active claim remains finalizable after the original authorization expires",
+    "Hubu does not accept vendor API keys or model/provider payloads in this protocol",
+    "executor route responses never include the private operation_key; executors identify work by spend_auth_token_id, claim_id, and the public decision_id"
+  ],
+  "settle_request": {
+    "identity": "claim_id",
+    "legacy_v4_3_input": "receipt.actual_vendor_cost_cents maps exactly to amount with scale 2 and usd; price_model_snapshot remains the complete immutable JSON snapshot",
+    "legacy_v4_3_response": "receipt.actual_vendor_cost_cents remains available as the conservative budget_charge_cents projection; actual_vendor_cost preserves the exact provider decimal",
+    "rejected": [
+      "spend_auth_token_id",
+      "operation_key",
+      "agent_id"
+    ],
+    "required": [
+      "receipt.actual_vendor_cost.amount",
+      "receipt.actual_vendor_cost.scale",
+      "receipt.actual_vendor_cost.currency",
+      "receipt.provider_request_id",
+      "receipt.price_model_snapshot",
+      "receipt.artifact_reference"
+    ]
+  },
+  "settlement_rules": [
+    "settle only after the executor has performed irreversible billable work",
+    "release only before irreversible billable work has occurred",
+    "settlement atomically persists the immutable exact provider cost and full frozen pricing snapshot, marks the claim settled and token used, consumes the cost rounded up to the budget's micro-unit (scale 6), and releases the authorization remainder",
+    "actual vendor cost is an integer major-unit decimal with scale at most 18 in the hold's own currency; Hubu never uses floating point and rounds only digits beyond scale 6 up",
+    "normal settlement rejects a conservative budget charge above the authorized maximum; human vendor-billed reconciliation records an already-incurred overrun explicitly",
+    "an identical settlement retry returns the original settlement_id and receipt without consuming budget twice; a changed receipt is rejected",
+    "finalization resolves by claim_id; an executor that lost the claim response replays the identical claim, which returns the existing claim even after the authorization expires",
+    "claim expiry is evaluated once when the settlement transaction starts",
+    "release atomically marks the claim released and token revoked while returning the reserved amount",
+    "settle and release serialize so the first terminal finalization wins",
+    "expired claims keep their holds claimed for reconciliation instead of automatically releasing",
+    "claim status lookup reports reconciliation_required once a claimed lease expires",
+    "only expired claimed leases enter the reconciliation queue",
+    "the normal API bearer token cannot authorize reconciliation",
+    "a human-confirmed vendor_billed resolution settles the hold; vendor_did_not_bill releases it",
+    "each reconciliation stores the provider reference, evidence, resolving user, outcome, and timestamp"
+  ],
+  "supported_protocol_versions": [
+    "hubu-spend-executor-v4.5",
+    "hubu-spend-executor-v4.4"
+  ],
+  "validate_request": {
+    "legacy_v4_4_required": [
+      "spend_auth_token_id",
+      "account_id",
+      "amount_cents"
+    ],
+    "note": "read-only scope inspection; it never authorizes irreversible work",
+    "rejected": [
+      "operation_key",
+      "agent_id"
+    ],
+    "required": [
+      "spend_auth_token_id",
+      "account_id",
+      "contract_version",
+      "amount.units",
+      "amount.scale",
+      "amount.currency"
+    ]
+  },
+  "void_unclaimed_request": {
+    "caller": "trusted router",
+    "reason": "executor_rejected_before_claim",
+    "required": [
+      "spend_auth_token_id",
+      "account_id",
+      "operation_key"
+    ],
+    "rules": [
+      "requires the backend bearer and the private operation key bound to this account and authorization; never exposed as an agent-facing MCP tool",
+      "void and claim are mutually exclusive in one SQLite write transaction",
+      "void requires an unused, unrevoked token with no claim and a frozen hold; exact void replay is idempotent",
+      "no charge or ledger posting is created",
+      "timeouts, ambiguous dispatch and retry exhaustion never justify voiding"
+    ]
+  }
+}

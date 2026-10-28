@@ -35,11 +35,87 @@ test("server-renders the Hubu documentation home", async () => {
   assert.doesNotMatch(html, /authorize → execute → submit/);
   assert.equal(html.match(/src="\/brand\/hubu-wordmark\.svg"/g)?.length, 2);
   assert.match(html, /alt="Hubu"/);
-  assert.match(html, /aria-label="Hubu documentation home"/);
+  assert.match(html, /aria-label="Hubu home"/);
   assert.match(html, /og-wordmark\.png/);
   assert.match(html, /https:\/\/hubustack\.dev\/og-wordmark\.png/);
   assert.doesNotMatch(html, /not on main yet/i);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/i);
+});
+
+test("release notes lead from the landing page to one concise stable release and its analysis", async () => {
+  const [home, indexResponse, overviewResponse, docs, blog, sitemap] = await Promise.all([
+    render().then((response) => response.text()),
+    render("/releases"),
+    render("/releases/v0.2.4"),
+    render("/docs/overview").then((response) => response.text()),
+    render("/blogs").then((response) => response.text()),
+    readFile(new URL("../dist/client/sitemap.xml", import.meta.url), "utf8"),
+  ]);
+  assert.equal(indexResponse.status, 200);
+  assert.equal(overviewResponse.status, 200);
+  const index = await indexResponse.text();
+  const overview = await overviewResponse.text();
+  const header = home.match(/<header\b[^>]*>[\s\S]*?<\/header>/)?.[0];
+  const hero = home.match(/<section class="hero">[\s\S]*?<\/section>/)?.[0];
+  assert.ok(header);
+  assert.ok(hero);
+  assert.match(header, /class="header-version" href="\/releases\/v0\.2\.4" aria-label="Read Hubu v0.2.4 release notes and system card"/);
+  assert.match(header, /v0\.2\.4 <span aria-hidden="true">↗<\/span>/);
+  assert.doesNotMatch(header, /\/ docs/);
+  assert.doesNotMatch(hero, /v0\.2\.4|hero-version/);
+  for (const html of [home, index, overview, docs, blog]) {
+    assert.match(html, /href="\/releases"/);
+    assert.doesNotMatch(html, /Break Hubu|href="\/break-hubu"|linear\.app|HUB-\d+/);
+  }
+  assert.match(index, /href="\/releases\/v0.2.4"/);
+  assert.doesNotMatch(index, /href="\/releases\/v0\.2\.[0-3]/);
+  assert.match(overview, /What changed/);
+  assert.match(overview, /System card/);
+  assert.match(overview, /Hubu remains experimental and local-first/);
+  assert.match(overview, /CHANGELOG\.md#v024--2026-10-19/);
+  assert.match(overview, /href="\/docs\/operations\/upgrading-to-v0.2.4"/);
+  assert.match(overview, /Storage migrations are one-way/);
+  assert.match(overview, /governance-query coverage/);
+  assert.match(overview, /four experiments do not qualify every new release feature/);
+  assert.match(overview, /Wallet rails remain USD-only/);
+  assert.match(overview, /Registered agent accounts are not bound/);
+  assert.match(overview, /normal bearer can change budgets and policies/);
+  assert.match(overview, /handles requests serially/);
+  assert.match(overview, /Requires explicit owner reconciliation/);
+  assert.match(overview, /href="\/releases\/v0.2.4\/report"/);
+  assert.ok(overview.indexOf('id="changes-title"') < overview.indexOf('id="system-card-title"'));
+  assert.doesNotMatch(overview, /<svg|Captured terminal excerpt/);
+  for (const path of ["/releases", "/releases/v0.2.4", "/releases/v0.2.4/report"]) {
+    assert.ok(sitemap.includes(`https://hubustack.dev${path}</loc>`));
+  }
+  assert.doesNotMatch(sitemap, /\/break-hubu/);
+  assert.match(index, /href="https:\/\/hubustack.dev\/releases"/);
+  assert.match(overview, /href="https:\/\/hubustack.dev\/releases\/v0.2.4"/);
+  for (const path of ["/break-hubu", "/break-hubu/v0.2.4", "/releases/v0.2.3"]) {
+    assert.equal((await render(path)).status, 404);
+  }
+});
+
+test("the detailed system analysis keeps reproducibility and authority limits alongside its claims", async () => {
+  const response = await render("/releases/v0.2.4/report");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /<h1>v0.2.4 system analysis<\/h1>/);
+  assert.match(html, /href="\/releases\/v0.2.4"/);
+  assert.match(html, /href="https:\/\/hubustack.dev\/releases\/v0.2.4\/report"/);
+  assert.match(html, /5344ab565171e1aa3d3ec628641cdbfce18372af/);
+  assert.match(html, /All claims are about Hubu’s own ledger and records, not provider invoices/);
+  assert.match(html, /Gongbu, Temporal, MCP transport, provider adapters, and actual provider billing/);
+  for (const id of ["ep01-runaway", "ep02-last-cent", "ep03-crash-recovery", "ep04-many-clients", "identity"]) {
+    assert.match(html, new RegExp(`id="${id}"`));
+    assert.match(html, new RegExp(`href="#${id}"`));
+  }
+  assert.match(html, /known gap that will be addressed in future releases/);
+  assert.doesNotMatch(html, /linear\.app|HUB-\d+/);
+  assert.match(html, /not server-enforced role isolation/);
+  assert.match(html, /Does not hold/);
+  assert.match(html, /a timeout never counts as a denial/i);
+  assert.doesNotMatch(html, /All claims pass|100% secure|autoplay|setInterval/);
 });
 
 test("embeds the introduction below the hero without autoplay", async () => {

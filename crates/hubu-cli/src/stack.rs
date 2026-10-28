@@ -32,7 +32,7 @@ const MANAGED_GONGBU_CALLER_ACCOUNT: &str = "gongbu-caller";
 const PROVIDER_CONTRACTS_DOCUMENT: &str =
     include_str!("../../../contracts/provider-contracts-v1.json");
 const PROVIDER_CONTRACTS_DOCUMENT_SHA256: &str =
-    "f016d273c246807bc2b1dfdb75e71965ad18fc1343fe736cc2ae6c7056aa71f5";
+    "160f81a950924beb58c2b5e0f452751b4cd1daa4517999606b495510d7588ae1";
 const MANAGED_CREDENTIAL_IGNORE: &[u8] =
     b"# Hubu-managed credentials. Do not edit or remove.\n*\n!.gitignore\n";
 
@@ -467,14 +467,50 @@ struct ProviderContractCapability {
     image_count: u32,
     output_formats: Vec<String>,
     presets: Vec<ProviderContractPreset>,
+    /// Set when the contract prices each image by its billed megapixels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    megapixels: Option<ProviderContractMegapixels>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderContractMegapixels {
+    rounding: String,
+    pixels_per_megapixel: u64,
+    minimum: u32,
+}
+
+impl ProviderContractMegapixels {
+    /// Billed megapixels for one image, as Gongbu counts them.
+    fn billed(&self, width: u32, height: u32) -> Option<i64> {
+        let pixels = u64::from(width) * u64::from(height);
+        let per = self.pixels_per_megapixel;
+        if per == 0 {
+            return None;
+        }
+        let (whole, rest) = (pixels / per, pixels % per);
+        let billed = match self.rounding.as_str() {
+            "floor" => whole,
+            "ceil" => whole + u64::from(rest > 0),
+            "nearest" => whole + u64::from(rest >= per - per / 2),
+            _ => return None,
+        };
+        i64::try_from(billed.max(u64::from(self.minimum))).ok()
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ProviderContractPreset {
     name: String,
-    width: u32,
-    height: u32,
+    /// The certified output size, when the provider publishes one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    height: Option<u32>,
+    /// The input values that select this size beyond `image_size`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    when: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -516,8 +552,12 @@ struct ProviderContractCapabilitySummary {
 #[derive(Clone, Debug, Serialize)]
 struct ProviderContractPresetSummary {
     name: String,
-    width: u32,
-    height: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    height: Option<u32>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    when: BTreeMap<String, String>,
     currency: String,
     rate_numerator_minor: i64,
     rate_denominator: i64,
@@ -611,18 +651,38 @@ fn provider_contract_catalog_entries(
                 .presets
                 .iter()
                 .map(|preset| {
-                    let rule = contract_definition.pricing_rules.iter().find(|rule| {
-                        rule.pointer("/selector/image_size").and_then(Value::as_str)
-                            == Some(preset.name.as_str())
-                    })?;
-                    let component = rule.get("components").and_then(Value::as_array)?.first()?;
+                    let (currency, (rate_numerator_minor, rate_denominator)) =
+                        match &contract_definition.capability.megapixels {
+                            Some(rule) => megapixel_preset_price(
+                                &contract_definition.pricing_rules,
+                                rule,
+                                preset,
+                            )?,
+                            None => {
+                                let rule =
+                                    contract_definition.pricing_rules.iter().find(|rule| {
+                                        rule.pointer("/selector/image_size").and_then(Value::as_str)
+                                            == Some(preset.name.as_str())
+                                    })?;
+                                let component =
+                                    rule.get("components").and_then(Value::as_array)?.first()?;
+                                (
+                                    rule.get("currency")?.as_str()?.to_owned(),
+                                    (
+                                        component.get("rate_numerator_minor")?.as_i64()?,
+                                        component.get("rate_denominator")?.as_i64()?,
+                                    ),
+                                )
+                            }
+                        };
                     Some(ProviderContractPresetSummary {
                         name: preset.name.clone(),
                         width: preset.width,
                         height: preset.height,
-                        currency: rule.get("currency")?.as_str()?.to_owned(),
-                        rate_numerator_minor: component.get("rate_numerator_minor")?.as_i64()?,
-                        rate_denominator: component.get("rate_denominator")?.as_i64()?,
+                        when: preset.when.clone(),
+                        currency,
+                        rate_numerator_minor,
+                        rate_denominator,
                     })
                 })
                 .collect::<Option<Vec<_>>>()?;
@@ -653,6 +713,47 @@ fn provider_contract_catalog_entries(
             })
         })
         .collect()
+}
+
+/// A megapixel-priced preset's exact price for one image of its size, from
+/// the contract's single unselected rule, as a reduced fraction of minor units.
+fn megapixel_preset_price(
+    rules: &[Value],
+    megapixels: &ProviderContractMegapixels,
+    preset: &ProviderContractPreset,
+) -> Option<(String, (i64, i64))> {
+    let [rule] = rules else {
+        return None;
+    };
+    if rule.get("selector").is_some() {
+        return None;
+    }
+    let billed = i128::from(megapixels.billed(preset.width?, preset.height?)?);
+    let (mut numerator, mut denominator) = (0_i128, 1_i128);
+    for component in rule.get("components")?.as_array()? {
+        let quantity = match component.get("unit")?.as_str()? {
+            "image" => 1,
+            "megapixel" => billed,
+            "additional_megapixel" => billed - 1,
+            _ => return None,
+        };
+        let rate_denominator = i128::from(component.get("rate_denominator")?.as_i64()?);
+        numerator = numerator * rate_denominator
+            + i128::from(component.get("rate_numerator_minor")?.as_i64()?) * quantity * denominator;
+        denominator *= rate_denominator;
+    }
+    let (mut a, mut b) = (numerator, denominator);
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    let divisor = a.abs().max(1);
+    Some((
+        rule.get("currency")?.as_str()?.to_owned(),
+        (
+            i64::try_from(numerator / divisor).ok()?,
+            i64::try_from(denominator / divisor).ok()?,
+        ),
+    ))
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1056,11 +1157,14 @@ fn catalog(mut args: Vec<String>, hubu_home: &Path) -> Result<()> {
             entry.pricing_reviewed_on
         );
         for preset in &entry.capability.presets {
+            let size = match (preset.width, preset.height) {
+                (Some(width), Some(height)) => format!("{width}x{height}"),
+                _ => "size varies".to_owned(),
+            };
             println!(
-                "  {}  {}x{}  {}/{} {} minor units",
+                "  {}  {}  {}/{} {} minor units",
                 preset.name,
-                preset.width,
-                preset.height,
+                size,
                 preset.rate_numerator_minor,
                 preset.rate_denominator,
                 preset.currency
@@ -2393,6 +2497,20 @@ fn validate_provider_source(source: &ProvidersSource) -> Result<()> {
                 bail!("providers.toml live mode requires a positive maximum_spend_minor and the exact Gongbu live-spend acknowledgement");
             }
             let bound_contracts = selected_provider_contracts(source)?;
+            // Successive contract versions are revisions of one target.
+            let mut bound_targets = BTreeSet::new();
+            if let Some((contract, _, _)) = bound_contracts.iter().find(|(_, _, definition)| {
+                !bound_targets.insert((
+                    definition.target.workload_type.clone(),
+                    definition.target.provider.clone(),
+                    definition.target.adapter.clone(),
+                    definition.target.model.clone(),
+                ))
+            }) {
+                bail!(
+                    "providers.toml binds `{contract}` and another version of the same provider target; bind one"
+                );
+            }
             let shipped_contracts = provider_contracts_document()?.contracts;
             for definition in &shipped_contracts {
                 let selected = bound_contracts
@@ -5172,6 +5290,113 @@ account = "executor"
         )
         .unwrap();
         assert!(validate_provider_credential_isolation(&providers, &bootstrap_collision).is_err());
+    }
+
+    #[test]
+    fn flux_v2_contract_renders_megapixel_pricing_and_aspect_ratio_presets() {
+        let source = |contracts: &[&str]| {
+            let bindings: String = contracts
+                .iter()
+                .map(|contract| {
+                    format!(
+                        "[[contract_bindings]]\ncontract = \"{contract}\"\ncredential = \"bfl\"\n"
+                    )
+                })
+                .collect();
+            toml::from_str::<ProvidersSource>(&format!(
+                r#"schema_version = 1
+mode = "live"
+maximum_spend_minor = 25
+live_spend_acknowledgement = "{LIVE_SPEND_ACKNOWLEDGEMENT}"
+{bindings}"#
+            ))
+            .unwrap()
+        };
+        let providers = source(&["hubu.flux-2-pro.text-to-image/v2"]);
+        validate_provider_source(&providers).unwrap();
+        let pricing = render_pricing_catalog(&providers).unwrap();
+        assert_eq!(
+            pricing["catalog_version"],
+            "bfl-flux-2-pro-usd-2026-10-21-v2"
+        );
+        assert_eq!(
+            pricing["rules"][0]["components"][1]["unit"],
+            "additional_megapixel"
+        );
+        let entries = provider_contract_catalog_entries(&providers, true);
+        let [entry] = entries.as_slice() else {
+            panic!("one contract");
+        };
+        assert_eq!(entry.capability.presets.len(), 18);
+        let header = entry
+            .capability
+            .presets
+            .iter()
+            .find(|preset| preset.name == "2k-16:9")
+            .unwrap();
+        assert_eq!((header.width, header.height), (Some(1920), Some(1088)));
+        assert_eq!(header.when["aspect_ratio"], "16:9");
+        assert_eq!(
+            (header.rate_numerator_minor, header.rate_denominator),
+            (9, 2)
+        );
+        let square_4k = entry
+            .capability
+            .presets
+            .iter()
+            .find(|preset| preset.name == "4k-1:1")
+            .unwrap();
+        assert_eq!(
+            (square_4k.rate_numerator_minor, square_4k.rate_denominator),
+            (15, 2)
+        );
+        // v1 and v2 are revisions of one target; a profile binds one.
+        let both = source(&[
+            "hubu.flux-2-pro.text-to-image/v1",
+            "hubu.flux-2-pro.text-to-image/v2",
+        ]);
+        assert!(validate_provider_source(&both).is_err());
+    }
+
+    #[test]
+    fn flux_3_binds_beside_flux_2_with_tier_prices_and_no_fixed_sizes() {
+        let providers: ProvidersSource = toml::from_str(&format!(
+            r#"schema_version = 1
+mode = "live"
+maximum_spend_minor = 25
+live_spend_acknowledgement = "{LIVE_SPEND_ACKNOWLEDGEMENT}"
+[[contract_bindings]]
+contract = "hubu.flux-2-pro.text-to-image/v2"
+credential = "bfl"
+[[contract_bindings]]
+contract = "hubu.flux-3-image.text-to-image/v1"
+credential = "bfl"
+"#
+        ))
+        .unwrap();
+        // Different models of one provider, so both bind with one BFL key.
+        validate_provider_source(&providers).unwrap();
+        let entries = provider_contract_catalog_entries(&providers, true);
+        let flux_3 = entries
+            .iter()
+            .find(|entry| entry.contract == "hubu.flux-3-image.text-to-image/v1")
+            .unwrap();
+        let prices: Vec<_> = flux_3
+            .capability
+            .presets
+            .iter()
+            .map(|preset| {
+                (
+                    preset.name.as_str(),
+                    preset.width,
+                    preset.rate_numerator_minor,
+                    preset.rate_denominator,
+                )
+            })
+            .collect();
+        assert_eq!(prices, [("1k", None, 48, 10), ("2k", None, 10, 1)]);
+        let rendered = serde_json::to_string(&flux_3.capability).unwrap();
+        assert!(!rendered.contains("width"));
     }
 
     #[test]

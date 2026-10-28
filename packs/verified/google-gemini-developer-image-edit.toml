@@ -1,0 +1,132 @@
+# Verified provider pack: Google Gemini Developer API image editing.
+#
+# Edits images that earlier governed executions delivered, referenced by
+# artifact ID. Its own contracts keep text-to-image unchanged;
+# contracts/provider-contracts-v1.json carries this pack's checked-in
+# projection, and Gongbu's tests fail if the two ever disagree.
+#
+# Pricing reviewed 2026-10-21 against https://ai.google.dev/gemini-api/docs/pricing:
+# output images keep the text-to-image per-image rates, and each input image
+# is billed as input tokens. Gemini 3 models count an image at the default
+# media resolution as 1,120 tokens, so one input image is 1,120 × $0.50 per 1M
+# tokens = 0.056¢ on Flash Image and 1,120 × $0.25 per 1M = 0.028¢ on Flash
+# Lite Image. The text prompt's input tokens stay unpriced, as for
+# text-to-image.
+schema_version = 1
+pack_id = "google-gemini-developer-image-edit"
+pack_version = "2026-10-21.1"
+provider = "google"
+display_name = "Google Gemini Developer API"
+billing_merchant = "merchant:google"
+capability = "capability:image:edit"
+workload_type = "image_edit"
+archetype = "sync_fixed"
+adapter = "gemini_developer_image"
+pricing_trust = "verified"
+
+[transport]
+endpoint = "https://generativelanguage.googleapis.com"
+api_version = "v1beta"
+allowed_hosts = ["generativelanguage.googleapis.com"]
+auth_header = "x-goog-api-key"
+credential = "gemini"
+timeout_ms = 30000
+
+[request]
+path = "/v1beta/interactions"
+
+[request.body]
+model = "{{model}}"
+input = [{ type = "text", text = "{{prompt}}" }, "{{input_images}}"]
+response_format = { type = "image", image_size = "{{image_size|upper}}" }
+
+[[parameters]]
+name = "prompt"
+type = "string"
+required = true
+max_length = 32000
+
+# Artifact IDs of images this account's earlier governed executions delivered.
+[[parameters]]
+name = "input_images"
+type = "images"
+required = true
+min = 1
+max = 4
+quantity = "input_images"
+item = { type = "image", mime_type = "{{image.media_type}}", data = "{{image.data}}" }
+
+[[parameters]]
+name = "image_count"
+type = "integer"
+min = 1
+max = 1
+default = 1
+quantity = "image_count"
+
+[[parameters]]
+name = "image_size"
+type = "enum"
+values = ["1k", "2k", "4k"]
+required = true
+selector = "image_size"
+
+[response]
+request_id_headers = ["x-goog-request-id", "x-request-id"]
+provider_request_id = "/id"
+usage = { images = "/steps[type=model_output]/content[type=image]", input_tokens = "/usage/input_tokens", output_tokens = "/usage/output_tokens" }
+optional_usage = ["input_tokens", "output_tokens"]
+artifact_items = "/steps[type=model_output]/content[type=image]"
+artifact_base64 = "/data"
+
+[artifacts]
+media_types = ["image/png", "image/jpeg"]
+
+[[models]]
+model = "gemini-3.1-flash-lite-image"
+provider_config_version = "hubu-gemini-3.1-flash-lite-image-edit-2026-10-21-v1"
+pricing_version = "google-gemini-3.1-flash-lite-image-edit-usd-2026-10-21-v1"
+pricing_reviewed_on = "2026-10-21"
+parameter_values = { image_size = ["1k"] }
+
+[[models.pricing_rules]]
+rule_id = "google-gemini-3.1-flash-lite-image-edit-1k-2026-10-21-v1"
+currency = "USD"
+selector = { image_size = "1k" }
+components = [
+  { unit = "image", rate_numerator_minor = 336, rate_denominator = 100 },
+  { unit = "input_image", rate_numerator_minor = 28, rate_denominator = 1000 },
+]
+
+[[models]]
+model = "gemini-3.1-flash-image"
+provider_config_version = "hubu-gemini-3.1-flash-image-edit-2026-10-21-v1"
+pricing_version = "google-gemini-3.1-flash-image-edit-usd-2026-10-21-v1"
+pricing_reviewed_on = "2026-10-21"
+
+[[models.pricing_rules]]
+rule_id = "google-gemini-3.1-flash-image-edit-1k-2026-10-21-v1"
+currency = "USD"
+selector = { image_size = "1k" }
+components = [
+  { unit = "image", rate_numerator_minor = 67, rate_denominator = 10 },
+  { unit = "input_image", rate_numerator_minor = 56, rate_denominator = 1000 },
+]
+
+[[models.pricing_rules]]
+rule_id = "google-gemini-3.1-flash-image-edit-2k-2026-10-21-v1"
+currency = "USD"
+selector = { image_size = "2k" }
+components = [
+  { unit = "image", rate_numerator_minor = 101, rate_denominator = 10 },
+  { unit = "input_image", rate_numerator_minor = 56, rate_denominator = 1000 },
+]
+
+[[models.pricing_rules]]
+rule_id = "google-gemini-3.1-flash-image-edit-4k-2026-10-21-v1"
+currency = "USD"
+selector = { image_size = "4k" }
+components = [
+  { unit = "image", rate_numerator_minor = 151, rate_denominator = 10 },
+  { unit = "input_image", rate_numerator_minor = 56, rate_denominator = 1000 },
+]

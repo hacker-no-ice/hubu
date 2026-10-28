@@ -1,0 +1,149 @@
+{
+  "verdict": "holds with caveat",
+  "checks": [
+    {
+      "name": "Fresh one-cent budget and empty public ledger",
+      "status": "supported"
+    },
+    {
+      "name": "Fresh instance has no earlier authorization records",
+      "status": "supported"
+    },
+    {
+      "name": "Overrun probe ran before the returned lease deadline",
+      "status": "supported"
+    },
+    {
+      "name": "Normal overrun rejected specifically as exceeding authorization",
+      "status": "supported"
+    },
+    {
+      "name": "held-after-overrun: exactly one admitted operation",
+      "status": "supported"
+    },
+    {
+      "name": "held-after-overrun: one cent remains held with no expense",
+      "status": "supported"
+    },
+    {
+      "name": "held-after-overrun: claimed obligation has no receipt",
+      "status": "supported"
+    },
+    {
+      "name": "expired: exactly one admitted operation",
+      "status": "supported"
+    },
+    {
+      "name": "expired: one cent remains held with no expense",
+      "status": "supported"
+    },
+    {
+      "name": "expired: claimed obligation has no receipt",
+      "status": "supported"
+    },
+    {
+      "name": "Fresh request denied while the original cent remains held",
+      "status": "supported"
+    },
+    {
+      "name": "Expired authorization publicly requires reconciliation",
+      "status": "supported"
+    },
+    {
+      "name": "Original claim is visible in the public reconciliation queue",
+      "status": "supported"
+    },
+    {
+      "name": "Owner first resolution and exact retry both succeeded",
+      "status": "supported"
+    },
+    {
+      "name": "Owner reused the frozen rejected receipt",
+      "status": "supported"
+    },
+    {
+      "name": "Owner retry preserved claim, receipt and evidence",
+      "status": "supported"
+    },
+    {
+      "name": "Post-reconciliation attempt 1 explicitly denied",
+      "status": "supported"
+    },
+    {
+      "name": "Post-reconciliation attempt 2 explicitly denied",
+      "status": "supported"
+    },
+    {
+      "name": "Post-reconciliation attempt 3 explicitly denied",
+      "status": "supported"
+    },
+    {
+      "name": "Post-reconciliation attempt 4 explicitly denied",
+      "status": "supported"
+    },
+    {
+      "name": "Post-reconciliation attempt 5 explicitly denied",
+      "status": "supported"
+    },
+    {
+      "name": "Post-reconciliation attempt 6 explicitly denied",
+      "status": "supported"
+    },
+    {
+      "name": "Post-reconciliation attempt 7 explicitly denied",
+      "status": "supported"
+    },
+    {
+      "name": "Post-reconciliation attempt 8 explicitly denied",
+      "status": "supported"
+    },
+    {
+      "name": "Post-reconciliation attempt 9 explicitly denied",
+      "status": "supported"
+    },
+    {
+      "name": "Post-reconciliation attempt 10 explicitly denied",
+      "status": "supported"
+    },
+    {
+      "name": "reconciled: no additional admitted operation",
+      "status": "supported"
+    },
+    {
+      "name": "reconciled: one three-cent expense, negative two-cent balance",
+      "status": "supported"
+    },
+    {
+      "name": "final: no additional admitted operation",
+      "status": "supported"
+    },
+    {
+      "name": "final: one three-cent expense, negative two-cent balance",
+      "status": "supported"
+    },
+    {
+      "name": "Public receipt discloses original maximum and full overrun",
+      "status": "supported"
+    },
+    {
+      "name": "Public claim records an explicit billed reconciliation",
+      "status": "supported"
+    },
+    {
+      "name": "Resolution retained the original authorization, claim and hold",
+      "status": "supported"
+    },
+    {
+      "name": "Retry preserved settlement and canonical transaction identities",
+      "status": "supported"
+    },
+    {
+      "name": "Policy and budget configuration stayed fixed",
+      "status": "supported"
+    }
+  ],
+  "caveat": "The full overrun is recorded only after explicit owner reconciliation and lease expiry.",
+  "episode": "ep02-last-cent",
+  "execution": "complete",
+  "elapsed_seconds": 31.273
+}

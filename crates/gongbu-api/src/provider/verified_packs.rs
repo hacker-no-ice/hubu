@@ -8,14 +8,24 @@ use super::pack::Pack;
 
 const GOOGLE_GEMINI_DEVELOPER_IMAGE: &str =
     include_str!("../../../../packs/verified/google-gemini-developer-image.toml");
+const GOOGLE_GEMINI_DEVELOPER_IMAGE_EDIT: &str =
+    include_str!("../../../../packs/verified/google-gemini-developer-image-edit.toml");
 const BFL_FLUX_2: &str = include_str!("../../../../packs/verified/bfl-flux-2.toml");
+const BFL_FLUX_2_V2: &str = include_str!("../../../../packs/verified/bfl-flux-2-v2.toml");
+const BFL_FLUX_3_IMAGE: &str = include_str!("../../../../packs/verified/bfl-flux-3-image.toml");
 
 /// Every verified pack, validated.
 pub fn verified_packs() -> Vec<Pack> {
-    [GOOGLE_GEMINI_DEVELOPER_IMAGE, BFL_FLUX_2]
-        .into_iter()
-        .map(|source| Pack::from_toml_str(source).expect("verified packs are valid"))
-        .collect()
+    [
+        GOOGLE_GEMINI_DEVELOPER_IMAGE,
+        GOOGLE_GEMINI_DEVELOPER_IMAGE_EDIT,
+        BFL_FLUX_2,
+        BFL_FLUX_2_V2,
+        BFL_FLUX_3_IMAGE,
+    ]
+    .into_iter()
+    .map(|source| Pack::from_toml_str(source).expect("verified packs are valid"))
+    .collect()
 }
 
 #[cfg(test)]
@@ -64,7 +74,13 @@ mod tests {
                 continue;
             }
             let config = &target["settings"]["config"];
-            let pack = pack(config["pack_id"].as_str().unwrap());
+            let pack = verified_packs()
+                .into_iter()
+                .find(|pack| {
+                    pack.pack_id() == config["pack_id"]
+                        && pack.pack_version() == config["pack_version"]
+                })
+                .unwrap();
             assert_eq!(config, &serde_json::to_value(pack.target_config()).unwrap());
             let model = pack.model(target["model"].as_str().unwrap()).unwrap();
             assert_eq!(
@@ -86,19 +102,53 @@ mod tests {
                 .map(|rule| serde_json::to_value(rule).unwrap())
                 .collect();
             assert_eq!(contract["pricing_rules"].as_array().unwrap(), &rules);
-            // Every advertised preset is a value the pack accepts for this model.
-            for preset in contract["capability"]["presets"].as_array().unwrap() {
+            // Every advertised preset is a value the pack accepts for this
+            // model, at the size it advertises.
+            let presets = contract["capability"]["presets"].as_array().unwrap();
+            for preset in presets {
                 let mut input = json!({"prompt": "x", "image_size": preset["name"]});
+                if pack.parameters().iter().any(|p| p.name == "input_images") {
+                    input["input_images"] = json!(["0f5c2a64-3f0e-4c9b-9a51-2b7d1c4e8a10"]);
+                }
+                for (name, value) in preset["when"].as_object().into_iter().flatten() {
+                    input[name] = value.clone();
+                }
                 if pack.parameters().iter().any(|p| p.name == "options.width") {
                     input["options"] =
                         json!({"width": preset["width"], "height": preset["height"]});
                 }
-                assert!(pack.prepare(&model.model, &input).is_ok(), "{preset}");
+                let prepared = pack.prepare(&model.model, &input).unwrap_or_else(|e| {
+                    panic!("{preset}: {e}");
+                });
+                if let Some(size) = prepared.request.output_dimensions {
+                    assert_eq!(
+                        (json!(size.width), json!(size.height)),
+                        (preset["width"].clone(), preset["height"].clone())
+                    );
+                }
             }
+            // A pack that certifies sizes by combination advertises exactly
+            // those sizes, and its megapixel rule.
+            if pack.has_size_presets() {
+                let advertised: Vec<Value> = presets
+                    .iter()
+                    .map(|p| json!({"when": p["when"], "width": p["width"], "height": p["height"]}))
+                    .collect();
+                assert_eq!(
+                    json!(advertised),
+                    serde_json::to_value(pack.output_sizes(&model.model)).unwrap()
+                );
+            }
+            assert_eq!(
+                contract["capability"].get("megapixels"),
+                pack.megapixel_rule()
+                    .map(|rule| serde_json::to_value(rule).unwrap())
+                    .as_ref()
+            );
             projected += 1;
         }
         assert_eq!(
-            projected, 3,
+            projected, 7,
             "every shipped contract comes from a verified pack"
         );
     }
@@ -511,6 +561,248 @@ mod tests {
             );
             assert_eq!(failure.evidence.operation_id.as_deref(), Some("job-1"));
         }
+    }
+
+    fn flux_v2() -> Pack {
+        verified_packs()
+            .into_iter()
+            .find(|pack| pack.pack_id() == "bfl-flux-2" && pack.pack_version() == "2026-10-21.1")
+            .unwrap()
+    }
+
+    fn snapshot(pack: &Pack, input: &Value) -> crate::provider::contract::PricingSnapshot {
+        snapshot_for(pack, "flux-2-pro", input)
+    }
+
+    fn snapshot_for(
+        pack: &Pack,
+        model: &str,
+        input: &Value,
+    ) -> crate::provider::contract::PricingSnapshot {
+        let catalog = crate::provider::contract::PricingCatalog::from_json(
+            &serde_json::to_vec(&json!({
+                "schema_version": 2,
+                "catalog_version": pack.models()[0].pricing_version,
+                "rules": pack.pricing_rules(),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        catalog
+            .snapshot(&pack.prepare(model, input).unwrap().request)
+            .unwrap()
+    }
+
+    fn png(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        image::GrayImage::new(width, height)
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageOutputFormat::Png,
+            )
+            .unwrap();
+        bytes
+    }
+
+    /// Every v2 size bills BFL's FLUX.2 [pro] rates (3¢ for the first
+    /// megapixel, 1.5¢ for each additional binary megapixel, rounded up), so
+    /// each tier keeps the v1 price at every aspect ratio.
+    #[test]
+    fn flux_v2_prices_every_aspect_ratio_at_bfl_megapixel_rates() {
+        let (v1, v2) = (pack("bfl-flux-2"), flux_v2());
+        let sizes = v2.output_sizes("flux-2-pro");
+        assert_eq!(sizes.len(), 18);
+        for size in &sizes {
+            let tier = size.when["image_size"].as_str();
+            let mut input = json!({"prompt": "x"});
+            for (name, value) in &size.when {
+                input[name] = json!(value);
+            }
+            let frozen = snapshot(&v2, &input);
+            let expected = match tier {
+                "1k" => 30_000,
+                "2k" => 45_000,
+                _ => 75_000,
+            };
+            assert_eq!(frozen.estimated_units, expected, "{size:?}");
+            let (width, height) = (size.width, size.height);
+            assert!(width % 16 == 0 && height % 16 == 0);
+            assert!(u64::from(width) * u64::from(height) <= 2048 * 2048);
+            // The same tier at v1's certified size costs the same.
+            let v1_size = crate::provider::flux_contract::contract_dimensions(tier).unwrap();
+            let v1_input = json!({"prompt": "x", "image_size": tier,
+                "options": {"width": v1_size.width, "height": v1_size.height}});
+            assert_eq!(snapshot(&v1, &v1_input).estimated_units, expected);
+        }
+        // 2k 16:9 is v1's 2k size; only the size is sent to BFL.
+        let header = v2
+            .prepare(
+                "flux-2-pro",
+                &json!({"prompt": "a header", "image_size": "2k", "aspect_ratio": "16:9",
+                        "options": {"seed": 7}}),
+            )
+            .unwrap();
+        assert_eq!(
+            header.body,
+            json!({"prompt": "a header", "width": 1920, "height": 1088, "seed": 7})
+        );
+        // Size options are optional, but must match the certified size if sent.
+        for (options, ok) in [
+            (json!({"width": 1920, "height": 1088}), true),
+            (json!({"width": 1024, "height": 1024}), false),
+        ] {
+            let input = json!({"prompt": "x", "image_size": "2k", "aspect_ratio": "16:9",
+                               "options": options});
+            assert_eq!(v2.prepare("flux-2-pro", &input).is_ok(), ok, "{input}");
+        }
+        // A ratio the contract does not certify is refused before any spend.
+        assert!(v2
+            .prepare(
+                "flux-2-pro",
+                &json!({"prompt": "x", "image_size": "1k", "aspect_ratio": "21:9"})
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn flux_v2_settles_the_delivered_megapixels() {
+        let v2 = Arc::new(flux_v2());
+        let input = json!({"prompt": "a banner", "image_size": "4k", "aspect_ratio": "16:9"});
+        let frozen = snapshot(&v2, &input);
+        assert_eq!(frozen.estimated_units, 75_000);
+        let run = |artifact: Vec<u8>, credits: f64| {
+            let request = v2.prepare("flux-2-pro", &input).unwrap().request;
+            let transport = FluxTransport {
+                submit: Ok(accepted()),
+                polls: Arc::new(std::sync::Mutex::new(vec![bfl(
+                    200,
+                    json!({"id": "job-1", "status": "Ready", "cost": credits,
+                           "result": {"sample": "https://delivery.us7.bfl.ai/out.png"}}),
+                )])),
+                posts: Arc::default(),
+                artifact,
+            };
+            AsyncPollEngine::new(v2.clone(), "flux-2-pro", transport, 1 << 20)
+                .unwrap()
+                .with_poll_interval_for_tests(Duration::from_millis(1))
+                .invoke(&request, &input, &secret_for_test("secret-canary"), None)
+                .unwrap()
+        };
+        // The certified 2688 × 1536 image: 4 billed megapixels, 7.5 credits.
+        let outcome = run(png(2688, 1536), 7.5);
+        let usage = outcome.usage.clone().unwrap();
+        assert_eq!(
+            (usage.megapixels, usage.additional_megapixels),
+            (Some(4), Some(3))
+        );
+        let settled = frozen
+            .settle_precise(&usage, outcome.actual_vendor_cost.as_ref(), 75_000)
+            .unwrap();
+        assert_eq!(settled.budget_units, 75_000);
+        // An image larger than was held is an overage, never a larger charge.
+        let oversized = run(png(4096, 2048), 7.5).usage.unwrap();
+        assert_eq!(
+            frozen.settle(&oversized, 75_000),
+            Err(crate::provider::contract::ContractError::SettlementOverage)
+        );
+    }
+
+    #[test]
+    fn flux_3_sends_tier_and_ratio_without_grounding_and_prices_by_tier() {
+        let flux3 = pack("bfl-flux-3-image");
+        assert_eq!(
+            flux3.request_url().as_str(),
+            "https://api.bfl.ai/v1/flux-3-image"
+        );
+        let prepared = flux3
+            .prepare(
+                "flux-3-image",
+                &json!({"prompt": "a skyline", "image_size": "2k", "aspect_ratio": "21:9",
+                        "options": {"safety_tolerance": 2}}),
+            )
+            .unwrap();
+        // Only fields BFL's FLUX 3 schema accepts; web search stays off.
+        assert_eq!(
+            prepared.body,
+            json!({"prompt": "a skyline", "resolution": "2k", "aspect_ratio": "21:9",
+                   "safety_tolerance": 2, "grounding": false})
+        );
+        assert_eq!(prepared.request.output_dimensions, None);
+        let square = flux3
+            .prepare("flux-3-image", &json!({"prompt": "x", "image_size": "1k"}))
+            .unwrap();
+        assert_eq!(square.body["aspect_ratio"], "1:1");
+        // Every ratio in a tier costs the same: 4.8¢ at 1k, 10¢ at 2k.
+        for (tier, units) in [("1k", 48_000), ("2k", 100_000)] {
+            for ratio in ["21:9", "1:1", "9:21"] {
+                let frozen = snapshot_for(
+                    &flux3,
+                    "flux-3-image",
+                    &json!({"prompt": "x", "image_size": tier, "aspect_ratio": ratio}),
+                );
+                assert_eq!(frozen.estimated_units, units, "{tier} {ratio}");
+            }
+        }
+        // Not offered: 4k, auto ratio, seed, size options and unknown fields.
+        for input in [
+            json!({"prompt": "x", "image_size": "4k"}),
+            json!({"prompt": "x", "image_size": "1k", "aspect_ratio": "auto"}),
+            json!({"prompt": "x", "image_size": "1k", "options": {"seed": 1}}),
+            json!({"prompt": "x", "image_size": "1k", "options": {"width": 1024}}),
+            json!({"prompt": "x", "image_size": "1k", "grounding": true}),
+            json!({"prompt": "x"}),
+        ] {
+            assert!(flux3.prepare("flux-3-image", &input).is_err(), "{input}");
+        }
+    }
+
+    #[test]
+    fn flux_3_polls_bfl_and_settles_reported_credits() {
+        let flux3 = Arc::new(pack("bfl-flux-3-image"));
+        let input = json!({"prompt": "a skyline", "image_size": "1k", "aspect_ratio": "16:9"});
+        let request = flux3.prepare("flux-3-image", &input).unwrap().request;
+        let run = |polls: Vec<TransportResponse>| {
+            let transport = FluxTransport {
+                submit: Ok(accepted()),
+                polls: Arc::new(std::sync::Mutex::new(polls)),
+                posts: Arc::default(),
+                artifact: PNG.to_vec(),
+            };
+            let posts = transport.posts.clone();
+            let result = AsyncPollEngine::new(flux3.clone(), "flux-3-image", transport, 1 << 20)
+                .unwrap()
+                .with_poll_interval_for_tests(Duration::from_millis(1))
+                .invoke(&request, &input, &secret_for_test("secret-canary"), None);
+            let submissions = *posts.lock().unwrap();
+            (result, submissions)
+        };
+        let (outcome, submissions) = run(vec![
+            bfl(200, json!({"id": "job-1", "status": "Reasoning"})),
+            bfl(
+                200,
+                json!({"id": "job-1", "status": "Ready", "cost": 4.8,
+                       "result": {"sample": "https://delivery.eu2.bfl.ai/out.png"}}),
+            ),
+        ]);
+        let outcome = outcome.unwrap();
+        assert_eq!(submissions, 1);
+        // 4.8 credits are exactly USD 0.048, the frozen 1k price.
+        let frozen = snapshot_for(&flux3, "flux-3-image", &input);
+        let settled = frozen
+            .settle_precise(
+                outcome.usage.as_ref().unwrap(),
+                outcome.actual_vendor_cost.as_ref(),
+                frozen.estimated_units,
+            )
+            .unwrap();
+        assert_eq!(settled.budget_units, 48_000);
+        let (moderated, _) = run(vec![bfl(
+            200,
+            json!({"id": "job-1", "status": "Content Moderated"}),
+        )]);
+        let failure = moderated.unwrap_err();
+        assert_eq!(failure.code, "provider_content_moderated");
+        assert_eq!(failure.spend_disposition, SpendDisposition::Release);
     }
 
     #[test]

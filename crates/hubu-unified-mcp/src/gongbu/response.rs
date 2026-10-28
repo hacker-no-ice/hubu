@@ -208,6 +208,11 @@ fn allowlisted_validation_diagnostic(
         {
             Some(AdmissionDiagnostic::PricingSelectorNotMatched)
         }
+        "input_artifact_unavailable"
+            if exactly_matches(AdmissionDiagnostic::InputArtifactUnavailable.fields()) =>
+        {
+            Some(AdmissionDiagnostic::InputArtifactUnavailable)
+        }
         _ => None,
     }
 }
@@ -251,10 +256,33 @@ pub(super) fn execution_target_catalog_result(
                         && price.components.iter().all(|component| {
                             matches!(
                                 component.unit.as_str(),
-                                "image" | "input_token" | "output_token"
+                                "image"
+                                    | "input_token"
+                                    | "output_token"
+                                    | "megapixel"
+                                    | "additional_megapixel"
+                                    | "input_image"
                             ) && component.rate_numerator_minor >= 0
                                 && component.rate_denominator > 0
                         })
+                })
+                && target.output_sizes.iter().all(|size| {
+                    !size.when.is_empty()
+                        && size
+                            .when
+                            .iter()
+                            .all(|(name, value)| !name.is_empty() && !value.is_empty())
+                        && size.width > 0
+                        && size.height > 0
+                })
+                && target.megapixels.as_ref().is_none_or(|rule| {
+                    matches!(rule.rounding.as_str(), "floor" | "ceil" | "nearest")
+                        && rule.pixels_per_megapixel > 0
+                        && rule.minimum > 0
+                        && !target.output_sizes.is_empty()
+                })
+                && target.input_images.as_ref().is_none_or(|images| {
+                    !images.parameter.is_empty() && 1 <= images.min && images.min <= images.max
                 })
         });
     if !valid {
@@ -766,6 +794,39 @@ struct ExecutionTargetResponse {
     execution_scope: ExecutionTargetScope,
     image_sizes: Vec<String>,
     pricing: Vec<ExecutionTargetPricing>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    output_sizes: Vec<ExecutionTargetOutputSize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    megapixels: Option<ExecutionTargetMegapixels>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    input_images: Option<ExecutionTargetInputImages>,
+}
+
+/// The input parameter an image-edit target takes artifact IDs in.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ExecutionTargetInputImages {
+    parameter: String,
+    min: i64,
+    max: i64,
+}
+
+/// One certified output size: the image a target returns for these input values.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ExecutionTargetOutputSize {
+    when: std::collections::BTreeMap<String, String>,
+    width: u32,
+    height: u32,
+}
+
+/// How a megapixel-priced target counts billed megapixels per image.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ExecutionTargetMegapixels {
+    rounding: String,
+    pixels_per_megapixel: u64,
+    minimum: u32,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

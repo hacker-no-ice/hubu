@@ -10,12 +10,14 @@
 
 use super::{
     contract::{
-        ActualVendorCost, AdapterCapabilities, AdapterOutcome, ContractError, NormalizedArtifact,
-        NormalizedRequest, NormalizedUsage, OutputDimensions, PriceComponent, PricingCatalog,
-        PricingRule, PricingSelector, ProviderAdapter, ProviderFailure, ProviderPhase,
+        ActualVendorCost, AdapterCapabilities, AdapterOutcome, ContractError, InputImageSource,
+        NormalizedArtifact, NormalizedRequest, NormalizedUsage, OutputDimensions, PriceComponent,
+        PricingCatalog, PricingRule, PricingSelector, PricingUnit, ProviderAdapter,
+        ProviderFailure, ProviderPhase, DEFAULT_WORKLOAD_TYPE, DERIVED_QUANTITIES,
         MAX_VENDOR_COST_SCALE, REQUEST_QUANTITIES,
     },
     http_kernel::{valid_provider_deadline_ms, validate_https_origin, validate_safe_headers},
+    registry::InputImagesParameter,
     targets::{PackTargetConfig, TargetKey},
 };
 use crate::secrets::{ProviderSecret, SecretReference};
@@ -51,7 +53,16 @@ const USAGE_QUANTITIES: &[(&str, &str)] = &[
     ("results", "results"),
     ("pages", "pages"),
     ("seconds", "seconds"),
+    ("input_images", "input_images"),
 ];
+
+/// The request quantity only an `images` parameter sets.
+const INPUT_IMAGES_QUANTITY: &str = "input_images";
+/// Placeholders an `images` parameter's `item` template may use.
+const IMAGE_MEDIA_TYPE_PLACEHOLDER: &str = "image.media_type";
+const IMAGE_DATA_PLACEHOLDER: &str = "image.data";
+/// The most input images one request may send.
+const MAX_INPUT_IMAGES: i64 = 16;
 
 /// Artifact media types the Gongbu artifact store accepts today.
 const PACK_ARTIFACT_MEDIA_TYPES: &[&str] = &["image/png", "image/jpeg"];
@@ -175,6 +186,86 @@ struct PackDocument {
     response: ResponseMapping,
     artifacts: Artifacts,
     models: Vec<Model>,
+    /// Certified output sizes keyed by a combination of enum parameter
+    /// values, such as image size and aspect ratio. An alternative to a
+    /// single parameter's `output_dimensions`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    size_presets: Vec<SizePreset>,
+    /// How billed megapixels are counted when a pricing rule prices the
+    /// `megapixel` or `additional_megapixel` unit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    megapixels: Option<MegapixelRule>,
+}
+
+/// One certified output size: the image the provider returns when every
+/// parameter in `when` has the given value.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SizePreset {
+    pub when: BTreeMap<String, String>,
+    pub size: [u32; 2],
+}
+
+/// How an output image's size becomes billed megapixels: pixels divided by
+/// `pixels_per_megapixel`, rounded as declared, never below `minimum`.
+/// Integer arithmetic only.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MegapixelRule {
+    pub rounding: MegapixelRounding,
+    #[serde(default = "default_pixels_per_megapixel")]
+    pub pixels_per_megapixel: u64,
+    #[serde(default = "default_minimum_megapixels")]
+    pub minimum: u32,
+}
+
+fn default_pixels_per_megapixel() -> u64 {
+    1_000_000
+}
+
+fn default_minimum_megapixels() -> u32 {
+    1
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MegapixelRounding {
+    /// Partial megapixels are free.
+    Floor,
+    /// Any partial megapixel is billed whole.
+    Ceil,
+    /// Half a megapixel or more is billed whole.
+    Nearest,
+}
+
+impl MegapixelRule {
+    /// Billed megapixels for one image.
+    pub fn billed(&self, width: u32, height: u32) -> i64 {
+        let pixels = u64::from(width) * u64::from(height);
+        let per = self.pixels_per_megapixel;
+        let (whole, rest) = (pixels / per, pixels % per);
+        let billed = match self.rounding {
+            MegapixelRounding::Floor => whole,
+            MegapixelRounding::Ceil => whole + u64::from(rest > 0),
+            MegapixelRounding::Nearest => whole + u64::from(rest >= per - per / 2),
+        };
+        // At most 65,535² pixels, so this always fits.
+        i64::try_from(billed.max(u64::from(self.minimum))).unwrap_or(i64::MAX)
+    }
+
+    /// `(megapixels, additional_megapixels)` for one image.
+    fn quantities(&self, width: u32, height: u32) -> (i64, i64) {
+        let billed = self.billed(width, height);
+        (billed, (billed - 1).max(0))
+    }
+}
+
+/// The certified output size discovery shows for one preset.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct OutputSize {
+    pub when: BTreeMap<String, String>,
+    pub width: u32,
+    pub height: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -332,6 +423,10 @@ pub struct Parameter {
     /// it must equal the size the preset certifies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub equals: Option<Derived>,
+    /// `images` only: the provider's shape for one input image, using
+    /// `{{image.media_type}}` and `{{image.data}}` (base64 bytes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item: Option<Map<String, Value>>,
 }
 
 /// A value derived from another parameter rather than chosen freely.
@@ -358,6 +453,9 @@ pub enum ParameterKind {
     Integer,
     Boolean,
     Enum,
+    /// Artifact IDs of images earlier governed executions delivered to the
+    /// same account. The engine loads and sends their verified bytes.
+    Images,
 }
 
 /// Response paths into the provider's JSON body. A path is a JSON Pointer
@@ -574,6 +672,8 @@ impl Pack {
                     rule_id: rule.rule_id.clone(),
                     provider: self.document.provider.clone(),
                     model: model.model.clone(),
+                    workload_type: (self.document.workload_type != DEFAULT_WORKLOAD_TYPE)
+                        .then(|| self.document.workload_type.clone()),
                     currency: rule.currency.clone(),
                     selector: rule.selector.clone(),
                     components: rule.components.clone(),
@@ -615,8 +715,58 @@ impl Pack {
     }
 
     /// Validate agent input against the declared parameters and build both the
-    /// priced request and the provider request body.
+    /// priced request and the provider request body. A request that sends
+    /// input images has a `Null` body here: only the engine, holding the
+    /// images, renders it with [`Pack::prepare_with_images`].
     pub fn prepare(&self, model: &str, input: &Value) -> Result<PreparedRequest, ContractError> {
+        self.prepare_inner(model, input, None)
+    }
+
+    /// [`Pack::prepare`], loading the input images the request references
+    /// from `images` and rendering the body that sends them.
+    pub fn prepare_with_images(
+        &self,
+        model: &str,
+        input: &Value,
+        images: &dyn InputImageSource,
+    ) -> Result<PreparedRequest, ContractError> {
+        self.prepare_inner(model, input, Some(images))
+    }
+
+    /// The parameter that takes input images, for discovery.
+    pub fn input_images_parameter(&self) -> Option<InputImagesParameter> {
+        self.document
+            .parameters
+            .iter()
+            .find(|p| p.kind == ParameterKind::Images)
+            .map(|p| InputImagesParameter {
+                parameter: p.name.clone(),
+                min: p.min.unwrap_or(1),
+                max: p.max.unwrap_or(1),
+            })
+    }
+
+    /// The artifact IDs `input` names in its images parameters, in order.
+    pub fn input_artifact_ids(&self, input: &Value) -> Vec<String> {
+        let Some(input) = input.as_object() else {
+            return Vec::new();
+        };
+        self.document
+            .parameters
+            .iter()
+            .filter(|p| p.kind == ParameterKind::Images)
+            .filter_map(|p| p.input_value(input)?.as_array())
+            .flatten()
+            .filter_map(|id| id.as_str().map(str::to_owned))
+            .collect()
+    }
+
+    fn prepare_inner(
+        &self,
+        model: &str,
+        input: &Value,
+        images: Option<&dyn InputImageSource>,
+    ) -> Result<PreparedRequest, ContractError> {
         let indeterminable = || ContractError::IndeterminableCost;
         let model = self.model(model).ok_or(ContractError::UnsupportedTarget)?;
         let input = input.as_object().ok_or_else(indeterminable)?;
@@ -642,23 +792,14 @@ impl Pack {
                 }
             }
         }
-        // The certified output size comes from the preset parameter, so it is
-        // known before any parameter tied to it is checked.
-        let dimensions = self
-            .document
-            .parameters
-            .iter()
-            .find(|p| !p.output_dimensions.is_empty())
-            .and_then(|p| {
-                let value = p.input_value(input).or(p.default.as_ref())?;
-                p.output_dimensions.get(value.as_str()?)
-            })
-            .map(|[width, height]| OutputDimensions {
-                width: *width,
-                height: *height,
-            });
-        let mut request = NormalizedRequest::new(&self.document.provider, &model.model);
+        // The certified output size comes from the preset parameters, so it
+        // is known before any parameter tied to it is checked.
+        let dimensions = self.output_size(input);
+        let mut request = NormalizedRequest::new(&self.document.provider, &model.model)
+            .with_workload(&self.document.workload_type);
         let mut values = BTreeMap::from([(MODEL_PLACEHOLDER.to_owned(), json!(model.model))]);
+        let mut spliced = BTreeSet::new();
+        let mut unrendered = false;
         if let Some(dimensions) = &dimensions {
             values.insert(OUTPUT_WIDTH_PLACEHOLDER.to_owned(), json!(dimensions.width));
             values.insert(
@@ -691,6 +832,38 @@ impl Pack {
                     return Err(indeterminable());
                 }
             }
+            if parameter.kind == ParameterKind::Images {
+                let ids = value.as_array().ok_or_else(indeterminable)?;
+                if let Some(quantity) = &parameter.quantity {
+                    request.set_quantity(quantity, Some(ids.len() as i64));
+                }
+                let Some(images) = images else {
+                    unrendered = true;
+                    continue;
+                };
+                let item = parameter.item.as_ref().ok_or_else(indeterminable)?;
+                let mut items = Vec::with_capacity(ids.len());
+                for id in ids {
+                    let image = images.load(id.as_str().ok_or_else(indeterminable)?)?;
+                    let fields = BTreeMap::from([
+                        (
+                            IMAGE_MEDIA_TYPE_PLACEHOLDER.to_owned(),
+                            json!(image.media_type),
+                        ),
+                        (
+                            IMAGE_DATA_PLACEHOLDER.to_owned(),
+                            json!(base64::engine::general_purpose::STANDARD.encode(&image.bytes)),
+                        ),
+                    ]);
+                    items.push(
+                        render_template(&Value::Object(item.clone()), &fields, &BTreeSet::new())
+                            .ok_or_else(indeterminable)?,
+                    );
+                }
+                spliced.insert(parameter.name.clone());
+                values.insert(parameter.name.clone(), Value::Array(items));
+                continue;
+            }
             if let Some(quantity) = &parameter.quantity {
                 request.set_quantity(quantity, value.as_i64());
             }
@@ -702,14 +875,123 @@ impl Pack {
             flat.insert(parameter.field().to_owned(), value.clone());
             values.insert(parameter.name.clone(), value);
         }
+        if let Some(rule) = &self.document.megapixels {
+            // Billed megapixels come only from the certified size: an input
+            // without one cannot be priced.
+            let size = dimensions.as_ref().ok_or_else(indeterminable)?;
+            let (megapixels, additional) = rule.quantities(size.width, size.height);
+            let images = request.image_count().unwrap_or(1);
+            for (name, per_image) in [
+                ("megapixels", megapixels),
+                ("additional_megapixels", additional),
+            ] {
+                if self.derived_quantities().contains(&name) {
+                    let total = per_image.checked_mul(images).ok_or_else(indeterminable)?;
+                    request.set_quantity(name, Some(total));
+                }
+            }
+        }
         request.output_dimensions = dimensions;
         request.validate()?;
         let body = match self.document.request.as_ref().and_then(|r| r.body.as_ref()) {
-            Some(template) => render_template(&Value::Object(template.clone()), &values)
+            Some(_) if unrendered => Value::Null,
+            Some(template) => render_template(&Value::Object(template.clone()), &values, &spliced)
                 .ok_or_else(indeterminable)?,
             None => Value::Object(flat),
         };
         Ok(PreparedRequest { request, body })
+    }
+
+    /// The certified output size `input` selects: from `size_presets`, or
+    /// from the one parameter that declares `output_dimensions`. Absent
+    /// parameters take their defaults.
+    fn output_size(&self, input: &Map<String, Value>) -> Option<OutputDimensions> {
+        let value_of = |name: &str| {
+            let parameter = self.document.parameters.iter().find(|p| p.name == name)?;
+            parameter
+                .input_value(input)
+                .or(parameter.default.as_ref())?
+                .as_str()
+        };
+        let [width, height] = if self.document.size_presets.is_empty() {
+            let parameter = self
+                .document
+                .parameters
+                .iter()
+                .find(|p| !p.output_dimensions.is_empty())?;
+            *parameter
+                .output_dimensions
+                .get(value_of(&parameter.name)?)?
+        } else {
+            self.document
+                .size_presets
+                .iter()
+                .find(|preset| {
+                    preset
+                        .when
+                        .iter()
+                        .all(|(name, value)| value_of(name) == Some(value.as_str()))
+                })?
+                .size
+        };
+        Some(OutputDimensions { width, height })
+    }
+
+    /// Whether sizes are certified by parameter combinations.
+    pub fn has_size_presets(&self) -> bool {
+        !self.document.size_presets.is_empty()
+    }
+
+    /// The megapixel quantities this pack's pricing rules price.
+    fn derived_quantities(&self) -> BTreeSet<&'static str> {
+        self.document.derived_quantities()
+    }
+
+    /// The certified output sizes `model` offers, for discovery.
+    pub fn output_sizes(&self, model: &str) -> Vec<OutputSize> {
+        let Some(model) = self.model(model) else {
+            return Vec::new();
+        };
+        let offered = |name: &str, value: &str| {
+            self.document
+                .parameters
+                .iter()
+                .find(|p| p.name == name)
+                .is_some_and(|p| model.values_for(p).iter().any(|v| v == value))
+        };
+        if self.document.size_presets.is_empty() {
+            return self
+                .document
+                .parameters
+                .iter()
+                .filter(|p| !p.output_dimensions.is_empty())
+                .flat_map(|p| {
+                    p.output_dimensions
+                        .iter()
+                        .filter(|(value, _)| offered(&p.name, value))
+                        .map(|(value, [width, height])| OutputSize {
+                            when: BTreeMap::from([(p.name.clone(), value.clone())]),
+                            width: *width,
+                            height: *height,
+                        })
+                })
+                .collect();
+        }
+        self.document
+            .size_presets
+            .iter()
+            .filter(|preset| preset.when.iter().all(|(name, value)| offered(name, value)))
+            .map(|preset| OutputSize {
+                when: preset.when.clone(),
+                width: preset.size[0],
+                height: preset.size[1],
+            })
+            .collect()
+    }
+
+    /// How this pack counts billed megapixels, when it prices them.
+    pub fn megapixel_rule(&self) -> Option<&MegapixelRule> {
+        self.document.megapixels.as_ref()
     }
 
     /// The provider request URL: the endpoint plus the declared request path.
@@ -886,6 +1168,20 @@ impl Pack {
                 bytes,
             });
         }
+        // Megapixels settle from what was delivered, never from what was
+        // asked: each image's decoded size, under the pack's declared rule.
+        if let Some(rule) = &self.document.megapixels {
+            let (mut megapixels, mut additional) = (0_i64, 0_i64);
+            for artifact in &artifacts {
+                let (width, height) =
+                    image_dimensions(&artifact.bytes).ok_or_else(policy_failure)?;
+                let (billed, extra) = rule.quantities(width, height);
+                megapixels = megapixels.saturating_add(billed);
+                additional = additional.saturating_add(extra);
+            }
+            usage.megapixels = Some(megapixels);
+            usage.additional_megapixels = Some(additional);
+        }
         Ok(AdapterOutcome {
             usage: Some(usage),
             actual_vendor_cost,
@@ -967,6 +1263,17 @@ impl Parameter {
                     return Err("is not one of values".into());
                 }
             }
+            ParameterKind::Images => {
+                let ids = value.as_array().ok_or("must be an array of artifact IDs")?;
+                let unique: BTreeSet<_> = ids.iter().filter_map(Value::as_str).collect();
+                if unique.len() != ids.len() || !unique.iter().all(|id| valid_artifact_id(id)) {
+                    return Err("must name distinct artifact IDs".into());
+                }
+                let count = ids.len() as i64;
+                if count < self.min.unwrap_or(1) || self.max.is_some_and(|max| count > max) {
+                    return Err("is outside min..=max images".into());
+                }
+            }
         }
         Ok(())
     }
@@ -1026,14 +1333,26 @@ impl Parameter {
         };
         let integer = self.kind == ParameterKind::Integer;
         let enumeration = self.kind == ParameterKind::Enum;
+        let images = self.kind == ParameterKind::Images;
         if self.min.is_some() {
-            only(integer, "min")?;
+            only(integer || images, "min")?;
         }
         if self.max.is_some() {
-            only(integer, "max")?;
+            only(integer || images, "max")?;
         }
         if self.quantity.is_some() {
-            only(integer, "quantity")?;
+            only(integer || images, "quantity")?;
+        }
+        if self.item.is_some() {
+            only(images, "item")?;
+        }
+        if images {
+            self.validate_images(field)?;
+        } else if self.quantity.as_deref() == Some(INPUT_IMAGES_QUANTITY) {
+            return Err(invalid(
+                format!("{field}.quantity"),
+                "input_images is set only by an images parameter",
+            ));
         }
         if self.max_length.is_some() {
             only(self.kind == ParameterKind::String, "max_length")?;
@@ -1094,7 +1413,12 @@ impl Parameter {
                     format!("must be one of {}", REQUEST_QUANTITIES.join(", ")),
                 ));
             }
-            if self.min.is_none_or(|min| min < 0) || self.max.is_none() {
+            let min = if images {
+                Some(self.min.unwrap_or(1))
+            } else {
+                self.min
+            };
+            if min.is_none_or(|min| min < 0) || self.max.is_none() {
                 return Err(invalid(
                     format!("{field}.quantity"),
                     "priced quantities need min >= 0 and a max, so every hold is bounded",
@@ -1128,6 +1452,65 @@ impl Parameter {
             return Err(invalid(
                 format!("{field}.default"),
                 "a priced parameter must be required or have a default",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl Parameter {
+    /// An `images` parameter is required, bounded, and declares how the
+    /// provider receives one image.
+    fn validate_images(&self, field: &str) -> Result<(), PackError> {
+        if !self.required || self.default.is_some() {
+            return Err(invalid(
+                format!("{field}.required"),
+                "an images parameter is required and has no default",
+            ));
+        }
+        let min = self.min.unwrap_or(1);
+        if min < 1
+            || self
+                .max
+                .is_none_or(|max| max < min || max > MAX_INPUT_IMAGES)
+        {
+            return Err(invalid(
+                format!("{field}.max"),
+                format!("an images parameter takes 1 to {MAX_INPUT_IMAGES} images, min <= max"),
+            ));
+        }
+        if self
+            .quantity
+            .as_deref()
+            .is_some_and(|quantity| quantity != INPUT_IMAGES_QUANTITY)
+        {
+            return Err(invalid(
+                format!("{field}.quantity"),
+                "an images parameter sets only input_images",
+            ));
+        }
+        let item = self.item.as_ref().ok_or_else(|| {
+            invalid(
+                format!("{field}.item"),
+                "an images parameter declares the provider's shape for one image",
+            )
+        })?;
+        let mut referenced = BTreeSet::new();
+        collect_placeholders(&Value::Object(item.clone()), &mut referenced)
+            .map_err(|reason| invalid(format!("{field}.item"), reason))?;
+        if referenced.iter().any(|(name, transform)| {
+            transform.is_some()
+                || !matches!(
+                    name.as_str(),
+                    IMAGE_MEDIA_TYPE_PLACEHOLDER | IMAGE_DATA_PLACEHOLDER
+                )
+        }) || !referenced
+            .iter()
+            .any(|(name, _)| name == IMAGE_DATA_PLACEHOLDER)
+        {
+            return Err(invalid(
+                format!("{field}.item"),
+                "must send {{image.data}} and may use only {{image.media_type}} besides",
             ));
         }
         Ok(())
@@ -1186,6 +1569,12 @@ impl PackDocument {
                 return Err(invalid(format!("{field}.field"), "is sent twice"));
             }
             if let Some(quantity) = &parameter.quantity {
+                if DERIVED_QUANTITIES.contains(&quantity.as_str()) {
+                    return Err(invalid(
+                        format!("{field}.quantity"),
+                        "is derived from the certified output size, never set by input",
+                    ));
+                }
                 if !quantities.insert(quantity.as_str()) {
                     return Err(invalid(
                         format!("{field}.quantity"),
@@ -1213,11 +1602,47 @@ impl PackDocument {
                 "only one parameter may declare output_dimensions",
             ));
         }
-        if presets == 0 && self.parameters.iter().any(|p| p.equals.is_some()) {
+        if presets > 0 && !self.size_presets.is_empty() {
+            return Err(invalid(
+                "size_presets",
+                "declare sizes in size_presets or in one parameter's output_dimensions, not both",
+            ));
+        }
+        self.validate_size_presets()?;
+        if !self.has_size_source() && self.parameters.iter().any(|p| p.equals.is_some()) {
             return Err(invalid(
                 "parameters",
-                "equals needs a parameter that declares output_dimensions",
+                "equals needs size_presets or a parameter that declares output_dimensions",
             ));
+        }
+        self.validate_megapixels()?;
+        quantities.extend(self.derived_quantities());
+        if let Some(parameter) = self
+            .parameters
+            .iter()
+            .find(|p| p.kind == ParameterKind::Images)
+        {
+            // Only the sync_fixed engine loads input images today.
+            if self.archetype != Archetype::SyncFixed {
+                return Err(invalid(
+                    "archetype",
+                    format!(
+                        "images parameter {} needs the sync_fixed engine",
+                        parameter.name
+                    ),
+                ));
+            }
+            if self
+                .request
+                .as_ref()
+                .and_then(|r| r.body.as_ref())
+                .is_none()
+            {
+                return Err(invalid(
+                    "request.body",
+                    format!("images parameter {} needs a body template", parameter.name),
+                ));
+            }
         }
         if let Some(parameter) = self.parameters.iter().find(|p| p.group().is_some()) {
             if self
@@ -1552,15 +1977,24 @@ impl PackDocument {
         let mut referenced = BTreeSet::new();
         collect_placeholders(&Value::Object(body.clone()), &mut referenced)
             .map_err(|reason| invalid("request.body", reason))?;
+        let images: BTreeSet<_> = self
+            .parameters
+            .iter()
+            .filter(|p| p.kind == ParameterKind::Images)
+            .map(|p| p.name.as_str())
+            .collect();
+        if !images_spliced_only(&Value::Object(body.clone()), &images, false) {
+            return Err(invalid(
+                "request.body",
+                "an images placeholder must be a whole element of an array",
+            ));
+        }
         for (name, transform) in &referenced {
             let parameter = self.parameters.iter().find(|p| &p.name == name);
             let derived = matches!(
                 name.as_str(),
                 OUTPUT_WIDTH_PLACEHOLDER | OUTPUT_HEIGHT_PLACEHOLDER
-            ) && self
-                .parameters
-                .iter()
-                .any(|p| !p.output_dimensions.is_empty());
+            ) && self.has_size_source();
             if name != MODEL_PLACEHOLDER && !derived && parameter.is_none() {
                 return Err(invalid(
                     "request.body",
@@ -1592,7 +2026,8 @@ impl PackDocument {
                 ParameterKind::Enum => {
                     parameter.values.len() == 1
                         // A size preset is sent as the size it certifies.
-                        || (!parameter.output_dimensions.is_empty()
+                        || ((!parameter.output_dimensions.is_empty()
+                            || self.is_size_preset_parameter(&parameter.name))
                             && referenced.iter().any(|(name, _)| {
                                 matches!(
                                     name.as_str(),
@@ -1608,6 +2043,179 @@ impl PackDocument {
                     "is never sent; reference it in request.body or make it a constant",
                 ));
             }
+        }
+        Ok(())
+    }
+
+    fn has_size_source(&self) -> bool {
+        !self.size_presets.is_empty()
+            || self
+                .parameters
+                .iter()
+                .any(|p| !p.output_dimensions.is_empty())
+    }
+
+    fn is_size_preset_parameter(&self, name: &str) -> bool {
+        self.size_presets
+            .first()
+            .is_some_and(|preset| preset.when.contains_key(name))
+    }
+
+    /// The megapixel quantities any pricing rule prices.
+    fn derived_quantities(&self) -> BTreeSet<&'static str> {
+        self.models
+            .iter()
+            .flat_map(|model| &model.pricing_rules)
+            .flat_map(|rule| &rule.components)
+            .filter(|c| {
+                matches!(
+                    c.unit,
+                    PricingUnit::Megapixel | PricingUnit::AdditionalMegapixel
+                )
+            })
+            .filter_map(|c| c.unit.quantity_name())
+            .collect()
+    }
+
+    /// Every preset names the same enum parameters, each combination and
+    /// each size appears once, and every combination a model accepts has a
+    /// certified size, so no valid input reaches an uncertified size.
+    fn validate_size_presets(&self) -> Result<(), PackError> {
+        let Some(first) = self.size_presets.first() else {
+            return Ok(());
+        };
+        let names: BTreeSet<&String> = first.when.keys().collect();
+        let mut parameters = Vec::new();
+        for name in &names {
+            let parameter = self
+                .parameters
+                .iter()
+                .find(|p| &&p.name == name && p.kind == ParameterKind::Enum)
+                .ok_or_else(|| {
+                    invalid(
+                        "size_presets",
+                        format!("{name} is not a declared enum parameter"),
+                    )
+                })?;
+            if !parameter.required && parameter.default.is_none() {
+                return Err(invalid(
+                    "size_presets",
+                    format!("{name} must be required or have a default, so every input has a size"),
+                ));
+            }
+            parameters.push(parameter);
+        }
+        let mut combinations = BTreeSet::new();
+        let mut sizes = BTreeSet::new();
+        for (index, preset) in self.size_presets.iter().enumerate() {
+            let field = format!("size_presets[{index}]");
+            if preset.when.keys().collect::<BTreeSet<_>>() != names {
+                return Err(invalid(
+                    format!("{field}.when"),
+                    "every preset must name the same parameters",
+                ));
+            }
+            if let Some((name, value)) = preset.when.iter().find(|(name, value)| {
+                !parameters
+                    .iter()
+                    .any(|p| &&p.name == name && p.values.contains(value))
+            }) {
+                return Err(invalid(
+                    format!("{field}.when.{name}"),
+                    format!("{value} is not a value of {name}"),
+                ));
+            }
+            let [width, height] = preset.size;
+            if width == 0 || height == 0 || width > 65_535 || height > 65_535 {
+                return Err(invalid(
+                    format!("{field}.size"),
+                    "must be a positive [width, height] of at most 65535 each",
+                ));
+            }
+            if !combinations.insert(&preset.when) {
+                return Err(invalid(format!("{field}.when"), "is certified twice"));
+            }
+            // A size identifies its preset, so sending only the size sends
+            // everything the agent chose.
+            if !sizes.insert(preset.size) {
+                return Err(invalid(
+                    format!("{field}.size"),
+                    "is certified for two presets",
+                ));
+            }
+        }
+        for model in &self.models {
+            let mut wanted = vec![BTreeMap::new()];
+            for parameter in &parameters {
+                wanted = wanted
+                    .into_iter()
+                    .flat_map(|base: BTreeMap<String, String>| {
+                        model.values_for(parameter).iter().map(move |value| {
+                            let mut next = base.clone();
+                            next.insert(parameter.name.clone(), value.clone());
+                            next
+                        })
+                    })
+                    .collect();
+            }
+            if let Some(missing) = wanted.iter().find(|w| !combinations.contains(w)) {
+                return Err(invalid(
+                    "size_presets",
+                    format!(
+                        "model {} accepts {} but no preset certifies its size",
+                        model.model,
+                        serde_json::to_string(missing).expect("combination serializes")
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// A pack that prices megapixels declares how to count them, and has a
+    /// certified size for every input to count them from.
+    fn validate_megapixels(&self) -> Result<(), PackError> {
+        let priced = !self.derived_quantities().is_empty();
+        let Some(rule) = &self.megapixels else {
+            return if priced {
+                Err(invalid(
+                    "megapixels",
+                    "a pack that prices megapixels must declare how they are rounded",
+                ))
+            } else {
+                Ok(())
+            };
+        };
+        if !priced {
+            return Err(invalid(
+                "megapixels",
+                "no pricing rule prices megapixel or additional_megapixel",
+            ));
+        }
+        if rule.pixels_per_megapixel == 0 || rule.minimum == 0 {
+            return Err(invalid(
+                "megapixels",
+                "pixels_per_megapixel and minimum must be positive",
+            ));
+        }
+        if !self.has_size_source() {
+            return Err(invalid(
+                "megapixels",
+                "megapixel pricing needs size_presets or a parameter with output_dimensions",
+            ));
+        }
+        if let Some(parameter) = self
+            .parameters
+            .iter()
+            .find(|p| !p.output_dimensions.is_empty() && !p.required && p.default.is_none())
+        {
+            return Err(invalid(
+                "megapixels",
+                format!(
+                    "{} must be required or have a default, so every input has a size",
+                    parameter.name
+                ),
+            ));
         }
         Ok(())
     }
@@ -1764,7 +2372,8 @@ impl PackDocument {
         // rule, so no valid agent input can reach an unpriced request.
         for model in &self.models {
             for combination in &selector_combinations(selectors, model) {
-                let mut request = NormalizedRequest::new(&self.provider, &model.model);
+                let mut request = NormalizedRequest::new(&self.provider, &model.model)
+                    .with_workload(&self.workload_type);
                 request.selector = combination.clone();
                 for quantity in quantities {
                     request.set_quantity(quantity, Some(1));
@@ -1792,6 +2401,7 @@ impl PackDocument {
                         "rule_id": rule.rule_id,
                         "provider": self.provider,
                         "model": model.model,
+                        "workload_type": self.workload_type,
                         "currency": rule.currency,
                         "selector": rule.selector,
                         "components": rule.components,
@@ -1867,6 +2477,7 @@ fn usage_slot<'a>(usage: &'a mut NormalizedUsage, quantity: &str) -> Option<&'a 
         "results" => &mut usage.results,
         "pages" => &mut usage.pages,
         "seconds" => &mut usage.seconds,
+        "input_images" => &mut usage.input_images,
         _ => return None,
     })
 }
@@ -2052,9 +2663,18 @@ fn collect_placeholders(
 }
 
 /// Render a validated body template. `None` means "leave this value out";
-/// the top-level object always renders.
-fn render_template(template: &Value, values: &BTreeMap<String, Value>) -> Option<Value> {
-    fn render(template: &Value, values: &BTreeMap<String, Value>) -> Option<Value> {
+/// the top-level object always renders. A `spliced` placeholder is an array
+/// element that expands to the elements of its value.
+fn render_template(
+    template: &Value,
+    values: &BTreeMap<String, Value>,
+    spliced: &BTreeSet<String>,
+) -> Option<Value> {
+    fn render(
+        template: &Value,
+        values: &BTreeMap<String, Value>,
+        spliced: &BTreeSet<String>,
+    ) -> Option<Value> {
         match template {
             Value::String(text) => match placeholder(text) {
                 Some((name, transform)) => {
@@ -2069,19 +2689,29 @@ fn render_template(template: &Value, values: &BTreeMap<String, Value>) -> Option
             },
             Value::Object(map) => Some(Value::Object(
                 map.iter()
-                    .filter_map(|(key, value)| Some((key.clone(), render(value, values)?)))
+                    .filter_map(|(key, value)| Some((key.clone(), render(value, values, spliced)?)))
                     .collect(),
             )),
-            Value::Array(items) => Some(Value::Array(
-                items
-                    .iter()
-                    .filter_map(|item| render(item, values))
-                    .collect(),
-            )),
+            Value::Array(items) => {
+                let mut rendered = Vec::with_capacity(items.len());
+                for item in items {
+                    let splice = item
+                        .as_str()
+                        .and_then(placeholder)
+                        .filter(|(name, _)| spliced.contains(*name));
+                    match splice {
+                        Some((name, _)) => {
+                            rendered.extend(values.get(name)?.as_array()?.iter().cloned())
+                        }
+                        None => rendered.extend(render(item, values, spliced)),
+                    }
+                }
+                Some(Value::Array(rendered))
+            }
             other => Some(other.clone()),
         }
     }
-    render(template, values).filter(Value::is_object)
+    render(template, values, spliced).filter(Value::is_object)
 }
 
 /// A provider-reported decimal amount in USD, shifted right by `scale`
@@ -2103,6 +2733,16 @@ fn decimal_cost(value: &Value, scale: u32) -> Option<ActualVendorCost> {
     let amount = format!("{whole}{fraction}").parse::<i64>().ok()?;
     let scale = u32::try_from(fraction.len()).ok()?.checked_add(scale)?;
     ActualVendorCost::new(amount, scale, "USD").ok()
+}
+
+/// The pixel size an image header declares, without decoding the pixels.
+fn image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    image::io::Reader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()
+        .filter(|(width, height)| *width > 0 && *height > 0)
 }
 
 fn sniff_media_type(bytes: &[u8]) -> Option<&'static str> {
@@ -2215,6 +2855,32 @@ fn valid_slug(value: &str) -> bool {
 
 fn valid_scope_tail(value: &str) -> bool {
     !value.is_empty() && value.len() <= 128 && value.split(':').all(valid_slug)
+}
+
+/// An artifact ID as Gongbu issues it: a lowercase hyphenated UUID.
+fn valid_artifact_id(value: &str) -> bool {
+    value.len() == 36
+        && value.char_indices().all(|(index, c)| match index {
+            8 | 13 | 18 | 23 => c == '-',
+            _ => c.is_ascii_digit() || ('a'..='f').contains(&c),
+        })
+}
+
+/// Whether every `images` placeholder in `template` is a whole element of
+/// an array, where the engine splices in one rendered item per image.
+fn images_spliced_only(template: &Value, images: &BTreeSet<&str>, in_array: bool) -> bool {
+    match template {
+        Value::String(text) => {
+            placeholder(text).is_none_or(|(name, _)| !images.contains(name) || in_array)
+        }
+        Value::Object(map) => map
+            .values()
+            .all(|value| images_spliced_only(value, images, false)),
+        Value::Array(items) => items
+            .iter()
+            .all(|item| images_spliced_only(item, images, true)),
+        _ => true,
+    }
 }
 
 /// A parameter name: an identifier, or `group.member` with one level.
@@ -2346,7 +3012,7 @@ impl ProviderAdapter for SandboxPackAdapter {
 mod tests {
     use super::*;
     use crate::provider::{
-        contract::PricingUnit,
+        contract::{PricingSnapshot, PricingUnit},
         registry::{ProviderRegistry, RegistryError, ValidatedProviderCatalog},
         targets::ProviderTargetConfig,
     };
@@ -3401,5 +4067,535 @@ mod tests {
             &patterns,
             "delivery.eu1.async-image.test.evil"
         ));
+    }
+
+    const MEGAPIXEL: &str = include_str!("../../../../fixtures/packs/megapixel-image.toml");
+
+    fn png(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        image::GrayImage::new(width, height)
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageOutputFormat::Png,
+            )
+            .unwrap();
+        bytes
+    }
+
+    fn delivered(pack: &Pack, request: &NormalizedRequest, sizes: &[(u32, u32)]) -> AdapterOutcome {
+        let images: Vec<_> = sizes
+            .iter()
+            .map(|(w, h)| json!({"b64": base64::engine::general_purpose::STANDARD.encode(png(*w, *h))}))
+            .collect();
+        pack.map_response(
+            request,
+            &ProviderResponse {
+                headers: BTreeMap::from([("x-request-id".to_owned(), "mp-1".to_owned())]),
+                body: json!({"images": images}),
+            },
+            &Evidence::default(),
+            &BTreeMap::new(),
+            64 << 20,
+        )
+        .unwrap()
+    }
+
+    fn megapixel_snapshot(pack: &Pack, input: Value) -> (NormalizedRequest, PricingSnapshot) {
+        let request = pack.prepare("megapixel-image-v1", &input).unwrap().request;
+        let catalog = PricingCatalog::from_json(
+            &serde_json::to_vec(&json!({
+                "schema_version": 2,
+                "catalog_version": "megapixel-test",
+                "rules": pack.pricing_rules(),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let snapshot = catalog.snapshot(&request).unwrap();
+        snapshot.validate_integrity().unwrap();
+        (request, snapshot)
+    }
+
+    #[test]
+    fn a_16_9_header_prices_its_certified_megapixels_and_settles_what_was_delivered() {
+        let pack = Pack::from_toml_str(MEGAPIXEL).unwrap();
+        let input = json!({"prompt": "a banner", "image_size": "2k", "aspect_ratio": "16:9"});
+        let prepared = pack.prepare("megapixel-image-v1", &input).unwrap();
+        // The preset's certified size is what the provider is asked for.
+        assert_eq!(
+            prepared.body,
+            json!({"model": "megapixel-image-v1", "prompt": "a banner", "width": 2688, "height": 1536, "count": 1})
+        );
+        // 2688 × 1536 = 4,128,768 pixels: 4 billed megapixels, 3 beyond the first.
+        let (request, snapshot) = megapixel_snapshot(&pack, input);
+        assert_eq!(
+            request.output_dimensions,
+            Some(OutputDimensions {
+                width: 2688,
+                height: 1536
+            })
+        );
+        assert_eq!(request.quantity("additional_megapixels"), Some(3));
+        assert_eq!(
+            snapshot.estimated_quantity(PricingUnit::AdditionalMegapixel),
+            Some(3)
+        );
+        // 3¢ + 3 × 1.5¢ = 7.5¢, exactly.
+        assert_eq!(snapshot.estimated_units, 75_000);
+        assert_eq!(
+            (
+                snapshot.exact_estimate_numerator.as_str(),
+                snapshot.exact_estimate_denominator.as_str()
+            ),
+            ("15", "2")
+        );
+
+        // Settled from the delivered image's decoded size.
+        let outcome = delivered(&pack, &request, &[(2688, 1536)]);
+        let usage = outcome.usage.unwrap();
+        assert_eq!(
+            (usage.megapixels, usage.additional_megapixels),
+            (Some(4), Some(3))
+        );
+        assert_eq!(
+            snapshot.settle(&usage, snapshot.estimated_units).unwrap(),
+            75_000
+        );
+        // A smaller delivery settles less.
+        let smaller = delivered(&pack, &request, &[(1344, 768)]).usage.unwrap();
+        assert_eq!(smaller.additional_megapixels, Some(0));
+        assert_eq!(
+            snapshot.settle(&smaller, snapshot.estimated_units).unwrap(),
+            30_000
+        );
+        // A larger one than was held is an overage, never a bigger charge.
+        let larger = delivered(&pack, &request, &[(4096, 4096)]).usage.unwrap();
+        assert_eq!(
+            snapshot.settle(&larger, snapshot.estimated_units),
+            Err(ContractError::SettlementOverage)
+        );
+    }
+
+    #[test]
+    fn megapixel_quantities_cover_every_image_and_may_have_no_additional_megapixels() {
+        let pack = Pack::from_toml_str(MEGAPIXEL).unwrap();
+        // Two 2k portraits: 2 × (3¢ + 3 × 1.5¢) = 15¢.
+        let (request, snapshot) = megapixel_snapshot(
+            &pack,
+            json!({"prompt": "a story", "image_count": 2, "image_size": "2k", "aspect_ratio": "9:16"}),
+        );
+        assert_eq!(request.quantity("additional_megapixels"), Some(6));
+        assert_eq!(snapshot.estimated_units, 150_000);
+        let usage = delivered(&pack, &request, &[(1536, 2688), (1536, 2688)])
+            .usage
+            .unwrap();
+        assert_eq!(usage.additional_megapixels, Some(6));
+        assert_eq!(
+            snapshot.settle(&usage, snapshot.estimated_units).unwrap(),
+            150_000
+        );
+
+        // Defaults: one 1k square is one megapixel, so only the first is billed.
+        let (request, snapshot) = megapixel_snapshot(&pack, json!({"prompt": "a square"}));
+        assert_eq!(
+            request.output_dimensions,
+            Some(OutputDimensions {
+                width: 1024,
+                height: 1024
+            })
+        );
+        assert_eq!(
+            snapshot.estimated_quantity(PricingUnit::AdditionalMegapixel),
+            Some(0)
+        );
+        assert_eq!(snapshot.estimated_units, 30_000);
+        let usage = delivered(&pack, &request, &[(1024, 1024)]).usage.unwrap();
+        assert_eq!(
+            snapshot.settle(&usage, snapshot.estimated_units).unwrap(),
+            30_000
+        );
+
+        // A ratio the pack does not offer is refused before pricing.
+        assert!(pack
+            .prepare(
+                "megapixel-image-v1",
+                &json!({"prompt": "x", "aspect_ratio": "4:3"})
+            )
+            .is_err());
+        // Zero is a real quantity only for additional megapixels.
+        let mut zero_images = snapshot.clone();
+        for component in &mut zero_images.components {
+            if component.unit == PricingUnit::Image {
+                component.quantity = 0;
+            }
+        }
+        assert!(zero_images.validate_integrity().is_err());
+    }
+
+    #[test]
+    fn megapixel_rounding_is_declared_and_exact() {
+        let rule = |rounding, pixels_per_megapixel, minimum| MegapixelRule {
+            rounding,
+            pixels_per_megapixel,
+            minimum,
+        };
+        let floor = rule(MegapixelRounding::Floor, 1_000_000, 1);
+        let ceil = rule(MegapixelRounding::Ceil, 1_000_000, 1);
+        let nearest = rule(MegapixelRounding::Nearest, 1_000_000, 1);
+        // 2688 × 1536 = 4,128,768 pixels.
+        assert_eq!(floor.billed(2688, 1536), 4);
+        assert_eq!(ceil.billed(2688, 1536), 5);
+        assert_eq!(nearest.billed(2688, 1536), 4);
+        // Exactly half rounds up; exact multiples never round.
+        assert_eq!(nearest.billed(1500, 1000), 2);
+        assert_eq!(nearest.billed(1499, 1000), 1);
+        assert_eq!(ceil.billed(2000, 1000), 2);
+        // Small images still bill the minimum.
+        assert_eq!(floor.billed(512, 512), 1);
+        assert_eq!(
+            rule(MegapixelRounding::Floor, 1_000_000, 2).billed(512, 512),
+            2
+        );
+        // A binary megapixel: 1024 × 1024 is exactly one.
+        let binary = rule(MegapixelRounding::Ceil, 1 << 20, 1);
+        assert_eq!(binary.billed(1024, 1024), 1);
+        assert_eq!(binary.billed(1024, 1025), 2);
+        assert_eq!(floor.quantities(1024, 1024), (1, 0));
+        assert_eq!(floor.billed(65_535, 65_535), 4_294);
+    }
+
+    #[test]
+    fn size_presets_and_megapixel_pricing_are_validated() {
+        let check = |edit: &dyn Fn(&mut PackDocument), field: &str, reason: &str| {
+            let mut document: PackDocument = toml::from_str(MEGAPIXEL).unwrap();
+            edit(&mut document);
+            match Pack::from_toml_str(&toml::to_string(&document).unwrap()).unwrap_err() {
+                PackError::Invalid {
+                    field: f,
+                    reason: r,
+                } => {
+                    assert_eq!(f, field, "{r}");
+                    assert!(r.contains(reason), "{r}");
+                }
+                other => panic!("{other}"),
+            }
+        };
+        check(
+            &|d| {
+                d.size_presets.pop();
+            },
+            "size_presets",
+            "no preset certifies its size",
+        );
+        check(
+            &|d| d.size_presets[1].size = [1024, 1024],
+            "size_presets[1].size",
+            "two presets",
+        );
+        check(
+            &|d| d.size_presets[1].when = BTreeMap::from([("image_size".into(), "1k".into())]),
+            "size_presets[1].when",
+            "same parameters",
+        );
+        check(
+            &|d| {
+                d.size_presets[5]
+                    .when
+                    .insert("aspect_ratio".into(), "4:3".into());
+            },
+            "size_presets[5].when.aspect_ratio",
+            "not a value",
+        );
+        check(
+            &|d| d.size_presets[0].size = [0, 1024],
+            "size_presets[0].size",
+            "positive",
+        );
+        check(
+            &|d| d.parameters[3].default = None,
+            "size_presets",
+            "required or have a default",
+        );
+        check(
+            &|d| d.megapixels = None,
+            "megapixels",
+            "must declare how they are rounded",
+        );
+        check(
+            &|d| d.megapixels.as_mut().unwrap().pixels_per_megapixel = 0,
+            "megapixels",
+            "must be positive",
+        );
+        check(
+            &|d| {
+                d.models[0].pricing_rules[0].components.pop();
+            },
+            "megapixels",
+            "no pricing rule prices",
+        );
+        check(
+            &|d| {
+                d.size_presets.clear();
+            },
+            "megapixels",
+            "needs size_presets",
+        );
+        check(
+            &|d| {
+                d.parameters[1].quantity = Some("additional_megapixels".into());
+            },
+            "parameters[1].quantity",
+            "derived from the certified output size",
+        );
+        check(
+            &|d| {
+                d.parameters[2].selector = Some("image_size".into());
+                d.parameters[2].output_dimensions =
+                    BTreeMap::from([("1k".into(), [1024, 1024]), ("2k".into(), [2048, 2048])]);
+            },
+            "size_presets",
+            "not both",
+        );
+        // A model that narrows a preset parameter needs only its own sizes.
+        let mut narrowed: PackDocument = toml::from_str(MEGAPIXEL).unwrap();
+        narrowed.models[0]
+            .parameter_values
+            .insert("aspect_ratio".into(), vec!["1:1".into()]);
+        narrowed
+            .size_presets
+            .retain(|p| p.when["aspect_ratio"] == "1:1");
+        let pack = Pack::from_toml_str(&toml::to_string(&narrowed).unwrap()).unwrap();
+        assert_eq!(pack.output_sizes("megapixel-image-v1").len(), 2);
+    }
+
+    #[test]
+    fn size_selected_rules_may_price_megapixels() {
+        // One size parameter with output_dimensions that also selects the rule.
+        let mut document: PackDocument = toml::from_str(MEGAPIXEL).unwrap();
+        document.size_presets.clear();
+        document.parameters.truncate(3);
+        let size = &mut document.parameters[2];
+        size.selector = Some("image_size".into());
+        size.output_dimensions =
+            BTreeMap::from([("1k".into(), [1024, 1024]), ("2k".into(), [2048, 2048])]);
+        let mut rule_2k = document.models[0].pricing_rules[0].clone();
+        rule_2k.rule_id = "megapixel-image-v1-2k".into();
+        rule_2k.selector = Some(serde_json::from_value(json!({"image_size": "2k"})).unwrap());
+        // 2k images carry a 1¢ surcharge per additional megapixel on top.
+        rule_2k.components[1].rate_numerator_minor = 5;
+        document.models[0].pricing_rules[0].selector =
+            Some(serde_json::from_value(json!({"image_size": "1k"})).unwrap());
+        document.models[0].pricing_rules.push(rule_2k);
+        let pack = Pack::from_toml_str(&toml::to_string(&document).unwrap()).unwrap();
+        // 2048² = 4,194,304 pixels: 4 megapixels, 3 additional at 2.5¢.
+        let (request, snapshot) =
+            megapixel_snapshot(&pack, json!({"prompt": "x", "image_size": "2k"}));
+        assert_eq!(request.image_size(), Some("2k"));
+        assert_eq!(snapshot.estimated_units, 105_000);
+        let usage = delivered(&pack, &request, &[(2048, 2048)]).usage.unwrap();
+        assert_eq!(
+            snapshot.settle(&usage, snapshot.estimated_units).unwrap(),
+            105_000
+        );
+        // A size still never selects a token or request price.
+        assert!(!PricingUnit::prices_images_only([
+            PricingUnit::Image,
+            PricingUnit::InputToken
+        ]));
+        assert!(!PricingUnit::prices_images_only([PricingUnit::Request]));
+        assert!(PricingUnit::prices_images_only([PricingUnit::Megapixel]));
+    }
+
+    #[test]
+    fn megapixel_targets_publish_their_sizes_and_rounding() {
+        let pack = Pack::from_toml_str(MEGAPIXEL).unwrap();
+        let catalog = bind(&pack, &pack).unwrap();
+        let targets = catalog.execution_targets();
+        let target = &targets[0];
+        assert!(target.image_sizes.is_empty());
+        assert_eq!(target.output_sizes.len(), 6);
+        assert!(target.output_sizes.contains(&OutputSize {
+            when: BTreeMap::from([
+                ("aspect_ratio".into(), "16:9".into()),
+                ("image_size".into(), "2k".into()),
+            ]),
+            width: 2688,
+            height: 1536,
+        }));
+        assert_eq!(
+            target.megapixels.as_ref().unwrap().rounding,
+            MegapixelRounding::Floor
+        );
+        assert_eq!(
+            serde_json::to_value(target).unwrap()["megapixels"],
+            json!({"rounding": "floor", "pixels_per_megapixel": 1_000_000, "minimum": 1})
+        );
+        // Targets without presets or megapixels publish exactly what they did.
+        let mut plain = target.clone();
+        plain.output_sizes.clear();
+        plain.megapixels = None;
+        let value = serde_json::to_value(&plain).unwrap();
+        assert!(value.get("output_sizes").is_none() && value.get("megapixels").is_none());
+    }
+
+    const EDIT: &str =
+        include_str!("../../../../packs/verified/google-gemini-developer-image-edit.toml");
+    const DRAFT: &str = "0f5c2a64-3f0e-4c9b-9a51-2b7d1c4e8a10";
+    const SKETCH: &str = "6b1e9d2c-8a47-4f3e-b5c0-91d2e7a4f638";
+
+    fn edit_pack(from: &str, to: &str) -> Result<Pack, PackError> {
+        assert_eq!(EDIT.matches(from).count(), 1, "{from}");
+        Pack::from_toml_str(&EDIT.replace(from, to))
+    }
+
+    use crate::provider::contract::InputImage;
+
+    struct Images(BTreeMap<&'static str, InputImage>);
+    impl InputImageSource for Images {
+        fn load(&self, artifact_id: &str) -> Result<InputImage, ContractError> {
+            self.0
+                .get(artifact_id)
+                .cloned()
+                .ok_or(ContractError::Provider {
+                    code: "input_artifact_unavailable".into(),
+                })
+        }
+    }
+
+    #[test]
+    fn edit_packs_send_each_loaded_input_image_and_price_it() {
+        let pack = Pack::from_toml_str(EDIT).unwrap();
+        let input =
+            json!({"prompt": "blend them", "image_size": "1k", "input_images": [DRAFT, SKETCH]});
+        // Pricing never needs the bytes: the body stays unrendered.
+        let priced = pack.prepare("gemini-3.1-flash-image", &input).unwrap();
+        assert_eq!(priced.body, Value::Null);
+        assert_eq!(priced.request.workload(), "image_edit");
+        assert_eq!(priced.request.quantity("input_images"), Some(2));
+        let catalog = PricingCatalog::from_json(
+            &serde_json::to_vec(&json!({
+                "schema_version": 2,
+                "catalog_version": "edit",
+                "rules": pack.pricing_rules(),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        // 6.7¢ for the output image and 0.056¢ for each input image.
+        assert_eq!(
+            catalog.snapshot(&priced.request).unwrap().estimated_units,
+            68_120
+        );
+        assert_eq!(pack.input_artifact_ids(&input), [DRAFT, SKETCH]);
+
+        let images = Images(BTreeMap::from([
+            (
+                DRAFT,
+                InputImage {
+                    media_type: "image/png".into(),
+                    bytes: PNG.to_vec(),
+                },
+            ),
+            (
+                SKETCH,
+                InputImage {
+                    media_type: "image/jpeg".into(),
+                    bytes: vec![0xff, 0xd8],
+                },
+            ),
+        ]));
+        let sent = pack
+            .prepare_with_images("gemini-3.1-flash-image", &input, &images)
+            .unwrap();
+        assert_eq!(sent.request, priced.request);
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        assert_eq!(
+            sent.body,
+            json!({
+                "model": "gemini-3.1-flash-image",
+                "input": [
+                    {"type": "text", "text": "blend them"},
+                    {"type": "image", "mime_type": "image/png", "data": encode(PNG)},
+                    {"type": "image", "mime_type": "image/jpeg", "data": encode(&[0xff, 0xd8])},
+                ],
+                "response_format": {"type": "image", "image_size": "1K"},
+            })
+        );
+        // An image that can't be loaded stops the request by name.
+        let only_draft = Images(BTreeMap::from([(
+            DRAFT,
+            InputImage {
+                media_type: "image/png".into(),
+                bytes: PNG.to_vec(),
+            },
+        )]));
+        assert_eq!(
+            pack.prepare_with_images("gemini-3.1-flash-image", &input, &only_draft),
+            Err(ContractError::Provider {
+                code: "input_artifact_unavailable".into()
+            })
+        );
+
+        for invalid in [
+            json!({"prompt": "x", "image_size": "1k"}),
+            json!({"prompt": "x", "image_size": "1k", "input_images": []}),
+            json!({"prompt": "x", "image_size": "1k", "input_images": [DRAFT, DRAFT]}),
+            json!({"prompt": "x", "image_size": "1k", "input_images": ["../executions/x.png"]}),
+            json!({"prompt": "x", "image_size": "1k", "input_images": [DRAFT.to_uppercase()]}),
+            json!({"prompt": "x", "image_size": "1k", "input_images": DRAFT}),
+            json!({"prompt": "x", "image_size": "1k", "input_images": [DRAFT, SKETCH,
+                "1b1e9d2c-8a47-4f3e-b5c0-91d2e7a4f638", "2b1e9d2c-8a47-4f3e-b5c0-91d2e7a4f638",
+                "3b1e9d2c-8a47-4f3e-b5c0-91d2e7a4f638"]}),
+        ] {
+            assert!(
+                pack.prepare("gemini-3.1-flash-image", &invalid).is_err(),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn images_parameters_are_required_bounded_and_spliced_into_an_array() {
+        let item = r#"item = { type = "image", mime_type = "{{image.media_type}}", data = "{{image.data}}" }"#;
+        for (from, to, field) in [
+            (item, "", "parameters[1].item"),
+            (
+                item,
+                r#"item = { type = "image", mime_type = "{{image.media_type}}" }"#,
+                "parameters[1].item",
+            ),
+            (
+                item,
+                r#"item = { type = "image", data = "{{image.data}}", uri = "{{prompt}}" }"#,
+                "parameters[1].item",
+            ),
+            ("max = 4\nquantity = \"input_images\"", "max = 17\nquantity = \"input_images\"", "parameters[1].max"),
+            ("min = 1\nmax = 4\nquantity = \"input_images\"", "min = 0\nmax = 4\nquantity = \"input_images\"", "parameters[1].max"),
+            ("type = \"images\"\nrequired = true", "type = \"images\"\nrequired = false", "parameters[1].required"),
+            ("quantity = \"input_images\"\nitem", "quantity = \"image_count\"\nitem", "parameters[1].quantity"),
+            (
+                "max = 1\ndefault = 1\nquantity = \"image_count\"",
+                "max = 1\ndefault = 1\nquantity = \"input_images\"",
+                "parameters[2].quantity",
+            ),
+            (
+                r#"input = [{ type = "text", text = "{{prompt}}" }, "{{input_images}}"]"#,
+                "input = [{ type = \"text\", text = \"{{prompt}}\" }]\nimages = \"{{input_images}}\"",
+                "request.body",
+            ),
+        ] {
+            let error = edit_pack(from, to).unwrap_err();
+            assert!(
+                matches!(&error, PackError::Invalid { field: f, .. } if f == field),
+                "{from} -> {to}: {error}"
+            );
+        }
+        // Every rule must price the input images an edit sends.
+        let error = edit_pack(
+            r#"  { unit = "input_image", rate_numerator_minor = 28, rate_denominator = 1000 },"#,
+            "",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("input_images"), "{error}");
     }
 }

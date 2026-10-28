@@ -1,0 +1,129 @@
+{
+  "verdict": "holds",
+  "checks": [
+    {
+      "name": "Fresh one-cent budget and empty public ledger",
+      "status": "supported"
+    },
+    {
+      "name": "Fresh instance has no earlier authorization records",
+      "status": "supported"
+    },
+    {
+      "name": "Durable fixture preceded an owned SIGKILL before settlement",
+      "status": "supported"
+    },
+    {
+      "name": "Public pre-crash checkpoint was claimed and unsettled",
+      "status": "supported"
+    },
+    {
+      "name": "before-crash: exactly one admitted operation",
+      "status": "supported"
+    },
+    {
+      "name": "before-crash: frozen cent survived with no expense or replacement capacity",
+      "status": "supported"
+    },
+    {
+      "name": "before-crash: original authorization, claim and hold survive",
+      "status": "supported"
+    },
+    {
+      "name": "after-restart: exactly one admitted operation",
+      "status": "supported"
+    },
+    {
+      "name": "after-restart: frozen cent survived with no expense or replacement capacity",
+      "status": "supported"
+    },
+    {
+      "name": "after-restart: original authorization, claim and hold survive",
+      "status": "supported"
+    },
+    {
+      "name": "expired: exactly one admitted operation",
+      "status": "supported"
+    },
+    {
+      "name": "expired: frozen cent survived with no expense or replacement capacity",
+      "status": "supported"
+    },
+    {
+      "name": "expired: original authorization, claim and hold survive",
+      "status": "supported"
+    },
+    {
+      "name": "after-expired-probes: exactly one admitted operation",
+      "status": "supported"
+    },
+    {
+      "name": "after-expired-probes: frozen cent survived with no expense or replacement capacity",
+      "status": "supported"
+    },
+    {
+      "name": "after-expired-probes: original authorization, claim and hold survive",
+      "status": "supported"
+    },
+    {
+      "name": "Fresh request after restart explicitly denied without a hold",
+      "status": "supported"
+    },
+    {
+      "name": "Expired claim requires reconciliation and appears in public queue",
+      "status": "supported"
+    },
+    {
+      "name": "expired-normal-settle rejected specifically for expired claim",
+      "status": "supported"
+    },
+    {
+      "name": "expired-normal-release rejected specifically for expired claim",
+      "status": "supported"
+    },
+    {
+      "name": "Owner first resolution and exact retry both succeeded",
+      "status": "supported"
+    },
+    {
+      "name": "Owner reused the durable synthetic receipt",
+      "status": "supported"
+    },
+    {
+      "name": "Owner retry preserved claim, receipt and evidence",
+      "status": "supported"
+    },
+    {
+      "name": "reconciled: no additional admitted operation",
+      "status": "supported"
+    },
+    {
+      "name": "reconciled: one canonical cent settled, no pending obligation",
+      "status": "supported"
+    },
+    {
+      "name": "final: no additional admitted operation",
+      "status": "supported"
+    },
+    {
+      "name": "final: one canonical cent settled, no pending obligation",
+      "status": "supported"
+    },
+    {
+      "name": "Public receipt and claim show billed owner resolution",
+      "status": "supported"
+    },
+    {
+      "name": "Retry and final restart retain settlement, transaction, claim and hold identities",
+      "status": "supported"
+    },
+    {
+      "name": "Policy and budget configuration stayed fixed",
+      "status": "supported"
+    }
+  ],
+  "caveat": "",
+  "episode": "ep03-crash-recovery",
+  "execution": "complete",
+  "elapsed_seconds": 31.263
+}

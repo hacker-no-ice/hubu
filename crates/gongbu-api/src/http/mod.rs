@@ -5,7 +5,7 @@
 use crate::{
     artifacts::{ArtifactService, Error as ArtifactError},
     attestation::{AttestationError, RedactionAttestor},
-    execution_scope::{for_execution, for_target, ExecutionScope},
+    execution_scope::{for_execution, for_workload_target, ExecutionScope},
     hubu::{HttpClientError, SpendAuthorizationResolver},
     persistence::{
         Artifact, CreateExecutionParams, Error as PersistenceError, Execution,
@@ -14,8 +14,8 @@ use crate::{
     provider::{
         contract::{
             polling_deadline_allows_reinspect, units_to_minor_ceil, ContractError,
-            NormalizedRequest, OutputDimensions, PollingRecoveryContext, PricingSnapshot,
-            UNITS_PER_MINOR,
+            InputImageSource, NormalizedRequest, OutputDimensions, PollingRecoveryContext,
+            PricingSnapshot, INPUT_ARTIFACT_UNAVAILABLE, UNITS_PER_MINOR,
         },
         flux_contract,
         registry::{ExecutionTarget, ValidatedProviderCatalog},
@@ -498,8 +498,11 @@ impl Api {
                 ));
             }
         }
-        let (normalized_input, output_dimensions) =
-            normalize_provider_input(&request, submitted_input)?;
+        let (normalized_input, output_dimensions) = normalize_provider_input(
+            &request,
+            submitted_input,
+            self.certifies_own_sizes(&request, existing.as_ref()),
+        )?;
         if let Some(existing) = existing {
             if !immutable_request_matches(&existing, &request, &normalized_input) {
                 return Err(ApiError::conflict());
@@ -532,8 +535,18 @@ impl Api {
         }) {
             return Err(ApiError::validation());
         }
-        let pricing_request =
-            NormalizedRequest::new(resolved.provider.clone(), resolved.model.clone())
+        // A pack target prices exactly as its engine will: from the pack's
+        // bounded parameters and certified sizes, including derived
+        // megapixels. Other targets price from the image input shape.
+        let pack = self.providers.pack(resolved);
+        let pricing_request = match pack {
+            Some(pack) => {
+                pack.prepare(&resolved.model, &normalized_input)
+                    .map_err(map_pricing_error)?
+                    .request
+            }
+            None => NormalizedRequest::new(resolved.provider.clone(), resolved.model.clone())
+                .with_workload(&resolved.workload_type)
                 .with_quantity("image_count", image_count)
                 .with_quantity(
                     "input_tokens",
@@ -550,7 +563,8 @@ impl Api {
                         .and_then(|value| value.as_str())
                         .map(str::to_owned),
                 )
-                .with_output_dimensions(output_dimensions);
+                .with_output_dimensions(output_dimensions),
+        };
         let pricing_snapshot = self
             .providers
             .pricing()
@@ -565,7 +579,8 @@ impl Api {
         // Tokenization belongs to provider-bound request normalization, which is
         // not part of this HTTP/persistence milestone. Fail closed rather than
         // accepting a caller-asserted token count that could underfund execution.
-        if !pricing_snapshot.is_image_only() {
+        // Pack engines re-derive every priced quantity from bounded input.
+        if !(pricing_snapshot.is_image_only() || pack.is_some()) {
             return Err(ApiError::validation());
         }
         let authorization = self
@@ -581,12 +596,35 @@ impl Api {
                 .execution_scope
                 .as_ref()
                 .map(|scope| scope.schema_version),
+            &resolved.workload_type,
             &resolved.provider,
             &resolved.adapter,
             &resolved.model,
-            pricing_request.image_size(),
+            // A megapixel-priced pack may not select its rule by size, but
+            // the policy Hubu evaluated still binds the size the agent sent.
+            // Persistence requires that exact input value, so a defaulted
+            // size makes no size claim and a v2 size binding fails closed.
+            pricing_request.image_size().or_else(|| {
+                pack.and(normalized_input.get("image_size"))
+                    .and_then(Value::as_str)
+            }),
         )
         .ok_or_else(ApiError::validation)?;
+        // An edit names its input images by artifact ID: each must be one
+        // this account's earlier governed executions delivered.
+        if let Some(pack) = pack {
+            let images = self.artifacts.input_images(&authorization.account_id);
+            if pack
+                .input_artifact_ids(&normalized_input)
+                .iter()
+                .any(|id| images.load(id).is_err())
+            {
+                return Err(ApiError::validation_with_diagnostics(
+                    INPUT_ARTIFACT_UNAVAILABLE,
+                    &["input.input_images"],
+                ));
+            }
+        }
         let created_at = (self.now)();
         let authorization_expires_at = DateTime::parse_from_rfc3339(&authorization.expires_at)
             .map_err(|_| ApiError::validation())?;
@@ -701,6 +739,37 @@ impl Api {
             200,
             &self.execution_response(execution, response_schema_version)?,
         ))
+    }
+
+    /// Whether the revision this request runs on, the replayed execution's
+    /// or else the active one, is a pack that certifies its own sizes.
+    fn certifies_own_sizes(
+        &self,
+        request: &CreateExecutionRequest,
+        existing: Option<&Execution>,
+    ) -> bool {
+        let Ok(key) = TargetKey::new(
+            &request.workload_type,
+            &request.provider,
+            &request.adapter,
+            &request.model,
+        ) else {
+            return false;
+        };
+        let targets = self.providers.targets();
+        let revision = match existing {
+            Some(existing) => targets
+                .resolve_persisted_revision(
+                    &key,
+                    &existing.provider_config_version,
+                    &existing.provider_config_digest,
+                )
+                .ok(),
+            None => targets.resolve_active(&key).ok(),
+        };
+        revision
+            .and_then(|revision| self.providers.pack(revision))
+            .is_some_and(|pack| pack.has_size_presets())
     }
 
     fn authorized_execution(
@@ -870,8 +939,12 @@ impl Api {
 fn normalize_provider_input(
     request: &CreateExecutionRequest,
     mut input: Value,
+    certifies_own_sizes: bool,
 ) -> Result<(Value, Option<OutputDimensions>), ApiError> {
-    let output_dimensions = if request.provider == flux_contract::PROVIDER_ID
+    // The v1 FLUX contract writes its certified preset size into the stored
+    // input. A revision whose pack certifies its own sizes derives them.
+    let output_dimensions = if !certifies_own_sizes
+        && request.provider == flux_contract::PROVIDER_ID
         && request.adapter == flux_contract::ADAPTER_ID
         && request.model == flux_contract::MODEL_ID
     {
@@ -1073,7 +1146,11 @@ fn immutable_hash(
         "input_schema_version": request.input_schema_version,
         "workload_type": resolved.workload_type,
         "provider": resolved.provider,
-        "execution_scope": for_target(&resolved.provider, &resolved.adapter),
+        "execution_scope": for_workload_target(
+            &resolved.workload_type,
+            &resolved.provider,
+            &resolved.adapter,
+        ),
         "adapter": resolved.adapter,
         "model": resolved.model,
         "provider_config_version": resolved.provider_config_version,
@@ -1352,6 +1429,7 @@ fn json_response(status: u16, body: &impl Serialize) -> HttpResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::execution_scope::for_target;
     use crate::{
         artifacts::{ArtifactLimits, LocalFsStorage},
         execution::{AttemptResult, CreateReceiptParams, ExecutionUpdate, LifecycleOutcome},
@@ -1567,6 +1645,7 @@ mod tests {
                 };
                 response.execution_scope = for_execution(
                     Some(crate::execution_scope::EXECUTION_SCOPE_TARGET_SCHEMA_VERSION),
+                    "image_generation",
                     "flux",
                     "flux2_api",
                     model,
@@ -1585,6 +1664,53 @@ mod tests {
                 response.account_id = "aga_n063sdm0pepd".into();
                 response.agent_id = "agt_wk3q33h3j6w8".into();
                 response.task_id = None;
+            }
+            if spend_auth_token_id.starts_with("bflv2-") {
+                // FLUX.2 [pro] v2: every 2k size bills 2 megapixels, 4.5¢.
+                response.execution_scope = for_target("flux", "flux2_api");
+                response.amount_cents = 5;
+                response.budget_hold.amount_cents = 5;
+                response.budget_hold.frozen_amount_cents = 5;
+                response.amount = Some(exact("45000"));
+            }
+            if let Some(rest) = spend_auth_token_id.strip_prefix("megapixel-") {
+                // The megapixel fixture pack: a 2k 16:9 header is exactly 7.5¢.
+                response.execution_scope = if rest.starts_with("v2-") {
+                    for_execution(
+                        Some(crate::execution_scope::EXECUTION_SCOPE_TARGET_SCHEMA_VERSION),
+                        "image_generation",
+                        "local-mock",
+                        "sync_fixed",
+                        "megapixel-image-v1",
+                        Some(if rest.contains("-1k") { "1k" } else { "2k" }),
+                    )
+                } else {
+                    for_target("local-mock", "sync_fixed")
+                };
+                // A 1k square is one megapixel: 3¢.
+                let (cents, units) = if rest.contains("-1k") {
+                    (3, "30000")
+                } else {
+                    (8, "75000")
+                };
+                response.amount_cents = cents;
+                response.budget_hold.amount_cents = cents;
+                response.budget_hold.frozen_amount_cents = cents;
+                response.amount = Some(exact(units));
+            }
+            if let Some(rest) = spend_auth_token_id.strip_prefix("edit-") {
+                // A 1k Flash edit of one input image is exactly 6.756¢.
+                if !rest.starts_with("draft") {
+                    response.execution_scope = if rest.starts_with("generate-scope") {
+                        for_target("google", "gemini_developer_image")
+                    } else {
+                        for_workload_target("image_edit", "google", "gemini_developer_image")
+                    };
+                    response.amount_cents = 7;
+                    response.budget_hold.amount_cents = 7;
+                    response.budget_hold.frozen_amount_cents = 7;
+                    response.amount = Some(exact("67560"));
+                }
             }
             // A v4.5 Hubu reports the exact authorization beside its cents.
             if response.amount.is_none() {
@@ -1667,6 +1793,10 @@ mod tests {
     }
 
     fn supported_flux_catalog() -> ValidatedProviderCatalog {
+        flux_contract_catalog("hubu.flux-2-pro.text-to-image/v1")
+    }
+
+    fn flux_contract_catalog(contract: &str) -> ValidatedProviderCatalog {
         let document: Value = serde_json::from_str(include_str!(
             "../../../../contracts/provider-contracts-v1.json"
         ))
@@ -1675,7 +1805,7 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .find(|contract| contract["contract"] == "hubu.flux-2-pro.text-to-image/v1")
+            .find(|definition| definition["contract"] == contract)
             .unwrap();
         let mut target = contract_definition["target"].clone();
         target["secret_service"] = json!("gongbu.bfl.hubu-hub-172");
@@ -1719,7 +1849,13 @@ mod tests {
             "../../../../contracts/provider-contracts-v1.json"
         ))
         .unwrap();
-        let contracts = document["contracts"].as_array().unwrap();
+        // One revision per target: the v1 contracts, which share no target.
+        let contracts: Vec<&Value> = document["contracts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|contract| contract["contract"].as_str().unwrap().ends_with("/v1"))
+            .collect();
         let bindings = contracts
             .iter()
             .map(|contract| {
@@ -2296,13 +2432,19 @@ mod tests {
             ids,
             std::collections::BTreeSet::from([
                 "hubu.flux-2-pro.text-to-image/v1",
+                "hubu.flux-3-image.text-to-image/v1",
+                "hubu.gemini-3.1-flash-image.image-edit/v1",
+                "hubu.gemini-3.1-flash-lite-image.image-edit/v1",
                 "hubu.gemini-3.1-flash-image.text-to-image/v1",
                 "hubu.gemini-3.1-flash-lite-image.text-to-image/v1"
             ])
         );
         let gemini_full = contracts
             .iter()
-            .find(|contract| contract["target"]["model"] == "gemini-3.1-flash-image")
+            .find(|contract| {
+                contract["target"]["model"] == "gemini-3.1-flash-image"
+                    && contract["target"]["workload_type"] == "image_generation"
+            })
             .unwrap();
         assert_eq!(gemini_full["capability"]["presets"][2]["width"], 4096);
         assert!(contracts.iter().all(|contract| contract["readiness"]
@@ -2379,6 +2521,319 @@ mod tests {
         assert_eq!(response.status, 404);
         assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), 0);
         assert!(fixture.scheduler.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn flux_v2_creates_aspect_ratio_sizes_without_writing_v1_sizes() {
+        let mut fixture = fixture();
+        fixture.api = Api::new_with_authorization_resolver(
+            fixture.repository.clone(),
+            fixture.artifacts.clone(),
+            flux_contract_catalog("hubu.flux-2-pro.text-to-image/v2"),
+            fixture.scheduler.clone(),
+            i64::MAX,
+            fixture.resolver.clone(),
+            || "2026-08-05T20:00:00Z".into(),
+        );
+        let target_id = TargetKey::new("image_generation", "flux", "flux2_api", "flux-2-pro")
+            .unwrap()
+            .public_id();
+        for (token, aspect_ratio, size) in [
+            ("bflv2-header", "16:9", (1920, 1088)),
+            ("bflv2-square", "1:1", (1440, 1440)),
+            ("bflv2-portrait", "4:5", (1280, 1600)),
+        ] {
+            let created = call_create(
+                &fixture,
+                &json!({
+                    "schema_version": 2,
+                    "spend_auth_token_id": token,
+                    "input": {"prompt": "a lighthouse", "image_size": "2k",
+                              "aspect_ratio": aspect_ratio},
+                    "input_schema_version": 1,
+                    "target_id": target_id,
+                }),
+            );
+            assert_eq!(
+                created.status,
+                200,
+                "{token}: {}",
+                String::from_utf8_lossy(&created.body)
+            );
+            let stored = fixture
+                .repository
+                .get_execution(&execution(&created).execution_id)
+                .unwrap();
+            // v2 derives the size from its own presets; the stored input is
+            // what the agent sent, with no v1 preset size written into it.
+            assert!(stored.normalized_input.get("options").is_none(), "{token}");
+            assert_eq!(
+                stored.provider_config_version,
+                "hubu-flux-2-pro-t2i-2026-10-21-v2"
+            );
+            let snapshot: crate::provider_contract::PricingSnapshot =
+                serde_json::from_value(stored.pricing_snapshot).unwrap();
+            assert_eq!(snapshot.estimated_units, 45_000, "{token}");
+            assert_eq!(
+                snapshot.output_dimensions,
+                Some(OutputDimensions {
+                    width: size.0,
+                    height: size.1
+                }),
+                "{token}"
+            );
+        }
+    }
+
+    fn megapixel_fixture() -> (Fixture, Value) {
+        let pack = crate::provider::pack::Pack::from_toml_str(include_str!(
+            "../../../../fixtures/packs/megapixel-image.toml"
+        ))
+        .unwrap();
+        let secret = SecretReference::new("gongbu.megapixel-image", "fixture").unwrap();
+        let targets: ProviderTargetConfig = serde_json::from_value(json!({
+            "schema_version": 2,
+            "provider_configs": pack.provider_configs(&secret),
+        }))
+        .unwrap();
+        let pricing = PricingCatalog::from_json(
+            &serde_json::to_vec(&json!({
+                "schema_version": 2,
+                "catalog_version": pack.models()[0].pricing_version,
+                "rules": pack.pricing_rules(),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let target_id = pack.target_key(&pack.models()[0]).public_id();
+        let mut registry = ProviderRegistry::new();
+        registry.register_pack(pack);
+        registry.register_pack_engine(
+            crate::provider::pack::Archetype::SyncFixed,
+            |target, pack| {
+                Ok(Arc::new(
+                    crate::provider::pack_sync::SyncFixedEngine::from_target(
+                        target,
+                        pack,
+                        1 << 20,
+                    )?,
+                ))
+            },
+        );
+        let mut fixture = fixture();
+        fixture.api = Api::new_with_authorization_resolver(
+            fixture.repository.clone(),
+            fixture.artifacts.clone(),
+            ValidatedProviderCatalog::bind(targets, pricing, &registry).unwrap(),
+            fixture.scheduler.clone(),
+            i64::MAX,
+            fixture.resolver.clone(),
+            || "2026-08-05T20:00:00Z".into(),
+        );
+        (fixture, json!(target_id))
+    }
+
+    #[test]
+    fn a_16_9_header_from_a_megapixel_priced_target_freezes_its_exact_estimate() {
+        let (fixture, target_id) = megapixel_fixture();
+        let catalog: Value = serde_json::from_slice(
+            &fixture
+                .api
+                .handle("GET", "/v2/execution-targets", Some(&fixture.caller), &[])
+                .body,
+        )
+        .unwrap();
+        let target = &catalog["targets"][0];
+        assert_eq!(target["target_id"], target_id);
+        assert_eq!(target["output_sizes"].as_array().unwrap().len(), 6);
+        assert_eq!(target["megapixels"]["rounding"], "floor");
+        assert_eq!(
+            target["pricing"][0]["components"][1]["unit"],
+            "additional_megapixel"
+        );
+
+        let header = |token: &str, image_size: &str| {
+            json!({
+                "schema_version": 2,
+                "spend_auth_token_id": token,
+                "input": {"prompt": "a banner", "image_size": image_size, "aspect_ratio": "16:9"},
+                "input_schema_version": 1,
+                "target_id": target_id,
+            })
+        };
+        for token in ["megapixel-header", "megapixel-v2-header"] {
+            let created = call_create(&fixture, &header(token, "2k"));
+            assert_eq!(
+                created.status,
+                200,
+                "{}",
+                String::from_utf8_lossy(&created.body)
+            );
+            let stored = fixture
+                .repository
+                .get_execution(&execution(&created).execution_id)
+                .unwrap();
+            let snapshot: crate::provider_contract::PricingSnapshot =
+                serde_json::from_value(stored.pricing_snapshot).unwrap();
+            // 3¢ + 3 additional megapixels × 1.5¢, authorized exactly.
+            assert_eq!(snapshot.estimated_units, 75_000);
+            assert_eq!(stored.authorized_units, 75_000);
+            assert_eq!(
+                snapshot.output_dimensions,
+                Some(OutputDimensions {
+                    width: 2688,
+                    height: 1536
+                })
+            );
+        }
+        // A defaulted size prices at the default, but makes no size claim:
+        // a v2 authorization that binds a size needs the size sent.
+        let defaulted = |token: &str| {
+            call_create(
+                &fixture,
+                &json!({
+                    "schema_version": 2,
+                    "spend_auth_token_id": token,
+                    "input": {"prompt": "a square"},
+                    "input_schema_version": 1,
+                    "target_id": target_id,
+                }),
+            )
+            .status
+        };
+        assert_eq!(defaulted("megapixel-v1-1k-default"), 200);
+        assert_eq!(defaulted("megapixel-v2-1k-default"), 400);
+        // A 1k header prices 3¢, so the 7.5¢ authorization does not match it.
+        let mismatch = call_create(&fixture, &header("megapixel-small", "1k"));
+        assert_eq!(mismatch.status, 400);
+        // A ratio the target does not certify is refused at admission.
+        let mut uncertified = header("megapixel-uncertified", "2k");
+        uncertified["input"]["aspect_ratio"] = json!("4:3");
+        assert_eq!(call_create(&fixture, &uncertified).status, 400);
+    }
+
+    #[test]
+    fn an_edit_admits_only_this_accounts_artifacts_under_an_edit_scope() {
+        let mut fixture = fixture();
+        // A draft this account's earlier execution delivered.
+        let draft = execution(&call_create(&fixture, &request("edit-draft-source")));
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            1,
+            1,
+            image::Rgba([1, 2, 3, 255]),
+        ))
+        .write_to(
+            &mut std::io::Cursor::new(&mut png),
+            image::ImageOutputFormat::Png,
+        )
+        .unwrap();
+        let artifact = fixture
+            .artifacts
+            .store_image(
+                &draft.execution_id,
+                None,
+                "image/png",
+                &png,
+                "2026-08-05T20:00:00Z",
+            )
+            .unwrap();
+
+        let pack = crate::provider::verified_packs::verified_packs()
+            .into_iter()
+            .find(|pack| pack.workload_type() == "image_edit")
+            .unwrap();
+        let secret = SecretReference::new("gongbu.google", "fixture").unwrap();
+        let targets: ProviderTargetConfig = serde_json::from_value(json!({
+            "schema_version": 2,
+            "provider_configs": pack.provider_configs(&secret),
+        }))
+        .unwrap();
+        let pricing = PricingCatalog::from_json(
+            &serde_json::to_vec(&json!({
+                "schema_version": 2,
+                "catalog_version": "gemini-edit-http-test",
+                "rules": pack.pricing_rules(),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let target_id = pack
+            .target_key(pack.model("gemini-3.1-flash-image").unwrap())
+            .public_id();
+        let mut registry = ProviderRegistry::new();
+        registry.register_pack(pack);
+        registry.register_pack_engine(
+            crate::provider::pack::Archetype::SyncFixed,
+            |target, pack| {
+                Ok(Arc::new(
+                    crate::provider::pack_sync::SyncFixedEngine::from_target(
+                        target,
+                        pack,
+                        1 << 20,
+                    )?,
+                ))
+            },
+        );
+        fixture.api = Api::new_with_authorization_resolver(
+            fixture.repository.clone(),
+            fixture.artifacts.clone(),
+            ValidatedProviderCatalog::bind(targets, pricing, &registry).unwrap(),
+            fixture.scheduler.clone(),
+            i64::MAX,
+            fixture.resolver.clone(),
+            || "2026-08-05T20:00:00Z".into(),
+        );
+        let edit = |token: &str, artifact_id: &str| {
+            json!({
+                "schema_version": 2,
+                "spend_auth_token_id": token,
+                "input": {"prompt": "make it blue", "image_size": "1k", "input_images": [artifact_id]},
+                "input_schema_version": 1,
+                "target_id": target_id,
+            })
+        };
+
+        let created = call_create(&fixture, &edit("edit-by-id", &artifact.artifact_id));
+        assert_eq!(
+            created.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&created.body)
+        );
+        let stored = fixture
+            .repository
+            .get_execution(&execution(&created).execution_id)
+            .unwrap();
+        assert_eq!(stored.workload_type, "image_edit");
+        // 6.7¢ for the output image plus 0.056¢ for the one input image.
+        assert_eq!(stored.authorized_units, 67_560);
+        assert_eq!(
+            stored.execution_scope.unwrap().capability.id,
+            "capability:image:edit"
+        );
+
+        // An ID no execution of this account delivered is refused by name.
+        let unknown = call_create(
+            &fixture,
+            &edit("edit-unknown", "00000000-0000-4000-8000-000000000000"),
+        );
+        assert_eq!(unknown.status, 400);
+        let body = error(&unknown);
+        assert_eq!(
+            body.error.reason_code.as_deref(),
+            Some("input_artifact_unavailable")
+        );
+        assert_eq!(body.error.fields, Some(vec!["input.input_images".into()]));
+        // A generation approval does not authorize an edit.
+        assert_eq!(
+            call_create(
+                &fixture,
+                &edit("edit-generate-scope", &artifact.artifact_id)
+            )
+            .status,
+            400
+        );
     }
 
     fn call_create(fixture: &Fixture, request: &Value) -> HttpResponse {

@@ -1,0 +1,445 @@
+{
+  "verdict": "holds",
+  "checks": [
+    {
+      "name": "Fresh USD 0.10 budget",
+      "status": "supported"
+    },
+    {
+      "name": "No observed reservation exceeded the fixed ten-cent budget",
+      "status": "supported"
+    },
+    {
+      "name": "All ten funded authorize/resolve/claim/settle responses completed",
+      "status": "supported"
+    },
+    {
+      "name": "exhausted: ten balanced settlements, USD 0.10 consumed, no hold",
+      "status": "supported"
+    },
+    {
+      "name": "final: ten balanced settlements, USD 0.10 consumed, no hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-001: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-002: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-003: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-004: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-005: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-006: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-007: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-008: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-009: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-010: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-011: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-012: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-013: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-014: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-015: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-016: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-017: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-018: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-019: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-020: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-021: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-022: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-023: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-024: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-025: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-026: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-027: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-028: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-029: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-030: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-031: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-032: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-033: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-034: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-035: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-036: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-037: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-038: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-039: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-040: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-041: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-042: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-043: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-044: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-045: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-046: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-047: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-048: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-049: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-050: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-051: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-052: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-053: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-054: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-055: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-056: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-057: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-058: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-059: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-060: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-061: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-062: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-063: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-064: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-065: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-066: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-067: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-068: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-069: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-070: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-071: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-072: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-073: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-074: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-075: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-076: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-077: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-078: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-079: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-080: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-081: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-082: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-083: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-084: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-085: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-086: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-087: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-088: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-089: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-090: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-091: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-092: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-093: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-094: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-095: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-096: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-097: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-098: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-099: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "after-budget-100: explicit budget denial without token/hold",
+      "status": "supported"
+    },
+    {
+      "name": "Exactly 110 distinct logical attempts recorded",
+      "status": "supported"
+    },
+    {
+      "name": "Exactly ten public authorizations, all settled at one cent",
+      "status": "supported"
+    },
+    {
+      "name": "All posting identities unchanged after the 100 denials",
+      "status": "supported"
+    },
+    {
+      "name": "Operator configuration remained fixed",
+      "status": "supported"
+    }
+  ],
+  "caveat": "",
+  "episode": "ep01-runaway",
+  "execution": "complete",
+  "elapsed_seconds": 32.009
+}

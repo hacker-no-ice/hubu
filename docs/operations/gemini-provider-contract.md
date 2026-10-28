@@ -1,7 +1,8 @@
 # Gemini Developer API provider contract
 
-Hubu ships two deliberately narrow Gemini Developer API contracts beside the
-FLUX contract. Operators select either or both contracts and provide only an
+Hubu ships two deliberately narrow Gemini Developer API text-to-image
+contracts beside the FLUX contract, and two image-edit contracts on the same
+models (see [image editing](#image-editing)). Operators select either or both contracts and provide only an
 opaque Keychain credential reference; the renderer supplies each immutable
 target, transport, capability, policy, and price.
 
@@ -38,6 +39,36 @@ Google's [Lite model page](https://ai.google.dev/gemini-api/docs/models/gemini-3
 [image generation guide](https://ai.google.dev/gemini-api/docs/image-generation),
 and [Developer API pricing](https://ai.google.dev/gemini-api/docs/pricing).
 Changing any frozen fact requires a new immutable contract and pricing version.
+
+## Image editing
+
+| Frozen field | Value |
+| --- | --- |
+| Contracts | `hubu.gemini-3.1-flash-lite-image.image-edit/v1`; `hubu.gemini-3.1-flash-image.image-edit/v1` |
+| Targets | workload `image_edit`, `google` / `gemini_developer_image`, same two models |
+| Hubu scope capability | `capability:image:edit` |
+| Input | a prompt, `image_size`, and `input_images`: 1 to 4 artifact IDs of images this account's earlier governed executions delivered |
+| Output | one image, at the text-to-image sizes and prices of the same model |
+| Input image price | each input image is billed as 1,120 input tokens, the Gemini 3 default for an image: USD $0.00056 (`56/1000` cents) on Flash Image, $0.00028 (`28/1000` cents) on Flash Lite Image |
+| Price review | 2026-10-21 |
+| Implementation | verified pack `packs/verified/google-gemini-developer-image-edit.toml` on the `sync_fixed` engine |
+
+A 1K Flash edit of one draft is held at exactly 6.756 cents: 6.7 cents for the
+output image plus 0.056 cents for the input image. The text prompt's input
+tokens stay unpriced, as for text-to-image. Gongbu sends each input image
+inline, after loading it from the account's own artifacts and checking its
+recorded digest; see [editing an image](../gongbu-execution.md#editing-an-image).
+The edit contracts' prices are their own rules (`workload_type = "image_edit"`),
+so binding them never changes a text-to-image price.
+
+Bind an edit contract beside the text-to-image one; it uses the same Google
+credential alias:
+
+```toml
+[[contract_bindings]]
+contract = "hubu.gemini-3.1-flash-image.image-edit/v1"
+credential = "google_gemini"
+```
 
 ## Configure
 

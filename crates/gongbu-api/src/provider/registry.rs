@@ -6,14 +6,18 @@ use super::{
         ADAPTER_ID as FLUX_ADAPTER_ID, MODEL_ID as FLUX_MODEL_ID, PROVIDER_ID as FLUX_PROVIDER_ID,
         SUPPORTED_PRESETS as FLUX_SUPPORTED_PRESETS,
     },
-    pack::{Archetype, Pack},
+    pack::{Archetype, MegapixelRule, OutputSize, Pack},
     pack_async::AsyncPollEngine,
     pack_sync::SyncFixedEngine,
     provider_contracts::{self, CatalogContract},
-    targets::{AdapterSettings, ProviderConfigVersion, ProviderTargetConfig, TargetKey},
+    targets::{
+        AdapterSettings, PackTargetConfig, ProviderConfigVersion, ProviderTargetConfig, TargetKey,
+    },
     verified_packs::verified_packs,
 };
-use crate::{artifact::ArtifactLimits, execution_scope::for_target, secrets::ProviderSecret};
+use crate::{
+    artifact::ArtifactLimits, execution_scope::for_workload_target, secrets::ProviderSecret,
+};
 use serde::Serialize;
 use std::{collections::BTreeMap, sync::Arc};
 use thiserror::Error;
@@ -37,6 +41,26 @@ pub struct ExecutionTarget {
     pub execution_scope: ExecutionTargetScope,
     pub image_sizes: Vec<String>,
     pub pricing: Vec<ExecutionTargetPricing>,
+    /// Certified output sizes by parameter values, for pack targets that
+    /// certify sizes beyond `image_sizes` (aspect ratios, for example).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub output_sizes: Vec<OutputSize>,
+    /// How billed megapixels are counted, when the target prices them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub megapixels: Option<MegapixelRule>,
+    /// The input parameter that takes artifact IDs to edit, for image-edit
+    /// targets.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_images: Option<InputImagesParameter>,
+}
+
+/// Where an edit target takes its input images: artifact IDs of images the
+/// same account's earlier governed executions delivered.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct InputImagesParameter {
+    pub parameter: String,
+    pub min: i64,
+    pub max: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -78,8 +102,9 @@ pub struct ProviderRegistry {
     factories: BTreeMap<(String, String), Arc<Factory>>,
     /// Archetype engines keyed by engine ID; they run pack targets.
     pack_engines: BTreeMap<String, Arc<PackEngineFactory>>,
-    /// Validated packs keyed by pack ID.
-    packs: BTreeMap<String, Arc<Pack>>,
+    /// Validated packs keyed by pack ID and version, so successive
+    /// versions of one pack can back different contract revisions.
+    packs: BTreeMap<(String, String), Arc<Pack>>,
     require_shipped_contracts: bool,
 }
 
@@ -140,7 +165,15 @@ impl ProviderRegistry {
 
     /// Make a validated pack available to targets that name it.
     pub fn register_pack(&mut self, pack: Pack) {
-        self.packs.insert(pack.pack_id().to_owned(), Arc::new(pack));
+        self.packs.insert(
+            (pack.pack_id().to_owned(), pack.pack_version().to_owned()),
+            Arc::new(pack),
+        );
+    }
+
+    fn pack_for(&self, config: &PackTargetConfig) -> Option<&Arc<Pack>> {
+        self.packs
+            .get(&(config.pack_id.clone(), config.pack_version.clone()))
     }
 
     /// Bind an archetype engine. Pack targets are bound by engine, never by a
@@ -170,8 +203,7 @@ impl ProviderRegistry {
             return factory(target).map_err(|_| RegistryError::BindingFailed(canonical()));
         };
         let pack = self
-            .packs
-            .get(&config.pack_id)
+            .pack_for(config)
             .ok_or_else(|| RegistryError::MissingFactory(canonical()))?;
         // The revision pins one exact pack; any drift is a binding failure.
         let model = pack.model(&target.model);
@@ -285,6 +317,8 @@ pub struct ValidatedProviderCatalog {
     targets: ProviderTargetConfig,
     pricing: PricingCatalog,
     adapters: BTreeMap<(TargetKey, String), BoundAdapter>,
+    /// The pinned pack of each bound pack target revision.
+    packs: BTreeMap<(TargetKey, String), Arc<Pack>>,
     provider_contracts: Vec<CatalogContract>,
 }
 
@@ -294,6 +328,7 @@ impl ValidatedProviderCatalog {
             targets: ProviderTargetConfig::disabled(),
             pricing: PricingCatalog::disabled(),
             adapters: BTreeMap::new(),
+            packs: BTreeMap::new(),
             provider_contracts: Vec::new(),
         }
     }
@@ -304,6 +339,7 @@ impl ValidatedProviderCatalog {
         registry: &ProviderRegistry,
     ) -> Result<Self, RegistryError> {
         let mut adapters = BTreeMap::new();
+        let mut packs = BTreeMap::new();
         for target in targets
             .revisions()
             .filter(|target| target.is_execution_enabled())
@@ -312,9 +348,16 @@ impl ValidatedProviderCatalog {
             if !pricing.supports_target(&target.target_key()) {
                 return Err(RegistryError::MissingPricing(canonical));
             }
+            // The v1 FLUX contract prices each certified preset by size; a
+            // pack that certifies its own sizes prices them itself.
+            let certifies_sizes = target
+                .pack()
+                .and_then(|config| registry.pack_for(config))
+                .is_some_and(|pack| pack.has_size_presets());
             if target.provider == FLUX_PROVIDER_ID
                 && target.adapter == FLUX_ADAPTER_ID
                 && target.model == FLUX_MODEL_ID
+                && !certifies_sizes
                 && !FLUX_SUPPORTED_PRESETS
                     .iter()
                     .all(|preset| pricing.supports_image_size(&target.target_key(), preset))
@@ -327,10 +370,11 @@ impl ValidatedProviderCatalog {
                     target.target_key().canonical_name(),
                 ));
             }
-            adapters.insert(
-                (target.target_key(), target.provider_config_version.clone()),
-                adapter,
-            );
+            let revision = (target.target_key(), target.provider_config_version.clone());
+            if let Some(pack) = target.pack().and_then(|config| registry.pack_for(config)) {
+                packs.insert(revision.clone(), Arc::clone(pack));
+            }
+            adapters.insert(revision, adapter);
         }
         let provider_contracts = if registry.require_shipped_contracts {
             provider_contracts::validate_and_project(&targets, &pricing)
@@ -342,6 +386,7 @@ impl ValidatedProviderCatalog {
             targets,
             pricing,
             adapters,
+            packs,
             provider_contracts,
         })
     }
@@ -370,7 +415,7 @@ impl ValidatedProviderCatalog {
             .filter(|target| target.is_active() && target.is_execution_enabled())
             .filter_map(|target| {
                 let key = target.target_key();
-                let scope = for_target(&key.provider, &key.adapter)?;
+                let scope = for_workload_target(&key.workload_type, &key.provider, &key.adapter)?;
                 let execution_scope = ExecutionTargetScope {
                     schema_version: scope.schema_version,
                     provider: scope.provider.id,
@@ -399,6 +444,11 @@ impl ValidatedProviderCatalog {
                     .collect::<Vec<_>>();
                 image_sizes.sort();
                 image_sizes.dedup();
+                let pack = self.pack(target);
+                let output_sizes = pack
+                    .filter(|pack| pack.megapixel_rule().is_some() || pack.has_size_presets())
+                    .map(|pack| pack.output_sizes(&key.model))
+                    .unwrap_or_default();
                 Some(ExecutionTarget {
                     target_id: key.public_id(),
                     workload_type: key.workload_type,
@@ -407,6 +457,9 @@ impl ValidatedProviderCatalog {
                     execution_scope,
                     image_sizes,
                     pricing,
+                    output_sizes,
+                    megapixels: pack.and_then(|pack| pack.megapixel_rule().cloned()),
+                    input_images: pack.and_then(|pack| pack.input_images_parameter()),
                 })
             })
             .collect()
@@ -444,6 +497,12 @@ impl ValidatedProviderCatalog {
             .resolve_persisted_revision(key, version, digest)
             .map_err(|_| RegistryError::TargetUnavailable)?;
         Ok((target, self.bound(target)?))
+    }
+
+    /// The pinned pack a bound pack target revision runs.
+    pub fn pack(&self, target: &ProviderConfigVersion) -> Option<&Arc<Pack>> {
+        self.packs
+            .get(&(target.target_key(), target.provider_config_version.clone()))
     }
 
     fn bound(&self, target: &ProviderConfigVersion) -> Result<&BoundAdapter, RegistryError> {
@@ -695,7 +754,13 @@ mod tests {
             "../../../../contracts/provider-contracts-v1.json"
         ))
         .unwrap();
-        let contracts = document["contracts"].as_array().unwrap();
+        // One revision per target: the v1 contracts, which share no target.
+        let contracts: Vec<&serde_json::Value> = document["contracts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|contract| contract["contract"].as_str().unwrap().ends_with("/v1"))
+            .collect();
         let bindings = contracts.iter().map(|contract| {
             let policies = &contract["policies"];
             json!({"contract":contract["contract"],"pricing_version":contract["pricing_version"],"poll_policy":policies["poll"],"artifact_delivery_policy":policies["artifact_delivery"],"recovery_policy":policies["recovery"],"generation_retries":0,"fallback":false})
@@ -730,20 +795,48 @@ mod tests {
             ),
             ("google", "gemini_developer_image", "gemini-3.1-flash-image"),
             ("flux", "flux2_api", "flux-2-pro"),
+            ("flux", "flux2_api", "flux-3-image"),
         ] {
             let key = TargetKey::new("image_generation", provider, adapter, model).unwrap();
             assert_eq!(catalog.resolve_active(&key).unwrap().adapter, adapter);
         }
         let execution_targets = catalog.execution_targets();
-        assert_eq!(execution_targets.len(), 3);
+        assert_eq!(execution_targets.len(), 6);
+        let flux_3 = execution_targets
+            .iter()
+            .find(|target| target.model == "flux-3-image")
+            .unwrap();
+        assert_eq!(flux_3.image_sizes, ["1k", "2k"]);
         let gemini_full = execution_targets
             .iter()
-            .find(|target| target.model == "gemini-3.1-flash-image")
+            .find(|target| {
+                target.model == "gemini-3.1-flash-image"
+                    && target.workload_type == "image_generation"
+            })
             .unwrap();
+        let gemini_edit = execution_targets
+            .iter()
+            .find(|target| {
+                target.model == "gemini-3.1-flash-image" && target.workload_type == "image_edit"
+            })
+            .unwrap();
+        assert_eq!(
+            gemini_edit.execution_scope.capability,
+            "capability:image:edit"
+        );
+        assert_eq!(
+            gemini_full.execution_scope.capability,
+            "capability:image:generate"
+        );
+        assert_ne!(gemini_edit.target_id, gemini_full.target_id);
+        assert!(gemini_edit
+            .pricing
+            .iter()
+            .all(|rule| rule.components.len() == 2));
         assert_eq!(gemini_full.image_sizes, ["1k", "2k", "4k"]);
         let flux = execution_targets
             .iter()
-            .find(|target| target.provider == "flux")
+            .find(|target| target.model == "flux-2-pro")
             .unwrap();
         assert_eq!(flux.image_sizes, ["1k", "2k", "4k"]);
         assert_eq!(

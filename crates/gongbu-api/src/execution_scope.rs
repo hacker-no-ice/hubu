@@ -27,7 +27,23 @@ pub struct ExecutionScope {
     pub image_size: Option<String>,
 }
 
+/// The scope of an image-generation target.
 pub fn for_target(provider: &str, adapter: &str) -> Option<ExecutionScope> {
+    for_workload_target("image_generation", provider, adapter)
+}
+
+/// The scope of a target running `workload_type`. Its capability names the
+/// workload, so Hubu policy can tell an edit from a generation.
+pub fn for_workload_target(
+    workload_type: &str,
+    provider: &str,
+    adapter: &str,
+) -> Option<ExecutionScope> {
+    let (capability_id, capability_name) = match workload_type {
+        "image_generation" => ("capability:image:generate", "Generate image"),
+        "image_edit" => ("capability:image:edit", "Edit image"),
+        _ => return None,
+    };
     let (provider_id, provider_name, merchant_id, merchant_name) = match (provider, adapter) {
         ("google", "gemini_developer_image") => (
             "provider:google:gemini-developer",
@@ -56,7 +72,7 @@ pub fn for_target(provider: &str, adapter: &str) -> Option<ExecutionScope> {
         schema_version: EXECUTION_SCOPE_SCHEMA_VERSION,
         provider: identity(provider_id, provider_name),
         executor: identity("executor:gongbu:image", "Gongbu image executor"),
-        capability: identity("capability:image:generate", "Generate image"),
+        capability: identity(capability_id, capability_name),
         billing_merchant: identity(merchant_id, merchant_name),
         model: None,
         image_size: None,
@@ -70,12 +86,13 @@ pub fn for_target(provider: &str, adapter: &str) -> Option<ExecutionScope> {
 /// unsupported version can never equal.
 pub fn for_execution(
     authorized_schema_version: Option<u32>,
+    workload_type: &str,
     provider: &str,
     adapter: &str,
     model: &str,
     image_size: Option<&str>,
 ) -> Option<ExecutionScope> {
-    let scope = for_target(provider, adapter)?;
+    let scope = for_workload_target(workload_type, provider, adapter)?;
     if authorized_schema_version == Some(EXECUTION_SCOPE_SCHEMA_VERSION) {
         return Some(scope);
     }
@@ -130,6 +147,7 @@ mod tests {
         assert_eq!(
             for_execution(
                 Some(EXECUTION_SCOPE_SCHEMA_VERSION),
+                "image_generation",
                 "google",
                 "gemini_developer_image",
                 "gemini-3.1-flash-image",
@@ -139,6 +157,7 @@ mod tests {
         );
         let v2 = for_execution(
             Some(EXECUTION_SCOPE_TARGET_SCHEMA_VERSION),
+            "image_generation",
             "google",
             "gemini_developer_image",
             "gemini-3.1-flash-image",
@@ -153,6 +172,7 @@ mod tests {
         assert_eq!(
             for_execution(
                 None,
+                "image_generation",
                 "google",
                 "gemini_developer_image",
                 "gemini-3.1-flash-image",
