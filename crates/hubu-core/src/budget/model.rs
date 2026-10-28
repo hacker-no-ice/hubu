@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use hubu_common::ids::{
     AgentId, BudgetHoldId, BudgetId, BudgetVersionId, SpendDecisionId, SpendExecutorClaimId,
+    TaskBudgetId,
 };
 use hubu_common::money::{Amount, Currency};
 use hubu_common::time::TimePeriod;
@@ -336,6 +337,9 @@ pub struct BudgetHold {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
+    /// Task budget this hold was reserved under, when the spend carried the
+    /// trusted `task_id` of an open task budget.
+    pub task_budget_id: Option<TaskBudgetId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

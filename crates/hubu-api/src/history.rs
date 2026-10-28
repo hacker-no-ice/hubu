@@ -551,7 +551,8 @@ fn authorization_record(
         "amount_cents":h.amount.legacy_cents_ceil(),
         "currency":h.currency.to_string(),
         "status":effective_hold_status(h,now),
-        "expires_at":h.expires_at.to_rfc3339()})),
+        "expires_at":h.expires_at.to_rfc3339(),
+        "task_budget_id":h.task_budget_id.as_ref().map(hubu_core::budget::public_task_budget_id)})),
         "claim":claim.map(|c|json!({"id":c.id,
         "status":match c.status {SpendExecutorClaimStatus::Claimed=>"claimed",SpendExecutorClaimStatus::Settled=>"settled",SpendExecutorClaimStatus::Released=>"released"},
         "claimed_at":c.claimed_at.to_rfc3339(),
@@ -799,10 +800,27 @@ pub(super) fn watch(request: &HttpRequest, state: &ServerState) -> Result<Value>
             .checked_add(expired)
             .ok_or_else(|| anyhow!("WATCH available balance overflow"))?;
     }
+    let open_task_budgets = state
+        .governance
+        .lock()
+        .map_err(|_| anyhow!("governance store lock poisoned"))?
+        .list_task_budgets(&user.user_id, None, false)?;
     let mut rows = Vec::new();
     let mut candidates = Vec::new();
     for agent in agents {
         let internal = resolve_agent_id_for_user(&agent.agent_id, &user, state)?;
+        // Open task budgets of this agent: spend so far against each cap.
+        let task_budgets: Vec<_> = open_task_budgets
+            .iter()
+            .filter(|t| t.budget.agent_id == internal && t.budget.currency.to_string() == currency)
+            .map(|t| {
+                let c = t.budget.currency;
+                json!({"task_budget_id":hubu_core::budget::public_task_budget_id(&t.budget.id),
+                    "task_id":t.budget.task_id, "budget_id":public_budget_id(&t.budget.parent_budget_id),
+                    "limit":money(t.budget.amount_limit,c), "consumed":money(t.usage.consumed_amount,c),
+                    "frozen":money(t.usage.frozen_amount,c), "remaining":money(t.remaining_amount(),c)})
+            })
+            .collect();
         let budgets: Vec<_> = data
             .budgets
             .iter()
@@ -868,6 +886,7 @@ pub(super) fn watch(request: &HttpRequest, state: &ServerState) -> Result<Value>
             "available_cents":selected.map(|(_,v)|v.remaining_amount.legacy_cents_floor()),
             "frozen_cents":selected.map(|(_,v)|v.frozen_amount.legacy_cents_ceil()),
             "consumed_cents":selected.map(|(_,v)|v.consumed_amount.legacy_cents_ceil()),
+            "task_budgets":task_budgets,
             "state":if pending {"APPROVAL"} else if blocked || selected.is_none() || agent.status != "active" || agent.account_status != "active" {"BLOCKED"} else {"ALLOW"}}));
     }
     rows.sort_by_key(|row| row["agent_id"].as_str().unwrap_or_default().to_owned());

@@ -15,9 +15,12 @@ use serde_json::json;
 use crate::{
     budget::{
         BudgetBalance, BudgetHold, BudgetManager, BudgetManagerError, ReleaseBudgetResponse,
-        ReserveBudgetRequest, ReserveBudgetResponse, SettleBudgetResponse,
+        ReservationAllocation, ReserveBudgetRequest, ReserveBudgetResponse, SettleBudgetResponse,
     },
-    persistence::{BudgetRepository, SelectedSpendPolicy, SpendAttemptAdmission, SpendRepository},
+    persistence::{
+        BudgetRepository, SelectedSpendPolicy, SpendAttemptAdmission, SpendRepository,
+        TaskBudgetRepository,
+    },
     policy::model::{Effect, Policy},
     spend::{
         AdmissionDenialReason, IssuedSpendAuthToken, LifecycleObservationId, SpendAuthTokenRecord,
@@ -177,6 +180,9 @@ pub enum SpendApprovalError {
     #[error("exact replay is pending durable authorization completion for operation key `{operation_key}`")]
     PendingExactReplay { operation_key: String },
 
+    #[error("{reason}")]
+    TaskBudgetDenied { reason: &'static str },
+
     #[error("unknown spend approval request")]
     UnknownApprovalRequest,
 
@@ -215,7 +221,7 @@ impl SpendApprovalService {
         governance: &mut G,
     ) -> Result<SpendAuthorizationOutcome, SpendApprovalError>
     where
-        G: SpendRepository + BudgetRepository,
+        G: SpendRepository + BudgetRepository + TaskBudgetRepository,
     {
         self.authorize_at(
             request,
@@ -237,7 +243,7 @@ impl SpendApprovalService {
         now: DateTime<Utc>,
     ) -> Result<SpendAuthorizationOutcome, SpendApprovalError>
     where
-        G: SpendRepository + BudgetRepository,
+        G: SpendRepository + BudgetRepository + TaskBudgetRepository,
     {
         self.authorize_with_policy_context(
             request,
@@ -260,7 +266,7 @@ impl SpendApprovalService {
         now: DateTime<Utc>,
     ) -> Result<SpendAuthorizationOutcome, SpendApprovalError>
     where
-        G: SpendRepository + BudgetRepository,
+        G: SpendRepository + BudgetRepository + TaskBudgetRepository,
     {
         self.authorize_with_policy_context(
             request,
@@ -285,7 +291,7 @@ impl SpendApprovalService {
         now: DateTime<Utc>,
     ) -> Result<SpendAuthorizationOutcome, SpendApprovalError>
     where
-        G: SpendRepository + BudgetRepository,
+        G: SpendRepository + BudgetRepository + TaskBudgetRepository,
     {
         if request.amount <= Amount::ZERO {
             return Err(SpendApprovalError::NonPositiveAmount);
@@ -673,7 +679,69 @@ impl SpendApprovalService {
             }
         };
         let budget_id = before.budget.id.clone();
-        let budget_reservation = match budget_manager.reserve_budget_at(
+        let allocation = match task_allocation_for_spend(
+            governance,
+            &request.agent_id,
+            request.task_id.as_deref(),
+            request.currency,
+            &budget_id,
+            request.amount,
+        ) {
+            Ok(TaskAllocation::Allowed(allocation)) => allocation,
+            Ok(TaskAllocation::Denied(reason)) => {
+                spend_manager.discard_auth_token_for_decision(&evaluation.decision_id);
+                let reasons = vec![reason.to_string()];
+                if let Err(error) = governance.save_automatic_denied_transition(
+                    &decision_record,
+                    selected,
+                    Some(&before),
+                    AdmissionDenialReason::InsufficientTaskBudget,
+                    &reasons,
+                    Utc::now().max(decision_record.created_at),
+                    now,
+                ) {
+                    let _ = governance.save_automatic_failure(
+                        &decision_record,
+                        &LifecycleObservationId::new(),
+                        Utc::now(),
+                    );
+                    return Err(error.into());
+                }
+                attach_attempt_audit(
+                    governance,
+                    &mut evaluation,
+                    &request.agent_id,
+                    &operation_key,
+                    SpendRetryAction::ReuseOperationKey,
+                    "this attempt was denied; reuse this operation key with corrected scope",
+                )?;
+                log_event(
+                    "warn",
+                    "spend_task_budget_denied",
+                    json!({
+                        "agent_id": request.agent_id.to_string(),
+                        "user_id": request.user.user_id.to_string(),
+                        "decision_id": evaluation.decision_id.to_string(),
+                        "budget_id": budget_id.to_string(),
+                        "amount": request.amount,
+                        "reason": reason,
+                    }),
+                );
+                return Ok(SpendAuthorizationOutcome::Rejected(budget_rejection(
+                    request, evaluation, reason,
+                )));
+            }
+            Err(error) => {
+                spend_manager.discard_auth_token_for_decision(&evaluation.decision_id);
+                governance.save_automatic_failure(
+                    &decision_record,
+                    &LifecycleObservationId::new(),
+                    Utc::now(),
+                )?;
+                return Err(error);
+            }
+        };
+        let budget_reservation = match budget_manager.reserve_budget_with_allocation_at(
             ReserveBudgetRequest {
                 budget_id: budget_id.clone(),
                 spend_decision_id: evaluation.decision_id.clone(),
@@ -681,17 +749,30 @@ impl SpendApprovalService {
                 currency: request.currency,
                 expires_at: token.expires_at,
             },
+            allocation,
             now,
         ) {
             Ok(reservation) => reservation,
             Err(BudgetManagerError::InsufficientRemainingBudget) => {
                 spend_manager.discard_auth_token_for_decision(&evaluation.decision_id);
-                let reasons = vec!["budget does not have enough remaining balance".to_string()];
+                // When the budget itself has room, open task budgets hold it back.
+                let (cause, reason) = if before.balance.remaining_amount < request.amount {
+                    (
+                        AdmissionDenialReason::InsufficientBudget,
+                        "budget does not have enough remaining balance",
+                    )
+                } else {
+                    (
+                        AdmissionDenialReason::InsufficientTaskBudget,
+                        TASK_BUDGET_ALLOCATION_HELD,
+                    )
+                };
+                let reasons = vec![reason.to_string()];
                 if let Err(error) = governance.save_automatic_denied_transition(
                     &decision_record,
                     selected,
                     Some(&before),
-                    AdmissionDenialReason::InsufficientBudget,
+                    cause,
                     &reasons,
                     Utc::now().max(decision_record.created_at),
                     now,
@@ -720,13 +801,11 @@ impl SpendApprovalService {
                         "decision_id": evaluation.decision_id.to_string(),
                         "budget_id": budget_id.to_string(),
                         "amount": request.amount,
-                        "reason": "insufficient_remaining_budget",
+                        "reason": reason,
                     }),
                 );
                 return Ok(SpendAuthorizationOutcome::Rejected(budget_rejection(
-                    request,
-                    evaluation,
-                    "budget does not have enough remaining balance",
+                    request, evaluation, reason,
                 )));
             }
             Err(error) => {
@@ -818,7 +897,7 @@ impl SpendApprovalService {
         governance: &mut G,
     ) -> Result<SpendAuthorizationOutcome, SpendApprovalError>
     where
-        G: SpendRepository + BudgetRepository,
+        G: SpendRepository + BudgetRepository + TaskBudgetRepository,
     {
         self.resolve_human_approval_at(
             user,
@@ -843,7 +922,7 @@ impl SpendApprovalService {
         now: DateTime<Utc>,
     ) -> Result<SpendAuthorizationOutcome, SpendApprovalError>
     where
-        G: SpendRepository + BudgetRepository,
+        G: SpendRepository + BudgetRepository + TaskBudgetRepository,
     {
         let decision_record = spend_manager
             .decision_record(approval_request_id)
@@ -939,12 +1018,27 @@ impl SpendApprovalService {
                         currency: decision_record.request.currency,
                     },
                 )?;
+                let allocation = match task_allocation_for_spend(
+                    governance,
+                    &decision_record.request.agent_id,
+                    decision_record.request.task_id.as_deref(),
+                    decision_record.request.currency,
+                    &budget_id,
+                    decision_record.request.amount,
+                )? {
+                    TaskAllocation::Allowed(allocation) => allocation,
+                    // The request stays pending: the human may close or
+                    // replace the task budget and approve again.
+                    TaskAllocation::Denied(reason) => {
+                        return Err(SpendApprovalError::TaskBudgetDenied { reason })
+                    }
+                };
                 let token =
                     spend_manager.issue_auth_token_for_approved_decision(approval_request_id)?;
                 let token_record = spend_manager
                     .auth_token_record(&token.id)
                     .ok_or(SpendApprovalError::MissingSpendAuthToken)?;
-                let budget_reservation = match budget_manager.reserve_budget_at(
+                let budget_reservation = match budget_manager.reserve_budget_with_allocation_at(
                     ReserveBudgetRequest {
                         budget_id,
                         spend_decision_id: approval_request_id.clone(),
@@ -952,6 +1046,7 @@ impl SpendApprovalService {
                         currency: decision_record.request.currency,
                         expires_at: token.expires_at,
                     },
+                    allocation,
                     now,
                 ) {
                     Ok(reservation) => reservation,
@@ -1344,6 +1439,64 @@ fn automatic_budget_selection(
 
 /// The agent's active budget in the spend's own currency. Budgets are per
 /// currency, so a spend never falls back to a budget in another currency.
+/// Denial reason when a spend would exceed its open task budget.
+pub const TASK_BUDGET_INSUFFICIENT: &str = "task budget does not have enough remaining balance";
+/// Denial reason when the agent budget's remaining balance is held for open
+/// task budgets the spend does not belong to.
+pub const TASK_BUDGET_ALLOCATION_HELD: &str = "budget balance is held for open task budgets";
+/// Denial reason when a task budget's agent budget is no longer the agent's
+/// available budget (for example, its period ended).
+pub const TASK_BUDGET_PARENT_UNAVAILABLE: &str =
+    "task budget is drawn from an agent budget that is no longer available";
+
+enum TaskAllocation {
+    Allowed(ReservationAllocation),
+    Denied(&'static str),
+}
+
+/// Apply open task budgets to one reservation from `budget_id`.
+///
+/// Spend carrying the `task_id` of an open task budget must fit that task's
+/// remaining balance and is attributed to it. Any spend must leave the unused
+/// headroom of the budget's other open task budgets untouched. Spend whose
+/// `task_id` has no open task budget draws from the agent budget as before.
+fn task_allocation_for_spend<G: TaskBudgetRepository>(
+    governance: &G,
+    agent_id: &AgentId,
+    task_id: Option<&str>,
+    currency: Currency,
+    budget_id: &BudgetId,
+    amount: Amount,
+) -> Result<TaskAllocation, SpendApprovalError> {
+    let task_budget = match task_id {
+        Some(task_id) => governance.open_task_budget_for_spend(agent_id, task_id, currency)?,
+        None => None,
+    };
+    if let Some(task_budget) = &task_budget {
+        if task_budget.budget.parent_budget_id != *budget_id {
+            return Ok(TaskAllocation::Denied(TASK_BUDGET_PARENT_UNAVAILABLE));
+        }
+        if task_budget.remaining_amount() < amount {
+            return Ok(TaskAllocation::Denied(TASK_BUDGET_INSUFFICIENT));
+        }
+    }
+    let task_budget_id = task_budget.map(|task_budget| task_budget.budget.id);
+    let held_for_other_tasks = governance
+        .open_task_budgets_for_parent(budget_id)?
+        .iter()
+        .filter(|open| Some(&open.budget.id) != task_budget_id.as_ref())
+        .try_fold(Amount::ZERO, |total, open| {
+            total.checked_add(open.allocated_headroom())
+        })
+        .ok_or(SpendApprovalError::Budget(
+            BudgetManagerError::BalanceOverflow,
+        ))?;
+    Ok(TaskAllocation::Allowed(ReservationAllocation {
+        task_budget_id,
+        held_for_other_tasks,
+    }))
+}
+
 fn active_budget_id_for_spend(
     budget_manager: &BudgetManager,
     agent_id: &AgentId,
@@ -1855,5 +2008,203 @@ mod tests {
             .load_budget_holds()
             .expect("holds should load")
             .is_empty());
+    }
+
+    impl ServiceHarness {
+        fn authorize_for_task(
+            &mut self,
+            operation_key: &str,
+            amount: i64,
+            task_id: Option<&str>,
+        ) -> SpendAuthorizationOutcome {
+            let mut spend_manager = self
+                .spend_manager
+                .lock()
+                .expect("spend manager lock should not poison");
+            self.service
+                .authorize(
+                    AuthorizeSpendRequest {
+                        operation_key: operation_key.to_string(),
+                        user: self.user.clone(),
+                        agent_id: self.agent_id.clone(),
+                        agent_account_id: self.account_id.clone(),
+                        amount: cents(amount),
+                        currency: Currency::Usd,
+                        merchant: Some("Design Studio".to_string()),
+                        execution_scope: None,
+                        task_id: task_id.map(str::to_string),
+                        reason: "Design task".to_string(),
+                        lease_profile: "default".to_string(),
+                    },
+                    &self.policy,
+                    &mut spend_manager,
+                    &mut self.budget_manager,
+                    &mut self.governance,
+                )
+                .expect("authorization should not error")
+        }
+
+        fn open_task_budget(
+            &mut self,
+            task_id: &str,
+            amount: i64,
+        ) -> Result<crate::budget::OpenTaskBudgetResponse, crate::budget::TaskBudgetError> {
+            crate::app::TaskBudgetService.open(
+                crate::budget::OpenTaskBudgetRequest {
+                    owner_user_id: self.user.user_id.clone(),
+                    agent_id: self.agent_id.clone(),
+                    task_id: task_id.to_string(),
+                    currency: Currency::Usd,
+                    amount_limit: cents(amount),
+                    actor: "agent:test".to_string(),
+                    source: "test".to_string(),
+                    reason: Some("landing page design".to_string()),
+                },
+                &self.budget_manager,
+                &mut self.governance,
+                Utc::now(),
+            )
+        }
+
+        fn close_task_budget(
+            &mut self,
+            id: &hubu_common::ids::TaskBudgetId,
+        ) -> Result<crate::budget::CloseTaskBudgetResponse, crate::budget::TaskBudgetError>
+        {
+            crate::app::TaskBudgetService.close(
+                crate::budget::CloseTaskBudgetRequest {
+                    owner_user_id: self.user.user_id.clone(),
+                    task_budget_id: id.clone(),
+                    actor: "agent:test".to_string(),
+                    source: "test".to_string(),
+                },
+                &mut self.governance,
+                Utc::now(),
+            )
+        }
+    }
+
+    fn approved(outcome: SpendAuthorizationOutcome) -> ApprovedSpendAuthorization {
+        match outcome {
+            SpendAuthorizationOutcome::Approved(authorization) => authorization,
+            SpendAuthorizationOutcome::Rejected(rejection) => {
+                panic!("expected approval, got {:?}", rejection.reasons)
+            }
+        }
+    }
+
+    fn rejected_reasons(outcome: SpendAuthorizationOutcome) -> Vec<String> {
+        match outcome {
+            SpendAuthorizationOutcome::Approved(_) => panic!("expected a rejection"),
+            SpendAuthorizationOutcome::Rejected(rejection) => {
+                assert_eq!(rejection.decision, Effect::Deny);
+                rejection.reasons
+            }
+        }
+    }
+
+    #[test]
+    fn task_budget_caps_task_spend_holds_back_its_allocation_and_returns_unused_on_close() {
+        let mut harness = ServiceHarness::new(1_000);
+        let opened = harness
+            .open_task_budget("design", 300)
+            .expect("task budget should open");
+        assert!(!opened.replayed);
+        let task_budget_id = opened.task_budget.budget.id.clone();
+
+        let first = approved(harness.authorize_for_task("draft-1", 120, Some("design")));
+        assert_eq!(
+            first.budget_reservation.hold.task_budget_id.as_ref(),
+            Some(&task_budget_id)
+        );
+        harness.submit_payment(&first);
+        let second = approved(harness.authorize_for_task("draft-2", 150, Some("design")));
+
+        // 3.00 - 1.20 settled - 1.50 outstanding leaves 0.30 for the task.
+        assert_eq!(
+            rejected_reasons(harness.authorize_for_task("draft-3", 50, Some("design"))),
+            vec![TASK_BUDGET_INSUFFICIENT.to_string()]
+        );
+        let usage = harness
+            .governance
+            .load_task_budget_by_id(&harness.user.user_id, &task_budget_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(usage.usage.consumed_amount, cents(120));
+        assert_eq!(usage.usage.frozen_amount, cents(150));
+        assert_eq!(usage.remaining_amount(), cents(30));
+
+        // Other spend cannot use the task's unused 0.30: 10.00 - 2.70 - 0.30.
+        assert_eq!(
+            rejected_reasons(harness.authorize_for_task("other-1", 710, None)),
+            vec![TASK_BUDGET_ALLOCATION_HELD.to_string()]
+        );
+
+        assert!(matches!(
+            harness.close_task_budget(&task_budget_id),
+            Err(crate::budget::TaskBudgetError::OutstandingHolds { count: 1 })
+        ));
+        harness.submit_payment(&second);
+        let closed = harness
+            .close_task_budget(&task_budget_id)
+            .expect("task budget should close");
+        assert!(!closed.replayed);
+        assert_eq!(closed.task_budget.usage.consumed_amount, cents(270));
+        assert_eq!(closed.task_budget.returned_amount(), cents(30));
+        assert!(
+            harness
+                .close_task_budget(&task_budget_id)
+                .expect("close replays")
+                .replayed
+        );
+
+        // The returned 0.30 is available to the agent again.
+        let other = approved(harness.authorize_for_task("other-2", 710, None));
+        assert_eq!(other.budget_reservation.hold.task_budget_id, None);
+        assert_eq!(other.budget_reservation.balance.remaining_amount, cents(20));
+    }
+
+    #[test]
+    fn task_spend_without_an_open_task_budget_draws_from_the_agent_budget() {
+        let mut harness = ServiceHarness::new(1_000);
+        let authorization = approved(harness.authorize_for_task("plain", 500, Some("design")));
+        assert_eq!(authorization.budget_reservation.hold.task_budget_id, None);
+    }
+
+    #[test]
+    fn opening_task_budgets_replays_rejects_conflicts_and_respects_unallocated_balance() {
+        let mut harness = ServiceHarness::new(1_000);
+        let opened = harness.open_task_budget("design", 300).unwrap();
+        let replay = harness.open_task_budget("design", 300).unwrap();
+        assert!(replay.replayed);
+        assert_eq!(replay.task_budget.budget.id, opened.task_budget.budget.id);
+        assert!(matches!(
+            harness.open_task_budget("design", 400),
+            Err(crate::budget::TaskBudgetError::OpenTaskBudgetConflict)
+        ));
+        approved(harness.authorize_for_task("other", 600, None));
+        // 10.00 - 6.00 frozen - 3.00 allocated leaves 1.00 unallocated.
+        assert!(matches!(
+            harness.open_task_budget("copy", 101),
+            Err(crate::budget::TaskBudgetError::InsufficientUnallocatedBudget { .. })
+        ));
+        harness.open_task_budget("copy", 100).unwrap();
+        assert!(matches!(
+            harness.open_task_budget(" design", 100),
+            Err(crate::budget::TaskBudgetError::InvalidTaskId)
+        ));
+    }
+
+    #[test]
+    fn task_budget_persists_hold_attribution_across_reload() {
+        let mut harness = ServiceHarness::new(1_000);
+        let opened = harness.open_task_budget("design", 300).unwrap();
+        let authorization = approved(harness.authorize_for_task("draft", 100, Some("design")));
+        let holds = harness.governance.load_budget_holds().unwrap();
+        let hold = holds
+            .iter()
+            .find(|hold| hold.id == authorization.budget_reservation.hold.id)
+            .unwrap();
+        assert_eq!(hold.task_budget_id, Some(opened.task_budget.budget.id));
     }
 }
