@@ -87,6 +87,11 @@ weekly version updates. RustSec findings such as unmaintained dependencies may
 not have an equivalent Dependabot alert, so the scheduled policy scan remains
 necessary.
 
+The daily [Dependabot PR triage](dependabot-triage.md) routine keeps Dependabot
+PRs current with `main`, merges patch and minor updates that pass every
+required check, and reports major updates, failures and alerts without a PR in
+one tracking issue.
+
 For manual recovery, start `Security advisory maintenance` on the default
 branch and inspect its summary and linked PR or issue. If automation cannot
 publish, open a focused dependency PR from current `main`, reproduce the advisory with
