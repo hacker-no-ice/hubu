@@ -404,6 +404,10 @@ pub struct Parameter {
     pub min: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max: Option<i64>,
+    /// `decimal` only: the fractional digits allowed. `min` and `max` count
+    /// units of that precision, so `scale = 1, min = 15` means 1.5.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_length: Option<usize>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -451,6 +455,8 @@ impl Derived {
 pub enum ParameterKind {
     String,
     Integer,
+    /// A JSON number with at most `scale` fractional digits.
+    Decimal,
     Boolean,
     Enum,
     /// Artifact IDs of images earlier governed executions delivered to the
@@ -1254,6 +1260,15 @@ impl Parameter {
                     return Err("is outside min..=max".into());
                 }
             }
+            ParameterKind::Decimal => {
+                let scaled = scaled_decimal(value, self.scale.unwrap_or(0))
+                    .ok_or("must be a number with at most scale fractional digits")?;
+                if self.min.is_some_and(|min| scaled < min)
+                    || self.max.is_some_and(|max| scaled > max)
+                {
+                    return Err("is outside min..=max".into());
+                }
+            }
             ParameterKind::Boolean => {
                 value.as_bool().ok_or("must be a boolean")?;
             }
@@ -1332,13 +1347,27 @@ impl Parameter {
             }
         };
         let integer = self.kind == ParameterKind::Integer;
+        let decimal = self.kind == ParameterKind::Decimal;
         let enumeration = self.kind == ParameterKind::Enum;
         let images = self.kind == ParameterKind::Images;
         if self.min.is_some() {
-            only(integer || images, "min")?;
+            only(integer || decimal || images, "min")?;
         }
         if self.max.is_some() {
-            only(integer || images, "max")?;
+            only(integer || decimal || images, "max")?;
+        }
+        if self.scale.is_some() {
+            only(decimal, "scale")?;
+        }
+        if decimal
+            && !self
+                .scale
+                .is_some_and(|scale| (1..=MAX_DECIMAL_SCALE).contains(&scale))
+        {
+            return Err(invalid(
+                format!("{field}.scale"),
+                format!("decimal parameters need a scale from 1 to {MAX_DECIMAL_SCALE}"),
+            ));
         }
         if self.quantity.is_some() {
             only(integer || images, "quantity")?;
@@ -2755,6 +2784,26 @@ fn sniff_media_type(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
+/// The most fractional digits a `decimal` parameter may allow.
+const MAX_DECIMAL_SCALE: u32 = 6;
+
+/// A JSON number as an integer count of `10^-scale` units, when it is written
+/// with at most `scale` fractional digits. The check uses the number's decimal
+/// text, so 2.3 is exactly 23 tenths rather than a nearby binary fraction.
+fn scaled_decimal(value: &Value, scale: u32) -> Option<i64> {
+    let Value::Number(number) = value else {
+        return None;
+    };
+    let text = number.to_string();
+    let (whole, fraction) = text.split_once('.').unwrap_or((&text, ""));
+    let fraction = fraction.trim_end_matches('0');
+    let width = usize::try_from(scale).ok()?;
+    if fraction.len() > width || !fraction.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    format!("{whole}{fraction:0<width$}").parse().ok()
+}
+
 fn is_zero(value: &u32) -> bool {
     *value == 0
 }
@@ -3769,6 +3818,69 @@ mod tests {
                 &json!({"prompt": "a lighthouse", "model": "expensive-model"}),
             )
             .is_err());
+    }
+
+    #[test]
+    fn decimal_parameters_take_exact_fractions_within_scaled_bounds() {
+        const FLEX: &str = include_str!("../../../../packs/verified/bfl-flux-2-flex.toml");
+        let pack = Pack::from_toml_str(FLEX).unwrap();
+        let guidance = |value: Value| {
+            pack.prepare(
+                "flux-2-flex",
+                &json!({"prompt": "x", "image_size": "1k", "options": {"guidance": value}}),
+            )
+        };
+        for accepted in [json!(1.5), json!(2.3), json!(5), json!(10), json!(10.0)] {
+            let prepared = guidance(accepted.clone()).unwrap();
+            assert_eq!(prepared.body["guidance"], accepted);
+        }
+        for refused in [
+            json!(1.4),
+            json!(10.1),
+            json!(2.25),
+            json!(-5),
+            json!("5"),
+            json!(null),
+            json!(1e300),
+        ] {
+            assert!(guidance(refused.clone()).is_err(), "{refused}");
+        }
+        assert_eq!(scaled_decimal(&json!(2.3), 1), Some(23));
+        assert_eq!(scaled_decimal(&json!(-0.5), 1), Some(-5));
+        assert_eq!(scaled_decimal(&json!(7), 2), Some(700));
+        assert_eq!(scaled_decimal(&json!(1.5e-7), 6), None);
+
+        let field = |document: &PackDocument| {
+            document
+                .parameters
+                .iter()
+                .position(|p| p.name == "options.guidance")
+                .unwrap()
+        };
+        let mut unscaled: PackDocument = toml::from_str(FLEX).unwrap();
+        let index = field(&unscaled);
+        unscaled.parameters[index].scale = None;
+        assert_eq!(
+            Pack::from_toml_str(&toml::to_string(&unscaled).unwrap()).unwrap_err(),
+            invalid(
+                format!("parameters[{index}].scale"),
+                format!("decimal parameters need a scale from 1 to {MAX_DECIMAL_SCALE}")
+            )
+        );
+        let mut scaled_integer: PackDocument = toml::from_str(FLEX).unwrap();
+        let steps = scaled_integer
+            .parameters
+            .iter()
+            .position(|p| p.name == "options.steps")
+            .unwrap();
+        scaled_integer.parameters[steps].scale = Some(1);
+        assert_eq!(
+            Pack::from_toml_str(&toml::to_string(&scaled_integer).unwrap()).unwrap_err(),
+            invalid(
+                format!("parameters[{steps}].scale"),
+                "is not allowed on a integer parameter"
+            )
+        );
     }
 
     #[test]
