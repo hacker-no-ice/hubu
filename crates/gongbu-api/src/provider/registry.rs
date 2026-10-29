@@ -794,6 +794,8 @@ mod tests {
                 "gemini-3.1-flash-lite-image",
             ),
             ("google", "gemini_developer_image", "gemini-3.1-flash-image"),
+            ("google", "gemini_developer_image", "gemini-3-pro-image"),
+            ("google", "gemini_developer_image", "gemini-nano-banana-2.1"),
             ("flux", "flux2_api", "flux-2-pro"),
             ("flux", "flux2_api", "flux-3-image"),
             ("flux", "flux2_api", "flux-2-klein-4b"),
@@ -805,7 +807,17 @@ mod tests {
             assert_eq!(catalog.resolve_active(&key).unwrap().adapter, adapter);
         }
         let execution_targets = catalog.execution_targets();
-        assert_eq!(execution_targets.len(), 10);
+        assert_eq!(execution_targets.len(), 14);
+        // Pro is its own target, discovered by model beside Flash and Lite,
+        // with an aspect-ratio certified size at every tier.
+        let pro = execution_targets
+            .iter()
+            .find(|target| {
+                target.model == "gemini-3-pro-image" && target.workload_type == "image_generation"
+            })
+            .unwrap();
+        assert_eq!(pro.image_sizes, ["1k", "2k", "4k"]);
+        assert_eq!(pro.output_sizes.len(), 30);
         // The new FLUX.2 models are explicit targets with megapixel pricing
         // and the shared aspect-ratio sizes; none stands in for another.
         for model in [
