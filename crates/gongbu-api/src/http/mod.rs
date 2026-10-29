@@ -1698,6 +1698,32 @@ mod tests {
                 response.budget_hold.frozen_amount_cents = cents;
                 response.amount = Some(exact(units));
             }
+            if let Some(rest) = spend_auth_token_id.strip_prefix("gpro-") {
+                // Gemini 3 Pro Image under a schema-v2 scope: exactly 13.4¢
+                // at 1k and 2k, 24¢ at 4k.
+                let image_size = if rest.contains("4k") { "4k" } else { "1k" };
+                response.execution_scope = for_execution(
+                    Some(crate::execution_scope::EXECUTION_SCOPE_TARGET_SCHEMA_VERSION),
+                    "image_generation",
+                    "google",
+                    "gemini_developer_image",
+                    "gemini-3-pro-image",
+                    Some(image_size),
+                );
+                let (cents, units) = if image_size == "4k" {
+                    (24, "240000")
+                } else {
+                    (14, "134000")
+                };
+                response.amount_cents = cents;
+                response.budget_hold.amount_cents = cents;
+                response.budget_hold.frozen_amount_cents = cents;
+                response.amount = Some(exact(units));
+                if rest.starts_with("pending") {
+                    // Hubu has not recorded the human approval yet.
+                    response.status = "pending_approval".into();
+                }
+            }
             if let Some(rest) = spend_auth_token_id.strip_prefix("edit-") {
                 // A 1k Flash edit of one input image is exactly 6.756¢.
                 if !rest.starts_with("draft") {
@@ -2437,10 +2463,14 @@ mod tests {
                 "hubu.flux-2-max.text-to-image/v1",
                 "hubu.flux-2-pro.text-to-image/v1",
                 "hubu.flux-3-image.text-to-image/v1",
+                "hubu.gemini-3-pro-image.image-edit/v1",
+                "hubu.gemini-3-pro-image.text-to-image/v1",
                 "hubu.gemini-3.1-flash-image.image-edit/v1",
                 "hubu.gemini-3.1-flash-lite-image.image-edit/v1",
                 "hubu.gemini-3.1-flash-image.text-to-image/v1",
-                "hubu.gemini-3.1-flash-lite-image.text-to-image/v1"
+                "hubu.gemini-3.1-flash-lite-image.text-to-image/v1",
+                "hubu.gemini-nano-banana-2.1.image-edit/v1",
+                "hubu.gemini-nano-banana-2.1.text-to-image/v1"
             ])
         );
         let gemini_full = contracts
@@ -2587,6 +2617,108 @@ mod tests {
                 "{token}"
             );
         }
+    }
+
+    #[test]
+    fn gemini_pro_is_discovered_explicitly_and_admitted_only_when_authorized() {
+        let mut fixture = fixture();
+        fixture.api = Api::new_with_authorization_resolver(
+            fixture.repository.clone(),
+            fixture.artifacts.clone(),
+            flux_contract_catalog("hubu.gemini-3-pro-image.text-to-image/v1"),
+            fixture.scheduler.clone(),
+            i64::MAX,
+            fixture.resolver.clone(),
+            || "2026-08-05T20:00:00Z".into(),
+        );
+        let catalog: Value = serde_json::from_slice(
+            &fixture
+                .api
+                .handle("GET", "/v2/execution-targets", Some(&fixture.caller), &[])
+                .body,
+        )
+        .unwrap();
+        let [target] = catalog["targets"].as_array().unwrap().as_slice() else {
+            panic!("only the bound Pro contract is discoverable");
+        };
+        assert_eq!(target["model"], "gemini-3-pro-image");
+        assert_eq!(target["image_sizes"], json!(["1k", "2k", "4k"]));
+        assert_eq!(target["output_sizes"].as_array().unwrap().len(), 30);
+        let rule_ids: Vec<&str> = target["pricing"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|rule| rule["rule_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            rule_ids,
+            [
+                "google-gemini-3-pro-image-1k-2026-10-28-v1",
+                "google-gemini-3-pro-image-2k-2026-10-28-v1",
+                "google-gemini-3-pro-image-4k-2026-10-28-v1"
+            ]
+        );
+        let target_id = target["target_id"].clone();
+        let create = |token: &str, image_size: &str, aspect_ratio: &str| {
+            call_create(
+                &fixture,
+                &json!({
+                    "schema_version": 2,
+                    "spend_auth_token_id": token,
+                    "input": {"prompt": "a product hero shot", "image_size": image_size,
+                              "aspect_ratio": aspect_ratio},
+                    "input_schema_version": 1,
+                    "target_id": target_id,
+                }),
+            )
+        };
+        for (token, image_size, aspect_ratio, units, size) in [
+            ("gpro-1k", "1k", "16:9", 134_000, (1376, 768)),
+            ("gpro-4k", "4k", "9:16", 240_000, (3072, 5504)),
+        ] {
+            let created = create(token, image_size, aspect_ratio);
+            assert_eq!(
+                created.status,
+                200,
+                "{token}: {}",
+                String::from_utf8_lossy(&created.body)
+            );
+            let stored = fixture
+                .repository
+                .get_execution(&execution(&created).execution_id)
+                .unwrap();
+            assert_eq!(
+                stored.provider_config_version,
+                "hubu-gemini-3-pro-image-t2i-2026-10-28-v1"
+            );
+            assert_eq!(stored.authorized_units, units, "{token}");
+            let snapshot: crate::provider_contract::PricingSnapshot =
+                serde_json::from_value(stored.pricing_snapshot).unwrap();
+            assert_eq!(snapshot.estimated_units, units, "{token}");
+            assert_eq!(
+                snapshot.output_dimensions,
+                Some(OutputDimensions {
+                    width: size.0,
+                    height: size.1
+                }),
+                "{token}"
+            );
+        }
+        let scheduled = fixture.scheduler.0.lock().unwrap().len();
+        assert_eq!(scheduled, 2);
+        // An authorization still waiting for human approval, a 13.4¢
+        // authorization stretched to a 4k render, and a ratio Google does
+        // not publish for Pro are refused before anything is scheduled, so
+        // Google is never contacted.
+        for (token, image_size, aspect_ratio) in [
+            ("gpro-pending-1k", "1k", "1:1"),
+            ("gpro-1k-as-large", "4k", "1:1"),
+            ("gpro-1k-uncertified", "1k", "1:4"),
+        ] {
+            let refused = create(token, image_size, aspect_ratio);
+            assert_eq!(refused.status, 400, "{token}");
+        }
+        assert_eq!(fixture.scheduler.0.lock().unwrap().len(), scheduled);
     }
 
     fn megapixel_fixture() -> (Fixture, Value) {

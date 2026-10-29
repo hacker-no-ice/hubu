@@ -12,7 +12,7 @@ use thiserror::Error;
 
 const CONTRACT_DOCUMENT: &str = include_str!("../../../../contracts/provider-contracts-v1.json");
 const CONTRACT_DOCUMENT_SHA256: &str =
-    "a75f7b6dc3ed5dddafc9b9d17cdcd325278232099d2130065540dbaf1494eb65";
+    "5c8b25adadc5ce2edb65bed9958924b9a845a49fa42e7ca7ea572237cf511732";
 
 #[derive(Debug, Error)]
 pub(crate) enum Error {
@@ -401,17 +401,20 @@ fn project(contract_definition: &ContractDefinition) -> Result<CatalogContract, 
 }
 
 /// A size-selected preset's output price; edit rules also price input images.
+/// A preset that names its image size in `when` (an aspect-ratio preset) is
+/// priced by that size; otherwise its name is the size.
 fn size_preset_price(
     contract_definition: &ContractDefinition,
     preset: &Preset,
 ) -> Result<(String, (i64, i64)), Error> {
+    let image_size = preset.when.get("image_size").unwrap_or(&preset.name);
     let rule = contract_definition
         .pricing_rules
         .iter()
         .find(|rule| {
             rule.selector
                 .as_ref()
-                .is_some_and(|selector| selector.image_size() == Some(preset.name.as_str()))
+                .is_some_and(|selector| selector.image_size() == Some(image_size.as_str()))
         })
         .ok_or(Error::InvalidDocument)?;
     let component = rule
@@ -788,7 +791,60 @@ mod tests {
     fn mixed_contracts_are_order_independent_and_credentials_are_isolated() {
         let (targets, pricing) = mixed_contract_inputs(false);
         let projected = validate_and_project(&targets, &pricing).unwrap();
-        assert_eq!(projected.len(), 10);
+        assert_eq!(projected.len(), 14);
+        // Nano Banana 2.1 is its own target beside Flash: 3.36¢, 5.04¢ and
+        // 11.3¢ per image at 1k, 2k and 4k.
+        let nano = projected
+            .iter()
+            .find(|contract| contract.contract == "hubu.gemini-nano-banana-2.1.text-to-image/v1")
+            .unwrap();
+        assert_eq!(nano.target.model, "gemini-nano-banana-2.1");
+        for preset in &nano.capability.presets {
+            let expected = match preset.when["image_size"].as_str() {
+                "1k" => (336, 100),
+                "2k" => (504, 100),
+                _ => (113, 10),
+            };
+            assert_eq!(
+                (preset.rate_numerator_minor, preset.rate_denominator),
+                expected,
+                "{}",
+                preset.name
+            );
+        }
+        // Pro prices per image by tier at every aspect ratio: 13.4¢ at 1k
+        // and 2k, 24¢ at 4k, beside Flash and Lite.
+        let pro = projected
+            .iter()
+            .find(|contract| contract.contract == "hubu.gemini-3-pro-image.text-to-image/v1")
+            .unwrap();
+        assert_eq!(pro.target.model, "gemini-3-pro-image");
+        assert_eq!(
+            pro.pricing_version,
+            "google-gemini-3-pro-image-usd-2026-10-28-v1"
+        );
+        assert_eq!(pro.pricing_reviewed_on, "2026-10-28");
+        assert_eq!(pro.capability.presets.len(), 30);
+        for preset in &pro.capability.presets {
+            let expected = if preset.when["image_size"] == "4k" {
+                (24, 1)
+            } else {
+                (134, 10)
+            };
+            assert_eq!(
+                (preset.rate_numerator_minor, preset.rate_denominator),
+                expected,
+                "{}",
+                preset.name
+            );
+        }
+        let banner = pro
+            .capability
+            .presets
+            .iter()
+            .find(|preset| preset.name == "2k-21:9")
+            .unwrap();
+        assert_eq!((banner.width, banner.height), (Some(3168), Some(1344)));
         // Each FLUX.2 model prices its own megapixel rates at the shared
         // sizes: Klein 4B 1k is 7/5¢ and 4k 17/10¢, Klein 9B 4k 21/10¢,
         // Flex 2k 10¢ and Max 4k 16¢.
