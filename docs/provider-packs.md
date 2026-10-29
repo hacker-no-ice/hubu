@@ -500,3 +500,5 @@ version without changing those per-model rules.
 - [Gongbu execution](gongbu-execution.md)
 - [`providers.toml` reference](configuration/local-stack/v1/providers-toml.md)
 - [Upgrading to v0.2.5](operations/upgrading-to-v0.2.5.md)
+- [Provider catalog check](operations/catalog-check.md): the weekly check for
+  price drift, new models and deprecations
