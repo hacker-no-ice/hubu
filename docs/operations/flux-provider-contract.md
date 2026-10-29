@@ -141,11 +141,73 @@ the same BFL key.
   settle the actual cost, as for FLUX.2.
 - **Polling, statuses, delivery and recovery:** the same as FLUX.2.
 
-BFL also offers `768sq`, `1.5k` and `4k`. `768sq` and `1.5k` need Gongbu's
-`image_size` values widened. `4k` (about 16.8 MP) waits on a live check that
-BFL's 4k output fits the 20 MiB artifact bound, so a paid image is never
-refused at delivery. No live FLUX 3 call has been made yet; one guarded call
-per tier is still needed before relying on the contract.
+BFL also offers `768sq`, `1.5k` and `4k`; contract v2 below adds the first
+two. No live FLUX 3 call has been made yet; one guarded call per tier is still
+needed before relying on the contract.
+
+### FLUX 3 Image contract v2: 768sq and 1.5k tiers
+
+`hubu.flux-3-image.text-to-image/v2`, from
+`packs/verified/bfl-flux-3-image-v2.toml`, is a second revision of the same
+`flux-3-image` target. It keeps v1's request, ratios, grounding and polling,
+and widens `image_size` to `768sq`, `1k`, `1.5k` and `2k`, priced from the
+same 2026-10-21 rates (pricing version `bfl-flux-3-image-usd-2026-10-21-v2`):
+
+| Tier | About | USD per image |
+| --- | --- | --- |
+| `768sq` | 0.6 MP | 0.041 |
+| `1k` | 1 MP | 0.048 |
+| `1.5k` | 2 MP | 0.07 |
+| `2k` | 4 MP | 0.10 |
+
+`4k` (about 16.8 MP, USD 0.607) is still not offered: it waits on a live
+check that BFL's 4k output fits the 20 MiB artifact bound, so a paid image is
+never refused at delivery. v1 and v2 are revisions of one target, so a
+profile binds one of them, and switching drains unfinished FLUX work first.
+
+## FLUX.2 [klein], [flex] and [max] contracts
+
+Three more FLUX.2 models run as their own targets beside FLUX.2 [pro], each
+from its own verified pack. Each uses BFL's non-preview endpoint, the same
+async submission, polling, delivery and recovery as FLUX.2 [pro], and the
+same 18 certified sizes, `aspect_ratio` values and options as
+[contract v2](#contract-v2-aspect-ratios-and-per-megapixel-pricing). They
+bill per output megapixel, like v2: a first-megapixel rate plus an
+additional-megapixel rate, with 1,048,576-pixel megapixels rounded up.
+Prices come from BFL's published rates, reviewed on 2026-10-21.
+
+| Model | Contract | Pack | Endpoint | First MP / each extra, USD | 1 / 2 / 4 MP, cents |
+| --- | --- | --- | --- | --- | --- |
+| [klein] 4B | `hubu.flux-2-klein-4b.text-to-image/v1` | `bfl-flux-2-klein-4b.toml` | `/v1/flux-2-klein-4b` | 0.014 / 0.001 | 1.4 / 1.5 / 1.7 |
+| [klein] 9B | `hubu.flux-2-klein-9b.text-to-image/v1` | `bfl-flux-2-klein-9b.toml` | `/v1/flux-2-klein-9b` | 0.015 / 0.002 | 1.5 / 1.7 / 2.1 |
+| [flex] | `hubu.flux-2-flex.text-to-image/v1` | `bfl-flux-2-flex.toml` | `/v1/flux-2-flex` | 0.05 / 0.05 | 5 / 10 / 20 |
+| [max] | `hubu.flux-2-max.text-to-image/v1` | `bfl-flux-2-max.toml` | `/v1/flux-2-max` | 0.07 / 0.03 | 7 / 10 / 16 |
+| [pro] (v2, for comparison) | `hubu.flux-2-pro.text-to-image/v2` | `bfl-flux-2-v2.toml` | `/v1/flux-2-pro` | 0.03 / 0.015 | 3 / 4.5 / 7.5 |
+
+Tradeoffs, from BFL's model descriptions:
+
+- **[klein] 4B and 9B** are BFL's fastest and cheapest FLUX.2 models, for
+  early exploration. 9B trades some speed for quality over 4B.
+- **[flex]** is BFL's model for text and typography and for small details.
+  It is the only one with `options.steps` (1 to 50, BFL's default 50) and
+  `options.guidance` (1.5 to 10 in steps of 0.1, BFL's default 5). Gongbu
+  leaves both out of the request unless the agent sets them, and neither
+  changes the price. The other models refuse them before any spend.
+- **[max]** is BFL's highest-quality FLUX.2 model, for selected refinement.
+- **[pro]** remains BFL's recommended default.
+
+No model is a universal quality ranking. Each is a separate target with its
+own `model`, so cheap exploration never turns into Max without an explicit
+choice, and Hubu policy can tier by model and `image_size` (execution scope
+schema v2) to require approval or a budget for premium work. Binding any of
+them uses the same BFL key as FLUX.2 [pro]; each binds as
+`[[contract_bindings]]` with its contract ID.
+
+Not in these contracts: input images and editing, BFL's preview endpoints,
+prompt upsampling controls, WebP, safety tolerance above 5, more than one
+image per call, and arbitrary sizes. Reference-image pricing (from the same
+rate sheet) will apply once editing contracts ship. No live call has been
+made for these models yet.
 
 ## Certified output dimensions
 

@@ -624,6 +624,3535 @@
           ]
         }
       ]
+    },
+    {
+      "contract": "hubu.flux-2-klein-4b.text-to-image/v1",
+      "pricing_version": "bfl-flux-2-klein-4b-usd-2026-10-21-v1",
+      "pricing_reviewed_on": "2026-10-21",
+      "target": {
+        "provider_config_version": "hubu-flux-2-klein-4b-t2i-2026-10-28-v1",
+        "workload_type": "image_generation",
+        "provider": "flux",
+        "adapter": "flux2_api",
+        "model": "flux-2-klein-4b",
+        "active": true,
+        "execution_enabled": true,
+        "settings": {
+          "type": "pack",
+          "config": {
+            "pack_id": "bfl-flux-2-klein-4b",
+            "pack_version": "2026-10-28.1",
+            "pack_digest": "sha256:d7c747b420fb57ba6be5b431c35674867b709fdb4a3e4c79350e33386bc837e5",
+            "archetype": "async_poll"
+          }
+        }
+      },
+      "capability": {
+        "image_count": 1,
+        "output_formats": [
+          "png",
+          "jpeg"
+        ],
+        "presets": [
+          {
+            "name": "1k-1:1",
+            "width": 1024,
+            "height": 1024,
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-16:9",
+            "width": 1344,
+            "height": 768,
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-9:16",
+            "width": 768,
+            "height": 1344,
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-3:2",
+            "width": 1248,
+            "height": 832,
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-2:3",
+            "width": 832,
+            "height": 1248,
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-4:5",
+            "width": 896,
+            "height": 1120,
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "2k-1:1",
+            "width": 1440,
+            "height": 1440,
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-16:9",
+            "width": 1920,
+            "height": 1088,
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-9:16",
+            "width": 1088,
+            "height": 1920,
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-3:2",
+            "width": 1728,
+            "height": 1152,
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-2:3",
+            "width": 1152,
+            "height": 1728,
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-4:5",
+            "width": 1280,
+            "height": 1600,
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "4k-1:1",
+            "width": 2048,
+            "height": 2048,
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-16:9",
+            "width": 2688,
+            "height": 1536,
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-9:16",
+            "width": 1536,
+            "height": 2688,
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-3:2",
+            "width": 2496,
+            "height": 1664,
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-2:3",
+            "width": 1664,
+            "height": 2496,
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-4:5",
+            "width": 1792,
+            "height": 2240,
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "4k"
+            }
+          }
+        ],
+        "megapixels": {
+          "rounding": "ceil",
+          "pixels_per_megapixel": 1048576,
+          "minimum": 1
+        }
+      },
+      "policies": {
+        "generation_retries": 0,
+        "fallback": false,
+        "poll": "bfl-async-status-poll-500ms-v1",
+        "artifact_delivery": "bfl-delivery-single-region-label-v1",
+        "recovery": "hubu-durable-async-resume-v1"
+      },
+      "pricing_rules": [
+        {
+          "rule_id": "bfl-flux-2-klein-4b-mp-2026-10-21-v1",
+          "provider": "flux",
+          "model": "flux-2-klein-4b",
+          "currency": "USD",
+          "components": [
+            {
+              "unit": "image",
+              "rate_numerator_minor": 14,
+              "rate_denominator": 10
+            },
+            {
+              "unit": "additional_megapixel",
+              "rate_numerator_minor": 1,
+              "rate_denominator": 10
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "contract": "hubu.flux-2-klein-9b.text-to-image/v1",
+      "pricing_version": "bfl-flux-2-klein-9b-usd-2026-10-21-v1",
+      "pricing_reviewed_on": "2026-10-21",
+      "target": {
+        "provider_config_version": "hubu-flux-2-klein-9b-t2i-2026-10-28-v1",
+        "workload_type": "image_generation",
+        "provider": "flux",
+        "adapter": "flux2_api",
+        "model": "flux-2-klein-9b",
+        "active": true,
+        "execution_enabled": true,
+        "settings": {
+          "type": "pack",
+          "config": {
+            "pack_id": "bfl-flux-2-klein-9b",
+            "pack_version": "2026-10-28.1",
+            "pack_digest": "sha256:7a5da88b7ef4339144e7b4d08d57bdb18328b114e8c665051412063d7576cf42",
+            "archetype": "async_poll"
+          }
+        }
+      },
+      "capability": {
+        "image_count": 1,
+        "output_formats": [
+          "png",
+          "jpeg"
+        ],
+        "presets": [
+          {
+            "name": "1k-1:1",
+            "width": 1024,
+            "height": 1024,
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-16:9",
+            "width": 1344,
+            "height": 768,
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-9:16",
+            "width": 768,
+            "height": 1344,
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-3:2",
+            "width": 1248,
+            "height": 832,
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-2:3",
+            "width": 832,
+            "height": 1248,
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-4:5",
+            "width": 896,
+            "height": 1120,
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "2k-1:1",
+            "width": 1440,
+            "height": 1440,
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-16:9",
+            "width": 1920,
+            "height": 1088,
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-9:16",
+            "width": 1088,
+            "height": 1920,
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-3:2",
+            "width": 1728,
+            "height": 1152,
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-2:3",
+            "width": 1152,
+            "height": 1728,
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-4:5",
+            "width": 1280,
+            "height": 1600,
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "4k-1:1",
+            "width": 2048,
+            "height": 2048,
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-16:9",
+            "width": 2688,
+            "height": 1536,
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-9:16",
+            "width": 1536,
+            "height": 2688,
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-3:2",
+            "width": 2496,
+            "height": 1664,
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-2:3",
+            "width": 1664,
+            "height": 2496,
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-4:5",
+            "width": 1792,
+            "height": 2240,
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "4k"
+            }
+          }
+        ],
+        "megapixels": {
+          "rounding": "ceil",
+          "pixels_per_megapixel": 1048576,
+          "minimum": 1
+        }
+      },
+      "policies": {
+        "generation_retries": 0,
+        "fallback": false,
+        "poll": "bfl-async-status-poll-500ms-v1",
+        "artifact_delivery": "bfl-delivery-single-region-label-v1",
+        "recovery": "hubu-durable-async-resume-v1"
+      },
+      "pricing_rules": [
+        {
+          "rule_id": "bfl-flux-2-klein-9b-mp-2026-10-21-v1",
+          "provider": "flux",
+          "model": "flux-2-klein-9b",
+          "currency": "USD",
+          "components": [
+            {
+              "unit": "image",
+              "rate_numerator_minor": 15,
+              "rate_denominator": 10
+            },
+            {
+              "unit": "additional_megapixel",
+              "rate_numerator_minor": 2,
+              "rate_denominator": 10
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "contract": "hubu.flux-2-flex.text-to-image/v1",
+      "pricing_version": "bfl-flux-2-flex-usd-2026-10-21-v1",
+      "pricing_reviewed_on": "2026-10-21",
+      "target": {
+        "provider_config_version": "hubu-flux-2-flex-t2i-2026-10-28-v1",
+        "workload_type": "image_generation",
+        "provider": "flux",
+        "adapter": "flux2_api",
+        "model": "flux-2-flex",
+        "active": true,
+        "execution_enabled": true,
+        "settings": {
+          "type": "pack",
+          "config": {
+            "pack_id": "bfl-flux-2-flex",
+            "pack_version": "2026-10-28.1",
+            "pack_digest": "sha256:551832acfec2c19c48b7906ae64dbf032ff4c0ddc674c8247a8f5efee02735b8",
+            "archetype": "async_poll"
+          }
+        }
+      },
+      "capability": {
+        "image_count": 1,
+        "output_formats": [
+          "png",
+          "jpeg"
+        ],
+        "presets": [
+          {
+            "name": "1k-1:1",
+            "width": 1024,
+            "height": 1024,
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-16:9",
+            "width": 1344,
+            "height": 768,
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-9:16",
+            "width": 768,
+            "height": 1344,
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-3:2",
+            "width": 1248,
+            "height": 832,
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-2:3",
+            "width": 832,
+            "height": 1248,
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-4:5",
+            "width": 896,
+            "height": 1120,
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "2k-1:1",
+            "width": 1440,
+            "height": 1440,
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-16:9",
+            "width": 1920,
+            "height": 1088,
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-9:16",
+            "width": 1088,
+            "height": 1920,
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-3:2",
+            "width": 1728,
+            "height": 1152,
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-2:3",
+            "width": 1152,
+            "height": 1728,
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-4:5",
+            "width": 1280,
+            "height": 1600,
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "4k-1:1",
+            "width": 2048,
+            "height": 2048,
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-16:9",
+            "width": 2688,
+            "height": 1536,
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-9:16",
+            "width": 1536,
+            "height": 2688,
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-3:2",
+            "width": 2496,
+            "height": 1664,
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-2:3",
+            "width": 1664,
+            "height": 2496,
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-4:5",
+            "width": 1792,
+            "height": 2240,
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "4k"
+            }
+          }
+        ],
+        "megapixels": {
+          "rounding": "ceil",
+          "pixels_per_megapixel": 1048576,
+          "minimum": 1
+        }
+      },
+      "policies": {
+        "generation_retries": 0,
+        "fallback": false,
+        "poll": "bfl-async-status-poll-500ms-v1",
+        "artifact_delivery": "bfl-delivery-single-region-label-v1",
+        "recovery": "hubu-durable-async-resume-v1"
+      },
+      "pricing_rules": [
+        {
+          "rule_id": "bfl-flux-2-flex-mp-2026-10-21-v1",
+          "provider": "flux",
+          "model": "flux-2-flex",
+          "currency": "USD",
+          "components": [
+            {
+              "unit": "image",
+              "rate_numerator_minor": 5,
+              "rate_denominator": 1
+            },
+            {
+              "unit": "additional_megapixel",
+              "rate_numerator_minor": 5,
+              "rate_denominator": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "contract": "hubu.flux-2-max.text-to-image/v1",
+      "pricing_version": "bfl-flux-2-max-usd-2026-10-21-v1",
+      "pricing_reviewed_on": "2026-10-21",
+      "target": {
+        "provider_config_version": "hubu-flux-2-max-t2i-2026-10-28-v1",
+        "workload_type": "image_generation",
+        "provider": "flux",
+        "adapter": "flux2_api",
+        "model": "flux-2-max",
+        "active": true,
+        "execution_enabled": true,
+        "settings": {
+          "type": "pack",
+          "config": {
+            "pack_id": "bfl-flux-2-max",
+            "pack_version": "2026-10-28.1",
+            "pack_digest": "sha256:8596163bbe94132f63558f11308f990b91564b8aa82e04996f6fb128b1d410bf",
+            "archetype": "async_poll"
+          }
+        }
+      },
+      "capability": {
+        "image_count": 1,
+        "output_formats": [
+          "png",
+          "jpeg"
+        ],
+        "presets": [
+          {
+            "name": "1k-1:1",
+            "width": 1024,
+            "height": 1024,
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-16:9",
+            "width": 1344,
+            "height": 768,
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-9:16",
+            "width": 768,
+            "height": 1344,
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-3:2",
+            "width": 1248,
+            "height": 832,
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-2:3",
+            "width": 832,
+            "height": 1248,
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-4:5",
+            "width": 896,
+            "height": 1120,
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "2k-1:1",
+            "width": 1440,
+            "height": 1440,
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-16:9",
+            "width": 1920,
+            "height": 1088,
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-9:16",
+            "width": 1088,
+            "height": 1920,
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-3:2",
+            "width": 1728,
+            "height": 1152,
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-2:3",
+            "width": 1152,
+            "height": 1728,
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-4:5",
+            "width": 1280,
+            "height": 1600,
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "4k-1:1",
+            "width": 2048,
+            "height": 2048,
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-16:9",
+            "width": 2688,
+            "height": 1536,
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-9:16",
+            "width": 1536,
+            "height": 2688,
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-3:2",
+            "width": 2496,
+            "height": 1664,
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-2:3",
+            "width": 1664,
+            "height": 2496,
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-4:5",
+            "width": 1792,
+            "height": 2240,
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "4k"
+            }
+          }
+        ],
+        "megapixels": {
+          "rounding": "ceil",
+          "pixels_per_megapixel": 1048576,
+          "minimum": 1
+        }
+      },
+      "policies": {
+        "generation_retries": 0,
+        "fallback": false,
+        "poll": "bfl-async-status-poll-500ms-v1",
+        "artifact_delivery": "bfl-delivery-single-region-label-v1",
+        "recovery": "hubu-durable-async-resume-v1"
+      },
+      "pricing_rules": [
+        {
+          "rule_id": "bfl-flux-2-max-mp-2026-10-21-v1",
+          "provider": "flux",
+          "model": "flux-2-max",
+          "currency": "USD",
+          "components": [
+            {
+              "unit": "image",
+              "rate_numerator_minor": 7,
+              "rate_denominator": 1
+            },
+            {
+              "unit": "additional_megapixel",
+              "rate_numerator_minor": 3,
+              "rate_denominator": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "contract": "hubu.flux-3-image.text-to-image/v2",
+      "pricing_version": "bfl-flux-3-image-usd-2026-10-21-v2",
+      "pricing_reviewed_on": "2026-10-21",
+      "target": {
+        "provider_config_version": "hubu-flux-3-image-t2i-2026-10-28-v2",
+        "workload_type": "image_generation",
+        "provider": "flux",
+        "adapter": "flux2_api",
+        "model": "flux-3-image",
+        "active": true,
+        "execution_enabled": true,
+        "settings": {
+          "type": "pack",
+          "config": {
+            "pack_id": "bfl-flux-3-image",
+            "pack_version": "2026-10-28.1",
+            "pack_digest": "sha256:9ec18c77ee991b01f37bb272ace093f725fcf13f57eb2c63682518bbed474e44",
+            "archetype": "async_poll"
+          }
+        }
+      },
+      "capability": {
+        "image_count": 1,
+        "output_formats": [
+          "png",
+          "jpeg"
+        ],
+        "presets": [
+          {
+            "name": "768sq"
+          },
+          {
+            "name": "1k"
+          },
+          {
+            "name": "1.5k"
+          },
+          {
+            "name": "2k"
+          }
+        ]
+      },
+      "policies": {
+        "generation_retries": 0,
+        "fallback": false,
+        "poll": "bfl-async-status-poll-500ms-v1",
+        "artifact_delivery": "bfl-delivery-single-region-label-v1",
+        "recovery": "hubu-durable-async-resume-v1"
+      },
+      "pricing_rules": [
+        {
+          "rule_id": "bfl-flux-3-image-768sq-2026-10-21-v2",
+          "provider": "flux",
+          "model": "flux-3-image",
+          "currency": "USD",
+          "selector": {
+            "image_size": "768sq"
+          },
+          "components": [
+            {
+              "unit": "image",
+              "rate_numerator_minor": 41,
+              "rate_denominator": 10
+            }
+          ]
+        },
+        {
+          "rule_id": "bfl-flux-3-image-1k-2026-10-21-v2",
+          "provider": "flux",
+          "model": "flux-3-image",
+          "currency": "USD",
+          "selector": {
+            "image_size": "1k"
+          },
+          "components": [
+            {
+              "unit": "image",
+              "rate_numerator_minor": 48,
+              "rate_denominator": 10
+            }
+          ]
+        },
+        {
+          "rule_id": "bfl-flux-3-image-1.5k-2026-10-21-v2",
+          "provider": "flux",
+          "model": "flux-3-image",
+          "currency": "USD",
+          "selector": {
+            "image_size": "1.5k"
+          },
+          "components": [
+            {
+              "unit": "image",
+              "rate_numerator_minor": 7,
+              "rate_denominator": 1
+            }
+          ]
+        },
+        {
+          "rule_id": "bfl-flux-3-image-2k-2026-10-21-v2",
+          "provider": "flux",
+          "model": "flux-3-image",
+          "currency": "USD",
+          "selector": {
+            "image_size": "2k"
+          },
+          "components": [
+            {
+              "unit": "image",
+              "rate_numerator_minor": 10,
+              "rate_denominator": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "contract": "hubu.gemini-3.1-flash-lite-image.text-to-image/v2",
+      "pricing_version": "google-gemini-3.1-flash-lite-image-usd-2026-10-28-v2",
+      "pricing_reviewed_on": "2026-10-28",
+      "target": {
+        "provider_config_version": "hubu-gemini-3.1-flash-lite-image-t2i-2026-10-28-v2",
+        "workload_type": "image_generation",
+        "provider": "google",
+        "adapter": "gemini_developer_image",
+        "model": "gemini-3.1-flash-lite-image",
+        "active": true,
+        "execution_enabled": true,
+        "settings": {
+          "type": "pack",
+          "config": {
+            "archetype": "sync_fixed",
+            "pack_digest": "sha256:e3ccded2f15af259d2d6fb1b5b789d519f4ac765c5a3a2d45c5d18839e53b5a6",
+            "pack_id": "google-gemini-developer-image",
+            "pack_version": "2026-10-28.1"
+          }
+        }
+      },
+      "capability": {
+        "image_count": 1,
+        "output_formats": [
+          "png",
+          "jpeg"
+        ],
+        "presets": [
+          {
+            "height": 1024,
+            "name": "1k-1:1",
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "1k"
+            },
+            "width": 1024
+          },
+          {
+            "height": 1264,
+            "name": "1k-2:3",
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "1k"
+            },
+            "width": 848
+          },
+          {
+            "height": 848,
+            "name": "1k-3:2",
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "1k"
+            },
+            "width": 1264
+          },
+          {
+            "height": 1200,
+            "name": "1k-3:4",
+            "when": {
+              "aspect_ratio": "3:4",
+              "image_size": "1k"
+            },
+            "width": 896
+          },
+          {
+            "height": 896,
+            "name": "1k-4:3",
+            "when": {
+              "aspect_ratio": "4:3",
+              "image_size": "1k"
+            },
+            "width": 1200
+          },
+          {
+            "height": 1152,
+            "name": "1k-4:5",
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "1k"
+            },
+            "width": 928
+          },
+          {
+            "height": 928,
+            "name": "1k-5:4",
+            "when": {
+              "aspect_ratio": "5:4",
+              "image_size": "1k"
+            },
+            "width": 1152
+          },
+          {
+            "height": 1376,
+            "name": "1k-9:16",
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "1k"
+            },
+            "width": 768
+          },
+          {
+            "height": 768,
+            "name": "1k-16:9",
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "1k"
+            },
+            "width": 1376
+          },
+          {
+            "height": 672,
+            "name": "1k-21:9",
+            "when": {
+              "aspect_ratio": "21:9",
+              "image_size": "1k"
+            },
+            "width": 1584
+          }
+        ]
+      },
+      "policies": {
+        "generation_retries": 0,
+        "fallback": false,
+        "poll": "synchronous-response-v1",
+        "artifact_delivery": "google-inline-image-v1",
+        "recovery": "hubu-durable-synchronous-replay-v1"
+      },
+      "pricing_rules": [
+        {
+          "components": [
+            {
+              "rate_denominator": 100,
+              "rate_numerator_minor": 336,
+              "unit": "image"
+            }
+          ],
+          "currency": "USD",
+          "model": "gemini-3.1-flash-lite-image",
+          "provider": "google",
+          "rule_id": "google-gemini-3.1-flash-lite-image-1k-2026-10-28-v2",
+          "selector": {
+            "image_size": "1k"
+          }
+        }
+      ]
+    },
+    {
+      "contract": "hubu.gemini-3.1-flash-image.text-to-image/v2",
+      "pricing_version": "google-gemini-3.1-flash-image-usd-2026-10-28-v2",
+      "pricing_reviewed_on": "2026-10-28",
+      "target": {
+        "provider_config_version": "hubu-gemini-3.1-flash-image-t2i-2026-10-28-v2",
+        "workload_type": "image_generation",
+        "provider": "google",
+        "adapter": "gemini_developer_image",
+        "model": "gemini-3.1-flash-image",
+        "active": true,
+        "execution_enabled": true,
+        "settings": {
+          "type": "pack",
+          "config": {
+            "archetype": "sync_fixed",
+            "pack_digest": "sha256:e3ccded2f15af259d2d6fb1b5b789d519f4ac765c5a3a2d45c5d18839e53b5a6",
+            "pack_id": "google-gemini-developer-image",
+            "pack_version": "2026-10-28.1"
+          }
+        }
+      },
+      "capability": {
+        "image_count": 1,
+        "output_formats": [
+          "png",
+          "jpeg"
+        ],
+        "presets": [
+          {
+            "height": 1024,
+            "name": "1k-1:1",
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "1k"
+            },
+            "width": 1024
+          },
+          {
+            "height": 1264,
+            "name": "1k-2:3",
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "1k"
+            },
+            "width": 848
+          },
+          {
+            "height": 848,
+            "name": "1k-3:2",
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "1k"
+            },
+            "width": 1264
+          },
+          {
+            "height": 1200,
+            "name": "1k-3:4",
+            "when": {
+              "aspect_ratio": "3:4",
+              "image_size": "1k"
+            },
+            "width": 896
+          },
+          {
+            "height": 896,
+            "name": "1k-4:3",
+            "when": {
+              "aspect_ratio": "4:3",
+              "image_size": "1k"
+            },
+            "width": 1200
+          },
+          {
+            "height": 1152,
+            "name": "1k-4:5",
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "1k"
+            },
+            "width": 928
+          },
+          {
+            "height": 928,
+            "name": "1k-5:4",
+            "when": {
+              "aspect_ratio": "5:4",
+              "image_size": "1k"
+            },
+            "width": 1152
+          },
+          {
+            "height": 1376,
+            "name": "1k-9:16",
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "1k"
+            },
+            "width": 768
+          },
+          {
+            "height": 768,
+            "name": "1k-16:9",
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "1k"
+            },
+            "width": 1376
+          },
+          {
+            "height": 672,
+            "name": "1k-21:9",
+            "when": {
+              "aspect_ratio": "21:9",
+              "image_size": "1k"
+            },
+            "width": 1584
+          },
+          {
+            "height": 2048,
+            "name": "2k-1:1",
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "2k"
+            },
+            "width": 2048
+          },
+          {
+            "height": 2528,
+            "name": "2k-2:3",
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "2k"
+            },
+            "width": 1696
+          },
+          {
+            "height": 1696,
+            "name": "2k-3:2",
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "2k"
+            },
+            "width": 2528
+          },
+          {
+            "height": 2400,
+            "name": "2k-3:4",
+            "when": {
+              "aspect_ratio": "3:4",
+              "image_size": "2k"
+            },
+            "width": 1792
+          },
+          {
+            "height": 1792,
+            "name": "2k-4:3",
+            "when": {
+              "aspect_ratio": "4:3",
+              "image_size": "2k"
+            },
+            "width": 2400
+          },
+          {
+            "height": 2304,
+            "name": "2k-4:5",
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "2k"
+            },
+            "width": 1856
+          },
+          {
+            "height": 1856,
+            "name": "2k-5:4",
+            "when": {
+              "aspect_ratio": "5:4",
+              "image_size": "2k"
+            },
+            "width": 2304
+          },
+          {
+            "height": 2752,
+            "name": "2k-9:16",
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "2k"
+            },
+            "width": 1536
+          },
+          {
+            "height": 1536,
+            "name": "2k-16:9",
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "2k"
+            },
+            "width": 2752
+          },
+          {
+            "height": 1344,
+            "name": "2k-21:9",
+            "when": {
+              "aspect_ratio": "21:9",
+              "image_size": "2k"
+            },
+            "width": 3168
+          },
+          {
+            "height": 4096,
+            "name": "4k-1:1",
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "4k"
+            },
+            "width": 4096
+          },
+          {
+            "height": 5056,
+            "name": "4k-2:3",
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "4k"
+            },
+            "width": 3392
+          },
+          {
+            "height": 3392,
+            "name": "4k-3:2",
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "4k"
+            },
+            "width": 5056
+          },
+          {
+            "height": 4800,
+            "name": "4k-3:4",
+            "when": {
+              "aspect_ratio": "3:4",
+              "image_size": "4k"
+            },
+            "width": 3584
+          },
+          {
+            "height": 3584,
+            "name": "4k-4:3",
+            "when": {
+              "aspect_ratio": "4:3",
+              "image_size": "4k"
+            },
+            "width": 4800
+          },
+          {
+            "height": 4608,
+            "name": "4k-4:5",
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "4k"
+            },
+            "width": 3712
+          },
+          {
+            "height": 3712,
+            "name": "4k-5:4",
+            "when": {
+              "aspect_ratio": "5:4",
+              "image_size": "4k"
+            },
+            "width": 4608
+          },
+          {
+            "height": 5504,
+            "name": "4k-9:16",
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "4k"
+            },
+            "width": 3072
+          },
+          {
+            "height": 3072,
+            "name": "4k-16:9",
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "4k"
+            },
+            "width": 5504
+          },
+          {
+            "height": 2688,
+            "name": "4k-21:9",
+            "when": {
+              "aspect_ratio": "21:9",
+              "image_size": "4k"
+            },
+            "width": 6336
+          }
+        ]
+      },
+      "policies": {
+        "generation_retries": 0,
+        "fallback": false,
+        "poll": "synchronous-response-v1",
+        "artifact_delivery": "google-inline-image-v1",
+        "recovery": "hubu-durable-synchronous-replay-v1"
+      },
+      "pricing_rules": [
+        {
+          "components": [
+            {
+              "rate_denominator": 10,
+              "rate_numerator_minor": 67,
+              "unit": "image"
+            }
+          ],
+          "currency": "USD",
+          "model": "gemini-3.1-flash-image",
+          "provider": "google",
+          "rule_id": "google-gemini-3.1-flash-image-1k-2026-10-28-v2",
+          "selector": {
+            "image_size": "1k"
+          }
+        },
+        {
+          "components": [
+            {
+              "rate_denominator": 10,
+              "rate_numerator_minor": 101,
+              "unit": "image"
+            }
+          ],
+          "currency": "USD",
+          "model": "gemini-3.1-flash-image",
+          "provider": "google",
+          "rule_id": "google-gemini-3.1-flash-image-2k-2026-10-28-v2",
+          "selector": {
+            "image_size": "2k"
+          }
+        },
+        {
+          "components": [
+            {
+              "rate_denominator": 10,
+              "rate_numerator_minor": 151,
+              "unit": "image"
+            }
+          ],
+          "currency": "USD",
+          "model": "gemini-3.1-flash-image",
+          "provider": "google",
+          "rule_id": "google-gemini-3.1-flash-image-4k-2026-10-28-v2",
+          "selector": {
+            "image_size": "4k"
+          }
+        }
+      ]
+    },
+    {
+      "contract": "hubu.gemini-nano-banana-2.1.text-to-image/v1",
+      "pricing_version": "google-gemini-nano-banana-2.1-usd-2026-10-28-v1",
+      "pricing_reviewed_on": "2026-10-28",
+      "target": {
+        "provider_config_version": "hubu-gemini-nano-banana-2.1-t2i-2026-10-28-v1",
+        "workload_type": "image_generation",
+        "provider": "google",
+        "adapter": "gemini_developer_image",
+        "model": "gemini-nano-banana-2.1",
+        "active": true,
+        "execution_enabled": true,
+        "settings": {
+          "type": "pack",
+          "config": {
+            "archetype": "sync_fixed",
+            "pack_digest": "sha256:e3ccded2f15af259d2d6fb1b5b789d519f4ac765c5a3a2d45c5d18839e53b5a6",
+            "pack_id": "google-gemini-developer-image",
+            "pack_version": "2026-10-28.1"
+          }
+        }
+      },
+      "capability": {
+        "image_count": 1,
+        "output_formats": [
+          "png",
+          "jpeg"
+        ],
+        "presets": [
+          {
+            "height": 1024,
+            "name": "1k-1:1",
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "1k"
+            },
+            "width": 1024
+          },
+          {
+            "height": 1264,
+            "name": "1k-2:3",
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "1k"
+            },
+            "width": 848
+          },
+          {
+            "height": 848,
+            "name": "1k-3:2",
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "1k"
+            },
+            "width": 1264
+          },
+          {
+            "height": 1200,
+            "name": "1k-3:4",
+            "when": {
+              "aspect_ratio": "3:4",
+              "image_size": "1k"
+            },
+            "width": 896
+          },
+          {
+            "height": 896,
+            "name": "1k-4:3",
+            "when": {
+              "aspect_ratio": "4:3",
+              "image_size": "1k"
+            },
+            "width": 1200
+          },
+          {
+            "height": 1152,
+            "name": "1k-4:5",
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "1k"
+            },
+            "width": 928
+          },
+          {
+            "height": 928,
+            "name": "1k-5:4",
+            "when": {
+              "aspect_ratio": "5:4",
+              "image_size": "1k"
+            },
+            "width": 1152
+          },
+          {
+            "height": 1376,
+            "name": "1k-9:16",
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "1k"
+            },
+            "width": 768
+          },
+          {
+            "height": 768,
+            "name": "1k-16:9",
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "1k"
+            },
+            "width": 1376
+          },
+          {
+            "height": 672,
+            "name": "1k-21:9",
+            "when": {
+              "aspect_ratio": "21:9",
+              "image_size": "1k"
+            },
+            "width": 1584
+          },
+          {
+            "height": 2048,
+            "name": "2k-1:1",
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "2k"
+            },
+            "width": 2048
+          },
+          {
+            "height": 2528,
+            "name": "2k-2:3",
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "2k"
+            },
+            "width": 1696
+          },
+          {
+            "height": 1696,
+            "name": "2k-3:2",
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "2k"
+            },
+            "width": 2528
+          },
+          {
+            "height": 2400,
+            "name": "2k-3:4",
+            "when": {
+              "aspect_ratio": "3:4",
+              "image_size": "2k"
+            },
+            "width": 1792
+          },
+          {
+            "height": 1792,
+            "name": "2k-4:3",
+            "when": {
+              "aspect_ratio": "4:3",
+              "image_size": "2k"
+            },
+            "width": 2400
+          },
+          {
+            "height": 2304,
+            "name": "2k-4:5",
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "2k"
+            },
+            "width": 1856
+          },
+          {
+            "height": 1856,
+            "name": "2k-5:4",
+            "when": {
+              "aspect_ratio": "5:4",
+              "image_size": "2k"
+            },
+            "width": 2304
+          },
+          {
+            "height": 2752,
+            "name": "2k-9:16",
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "2k"
+            },
+            "width": 1536
+          },
+          {
+            "height": 1536,
+            "name": "2k-16:9",
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "2k"
+            },
+            "width": 2752
+          },
+          {
+            "height": 1344,
+            "name": "2k-21:9",
+            "when": {
+              "aspect_ratio": "21:9",
+              "image_size": "2k"
+            },
+            "width": 3168
+          },
+          {
+            "height": 4096,
+            "name": "4k-1:1",
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "4k"
+            },
+            "width": 4096
+          },
+          {
+            "height": 5056,
+            "name": "4k-2:3",
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "4k"
+            },
+            "width": 3392
+          },
+          {
+            "height": 3392,
+            "name": "4k-3:2",
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "4k"
+            },
+            "width": 5056
+          },
+          {
+            "height": 4800,
+            "name": "4k-3:4",
+            "when": {
+              "aspect_ratio": "3:4",
+              "image_size": "4k"
+            },
+            "width": 3584
+          },
+          {
+            "height": 3584,
+            "name": "4k-4:3",
+            "when": {
+              "aspect_ratio": "4:3",
+              "image_size": "4k"
+            },
+            "width": 4800
+          },
+          {
+            "height": 4608,
+            "name": "4k-4:5",
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "4k"
+            },
+            "width": 3712
+          },
+          {
+            "height": 3712,
+            "name": "4k-5:4",
+            "when": {
+              "aspect_ratio": "5:4",
+              "image_size": "4k"
+            },
+            "width": 4608
+          },
+          {
+            "height": 5504,
+            "name": "4k-9:16",
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "4k"
+            },
+            "width": 3072
+          },
+          {
+            "height": 3072,
+            "name": "4k-16:9",
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "4k"
+            },
+            "width": 5504
+          },
+          {
+            "height": 2688,
+            "name": "4k-21:9",
+            "when": {
+              "aspect_ratio": "21:9",
+              "image_size": "4k"
+            },
+            "width": 6336
+          }
+        ]
+      },
+      "policies": {
+        "generation_retries": 0,
+        "fallback": false,
+        "poll": "synchronous-response-v1",
+        "artifact_delivery": "google-inline-image-v1",
+        "recovery": "hubu-durable-synchronous-replay-v1"
+      },
+      "pricing_rules": [
+        {
+          "components": [
+            {
+              "rate_denominator": 100,
+              "rate_numerator_minor": 336,
+              "unit": "image"
+            }
+          ],
+          "currency": "USD",
+          "model": "gemini-nano-banana-2.1",
+          "provider": "google",
+          "rule_id": "google-gemini-nano-banana-2.1-1k-2026-10-28-v1",
+          "selector": {
+            "image_size": "1k"
+          }
+        },
+        {
+          "components": [
+            {
+              "rate_denominator": 100,
+              "rate_numerator_minor": 504,
+              "unit": "image"
+            }
+          ],
+          "currency": "USD",
+          "model": "gemini-nano-banana-2.1",
+          "provider": "google",
+          "rule_id": "google-gemini-nano-banana-2.1-2k-2026-10-28-v1",
+          "selector": {
+            "image_size": "2k"
+          }
+        },
+        {
+          "components": [
+            {
+              "rate_denominator": 10,
+              "rate_numerator_minor": 113,
+              "unit": "image"
+            }
+          ],
+          "currency": "USD",
+          "model": "gemini-nano-banana-2.1",
+          "provider": "google",
+          "rule_id": "google-gemini-nano-banana-2.1-4k-2026-10-28-v1",
+          "selector": {
+            "image_size": "4k"
+          }
+        }
+      ]
+    },
+    {
+      "contract": "hubu.gemini-3-pro-image.text-to-image/v1",
+      "pricing_version": "google-gemini-3-pro-image-usd-2026-10-28-v1",
+      "pricing_reviewed_on": "2026-10-28",
+      "target": {
+        "provider_config_version": "hubu-gemini-3-pro-image-t2i-2026-10-28-v1",
+        "workload_type": "image_generation",
+        "provider": "google",
+        "adapter": "gemini_developer_image",
+        "model": "gemini-3-pro-image",
+        "active": true,
+        "execution_enabled": true,
+        "settings": {
+          "type": "pack",
+          "config": {
+            "archetype": "sync_fixed",
+            "pack_digest": "sha256:e3ccded2f15af259d2d6fb1b5b789d519f4ac765c5a3a2d45c5d18839e53b5a6",
+            "pack_id": "google-gemini-developer-image",
+            "pack_version": "2026-10-28.1"
+          }
+        }
+      },
+      "capability": {
+        "image_count": 1,
+        "output_formats": [
+          "png",
+          "jpeg"
+        ],
+        "presets": [
+          {
+            "height": 1024,
+            "name": "1k-1:1",
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "1k"
+            },
+            "width": 1024
+          },
+          {
+            "height": 1264,
+            "name": "1k-2:3",
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "1k"
+            },
+            "width": 848
+          },
+          {
+            "height": 848,
+            "name": "1k-3:2",
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "1k"
+            },
+            "width": 1264
+          },
+          {
+            "height": 1200,
+            "name": "1k-3:4",
+            "when": {
+              "aspect_ratio": "3:4",
+              "image_size": "1k"
+            },
+            "width": 896
+          },
+          {
+            "height": 896,
+            "name": "1k-4:3",
+            "when": {
+              "aspect_ratio": "4:3",
+              "image_size": "1k"
+            },
+            "width": 1200
+          },
+          {
+            "height": 1152,
+            "name": "1k-4:5",
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "1k"
+            },
+            "width": 928
+          },
+          {
+            "height": 928,
+            "name": "1k-5:4",
+            "when": {
+              "aspect_ratio": "5:4",
+              "image_size": "1k"
+            },
+            "width": 1152
+          },
+          {
+            "height": 1376,
+            "name": "1k-9:16",
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "1k"
+            },
+            "width": 768
+          },
+          {
+            "height": 768,
+            "name": "1k-16:9",
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "1k"
+            },
+            "width": 1376
+          },
+          {
+            "height": 672,
+            "name": "1k-21:9",
+            "when": {
+              "aspect_ratio": "21:9",
+              "image_size": "1k"
+            },
+            "width": 1584
+          },
+          {
+            "height": 2048,
+            "name": "2k-1:1",
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "2k"
+            },
+            "width": 2048
+          },
+          {
+            "height": 2528,
+            "name": "2k-2:3",
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "2k"
+            },
+            "width": 1696
+          },
+          {
+            "height": 1696,
+            "name": "2k-3:2",
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "2k"
+            },
+            "width": 2528
+          },
+          {
+            "height": 2400,
+            "name": "2k-3:4",
+            "when": {
+              "aspect_ratio": "3:4",
+              "image_size": "2k"
+            },
+            "width": 1792
+          },
+          {
+            "height": 1792,
+            "name": "2k-4:3",
+            "when": {
+              "aspect_ratio": "4:3",
+              "image_size": "2k"
+            },
+            "width": 2400
+          },
+          {
+            "height": 2304,
+            "name": "2k-4:5",
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "2k"
+            },
+            "width": 1856
+          },
+          {
+            "height": 1856,
+            "name": "2k-5:4",
+            "when": {
+              "aspect_ratio": "5:4",
+              "image_size": "2k"
+            },
+            "width": 2304
+          },
+          {
+            "height": 2752,
+            "name": "2k-9:16",
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "2k"
+            },
+            "width": 1536
+          },
+          {
+            "height": 1536,
+            "name": "2k-16:9",
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "2k"
+            },
+            "width": 2752
+          },
+          {
+            "height": 1344,
+            "name": "2k-21:9",
+            "when": {
+              "aspect_ratio": "21:9",
+              "image_size": "2k"
+            },
+            "width": 3168
+          },
+          {
+            "height": 4096,
+            "name": "4k-1:1",
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "4k"
+            },
+            "width": 4096
+          },
+          {
+            "height": 5056,
+            "name": "4k-2:3",
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "4k"
+            },
+            "width": 3392
+          },
+          {
+            "height": 3392,
+            "name": "4k-3:2",
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "4k"
+            },
+            "width": 5056
+          },
+          {
+            "height": 4800,
+            "name": "4k-3:4",
+            "when": {
+              "aspect_ratio": "3:4",
+              "image_size": "4k"
+            },
+            "width": 3584
+          },
+          {
+            "height": 3584,
+            "name": "4k-4:3",
+            "when": {
+              "aspect_ratio": "4:3",
+              "image_size": "4k"
+            },
+            "width": 4800
+          },
+          {
+            "height": 4608,
+            "name": "4k-4:5",
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "4k"
+            },
+            "width": 3712
+          },
+          {
+            "height": 3712,
+            "name": "4k-5:4",
+            "when": {
+              "aspect_ratio": "5:4",
+              "image_size": "4k"
+            },
+            "width": 4608
+          },
+          {
+            "height": 5504,
+            "name": "4k-9:16",
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "4k"
+            },
+            "width": 3072
+          },
+          {
+            "height": 3072,
+            "name": "4k-16:9",
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "4k"
+            },
+            "width": 5504
+          },
+          {
+            "height": 2688,
+            "name": "4k-21:9",
+            "when": {
+              "aspect_ratio": "21:9",
+              "image_size": "4k"
+            },
+            "width": 6336
+          }
+        ]
+      },
+      "policies": {
+        "generation_retries": 0,
+        "fallback": false,
+        "poll": "synchronous-response-v1",
+        "artifact_delivery": "google-inline-image-v1",
+        "recovery": "hubu-durable-synchronous-replay-v1"
+      },
+      "pricing_rules": [
+        {
+          "components": [
+            {
+              "rate_denominator": 10,
+              "rate_numerator_minor": 134,
+              "unit": "image"
+            }
+          ],
+          "currency": "USD",
+          "model": "gemini-3-pro-image",
+          "provider": "google",
+          "rule_id": "google-gemini-3-pro-image-1k-2026-10-28-v1",
+          "selector": {
+            "image_size": "1k"
+          }
+        },
+        {
+          "components": [
+            {
+              "rate_denominator": 10,
+              "rate_numerator_minor": 134,
+              "unit": "image"
+            }
+          ],
+          "currency": "USD",
+          "model": "gemini-3-pro-image",
+          "provider": "google",
+          "rule_id": "google-gemini-3-pro-image-2k-2026-10-28-v1",
+          "selector": {
+            "image_size": "2k"
+          }
+        },
+        {
+          "components": [
+            {
+              "rate_denominator": 1,
+              "rate_numerator_minor": 24,
+              "unit": "image"
+            }
+          ],
+          "currency": "USD",
+          "model": "gemini-3-pro-image",
+          "provider": "google",
+          "rule_id": "google-gemini-3-pro-image-4k-2026-10-28-v1",
+          "selector": {
+            "image_size": "4k"
+          }
+        }
+      ]
+    },
+    {
+      "contract": "hubu.gemini-3.1-flash-lite-image.image-edit/v2",
+      "pricing_version": "google-gemini-3.1-flash-lite-image-edit-usd-2026-10-28-v2",
+      "pricing_reviewed_on": "2026-10-28",
+      "target": {
+        "provider_config_version": "hubu-gemini-3.1-flash-lite-image-edit-2026-10-28-v2",
+        "workload_type": "image_edit",
+        "provider": "google",
+        "adapter": "gemini_developer_image",
+        "model": "gemini-3.1-flash-lite-image",
+        "active": true,
+        "execution_enabled": true,
+        "settings": {
+          "type": "pack",
+          "config": {
+            "archetype": "sync_fixed",
+            "pack_digest": "sha256:73a866cc3c44baf7d0478c853877da942dd09a2548ba70bcce6b48d61a9ed284",
+            "pack_id": "google-gemini-developer-image-edit",
+            "pack_version": "2026-10-28.1"
+          }
+        }
+      },
+      "capability": {
+        "image_count": 1,
+        "output_formats": [
+          "png",
+          "jpeg"
+        ],
+        "presets": [
+          {
+            "height": 1024,
+            "name": "1k-1:1",
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "1k"
+            },
+            "width": 1024
+          },
+          {
+            "height": 1264,
+            "name": "1k-2:3",
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "1k"
+            },
+            "width": 848
+          },
+          {
+            "height": 848,
+            "name": "1k-3:2",
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "1k"
+            },
+            "width": 1264
+          },
+          {
+            "height": 1200,
+            "name": "1k-3:4",
+            "when": {
+              "aspect_ratio": "3:4",
+              "image_size": "1k"
+            },
+            "width": 896
+          },
+          {
+            "height": 896,
+            "name": "1k-4:3",
+            "when": {
+              "aspect_ratio": "4:3",
+              "image_size": "1k"
+            },
+            "width": 1200
+          },
+          {
+            "height": 1152,
+            "name": "1k-4:5",
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "1k"
+            },
+            "width": 928
+          },
+          {
+            "height": 928,
+            "name": "1k-5:4",
+            "when": {
+              "aspect_ratio": "5:4",
+              "image_size": "1k"
+            },
+            "width": 1152
+          },
+          {
+            "height": 1376,
+            "name": "1k-9:16",
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "1k"
+            },
+            "width": 768
+          },
+          {
+            "height": 768,
+            "name": "1k-16:9",
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "1k"
+            },
+            "width": 1376
+          },
+          {
+            "height": 672,
+            "name": "1k-21:9",
+            "when": {
+              "aspect_ratio": "21:9",
+              "image_size": "1k"
+            },
+            "width": 1584
+          }
+        ]
+      },
+      "policies": {
+        "generation_retries": 0,
+        "fallback": false,
+        "poll": "synchronous-response-v1",
+        "artifact_delivery": "google-inline-image-v1",
+        "recovery": "hubu-durable-synchronous-replay-v1"
+      },
+      "pricing_rules": [
+        {
+          "components": [
+            {
+              "rate_denominator": 100,
+              "rate_numerator_minor": 336,
+              "unit": "image"
+            },
+            {
+              "rate_denominator": 1000,
+              "rate_numerator_minor": 28,
+              "unit": "input_image"
+            }
+          ],
+          "currency": "USD",
+          "model": "gemini-3.1-flash-lite-image",
+          "provider": "google",
+          "rule_id": "google-gemini-3.1-flash-lite-image-edit-1k-2026-10-28-v2",
+          "selector": {
+            "image_size": "1k"
+          },
+          "workload_type": "image_edit"
+        }
+      ]
+    },
+    {
+      "contract": "hubu.gemini-3.1-flash-image.image-edit/v2",
+      "pricing_version": "google-gemini-3.1-flash-image-edit-usd-2026-10-28-v2",
+      "pricing_reviewed_on": "2026-10-28",
+      "target": {
+        "provider_config_version": "hubu-gemini-3.1-flash-image-edit-2026-10-28-v2",
+        "workload_type": "image_edit",
+        "provider": "google",
+        "adapter": "gemini_developer_image",
+        "model": "gemini-3.1-flash-image",
+        "active": true,
+        "execution_enabled": true,
+        "settings": {
+          "type": "pack",
+          "config": {
+            "archetype": "sync_fixed",
+            "pack_digest": "sha256:73a866cc3c44baf7d0478c853877da942dd09a2548ba70bcce6b48d61a9ed284",
+            "pack_id": "google-gemini-developer-image-edit",
+            "pack_version": "2026-10-28.1"
+          }
+        }
+      },
+      "capability": {
+        "image_count": 1,
+        "output_formats": [
+          "png",
+          "jpeg"
+        ],
+        "presets": [
+          {
+            "height": 1024,
+            "name": "1k-1:1",
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "1k"
+            },
+            "width": 1024
+          },
+          {
+            "height": 1264,
+            "name": "1k-2:3",
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "1k"
+            },
+            "width": 848
+          },
+          {
+            "height": 848,
+            "name": "1k-3:2",
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "1k"
+            },
+            "width": 1264
+          },
+          {
+            "height": 1200,
+            "name": "1k-3:4",
+            "when": {
+              "aspect_ratio": "3:4",
+              "image_size": "1k"
+            },
+            "width": 896
+          },
+          {
+            "height": 896,
+            "name": "1k-4:3",
+            "when": {
+              "aspect_ratio": "4:3",
+              "image_size": "1k"
+            },
+            "width": 1200
+          },
+          {
+            "height": 1152,
+            "name": "1k-4:5",
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "1k"
+            },
+            "width": 928
+          },
+          {
+            "height": 928,
+            "name": "1k-5:4",
+            "when": {
+              "aspect_ratio": "5:4",
+              "image_size": "1k"
+            },
+            "width": 1152
+          },
+          {
+            "height": 1376,
+            "name": "1k-9:16",
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "1k"
+            },
+            "width": 768
+          },
+          {
+            "height": 768,
+            "name": "1k-16:9",
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "1k"
+            },
+            "width": 1376
+          },
+          {
+            "height": 672,
+            "name": "1k-21:9",
+            "when": {
+              "aspect_ratio": "21:9",
+              "image_size": "1k"
+            },
+            "width": 1584
+          },
+          {
+            "height": 2048,
+            "name": "2k-1:1",
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "2k"
+            },
+            "width": 2048
+          },
+          {
+            "height": 2528,
+            "name": "2k-2:3",
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "2k"
+            },
+            "width": 1696
+          },
+          {
+            "height": 1696,
+            "name": "2k-3:2",
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "2k"
+            },
+            "width": 2528
+          },
+          {
+            "height": 2400,
+            "name": "2k-3:4",
+            "when": {
+              "aspect_ratio": "3:4",
+              "image_size": "2k"
+            },
+            "width": 1792
+          },
+          {
+            "height": 1792,
+            "name": "2k-4:3",
+            "when": {
+              "aspect_ratio": "4:3",
+              "image_size": "2k"
+            },
+            "width": 2400
+          },
+          {
+            "height": 2304,
+            "name": "2k-4:5",
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "2k"
+            },
+            "width": 1856
+          },
+          {
+            "height": 1856,
+            "name": "2k-5:4",
+            "when": {
+              "aspect_ratio": "5:4",
+              "image_size": "2k"
+            },
+            "width": 2304
+          },
+          {
+            "height": 2752,
+            "name": "2k-9:16",
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "2k"
+            },
+            "width": 1536
+          },
+          {
+            "height": 1536,
+            "name": "2k-16:9",
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "2k"
+            },
+            "width": 2752
+          },
+          {
+            "height": 1344,
+            "name": "2k-21:9",
+            "when": {
+              "aspect_ratio": "21:9",
+              "image_size": "2k"
+            },
+            "width": 3168
+          },
+          {
+            "height": 4096,
+            "name": "4k-1:1",
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "4k"
+            },
+            "width": 4096
+          },
+          {
+            "height": 5056,
+            "name": "4k-2:3",
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "4k"
+            },
+            "width": 3392
+          },
+          {
+            "height": 3392,
+            "name": "4k-3:2",
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "4k"
+            },
+            "width": 5056
+          },
+          {
+            "height": 4800,
+            "name": "4k-3:4",
+            "when": {
+              "aspect_ratio": "3:4",
+              "image_size": "4k"
+            },
+            "width": 3584
+          },
+          {
+            "height": 3584,
+            "name": "4k-4:3",
+            "when": {
+              "aspect_ratio": "4:3",
+              "image_size": "4k"
+            },
+            "width": 4800
+          },
+          {
+            "height": 4608,
+            "name": "4k-4:5",
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "4k"
+            },
+            "width": 3712
+          },
+          {
+            "height": 3712,
+            "name": "4k-5:4",
+            "when": {
+              "aspect_ratio": "5:4",
+              "image_size": "4k"
+            },
+            "width": 4608
+          },
+          {
+            "height": 5504,
+            "name": "4k-9:16",
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "4k"
+            },
+            "width": 3072
+          },
+          {
+            "height": 3072,
+            "name": "4k-16:9",
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "4k"
+            },
+            "width": 5504
+          },
+          {
+            "height": 2688,
+            "name": "4k-21:9",
+            "when": {
+              "aspect_ratio": "21:9",
+              "image_size": "4k"
+            },
+            "width": 6336
+          }
+        ]
+      },
+      "policies": {
+        "generation_retries": 0,
+        "fallback": false,
+        "poll": "synchronous-response-v1",
+        "artifact_delivery": "google-inline-image-v1",
+        "recovery": "hubu-durable-synchronous-replay-v1"
+      },
+      "pricing_rules": [
+        {
+          "components": [
+            {
+              "rate_denominator": 10,
+              "rate_numerator_minor": 67,
+              "unit": "image"
+            },
+            {
+              "rate_denominator": 1000,
+              "rate_numerator_minor": 56,
+              "unit": "input_image"
+            }
+          ],
+          "currency": "USD",
+          "model": "gemini-3.1-flash-image",
+          "provider": "google",
+          "rule_id": "google-gemini-3.1-flash-image-edit-1k-2026-10-28-v2",
+          "selector": {
+            "image_size": "1k"
+          },
+          "workload_type": "image_edit"
+        },
+        {
+          "components": [
+            {
+              "rate_denominator": 10,
+              "rate_numerator_minor": 101,
+              "unit": "image"
+            },
+            {
+              "rate_denominator": 1000,
+              "rate_numerator_minor": 56,
+              "unit": "input_image"
+            }
+          ],
+          "currency": "USD",
+          "model": "gemini-3.1-flash-image",
+          "provider": "google",
+          "rule_id": "google-gemini-3.1-flash-image-edit-2k-2026-10-28-v2",
+          "selector": {
+            "image_size": "2k"
+          },
+          "workload_type": "image_edit"
+        },
+        {
+          "components": [
+            {
+              "rate_denominator": 10,
+              "rate_numerator_minor": 151,
+              "unit": "image"
+            },
+            {
+              "rate_denominator": 1000,
+              "rate_numerator_minor": 56,
+              "unit": "input_image"
+            }
+          ],
+          "currency": "USD",
+          "model": "gemini-3.1-flash-image",
+          "provider": "google",
+          "rule_id": "google-gemini-3.1-flash-image-edit-4k-2026-10-28-v2",
+          "selector": {
+            "image_size": "4k"
+          },
+          "workload_type": "image_edit"
+        }
+      ]
+    },
+    {
+      "contract": "hubu.gemini-nano-banana-2.1.image-edit/v1",
+      "pricing_version": "google-gemini-nano-banana-2.1-edit-usd-2026-10-28-v1",
+      "pricing_reviewed_on": "2026-10-28",
+      "target": {
+        "provider_config_version": "hubu-gemini-nano-banana-2.1-edit-2026-10-28-v1",
+        "workload_type": "image_edit",
+        "provider": "google",
+        "adapter": "gemini_developer_image",
+        "model": "gemini-nano-banana-2.1",
+        "active": true,
+        "execution_enabled": true,
+        "settings": {
+          "type": "pack",
+          "config": {
+            "archetype": "sync_fixed",
+            "pack_digest": "sha256:73a866cc3c44baf7d0478c853877da942dd09a2548ba70bcce6b48d61a9ed284",
+            "pack_id": "google-gemini-developer-image-edit",
+            "pack_version": "2026-10-28.1"
+          }
+        }
+      },
+      "capability": {
+        "image_count": 1,
+        "output_formats": [
+          "png",
+          "jpeg"
+        ],
+        "presets": [
+          {
+            "height": 1024,
+            "name": "1k-1:1",
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "1k"
+            },
+            "width": 1024
+          },
+          {
+            "height": 1264,
+            "name": "1k-2:3",
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "1k"
+            },
+            "width": 848
+          },
+          {
+            "height": 848,
+            "name": "1k-3:2",
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "1k"
+            },
+            "width": 1264
+          },
+          {
+            "height": 1200,
+            "name": "1k-3:4",
+            "when": {
+              "aspect_ratio": "3:4",
+              "image_size": "1k"
+            },
+            "width": 896
+          },
+          {
+            "height": 896,
+            "name": "1k-4:3",
+            "when": {
+              "aspect_ratio": "4:3",
+              "image_size": "1k"
+            },
+            "width": 1200
+          },
+          {
+            "height": 1152,
+            "name": "1k-4:5",
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "1k"
+            },
+            "width": 928
+          },
+          {
+            "height": 928,
+            "name": "1k-5:4",
+            "when": {
+              "aspect_ratio": "5:4",
+              "image_size": "1k"
+            },
+            "width": 1152
+          },
+          {
+            "height": 1376,
+            "name": "1k-9:16",
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "1k"
+            },
+            "width": 768
+          },
+          {
+            "height": 768,
+            "name": "1k-16:9",
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "1k"
+            },
+            "width": 1376
+          },
+          {
+            "height": 672,
+            "name": "1k-21:9",
+            "when": {
+              "aspect_ratio": "21:9",
+              "image_size": "1k"
+            },
+            "width": 1584
+          },
+          {
+            "height": 2048,
+            "name": "2k-1:1",
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "2k"
+            },
+            "width": 2048
+          },
+          {
+            "height": 2528,
+            "name": "2k-2:3",
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "2k"
+            },
+            "width": 1696
+          },
+          {
+            "height": 1696,
+            "name": "2k-3:2",
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "2k"
+            },
+            "width": 2528
+          },
+          {
+            "height": 2400,
+            "name": "2k-3:4",
+            "when": {
+              "aspect_ratio": "3:4",
+              "image_size": "2k"
+            },
+            "width": 1792
+          },
+          {
+            "height": 1792,
+            "name": "2k-4:3",
+            "when": {
+              "aspect_ratio": "4:3",
+              "image_size": "2k"
+            },
+            "width": 2400
+          },
+          {
+            "height": 2304,
+            "name": "2k-4:5",
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "2k"
+            },
+            "width": 1856
+          },
+          {
+            "height": 1856,
+            "name": "2k-5:4",
+            "when": {
+              "aspect_ratio": "5:4",
+              "image_size": "2k"
+            },
+            "width": 2304
+          },
+          {
+            "height": 2752,
+            "name": "2k-9:16",
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "2k"
+            },
+            "width": 1536
+          },
+          {
+            "height": 1536,
+            "name": "2k-16:9",
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "2k"
+            },
+            "width": 2752
+          },
+          {
+            "height": 1344,
+            "name": "2k-21:9",
+            "when": {
+              "aspect_ratio": "21:9",
+              "image_size": "2k"
+            },
+            "width": 3168
+          },
+          {
+            "height": 4096,
+            "name": "4k-1:1",
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "4k"
+            },
+            "width": 4096
+          },
+          {
+            "height": 5056,
+            "name": "4k-2:3",
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "4k"
+            },
+            "width": 3392
+          },
+          {
+            "height": 3392,
+            "name": "4k-3:2",
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "4k"
+            },
+            "width": 5056
+          },
+          {
+            "height": 4800,
+            "name": "4k-3:4",
+            "when": {
+              "aspect_ratio": "3:4",
+              "image_size": "4k"
+            },
+            "width": 3584
+          },
+          {
+            "height": 3584,
+            "name": "4k-4:3",
+            "when": {
+              "aspect_ratio": "4:3",
+              "image_size": "4k"
+            },
+            "width": 4800
+          },
+          {
+            "height": 4608,
+            "name": "4k-4:5",
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "4k"
+            },
+            "width": 3712
+          },
+          {
+            "height": 3712,
+            "name": "4k-5:4",
+            "when": {
+              "aspect_ratio": "5:4",
+              "image_size": "4k"
+            },
+            "width": 4608
+          },
+          {
+            "height": 5504,
+            "name": "4k-9:16",
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "4k"
+            },
+            "width": 3072
+          },
+          {
+            "height": 3072,
+            "name": "4k-16:9",
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "4k"
+            },
+            "width": 5504
+          },
+          {
+            "height": 2688,
+            "name": "4k-21:9",
+            "when": {
+              "aspect_ratio": "21:9",
+              "image_size": "4k"
+            },
+            "width": 6336
+          }
+        ]
+      },
+      "policies": {
+        "generation_retries": 0,
+        "fallback": false,
+        "poll": "synchronous-response-v1",
+        "artifact_delivery": "google-inline-image-v1",
+        "recovery": "hubu-durable-synchronous-replay-v1"
+      },
+      "pricing_rules": [
+        {
+          "components": [
+            {
+              "rate_denominator": 100,
+              "rate_numerator_minor": 336,
+              "unit": "image"
+            },
+            {
+              "rate_denominator": 1000,
+              "rate_numerator_minor": 168,
+              "unit": "input_image"
+            }
+          ],
+          "currency": "USD",
+          "model": "gemini-nano-banana-2.1",
+          "provider": "google",
+          "rule_id": "google-gemini-nano-banana-2.1-edit-1k-2026-10-28-v1",
+          "selector": {
+            "image_size": "1k"
+          },
+          "workload_type": "image_edit"
+        },
+        {
+          "components": [
+            {
+              "rate_denominator": 100,
+              "rate_numerator_minor": 504,
+              "unit": "image"
+            },
+            {
+              "rate_denominator": 1000,
+              "rate_numerator_minor": 168,
+              "unit": "input_image"
+            }
+          ],
+          "currency": "USD",
+          "model": "gemini-nano-banana-2.1",
+          "provider": "google",
+          "rule_id": "google-gemini-nano-banana-2.1-edit-2k-2026-10-28-v1",
+          "selector": {
+            "image_size": "2k"
+          },
+          "workload_type": "image_edit"
+        },
+        {
+          "components": [
+            {
+              "rate_denominator": 10,
+              "rate_numerator_minor": 113,
+              "unit": "image"
+            },
+            {
+              "rate_denominator": 1000,
+              "rate_numerator_minor": 168,
+              "unit": "input_image"
+            }
+          ],
+          "currency": "USD",
+          "model": "gemini-nano-banana-2.1",
+          "provider": "google",
+          "rule_id": "google-gemini-nano-banana-2.1-edit-4k-2026-10-28-v1",
+          "selector": {
+            "image_size": "4k"
+          },
+          "workload_type": "image_edit"
+        }
+      ]
+    },
+    {
+      "contract": "hubu.gemini-3-pro-image.image-edit/v1",
+      "pricing_version": "google-gemini-3-pro-image-edit-usd-2026-10-28-v1",
+      "pricing_reviewed_on": "2026-10-28",
+      "target": {
+        "provider_config_version": "hubu-gemini-3-pro-image-edit-2026-10-28-v1",
+        "workload_type": "image_edit",
+        "provider": "google",
+        "adapter": "gemini_developer_image",
+        "model": "gemini-3-pro-image",
+        "active": true,
+        "execution_enabled": true,
+        "settings": {
+          "type": "pack",
+          "config": {
+            "archetype": "sync_fixed",
+            "pack_digest": "sha256:73a866cc3c44baf7d0478c853877da942dd09a2548ba70bcce6b48d61a9ed284",
+            "pack_id": "google-gemini-developer-image-edit",
+            "pack_version": "2026-10-28.1"
+          }
+        }
+      },
+      "capability": {
+        "image_count": 1,
+        "output_formats": [
+          "png",
+          "jpeg"
+        ],
+        "presets": [
+          {
+            "height": 1024,
+            "name": "1k-1:1",
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "1k"
+            },
+            "width": 1024
+          },
+          {
+            "height": 1264,
+            "name": "1k-2:3",
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "1k"
+            },
+            "width": 848
+          },
+          {
+            "height": 848,
+            "name": "1k-3:2",
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "1k"
+            },
+            "width": 1264
+          },
+          {
+            "height": 1200,
+            "name": "1k-3:4",
+            "when": {
+              "aspect_ratio": "3:4",
+              "image_size": "1k"
+            },
+            "width": 896
+          },
+          {
+            "height": 896,
+            "name": "1k-4:3",
+            "when": {
+              "aspect_ratio": "4:3",
+              "image_size": "1k"
+            },
+            "width": 1200
+          },
+          {
+            "height": 1152,
+            "name": "1k-4:5",
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "1k"
+            },
+            "width": 928
+          },
+          {
+            "height": 928,
+            "name": "1k-5:4",
+            "when": {
+              "aspect_ratio": "5:4",
+              "image_size": "1k"
+            },
+            "width": 1152
+          },
+          {
+            "height": 1376,
+            "name": "1k-9:16",
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "1k"
+            },
+            "width": 768
+          },
+          {
+            "height": 768,
+            "name": "1k-16:9",
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "1k"
+            },
+            "width": 1376
+          },
+          {
+            "height": 672,
+            "name": "1k-21:9",
+            "when": {
+              "aspect_ratio": "21:9",
+              "image_size": "1k"
+            },
+            "width": 1584
+          },
+          {
+            "height": 2048,
+            "name": "2k-1:1",
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "2k"
+            },
+            "width": 2048
+          },
+          {
+            "height": 2528,
+            "name": "2k-2:3",
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "2k"
+            },
+            "width": 1696
+          },
+          {
+            "height": 1696,
+            "name": "2k-3:2",
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "2k"
+            },
+            "width": 2528
+          },
+          {
+            "height": 2400,
+            "name": "2k-3:4",
+            "when": {
+              "aspect_ratio": "3:4",
+              "image_size": "2k"
+            },
+            "width": 1792
+          },
+          {
+            "height": 1792,
+            "name": "2k-4:3",
+            "when": {
+              "aspect_ratio": "4:3",
+              "image_size": "2k"
+            },
+            "width": 2400
+          },
+          {
+            "height": 2304,
+            "name": "2k-4:5",
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "2k"
+            },
+            "width": 1856
+          },
+          {
+            "height": 1856,
+            "name": "2k-5:4",
+            "when": {
+              "aspect_ratio": "5:4",
+              "image_size": "2k"
+            },
+            "width": 2304
+          },
+          {
+            "height": 2752,
+            "name": "2k-9:16",
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "2k"
+            },
+            "width": 1536
+          },
+          {
+            "height": 1536,
+            "name": "2k-16:9",
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "2k"
+            },
+            "width": 2752
+          },
+          {
+            "height": 1344,
+            "name": "2k-21:9",
+            "when": {
+              "aspect_ratio": "21:9",
+              "image_size": "2k"
+            },
+            "width": 3168
+          },
+          {
+            "height": 4096,
+            "name": "4k-1:1",
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "4k"
+            },
+            "width": 4096
+          },
+          {
+            "height": 5056,
+            "name": "4k-2:3",
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "4k"
+            },
+            "width": 3392
+          },
+          {
+            "height": 3392,
+            "name": "4k-3:2",
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "4k"
+            },
+            "width": 5056
+          },
+          {
+            "height": 4800,
+            "name": "4k-3:4",
+            "when": {
+              "aspect_ratio": "3:4",
+              "image_size": "4k"
+            },
+            "width": 3584
+          },
+          {
+            "height": 3584,
+            "name": "4k-4:3",
+            "when": {
+              "aspect_ratio": "4:3",
+              "image_size": "4k"
+            },
+            "width": 4800
+          },
+          {
+            "height": 4608,
+            "name": "4k-4:5",
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "4k"
+            },
+            "width": 3712
+          },
+          {
+            "height": 3712,
+            "name": "4k-5:4",
+            "when": {
+              "aspect_ratio": "5:4",
+              "image_size": "4k"
+            },
+            "width": 4608
+          },
+          {
+            "height": 5504,
+            "name": "4k-9:16",
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "4k"
+            },
+            "width": 3072
+          },
+          {
+            "height": 3072,
+            "name": "4k-16:9",
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "4k"
+            },
+            "width": 5504
+          },
+          {
+            "height": 2688,
+            "name": "4k-21:9",
+            "when": {
+              "aspect_ratio": "21:9",
+              "image_size": "4k"
+            },
+            "width": 6336
+          }
+        ]
+      },
+      "policies": {
+        "generation_retries": 0,
+        "fallback": false,
+        "poll": "synchronous-response-v1",
+        "artifact_delivery": "google-inline-image-v1",
+        "recovery": "hubu-durable-synchronous-replay-v1"
+      },
+      "pricing_rules": [
+        {
+          "components": [
+            {
+              "rate_denominator": 10,
+              "rate_numerator_minor": 134,
+              "unit": "image"
+            },
+            {
+              "rate_denominator": 1000,
+              "rate_numerator_minor": 112,
+              "unit": "input_image"
+            }
+          ],
+          "currency": "USD",
+          "model": "gemini-3-pro-image",
+          "provider": "google",
+          "rule_id": "google-gemini-3-pro-image-edit-1k-2026-10-28-v1",
+          "selector": {
+            "image_size": "1k"
+          },
+          "workload_type": "image_edit"
+        },
+        {
+          "components": [
+            {
+              "rate_denominator": 10,
+              "rate_numerator_minor": 134,
+              "unit": "image"
+            },
+            {
+              "rate_denominator": 1000,
+              "rate_numerator_minor": 112,
+              "unit": "input_image"
+            }
+          ],
+          "currency": "USD",
+          "model": "gemini-3-pro-image",
+          "provider": "google",
+          "rule_id": "google-gemini-3-pro-image-edit-2k-2026-10-28-v1",
+          "selector": {
+            "image_size": "2k"
+          },
+          "workload_type": "image_edit"
+        },
+        {
+          "components": [
+            {
+              "rate_denominator": 1,
+              "rate_numerator_minor": 24,
+              "unit": "image"
+            },
+            {
+              "rate_denominator": 1000,
+              "rate_numerator_minor": 112,
+              "unit": "input_image"
+            }
+          ],
+          "currency": "USD",
+          "model": "gemini-3-pro-image",
+          "provider": "google",
+          "rule_id": "google-gemini-3-pro-image-edit-4k-2026-10-28-v1",
+          "selector": {
+            "image_size": "4k"
+          },
+          "workload_type": "image_edit"
+        }
+      ]
     }
   ]
 }
