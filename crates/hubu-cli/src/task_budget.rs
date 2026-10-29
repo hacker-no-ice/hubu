@@ -1,12 +1,13 @@
-//! `hubu budget task`: open, close, list and show task-scoped budgets.
+//! `hubu budget task`: open, close, list and show task-scoped budgets, and
+//! review agents' task budget proposals and close requests.
 
 use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Value};
 
 use crate::{
-    ensure_no_args, get_json, local_timestamp, money, money_at, normalize_currency, post_json,
-    string_at, take_flag, take_help, take_required, take_value, terminal, terminal_safe_text,
-    u64_at, CliContext,
+    ensure_no_args, get_json, local_timestamp, money, money_at, normalize_currency,
+    post_approval_json, post_json, string_at, take_flag, take_help, take_required, take_value,
+    terminal, terminal_safe_text, u64_at, CliContext,
 };
 
 pub(crate) fn command(client: &CliContext, mut args: Vec<String>) -> Result<()> {
@@ -20,6 +21,7 @@ pub(crate) fn command(client: &CliContext, mut args: Vec<String>) -> Result<()> 
         "close" => close(client, args),
         "list" => list(client, args),
         "show" => show(client, args),
+        "approval" => approval(client, args),
         "-h" | "--help" | "help" => {
             print_help();
             Ok(())
@@ -149,6 +151,41 @@ fn show(client: &CliContext, mut args: Vec<String>) -> Result<()> {
     }
 }
 
+/// Task budget approval ids carry this prefix.
+pub(crate) const APPROVAL_ID_PREFIX: &str = "tba_";
+
+fn approval(client: &CliContext, mut args: Vec<String>) -> Result<()> {
+    if take_help(&mut args) || args.is_empty() {
+        print_help();
+        return Ok(());
+    }
+    let action = args.remove(0);
+    let approval_request_id = take_required(&mut args, "--approval-request-id")?;
+    ensure_no_args(args)?;
+    if !approval_request_id.starts_with(APPROVAL_ID_PREFIX)
+        || !approval_request_id[APPROVAL_ID_PREFIX.len()..]
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric())
+    {
+        bail!(
+            "--approval-request-id must be a task budget approval id ({APPROVAL_ID_PREFIX}...); review spend approvals with `hubu spend approval`"
+        );
+    }
+    let response = match action.as_str() {
+        "get" => get_json(
+            client,
+            &format!("/task-budgets/approvals?approval_request_id={approval_request_id}"),
+        )?,
+        "approve" | "deny" => post_approval_json(
+            client,
+            "/task-budgets/approvals/resolve",
+            json!({"approval_request_id": approval_request_id, "decision": action}),
+        )?,
+        _ => bail!("unknown budget task approval action `{action}`; use get, approve, or deny"),
+    };
+    print_task_budget_approval(&response)
+}
+
 /// Task budgets from the server; open ones unless `include_all`.
 pub(crate) fn fetch(
     client: &CliContext,
@@ -234,14 +271,6 @@ pub(crate) fn print_task_budget(task_budget: &Value) -> Result<()> {
     Ok(())
 }
 
-/// Whether an approval link response is a task budget approval request.
-pub(crate) fn is_task_budget_approval(approval: &Value) -> bool {
-    approval
-        .get("kind")
-        .and_then(Value::as_str)
-        .is_some_and(|kind| kind.starts_with("task_budget_"))
-}
-
 fn print_task_budget_approval_summary(approval: &Value) -> Result<()> {
     let review = approval
         .get("review")
@@ -273,6 +302,7 @@ pub(crate) fn print_task_budget_approval(approval: &Value) -> Result<()> {
             "Task budget close request"
         })
     );
+    println!("  {}", terminal_safe_text(string_at(approval, "summary")?));
     println!(
         "  approval_request_id: {}",
         string_at(approval, "approval_request_id")?
@@ -320,17 +350,24 @@ cannot use its unused part. Closing returns the unused part to the agent
 budget. Closing is refused while an authorization is outstanding.
 
 You open and close directly. An agent instead proposes a task budget or asks
-to close one; `list` shows those requests, and you resolve them with
-`hubu spend approval approve|deny --approval-request-id tba_...`.
+to close one; `list` shows those requests, and you review and resolve them with
+`hubu budget task approval`. Approving a proposal opens the task budget and
+reserves its limit; approving a close request closes it and returns the unused
+amount, so check that the task is done first. Denying a close request keeps the
+task budget open. Requests expire after 24 hours. A task budget request never
+authorizes spend: each spend request still goes through `hubu spend approval`
+when policy asks for one.
 
 Usage:
   hubu budget task open --agent-id ID --task-id TASK --amount DECIMAL [--currency usd|usdc] [--reason TEXT]
   hubu budget task close --task-budget-id ID
   hubu budget task list [--agent-id ID] [--all]
   hubu budget task show (--task-budget-id ID | --agent-id ID --task-id TASK)
+  hubu budget task approval get|approve|deny --approval-request-id tba_ID
 
 Examples:
   hubu budget task open --agent-id AGENT_ID --task-id landing-page --amount 3
-  hubu budget task close --task-budget-id tbg_0123456789ab"
+  hubu budget task close --task-budget-id tbg_0123456789ab
+  hubu budget task approval approve --approval-request-id tba_0123456789ab"
     );
 }

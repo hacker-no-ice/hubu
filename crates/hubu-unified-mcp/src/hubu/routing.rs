@@ -218,6 +218,7 @@ pub(super) fn route_tool_call_v1(
         }
         "hubu_get_spend_approval" => {
             let approval_request_id = spend_approval_request_id(&arguments, name, 1)?;
+            super::task_budget::reject_on_spend_tool(&approval_request_id, name)?;
             PreparedHubuCallV1::Http(
                 HubuHttpRequestV1 {
                     method: "GET",
@@ -231,6 +232,7 @@ pub(super) fn route_tool_call_v1(
         "hubu_resolve_spend_approval" => {
             require_trusted_spend_approval(config, name)?;
             let approval_request_id = spend_approval_request_id(&arguments, name, 2)?;
+            super::task_budget::reject_on_spend_tool(&approval_request_id, name)?;
             let decision = arguments
                 .get("decision")
                 .and_then(Value::as_str)
@@ -258,6 +260,18 @@ pub(super) fn route_tool_call_v1(
             super::task_budget::close_body(arguments)?,
         ),
         super::task_budget::LIST_TOOL => get_request(super::task_budget::list_path(&arguments)?),
+        super::task_budget::GET_APPROVAL_TOOL => {
+            get_request(super::task_budget::approval_path(&arguments)?)
+        }
+        super::task_budget::RESOLVE_APPROVAL_TOOL => {
+            require_trusted_spend_approval(config, name)?;
+            post_request_with(
+                super::task_budget::APPROVAL_RESOLVE_PATH,
+                super::task_budget::resolve_approval_body(&arguments)?,
+                HubuRequestCapabilityV1::Approval,
+                HubuResponseTransformV1::Plain,
+            )
+        }
         "hubu_list_agents" => get_request("/agents"),
         "hubu_list_budgets" => {
             if arguments

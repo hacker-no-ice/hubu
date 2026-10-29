@@ -151,6 +151,14 @@ fn cases() -> Vec<GoldenCase> {
             meta: None,
         },
         GoldenCase {
+            name: "hubu_get_task_budget_approval",
+            owner: hubu,
+            method: "GET",
+            path: "/task-budgets/approvals?approval_request_id=tba_0123456789ab",
+            arguments: json!({"approval_request_id":"tba_0123456789ab"}),
+            meta: None,
+        },
+        GoldenCase {
             name: "hubu_list_agents",
             owner: hubu,
             method: "GET",
@@ -317,6 +325,14 @@ fn cases() -> Vec<GoldenCase> {
             meta: None,
         },
         GoldenCase {
+            name: "hubu_resolve_task_budget_approval",
+            owner: hubu,
+            method: "POST",
+            path: "/task-budgets/approvals/resolve",
+            arguments: json!({"approval_request_id":"tba_0123456789ab","decision":"approve"}),
+            meta: None,
+        },
+        GoldenCase {
             name: "hubu_revoke_budget",
             owner: hubu,
             method: "POST",
@@ -383,8 +399,8 @@ fn assert_complete_unique_matrix(cases: &[GoldenCase]) {
     );
     assert_eq!(
         cases.len(),
-        39,
-        "golden matrix must contain exactly 39 cases"
+        41,
+        "golden matrix must contain exactly 41 cases"
     );
     let fixture = routing_fixture();
     let expected_names = fixture["tools"]
@@ -397,8 +413,8 @@ fn assert_complete_unique_matrix(cases: &[GoldenCase]) {
     let expected = expected_names.iter().copied().collect::<BTreeSet<_>>();
     assert_eq!(
         expected_names.len(),
-        39,
-        "routing fixture must map 39 tools"
+        41,
+        "routing fixture must map 41 tools"
     );
     assert_eq!(
         expected.len(),
@@ -414,7 +430,7 @@ fn assert_complete_unique_matrix(cases: &[GoldenCase]) {
             .iter()
             .filter(|case| case.owner == Owner::Hubu)
             .count(),
-        34
+        36
     );
     assert_eq!(
         cases
@@ -519,6 +535,14 @@ fn success_body(case: &GoldenCase) -> Value {
             },
             "auth_token_id":"fixture-private-approval-token",
             "authorization_expires_at":"2099-01-01T00:00:00Z"
+        }),
+        "hubu_get_task_budget_approval" | "hubu_resolve_task_budget_approval" => json!({
+            "approval_request_id":"tba_0123456789ab",
+            "kind":"task_budget_open",
+            "status":if case.name == "hubu_get_task_budget_approval" { "pending" } else { "approved" },
+            "summary":"Task budget: open USD 3.00 for task fixture-task. This reserves budget and does not authorize spend.",
+            "review":{"agent_id":"agt_0123456789ab","task_id":"fixture-task","currency":"usd"},
+            "task_budget":null
         }),
         "hubu_update_budget" => json!({
             "applied_version": {

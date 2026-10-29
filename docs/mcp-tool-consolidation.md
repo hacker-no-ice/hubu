@@ -107,7 +107,9 @@ they remain available through authenticated Gongbu operator endpoints.
 | Tool | Prerequisites | Purpose |
 | --- | --- | --- |
 | `hubu_get_spend_approval` | Hubu | Immutable approval review |
-| `hubu_resolve_spend_approval` | Hubu | Explicit human approve/deny gate for spend and `tba_` task budget requests |
+| `hubu_resolve_spend_approval` | Hubu | Explicit human approve/deny gate for spend; refuses `tba_` ids |
+| `hubu_get_task_budget_approval` | Hubu | Review one `tba_` task budget proposal or close request |
+| `hubu_resolve_task_budget_approval` | Hubu | Explicit human approve/deny gate for `tba_` task budget requests; never authorizes spend |
 | `hubu_operation_status` | store | Observe a public operation handle in the MCP store |
 | `hubu_resume_operation` | Hubu + store | Resume the stored, approved intent |
 

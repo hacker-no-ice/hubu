@@ -18,8 +18,14 @@ use crate::{Server, ToolCall};
 pub(crate) const OPEN_TOOL: &str = "hubu_open_task_budget";
 pub(crate) const CLOSE_TOOL: &str = "hubu_close_task_budget";
 pub(crate) const LIST_TOOL: &str = "hubu_list_task_budgets";
+pub(crate) const GET_APPROVAL_TOOL: &str = "hubu_get_task_budget_approval";
+pub(crate) const RESOLVE_APPROVAL_TOOL: &str = "hubu_resolve_task_budget_approval";
 pub(crate) const PROPOSAL_PATH: &str = "/task-budgets/proposals";
 pub(crate) const CLOSE_REQUEST_PATH: &str = "/task-budgets/close-requests";
+pub(crate) const APPROVAL_PATH: &str = "/task-budgets/approvals";
+pub(crate) const APPROVAL_RESOLVE_PATH: &str = "/task-budgets/approvals/resolve";
+/// Task budget approval ids carry this prefix; spend approval tools refuse it.
+pub(crate) const APPROVAL_ID_PREFIX: &str = "tba_";
 const SOURCE: &str = "hubu-unified-mcp";
 
 /// The task this session's spend operations carry, and the proposal and task
@@ -91,6 +97,72 @@ pub(super) fn close_body(arguments: Value) -> Result<Value> {
         Some(_) => bail!("{CLOSE_TOOL} reason must be a string"),
     };
     Ok(json!({"task_budget_id": task_budget_id, "reason": reason, "source": SOURCE}))
+}
+
+/// Whether a tool reviews or resolves a task budget approval request.
+pub(crate) fn is_approval_tool(name: &str) -> bool {
+    matches!(name, GET_APPROVAL_TOOL | RESOLVE_APPROVAL_TOOL)
+}
+
+/// The `tba_` id a task budget approval tool names.
+pub(super) fn approval_request_id(
+    arguments: &Value,
+    tool: &str,
+    fields: &[&str],
+) -> Result<String> {
+    reject_unknown(arguments, tool, fields)?;
+    match arguments.get("approval_request_id") {
+        Some(Value::String(id))
+            if id.len() > APPROVAL_ID_PREFIX.len()
+                && id.len() <= 64
+                && id.starts_with(APPROVAL_ID_PREFIX)
+                && id[APPROVAL_ID_PREFIX.len()..]
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric()) =>
+        {
+            Ok(id.clone())
+        }
+        _ => bail!(
+            "{tool} requires a task budget approval_request_id ({APPROVAL_ID_PREFIX}...); review spend approvals with hubu_get_spend_approval"
+        ),
+    }
+}
+
+pub(super) fn approval_path(arguments: &Value) -> Result<String> {
+    let approval_request_id =
+        approval_request_id(arguments, GET_APPROVAL_TOOL, &["approval_request_id"])?;
+    Ok(format!(
+        "{APPROVAL_PATH}?approval_request_id={approval_request_id}"
+    ))
+}
+
+pub(super) fn resolve_approval_body(arguments: &Value) -> Result<Value> {
+    let approval_request_id = approval_request_id(
+        arguments,
+        RESOLVE_APPROVAL_TOOL,
+        &["approval_request_id", "decision"],
+    )?;
+    let decision = arguments
+        .get("decision")
+        .and_then(Value::as_str)
+        .filter(|decision| matches!(*decision, "approve" | "deny"))
+        .ok_or_else(|| anyhow!("{RESOLVE_APPROVAL_TOOL} requires decision approve or deny"))?;
+    Ok(json!({"approval_request_id": approval_request_id, "decision": decision}))
+}
+
+/// Spend approval tools cover spend only.
+pub(super) fn reject_on_spend_tool(approval_request_id: &str, tool: &str) -> Result<()> {
+    if approval_request_id.starts_with(APPROVAL_ID_PREFIX) {
+        let replacement = if tool == "hubu_resolve_spend_approval" {
+            RESOLVE_APPROVAL_TOOL
+        } else {
+            GET_APPROVAL_TOOL
+        };
+        bail!(
+            "{approval_request_id} is a task budget approval request, not a spend approval; use {replacement}"
+        );
+    }
+    Ok(())
 }
 
 pub(super) fn list_path(arguments: &Value) -> Result<String> {

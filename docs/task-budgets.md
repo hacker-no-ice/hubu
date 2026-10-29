@@ -107,16 +107,27 @@ draws from the agent budget, unless a new task budget is opened.
 
 ## Approval requests
 
-Proposals and close requests are approval requests with `tba_` ids. They use
-the same approval link as spend approvals: `GET
-/spend/approval?approval_request_id=tba_…` returns the review, and `POST
-/spend/approval/resolve` with the human approval capability approves or
-denies it. The CLI is `hubu spend approval get|approve|deny
---approval-request-id tba_…`, and MCP clients use `hubu_get_spend_approval`
-and the protected `hubu_resolve_spend_approval`.
+Proposals and close requests are task budget approval requests with `tba_`
+ids. They have their own entry points, separate from spend approval, because a
+task budget request reserves or returns budget and never authorizes spend:
+
+| Surface | Review | Resolve |
+| --- | --- | --- |
+| HTTP | `GET /task-budgets/approvals?approval_request_id=tba_…` | `POST /task-budgets/approvals/resolve` with the human approval capability |
+| CLI | `hubu budget task approval get --approval-request-id tba_…` | `hubu budget task approval approve\|deny --approval-request-id tba_…` |
+| MCP | `hubu_get_task_budget_approval` | protected `hubu_resolve_task_budget_approval` |
+
+Spend approval entry points refuse `tba_` ids. `GET /spend/approval` and `POST
+/spend/approval/resolve` return `400 task_budget_approval_not_spend` with the
+task budget route in `task_budget_approval_route`; `hubu spend approval` and
+`hubu_get_spend_approval` / `hubu_resolve_spend_approval` fail before any
+network call and name the task budget command or tool. Internally both kinds
+share the human approval capability and the same client prompt gate.
 
 A task budget approval carries `kind` (`task_budget_open` or
-`task_budget_close`), `status` (`pending`, `approved`, `denied` or `expired`),
+`task_budget_close`), a `summary` that says what approving does (for example
+"Task budget: open USD 3.00 for task landing-page. This reserves budget and
+does not authorize spend."), `status` (`pending`, `approved`, `denied` or `expired`),
 a `review` with the agent, task, currency, exact `amount_limit`, reason, who
 requested it and when, and `expires_at`, plus the `task_budget` it opened or
 would close. Repeating a decision returns the request with
@@ -184,7 +195,8 @@ a pending close request and lists proposals waiting for approval.
 
 An agent cannot open or close a task budget by itself. `hubu_open_task_budget`
 sends a proposal and `hubu_close_task_budget` sends a close request. A human
-resolves each on the approval link. This replaces HUB-259 decision D, under
+resolves each through the task budget approval entry points. This replaces
+HUB-259 decision D, under
 which the MCP tools opened and closed with no human click. The MCP router can
 reach only the proposal and close-request routes, not the direct ones.
 
@@ -196,7 +208,8 @@ execution) carry its `task_id`. Hubu denies them until the proposal is
 approved, then the task budget caps them. A close request keeps the binding, so
 Hubu refuses new spend while it is pending. The binding ends when the session
 sees the task budget closed, or its proposal denied or expired, through a close
-result or `hubu_get_spend_approval` / `hubu_resolve_spend_approval`. Only the
+result or `hubu_get_task_budget_approval` /
+`hubu_resolve_task_budget_approval`. Only the
 bound proposal and the task budget it opened count: reading an earlier
 proposal or closed task budget for the same task leaves the binding in place.
 Proposing another task replaces it. A closed task budget's task otherwise draws from the

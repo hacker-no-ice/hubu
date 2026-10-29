@@ -113,6 +113,11 @@ provider work; the unified MCP flow resumes it separately by public operation
 handle. Denial ends it. Repeating the same resolution is idempotent, while a
 conflicting resolution is rejected.
 
+Spend approval covers spend only. A task budget proposal or close request
+(`tba_` id) is reviewed and resolved through its own
+[task budget approval](task-budgets.md#approval-requests) entry points, and the
+spend approval routes, CLI and MCP tools refuse it.
+
 ## Budgets and spending targets
 
 Supported budget creation, total-limit updates, and revocation enter through

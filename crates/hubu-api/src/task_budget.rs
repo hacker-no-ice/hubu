@@ -2,8 +2,9 @@
 //! agent proposals and close requests that a human approves.
 //!
 //! A human opens and closes directly. An agent proposes or requests close;
-//! the request is resolved on the shared approval link
-//! (`/spend/approval?approval_request_id=tba_..`).
+//! a human reviews and resolves the request on the task budget approval
+//! routes (`/task-budgets/approvals`). Spend approval routes refuse `tba_` ids:
+//! a task budget request reserves or returns budget and never authorizes spend.
 //!
 //! Amounts are exact decimals only; task budgets have no legacy cent fields.
 use super::*;
@@ -21,6 +22,44 @@ pub(super) const CLOSE_ROUTE: &str = "/task-budgets/close";
 pub(super) const SHOW_ROUTE: &str = "/task-budgets/show";
 pub(super) const PROPOSAL_ROUTE: &str = "/task-budgets/proposals";
 pub(super) const CLOSE_REQUEST_ROUTE: &str = "/task-budgets/close-requests";
+pub(super) const APPROVAL_ROUTE: &str = "/task-budgets/approvals";
+pub(super) const APPROVAL_RESOLVE_ROUTE: &str = "/task-budgets/approvals/resolve";
+
+/// A `tba_` id sent to a spend approval route.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "{approval_request_id} is a task budget approval request, not a spend approval; use {route}"
+)]
+pub(super) struct NotASpendApproval {
+    approval_request_id: String,
+    route: &'static str,
+}
+
+/// Refuse a task budget approval id on a spend approval route.
+pub(super) fn reject_on_spend_route(approval_request_id: &str, route: &'static str) -> Result<()> {
+    if is_approval_request_id(approval_request_id) {
+        return Err(NotASpendApproval {
+            approval_request_id: approval_request_id.to_owned(),
+            route,
+        }
+        .into());
+    }
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResolveTaskBudgetApprovalHttpRequest {
+    approval_request_id: String,
+    decision: TaskBudgetApprovalHttpDecision,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum TaskBudgetApprovalHttpDecision {
+    Approve,
+    Deny,
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -82,6 +121,9 @@ pub(super) struct TaskBudgetApprovalHttpResponse {
     approval_request_id: String,
     /// `task_budget_open` or `task_budget_close`.
     kind: &'static str,
+    /// What approving does, in words a human reviewer reads. A task budget
+    /// request reserves or returns budget; it never authorizes spend.
+    summary: String,
     /// `pending`, `approved`, `denied` or `expired`.
     status: &'static str,
     review: TaskBudgetApprovalReviewHttpResponse,
@@ -333,12 +375,13 @@ pub(super) fn is_approval_request_id(approval_request_id: &str) -> bool {
     approval_request_id.starts_with(TASK_BUDGET_APPROVAL_ID_PREFIX)
 }
 
-/// `GET /spend/approval?approval_request_id=tba_..`: the human review.
+/// `GET /task-budgets/approvals?approval_request_id=tba_..`: the human review.
 pub(super) fn get_approval(
-    approval_request_id: &str,
+    request: &HttpRequest,
     state: &ServerState,
     now: DateTime<Utc>,
 ) -> Result<Value> {
+    let approval_request_id = approval_request_id(request.query.get("approval_request_id"))?;
     let user = authenticated_user(state)?;
     let snapshot = state
         .governance
@@ -349,15 +392,28 @@ pub(super) fn get_approval(
     Ok(to_json(approval_response(&snapshot, now, state)?))
 }
 
-/// `POST /spend/approval/resolve` for a `tba_` id, behind the human approval
+/// Only `tba_` ids name task budget approval requests.
+fn approval_request_id(approval_request_id: Option<&String>) -> Result<&str> {
+    let approval_request_id = approval_request_id
+        .map(String::as_str)
+        .ok_or_else(|| anyhow!("approval_request_id is required"))?;
+    if !is_approval_request_id(approval_request_id) {
+        return Err(TaskBudgetError::UnknownApproval.into());
+    }
+    Ok(approval_request_id)
+}
+
+/// `POST /task-budgets/approvals/resolve`, behind the human approval
 /// capability. Approving a proposal opens the task budget; approving a close
 /// request closes it and returns the unused amount.
 pub(super) fn resolve_approval(
-    approval_request_id: &str,
-    approve: bool,
+    body: String,
     state: &ServerState,
     now: DateTime<Utc>,
 ) -> Result<Value> {
+    let request: ResolveTaskBudgetApprovalHttpRequest = serde_json::from_str(&body)?;
+    let approval_request_id = approval_request_id(Some(&request.approval_request_id))?;
+    let approve = matches!(request.decision, TaskBudgetApprovalHttpDecision::Approve);
     let user = authenticated_user(state)?;
     // An expired hold is not outstanding; sweep it before a close approval.
     reconcile_expired_budget_holds_at(state, now)?;
@@ -530,6 +586,7 @@ pub(super) fn approval_response(
             TaskBudgetApprovalKind::Open => "task_budget_open",
             TaskBudgetApprovalKind::Close => "task_budget_close",
         },
+        summary: approval_summary(approval),
         status: status.as_str(),
         review: TaskBudgetApprovalReviewHttpResponse {
             agent_id: registration_agent_pub_id(&approval.agent_id, state)?,
@@ -552,8 +609,34 @@ pub(super) fn approval_response(
     })
 }
 
+/// One-line review wording for a task budget approval request.
+pub(super) fn approval_summary(approval: &TaskBudgetApproval) -> String {
+    let amount = MoneyHttpResponse::new(approval.amount_limit, approval.currency).display;
+    let currency = approval.currency.to_string().to_uppercase();
+    match approval.kind {
+        TaskBudgetApprovalKind::Open => format!(
+            "Task budget: open {currency} {amount} for task {}. This reserves budget and does not authorize spend.",
+            approval.task_id
+        ),
+        TaskBudgetApprovalKind::Close => format!(
+            "Task budget: close the {currency} {amount} task budget for task {} and return its unused amount to the agent budget. This does not authorize spend.",
+            approval.task_id
+        ),
+    }
+}
+
 /// Structured status and code for task budget command failures.
 pub(super) fn error_response(error: &anyhow::Error) -> Option<HttpResponse> {
+    if let Some(rejected) = error.downcast_ref::<NotASpendApproval>() {
+        return Some(HttpResponse {
+            status: 400,
+            body: json!({
+                "error": error.to_string(),
+                "error_code": "task_budget_approval_not_spend",
+                "task_budget_approval_route": rejected.route,
+            }),
+        });
+    }
     let (status, code) = match error.downcast_ref::<TaskBudgetError>()? {
         TaskBudgetError::InvalidTaskId | TaskBudgetError::AmountMustBePositive => {
             (400, "invalid_task_budget")

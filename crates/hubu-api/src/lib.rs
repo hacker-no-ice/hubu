@@ -2052,18 +2052,25 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
         }
         ("GET", task_budget::OPEN_ROUTE) => task_budget::list(&request, state),
         ("GET", task_budget::SHOW_ROUTE) => task_budget::show(&request, state),
+        ("GET", task_budget::APPROVAL_ROUTE) => {
+            task_budget::get_approval(&request, state, request_now)
+        }
+        ("POST", task_budget::APPROVAL_RESOLVE_ROUTE) => {
+            authenticate_approval_capability(approval_capability, state)
+                .and_then(|()| task_budget::resolve_approval(request.body, state, request_now))
+        }
         ("POST", "/spend/authorize") => {
             authorize_spend_at(request.body, state, request_now).map(to_json)
         }
-        ("GET", "/spend/approval") => match request.query.get("approval_request_id") {
-            Some(id) if task_budget::is_approval_request_id(id) => {
-                task_budget::get_approval(id, state, request_now)
-            }
-            id => get_spend_approval(id.map(String::as_str), state).map(to_json),
-        },
+        ("GET", "/spend/approval") => get_spend_approval(
+            request.query.get("approval_request_id").map(String::as_str),
+            state,
+        )
+        .map(to_json),
         ("POST", "/spend/approval/resolve") => {
-            authenticate_approval_capability(approval_capability, state)
-                .and_then(|()| resolve_approval_at(request.body, state, request_now))
+            authenticate_approval_capability(approval_capability, state).and_then(|()| {
+                resolve_spend_approval_at(request.body, state, request_now).map(to_json)
+            })
         }
         ("GET", "/spend/executor/guidance") | ("GET", "/.well-known/hubu-spend-executor.json") => {
             Ok(spend_executor_guidance(state))
@@ -4257,8 +4264,10 @@ fn get_spend_approval(
     approval_request_id: Option<&str>,
     state: &ServerState,
 ) -> Result<SpendApprovalHttpResponse> {
+    let approval_request_id =
+        approval_request_id.ok_or_else(|| anyhow!("approval_request_id is required"))?;
+    task_budget::reject_on_spend_route(approval_request_id, task_budget::APPROVAL_ROUTE)?;
     let approval_request_id: SpendDecisionId = approval_request_id
-        .ok_or_else(|| anyhow!("approval_request_id is required"))?
         .parse()
         .with_context(|| "parse approval_request_id")?;
     let user = authenticated_user_context(state)?;
@@ -4277,28 +4286,17 @@ fn get_spend_approval(
     approval_http_response(&decision, status, state)
 }
 
-/// Resolve a request on the shared approval link: a task budget approval
-/// for a `tba_` id, otherwise a spend approval.
-fn resolve_approval_at(body: String, state: &ServerState, now: DateTime<Utc>) -> Result<Value> {
-    let request: ResolveSpendApprovalHttpRequest = serde_json::from_str(&body)?;
-    if task_budget::is_approval_request_id(&request.approval_request_id) {
-        return task_budget::resolve_approval(
-            &request.approval_request_id,
-            matches!(request.decision, HumanApprovalHttpDecision::Approve),
-            state,
-            now,
-        );
-    }
-    resolve_spend_approval_at(body, state, now).map(to_json)
-}
-
 fn resolve_spend_approval_at(
     body: String,
     state: &ServerState,
     now: DateTime<Utc>,
 ) -> Result<SpendHttpResponse> {
-    reconcile_expired_budget_holds_at(state, now)?;
     let request: ResolveSpendApprovalHttpRequest = serde_json::from_str(&body)?;
+    task_budget::reject_on_spend_route(
+        &request.approval_request_id,
+        task_budget::APPROVAL_RESOLVE_ROUTE,
+    )?;
+    reconcile_expired_budget_holds_at(state, now)?;
     let approval_request_id: SpendDecisionId = request
         .approval_request_id
         .parse()
@@ -10762,7 +10760,7 @@ lease_profiles:
     }
 
     #[test]
-    fn agent_task_budget_requests_wait_for_a_human_on_the_approval_link() {
+    fn agent_task_budget_requests_wait_for_a_human_on_task_budget_approval_routes() {
         let path = std::env::temp_dir().join(format!(
             "hubu-api-task-budget-approval-{}.sqlite",
             UserId::new()
@@ -10801,9 +10799,16 @@ lease_profiles:
         };
         let review = |id: &str| {
             route(
-                authenticated_get_request(&format!("/spend/approval?approval_request_id={id}")),
+                authenticated_get_request(&format!(
+                    "/task-budgets/approvals?approval_request_id={id}"
+                )),
                 &state,
             )
+        };
+        let resolve_request = |body: Value| {
+            let mut request = approval_json_request(body);
+            request.path = "/task-budgets/approvals/resolve".to_string();
+            request
         };
 
         let proposed = route(
@@ -10828,6 +10833,10 @@ lease_profiles:
             .to_string();
         assert!(proposal_id.starts_with("tba_"));
         assert_eq!(proposal["kind"], "task_budget_open");
+        assert_eq!(
+            proposal["summary"],
+            "Task budget: open USD 3.00 for task landing-page. This reserves budget and does not authorize spend."
+        );
         assert_eq!(proposal["status"], "pending");
         assert_eq!(proposal["review"]["amount_limit"]["units"], "3000000");
         assert!(proposal["review"].get("amount_limit_cents").is_none());
@@ -10851,15 +10860,42 @@ lease_profiles:
         let shown = review(&proposal_id);
         assert_eq!(shown.status, 200, "{}", shown.body);
         assert_eq!(shown.body["review"]["task_id"], "landing-page");
-        let mut bearer_only = approval_json_request(
-            json!({"approval_request_id": proposal_id, "decision": "approve"}),
+
+        // Spend approval routes refuse task budget requests and point to
+        // the task budget routes instead of resolving them.
+        let spend_review = route(
+            authenticated_get_request(&format!(
+                "/spend/approval?approval_request_id={proposal_id}"
+            )),
+            &state,
         );
-        bearer_only.headers.remove(APPROVAL_CAPABILITY_HEADER);
-        assert_ne!(route(bearer_only, &state).status, 200);
-        let opened = route(
+        assert_eq!(spend_review.status, 400, "{}", spend_review.body);
+        assert_eq!(
+            spend_review.body["error_code"],
+            "task_budget_approval_not_spend"
+        );
+        assert_eq!(
+            spend_review.body["task_budget_approval_route"],
+            "/task-budgets/approvals"
+        );
+        let spend_resolve = route(
             approval_json_request(
                 json!({"approval_request_id": proposal_id, "decision": "approve"}),
             ),
+            &state,
+        );
+        assert_eq!(spend_resolve.status, 400, "{}", spend_resolve.body);
+        assert_eq!(
+            spend_resolve.body["task_budget_approval_route"],
+            "/task-budgets/approvals/resolve"
+        );
+        assert_eq!(review(&proposal_id).body["status"], "pending");
+        let mut bearer_only =
+            resolve_request(json!({"approval_request_id": proposal_id, "decision": "approve"}));
+        bearer_only.headers.remove(APPROVAL_CAPABILITY_HEADER);
+        assert_ne!(route(bearer_only, &state).status, 200);
+        let opened = route(
+            resolve_request(json!({"approval_request_id": proposal_id, "decision": "approve"})),
             &state,
         );
         assert_eq!(opened.status, 200, "{}", opened.body);
@@ -10895,6 +10931,10 @@ lease_profiles:
             .unwrap()
             .to_string();
         assert_eq!(requested.body["approval"]["kind"], "task_budget_close");
+        assert!(requested.body["approval"]["summary"]
+            .as_str()
+            .unwrap()
+            .ends_with("This does not authorize spend."));
         assert_eq!(requested.body["task_budget"]["state"], "open");
         assert_eq!(
             requested.body["task_budget"]["close_approval_request_id"],
@@ -10909,7 +10949,7 @@ lease_profiles:
 
         // The outstanding draft must settle or release before the close.
         let refused = route(
-            approval_json_request(json!({"approval_request_id": close_id, "decision": "approve"})),
+            resolve_request(json!({"approval_request_id": close_id, "decision": "approve"})),
             &state,
         );
         assert_eq!(refused.status, 409);
@@ -10931,7 +10971,7 @@ lease_profiles:
         );
         assert_eq!(voided.status, 200, "{}", voided.body);
         let closed = route(
-            approval_json_request(json!({"approval_request_id": close_id, "decision": "approve"})),
+            resolve_request(json!({"approval_request_id": close_id, "decision": "approve"})),
             &state,
         );
         assert_eq!(closed.status, 200, "{}", closed.body);
@@ -10942,12 +10982,12 @@ lease_profiles:
             "3000000"
         );
         let replay = route(
-            approval_json_request(json!({"approval_request_id": close_id, "decision": "approve"})),
+            resolve_request(json!({"approval_request_id": close_id, "decision": "approve"})),
             &state,
         );
         assert_eq!(replay.body["idempotent_replay"], true);
         let conflicting = route(
-            approval_json_request(json!({"approval_request_id": close_id, "decision": "deny"})),
+            resolve_request(json!({"approval_request_id": close_id, "decision": "deny"})),
             &state,
         );
         assert_eq!(conflicting.status, 409);

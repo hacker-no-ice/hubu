@@ -127,8 +127,9 @@ With `--stack-profile`, the command consumes the verified handoff from an
 already running stack and writes the managed MCP entry; managed startup has
 already created the required capabilities. The non-stack setup form may create
 or reuse its manual local defaults. Both forms generate per-tool approval
-settings alongside Hubu's tool approval annotations. The resolver is rendered with
-`approval_mode = "prompt"`; spend submission and public-handle resume retain
+settings alongside Hubu's tool approval annotations. Both resolvers
+(`hubu_resolve_spend_approval` and `hubu_resolve_task_budget_approval`) are
+rendered with `approval_mode = "prompt"`; spend submission and public-handle resume retain
 their non-interactive client policy because Hubu's durable decision remains the
 authority. Restart Codex after changing the generated configuration.
 
@@ -232,16 +233,16 @@ only when the human answers yes at its one-time prompt or passes
 
 `hubu_open_task_budget` and `hubu_close_task_budget` need no client prompt
 because they change nothing on their own. The first proposes a task budget and
-the second requests its close. Each returns a `tba_` approval request that a
-human resolves on the same approval link as spend approvals, through
-`hubu_resolve_spend_approval` or `hubu spend approval`. Proposing binds the
+the second requests its close. Each returns a `tba_` task budget approval
+request that a human resolves through `hubu_resolve_task_budget_approval` or
+`hubu budget task approval`, not through spend approval. Proposing binds the
 task to the MCP session, so later spend operations in that session carry it:
 Hubu denies them until the proposal is approved and while a close request is
 pending. See [task budgets](task-budgets.md).
 
-Spend approval resolution uses the narrower
+Spend approval resolution and task budget approval resolution use the narrower
 `HUBU_MCP_TRUST_SPEND_APPROVAL=1` gate. `hubu init codex` always renders that
-gate together with the per-tool native prompt, without enabling the broader
+gate together with a native prompt for each resolver tool, without enabling the broader
 administrative surface. The broad gate also satisfies the resolver gate when
 an operator deliberately enables it. Approval authority is loaded from the
 separate local capability and is never accepted as a model-owned tool argument.
@@ -303,11 +304,17 @@ trusted harness identity and a newly allocated private operation key.
   later calls can project an approved or completed durable state.
 - `hubu_get_spend_approval` reads the owner-scoped immutable review and durable
   `pending`, `approved`, or `denied` status without using approval authority.
-  For a `tba_` task budget request it returns that request's `kind`, review and
-  status, which can also be `expired`.
+  It covers spend only and refuses `tba_` ids before calling Hubu.
 - `hubu_resolve_spend_approval` submits exactly one explicit human `approve` or
   `deny` decision behind the client prompt and the separate Hubu approval
-  capability. It never starts Gongbu execution or provider work.
+  capability. It never starts Gongbu execution or provider work. It refuses
+  `tba_` ids.
+- `hubu_get_task_budget_approval` and `hubu_resolve_task_budget_approval` are
+  the task budget counterparts: they accept only `tba_` ids, return the
+  request's `kind`, `summary`, review and status (which can also be
+  `expired`), and route to `/task-budgets/approvals`. The resolver has the
+  same client prompt, gate and approval capability as the spend resolver, and
+  never authorizes spend.
 - `hubu_resume_operation` accepts only a public operation handle. After an
   approval, it replays the stored immutable Hubu intent. Primitive operations
   return their original authorization or spend outcome; a governed operation

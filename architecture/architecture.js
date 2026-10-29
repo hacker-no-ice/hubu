@@ -518,7 +518,7 @@ const components = {
       ["Replay-safe", "Authorizations, claims, and settlements are keyed by agent and operation; identical retries return stored state."],
       ["Advisory targets", "Owner spending targets are separate records. Exceeding one produces a warning, never a block."],
       ["Task budgets", "A task budget caps spend carrying its trusted task_id and holds its unused part back from other spend in the same agent budget. Holds stay on the agent budget and record the task; spend so far is derived from those holds and ledger charges. Closing returns the unused part."],
-      ["Task budget approvals", "An agent's proposal reserves nothing and denies its task's spend until a human approves it; an agent's close request refuses new task spend until a human approves or rejects it. Both are tba_ requests on the spend approval link and expire after 24 hours. Human CLI/HTTP opens and closes stay direct."],
+      ["Task budget approvals", "An agent's proposal reserves nothing and denies its task's spend until a human approves it; an agent's close request refuses new task spend until a human approves or rejects it. Both are tba_ requests reviewed and resolved on their own task budget approval routes, CLI command and MCP tools, never on spend approval, and expire after 24 hours. Human CLI/HTTP opens and closes stay direct."],
     ],
     links: [["Budget boundary and lock order", "docs/budget-architecture.md"], ["Task budgets", "docs/task-budgets.md"], sharedLinks.taskBudget, sharedLinks.taskBudgetStore, sharedLinks.taskBudgetApprovalStore, sharedLinks.taskBudgetHttp, sharedLinks.budget, sharedLinks.budgetState, sharedLinks.budgetModel, sharedLinks.spendingTarget, sharedLinks.budgetCoordinator, sharedLinks.appSpend, sharedLinks.appClaims, sharedLinks.spendExecutor, sharedLinks.persistence, ["Budget DTOs", "crates/hubu-core/src/budget/dto.rs"]],
     nodes: [
@@ -860,7 +860,7 @@ const components = {
       ["Decide explicitly", "Says approve or deny in chat, then confirms the prompt; canceling leaves the request pending."],
       ["Safe decisions", "Repeating a decision is harmless, conflicting decisions are rejected, and approval never calls a provider by itself."],
       ["Save destinations", "Chooses which project folders agents may save artifacts into with `hubu folders allow`."],
-      ["Task budgets", "Gives one task a cap, such as $3 for a landing page, with `hubu budget task open`. Agents propose one and ask to close it through MCP; the human approves each request on the approval link, checking the task is done before a close. Closing returns the unused part."],
+      ["Task budgets", "Gives one task a cap, such as $3 for a landing page, with `hubu budget task open`. Agents propose one and ask to close it through MCP; the human approves each request with `hubu budget task approval` or the task budget approval MCP tool, checking the task is done before a close. A task budget request never authorizes spend. Closing returns the unused part."],
     ],
     links: [sharedLinks.saveFolders, sharedLinks.galleryCli, sharedLinks.gallery, sharedLinks.cli, sharedLinks.unifiedMcp, sharedLinks.registrationProtocol, sharedLinks.budget],
     nodes: [

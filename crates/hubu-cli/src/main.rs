@@ -2346,6 +2346,11 @@ fn spend_approval(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
     args.remove(0);
     let approval_request_id = take_required(&mut args, "--approval-request-id")?;
     ensure_no_args(args)?;
+    if approval_request_id.starts_with(task_budget::APPROVAL_ID_PREFIX) {
+        bail!(
+            "{approval_request_id} is a task budget approval request, not a spend approval; use `hubu budget task approval {action} --approval-request-id {approval_request_id}`"
+        );
+    }
 
     match action.as_str() {
         "get" => {
@@ -2353,9 +2358,6 @@ fn spend_approval(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
                 base_url,
                 &format!("/spend/approval?approval_request_id={approval_request_id}"),
             )?;
-            if task_budget::is_task_budget_approval(&response) {
-                return task_budget::print_task_budget_approval(&response);
-            }
             print_spend_approval_response(&response)
         }
         "approve" | "deny" => {
@@ -2367,9 +2369,6 @@ fn spend_approval(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
                     "decision": action,
                 }),
             )?;
-            if task_budget::is_task_budget_approval(&response) {
-                return task_budget::print_task_budget_approval(&response);
-            }
             print_spend_response(&response)
         }
         _ => bail!("unknown spend approval action `{action}`; use get, approve, or deny"),
@@ -4186,7 +4185,7 @@ Usage:
 
 The review is immutable. Approving reserves budget and returns an authorization token; it does not invoke a provider. Denial is terminal for that request. Repeating the same decision is idempotent, while a conflicting decision is rejected.
 
-A tba_ ID is an agent's task budget request. Approving a proposal opens the task budget and reserves its limit; approving a close request closes it and returns the unused amount, so check that the task is done first. Denying a close request keeps the task budget open. Requests expire after 24 hours."
+Spend approval covers spend only. Review an agent's task budget proposal or close request (a tba_ ID) with `hubu budget task approval`."
     );
 }
 
@@ -4599,6 +4598,49 @@ mod tests {
         assert_eq!(path, "/spend/approval/resolve");
         assert_eq!(body["approval_request_id"], "decision-123");
         assert_eq!(body["decision"], "approve");
+    }
+
+    #[test]
+    fn task_budget_approvals_use_their_own_cli_and_routes() {
+        let args = |values: &[&str]| -> Vec<String> {
+            values.iter().map(|value| value.to_string()).collect()
+        };
+        let error = spend_approval(
+            &CliContext::new(
+                Some("http://127.0.0.1:1".into()),
+                std::env::temp_dir().join("hubu-cli-unit-test-home"),
+            ),
+            args(&["approve", "--approval-request-id", "tba_0123456789ab"]),
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("hubu budget task approval approve --approval-request-id tba_0123456789ab"));
+
+        let (path, body) = capture_cli_request(|base_url| {
+            task_budget::command(
+                base_url,
+                args(&[
+                    "approval",
+                    "deny",
+                    "--approval-request-id",
+                    "tba_0123456789ab",
+                ]),
+            )
+        });
+        assert_eq!(path, "/task-budgets/approvals/resolve");
+        assert_eq!(body["approval_request_id"], "tba_0123456789ab");
+        assert_eq!(body["decision"], "deny");
+
+        let error = task_budget::command(
+            &CliContext::new(
+                Some("http://127.0.0.1:1".into()),
+                std::env::temp_dir().join("hubu-cli-unit-test-home"),
+            ),
+            args(&["approval", "get", "--approval-request-id", "decision-123"]),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("hubu spend approval"));
     }
 
     #[test]

@@ -226,14 +226,29 @@ fn all_tool_definitions() -> Vec<Value> {
         ),
         read_tool(
             "hubu_get_spend_approval",
-            "Get the durable state and immutable human review payload for one approval request: a spend approval, or a tba_ task budget proposal or close request.",
+            "Get the durable state and immutable human review payload for one spend approval request. Spend approval covers spend only; review a tba_ task budget proposal or close request with hubu_get_task_budget_approval.",
             json_schema_required(json!({
                 "approval_request_id": { "type": "string" }
             }), &["approval_request_id"]),
         ),
         approval_resolution_tool(
             "hubu_resolve_spend_approval",
-            "Resolve a pending approval request (a spend approval, or a tba_ task budget proposal or close request) after the human explicitly chooses approve or deny in chat. The native client prompt confirms or cancels this formed resolver call; cancelling does not submit a denial.",
+            "Resolve a pending spend approval request after the human explicitly chooses approve or deny in chat. The native client prompt confirms or cancels this formed resolver call; cancelling does not submit a denial. Spend approval covers spend only; tba_ task budget requests use hubu_resolve_task_budget_approval.",
+            json_schema_required(json!({
+                "approval_request_id": { "type": "string" },
+                "decision": { "type": "string", "enum": ["approve", "deny"] }
+            }), &["approval_request_id", "decision"]),
+        ),
+        read_tool(
+            "hubu_get_task_budget_approval",
+            "Get one tba_ task budget proposal or close request and its human review. Its summary says what approving does: opening reserves part of the agent budget for a task and closing returns the unused amount. A task budget request never authorizes spend.",
+            json_schema_required(json!({
+                "approval_request_id": { "type": "string" }
+            }), &["approval_request_id"]),
+        ),
+        approval_resolution_tool(
+            "hubu_resolve_task_budget_approval",
+            "Resolve a pending tba_ task budget proposal or close request after the human explicitly chooses approve or deny in chat. Approving a proposal opens the task budget; approving a close request closes it and returns the unused amount, so the human should check the task is done first. It never authorizes spend. The native client prompt confirms or cancels this formed resolver call; cancelling does not submit a denial.",
             json_schema_required(json!({
                 "approval_request_id": { "type": "string" },
                 "decision": { "type": "string", "enum": ["approve", "deny"] }

@@ -19,6 +19,7 @@ use routing::{
     validate_model_spend_arguments,
 };
 pub(crate) use task_budget::{
+    is_approval_tool as is_task_budget_approval_tool,
     observe_approval as observe_task_budget_approval, status_task_budget, ActiveTaskBudget,
 };
 pub use transport::RoutingConfig;

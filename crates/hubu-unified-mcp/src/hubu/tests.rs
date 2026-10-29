@@ -201,7 +201,7 @@ fn configured_catalog_matches_the_owned_hubu_contract() {
 
     let expected = super::catalog::tool_definitions();
     assert_eq!(&actual[5..], expected.as_slice());
-    assert_eq!(expected.len(), 34);
+    assert_eq!(expected.len(), 36);
     assert!(!actual
         .iter()
         .any(|tool| tool["name"] == "hubu_replace_budget"));
@@ -333,7 +333,7 @@ fn combined_catalog_exposes_both_approved_sets_under_readiness_gates() {
         None,
     );
     let tools = server.list_tools_for_snapshot();
-    assert_eq!(tools.len(), 45);
+    assert_eq!(tools.len(), 47);
     assert!(tools.contains(&gongbu::operation_status_definition()));
     for definition in super::catalog::tool_definitions()
         .into_iter()
@@ -351,7 +351,7 @@ fn combined_catalog_exposes_both_approved_sets_under_readiness_gates() {
         snapshot.gongbu.reason_code = Some("backend_not_ready");
     }
     let degraded = server.list_tools_for_snapshot();
-    assert_eq!(degraded.len(), 43);
+    assert_eq!(degraded.len(), 45);
     assert!(!degraded
         .iter()
         .any(|tool| tool["name"] == "gongbu_create_execution"));
@@ -2716,12 +2716,13 @@ fn proposed_task_budget_binds_session_spend_until_a_human_closes_it() {
     // Seeing the human's approved close ends the binding.
     let reviewed = tool_call(
         &server,
-        "hubu_get_spend_approval",
+        "hubu_get_task_budget_approval",
         json!({"approval_request_id": "tba_close0000000"}),
         None,
     );
     let raw = requests.recv_timeout(Duration::from_secs(2)).unwrap();
-    assert!(raw.starts_with("GET /spend/approval?approval_request_id=tba_close0000000 HTTP/1.1"));
+    assert!(raw
+        .starts_with("GET /task-budgets/approvals?approval_request_id=tba_close0000000 HTTP/1.1"));
     assert_eq!(
         reviewed["result"]["structuredContent"]["status"],
         "approved"
@@ -2773,7 +2774,7 @@ fn reading_an_earlier_proposal_or_close_keeps_the_newer_binding() {
     let get_approval = |id: &str| {
         tool_call(
             &server,
-            "hubu_get_spend_approval",
+            "hubu_get_task_budget_approval",
             json!({"approval_request_id": id}),
             None,
         );
@@ -2810,6 +2811,47 @@ fn reading_an_earlier_proposal_or_close_keeps_the_newer_binding() {
 }
 
 #[test]
+fn task_budget_approval_resolution_uses_the_human_gate_and_its_own_route() {
+    let ungated = server_with_backends("http://127.0.0.1:1", None, false, None);
+    let refused = tool_call(
+        &ungated,
+        "hubu_resolve_task_budget_approval",
+        json!({"approval_request_id": "tba_0123456789ab", "decision": "approve"}),
+        None,
+    );
+    assert!(refused
+        .to_string()
+        .contains("trusted spend-approval client gate"));
+
+    let (hubu_endpoint, request, handle) = one_shot_http_server(
+        200,
+        r#"{"approval_request_id":"tba_0123456789ab","kind":"task_budget_open","status":"approved","summary":"Task budget: open USD 3.00 for task landing-page. This reserves budget and does not authorize spend.","review":{"task_id":"landing-page"},"task_budget":null}"#,
+    );
+    let server = server_with_spend_approval(
+        &hubu_endpoint,
+        None,
+        false,
+        true,
+        Some("approval-capability-canary"),
+        None,
+    );
+    let response = tool_call(
+        &server,
+        "hubu_resolve_task_budget_approval",
+        json!({"approval_request_id": "tba_0123456789ab", "decision": "approve"}),
+        None,
+    );
+    let raw = request.recv_timeout(Duration::from_secs(2)).unwrap();
+    handle.join().unwrap();
+    assert!(raw.starts_with("POST /task-budgets/approvals/resolve HTTP/1.1"));
+    assert!(raw.contains("x-hubu-approval-capability: approval-capability-canary"));
+    assert_eq!(
+        response["result"]["structuredContent"]["kind"],
+        "task_budget_open"
+    );
+}
+
+#[test]
 fn task_budget_tool_arguments_fail_before_network() {
     let server = server_with_backends("http://127.0.0.1:1", None, false, None);
     for (name, arguments) in [
@@ -2832,6 +2874,27 @@ fn task_budget_tool_arguments_fail_before_network() {
         ),
         ("hubu_list_task_budgets", json!({"agent_id": "agt 1"})),
         ("hubu_list_task_budgets", json!({"include_all": "yes"})),
+        // Spend approval tools cover spend only.
+        (
+            "hubu_get_spend_approval",
+            json!({"approval_request_id": "tba_0123456789ab"}),
+        ),
+        (
+            "hubu_resolve_spend_approval",
+            json!({"approval_request_id": "tba_0123456789ab", "decision": "approve"}),
+        ),
+        (
+            "hubu_get_task_budget_approval",
+            json!({"approval_request_id": "11111111-1111-4111-8111-111111111111"}),
+        ),
+        (
+            "hubu_get_task_budget_approval",
+            json!({"approval_request_id": "tba_0123&all=true"}),
+        ),
+        (
+            "hubu_resolve_task_budget_approval",
+            json!({"approval_request_id": "tba_0123456789ab", "decision": "maybe"}),
+        ),
     ] {
         let response = tool_call(&server, name, arguments.clone(), None);
         assert!(

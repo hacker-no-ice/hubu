@@ -135,16 +135,18 @@ closed one also shows the amount returned. `hubu watch` shows open task budgets
 under their agent.
 
 These commands act directly. An agent instead proposes a task budget or asks
-to close one. `list` shows those requests first, and you resolve each `tba_`
-request on the approval link:
+to close one. `list` shows those requests first, and you review and resolve
+each `tba_` request with `hubu budget task approval`:
 
 ```bash
-hubu spend approval get --approval-request-id tba_0123456789ab
-hubu spend approval approve --approval-request-id tba_0123456789ab
+hubu budget task approval get --approval-request-id tba_0123456789ab
+hubu budget task approval approve --approval-request-id tba_0123456789ab
 ```
 
 Approve a close request only after checking that the task is done. Denying it
-keeps the task budget open. Requests expire after 24 hours.
+keeps the task budget open. Requests expire after 24 hours. A task budget
+request never authorizes spend, and `hubu spend approval` refuses `tba_` ids:
+spend approval covers spend only.
 
 ## Amounts
 

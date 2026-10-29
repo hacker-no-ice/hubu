@@ -274,6 +274,7 @@ codex_config="${workspace}/codex-config.toml"
 grep -F "HUBU_APPROVAL_TOKEN_FILE = \"${hubu_approval}\"" "${codex_config}" >/dev/null || fail "Codex config omitted the approval capability file"
 grep -F 'HUBU_MCP_TRUST_SPEND_APPROVAL = "1"' "${codex_config}" >/dev/null || fail "Codex config omitted the narrow spend-approval gate"
 grep -A1 -F '[mcp_servers.hubu.tools.hubu_resolve_spend_approval]' "${codex_config}" | grep -F 'approval_mode = "prompt"' >/dev/null || fail "Codex config did not prompt for spend approval resolution"
+grep -A1 -F '[mcp_servers.hubu.tools.hubu_resolve_task_budget_approval]' "${codex_config}" | grep -F 'approval_mode = "prompt"' >/dev/null || fail "Codex config did not prompt for task budget approval resolution"
 for directory in "${managed_credential_root}" "${managed_credential_root}/hubu" "${managed_credential_root}/gongbu"; do
   [[ "$(file_mode "${directory}")" == "700" ]] || fail "managed credential directory permissions are not private"
 done
@@ -582,13 +583,15 @@ try:
         "gongbu_list_execution_targets",
         "hubu_get_spend_approval",
         "hubu_resolve_spend_approval",
+        "hubu_get_task_budget_approval",
+        "hubu_resolve_task_budget_approval",
         "hubu_resume_operation",
         "hubu_update_budget",
     }
     tools = request("tools/list").get("tools", [])
     tool_names = {tool.get("name") for tool in tools}
     if (
-        len(tool_names) != 39
+        len(tool_names) != 47
         or not expected_tools.issubset(tool_names)
         or tool_names.intersection({
             "hubu_replace_budget", "hubu_add_policy", "hubu_export_policy",

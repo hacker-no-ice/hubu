@@ -109,6 +109,8 @@ fn finish_block(block: &mut String, trust_client_approval: bool) {
          [mcp_servers.hubu.tools.hubu_submit_spend]\n\
          approval_mode = \"approve\"\n\n\
          [mcp_servers.hubu.tools.hubu_resolve_spend_approval]\n\
+         approval_mode = \"prompt\"\n\n\
+         [mcp_servers.hubu.tools.hubu_resolve_task_budget_approval]\n\
          approval_mode = \"prompt\"\n",
     );
     let _ = writeln!(block, "{MANAGED_END}");
@@ -257,6 +259,9 @@ mod tests {
             .contains("[mcp_servers.hubu.tools.hubu_submit_spend]\napproval_mode = \"approve\""));
         assert!(block.contains(
             "[mcp_servers.hubu.tools.hubu_resolve_spend_approval]\napproval_mode = \"prompt\""
+        ));
+        assert!(block.contains(
+            "[mcp_servers.hubu.tools.hubu_resolve_task_budget_approval]\napproval_mode = \"prompt\""
         ));
         toml::from_str::<toml::Value>(&block).unwrap();
     }

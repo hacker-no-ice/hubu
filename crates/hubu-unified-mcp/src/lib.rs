@@ -51,7 +51,7 @@ pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 pub const UNIFIED_CONTRACT_VERSION: &str = "hubu-gongbu-mcp-v1";
 pub const EXECUTOR_CONTRACT_VERSION: &str = "hubu-spend-executor-v4.5";
 pub const HUBU_ROUTING_CONTRACT_VERSION: &str = "hubu-mcp-routing-v1";
-pub const ROUTING_REVISION: u32 = 16;
+pub const ROUTING_REVISION: u32 = 17;
 
 const HUBU_ENDPOINT_ENV: &str = "HUBU_UNIFIED_HUBU_ENDPOINT";
 const HUBU_TOKEN_ENV: &str = "HUBU_UNIFIED_HUBU_BEARER_TOKEN";
@@ -100,6 +100,7 @@ const DOMAIN_TOOLS: &[(&str, BackendOwner)] = &[
     ("hubu_get_governance_record", BackendOwner::Hubu),
     ("hubu_governance_summary", BackendOwner::Hubu),
     ("hubu_get_spend_approval", BackendOwner::Hubu),
+    ("hubu_get_task_budget_approval", BackendOwner::Hubu),
     ("hubu_get_authorization_record", BackendOwner::Hubu),
     ("hubu_list_agents", BackendOwner::Hubu),
     ("hubu_list_budgets", BackendOwner::Hubu),
@@ -124,6 +125,7 @@ const DOMAIN_TOOLS: &[(&str, BackendOwner)] = &[
     ("hubu_register_human", BackendOwner::Hubu),
     ("hubu_registration_guidance", BackendOwner::Hubu),
     ("hubu_resolve_spend_approval", BackendOwner::Hubu),
+    ("hubu_resolve_task_budget_approval", BackendOwner::Hubu),
     ("hubu_revoke_budget", BackendOwner::Hubu),
     ("hubu_revoke_spending_target", BackendOwner::Hubu),
     ("hubu_set_spending_target", BackendOwner::Hubu),
@@ -891,7 +893,46 @@ impl Server {
         self.call_hubu_tool_and_sync_approval(id, call)
     }
 
+    /// Task budget approvals have no harness operation to synchronize; a
+    /// result only updates this session's task budget binding.
+    fn call_task_budget_approval_tool(&self, id: Value, call: ToolCall) -> Value {
+        let approval_request_id = call
+            .arguments
+            .get("approval_request_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let response = hubu::call_tool(self, id.clone(), call);
+        if response.get("error").is_some()
+            || response.pointer("/result/isError") == Some(&Value::Bool(true))
+        {
+            return response;
+        }
+        let Some(approval) = response.pointer("/result/structuredContent") else {
+            return error_response(id, -32000, "Hubu returned an invalid approval result");
+        };
+        let valid = approval.get("approval_request_id").and_then(Value::as_str)
+            == approval_request_id.as_deref()
+            && approval
+                .get("kind")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| matches!(kind, "task_budget_open" | "task_budget_close"))
+            && approval
+                .get("status")
+                .and_then(Value::as_str)
+                .is_some_and(|status| {
+                    matches!(status, "pending" | "approved" | "denied" | "expired")
+                });
+        if !valid {
+            return error_response(id, -32000, "Hubu returned an invalid approval result");
+        }
+        hubu::observe_task_budget_approval(self, approval);
+        response
+    }
+
     fn call_hubu_tool_and_sync_approval(&self, id: Value, call: ToolCall) -> Value {
+        if hubu::is_task_budget_approval_tool(&call.name) {
+            return self.call_task_budget_approval_tool(id, call);
+        }
         let approval_request_id = matches!(
             call.name.as_str(),
             "hubu_get_spend_approval" | "hubu_resolve_spend_approval"
@@ -921,24 +962,6 @@ impl Server {
         };
         if !same_approval_request_id(&approval_request_id, response_approval_request_id) {
             return error_response(id, -32000, "Hubu returned a conflicting approval identity");
-        }
-        // Task budget approvals have no harness operation to synchronize.
-        if approval
-            .get("kind")
-            .and_then(Value::as_str)
-            .is_some_and(|kind| kind.starts_with("task_budget_"))
-        {
-            if !approval
-                .get("status")
-                .and_then(Value::as_str)
-                .is_some_and(|status| {
-                    matches!(status, "pending" | "approved" | "denied" | "expired")
-                })
-            {
-                return error_response(id, -32000, "Hubu returned an invalid approval result");
-            }
-            hubu::observe_task_budget_approval(self, approval);
-            return response;
         }
         let Some(status) = approval
             .get("status")
@@ -2663,7 +2686,7 @@ mod tests {
 
         assert_eq!(capability["contract_version"], UNIFIED_CONTRACT_VERSION);
         assert_eq!(capability["routing_revision"], ROUTING_REVISION);
-        assert_eq!(capability["tools"].as_array().unwrap().len(), 46);
+        assert_eq!(capability["tools"].as_array().unwrap().len(), 48);
         assert_eq!(capability["backends"]["hubu"]["state"], "unavailable");
         assert!(!serialized.contains("hubu.test"));
         assert!(!serialized.contains("gongbu.test"));
