@@ -88,8 +88,8 @@ not have an equivalent Dependabot alert, so the scheduled policy scan remains
 necessary.
 
 The daily [Dependabot PR triage](dependabot-triage.md) routine keeps Dependabot
-PRs current with `main`, merges patch and minor updates that pass every
-required check, and reports major updates, failures and alerts without a PR in
+PRs current with `main`, merges patch and minor updates and lockfile-only
+security fixes that pass every required check and review, and reports major updates, failures and alerts without a PR in
 one tracking issue.
 
 For manual recovery, start `Security advisory maintenance` on the default
