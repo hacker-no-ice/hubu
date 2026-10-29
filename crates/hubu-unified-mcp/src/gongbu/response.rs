@@ -242,7 +242,7 @@ pub(super) fn execution_target_catalog_result(
                 && target
                     .image_sizes
                     .iter()
-                    .all(|size| matches!(size.as_str(), "1k" | "2k" | "4k"))
+                    .all(|size| matches!(size.as_str(), "768sq" | "1k" | "1.5k" | "2k" | "4k"))
                 && target.image_sizes.windows(2).all(|pair| pair[0] < pair[1])
                 && !target.pricing.is_empty()
                 && target.pricing.iter().all(|price| {

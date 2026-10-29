@@ -12,7 +12,7 @@ use thiserror::Error;
 
 const CONTRACT_DOCUMENT: &str = include_str!("../../../../contracts/provider-contracts-v1.json");
 const CONTRACT_DOCUMENT_SHA256: &str =
-    "5bad24730152b1155773386d107df7c7c2b038a9f77150f4bea05da752edcadf";
+    "5c8b25adadc5ce2edb65bed9958924b9a845a49fa42e7ca7ea572237cf511732";
 
 #[derive(Debug, Error)]
 pub(crate) enum Error {
@@ -743,11 +743,55 @@ mod tests {
         }
     }
 
+    const FLUX_3_V1: &str = "hubu.flux-3-image.text-to-image/v1";
+    const FLUX_3_V2: &str = "hubu.flux-3-image.text-to-image/v2";
+
+    #[test]
+    fn flux_3_v2_adds_the_768sq_and_1_5k_tiers_and_never_binds_beside_v1() {
+        let (targets, pricing) = bound(&[FLUX_3_V2], &[FLUX_3_V2]);
+        let contracts = validate_and_project(&targets, &pricing.unwrap()).unwrap();
+        let [contract] = contracts.as_slice() else {
+            panic!("one contract");
+        };
+        let tiers: Vec<_> = contract
+            .capability
+            .presets
+            .iter()
+            .map(|preset| {
+                (
+                    preset.name.as_str(),
+                    preset.width,
+                    preset.rate_numerator_minor,
+                    preset.rate_denominator,
+                )
+            })
+            .collect();
+        assert_eq!(
+            tiers,
+            [
+                ("768sq", None, 41, 10),
+                ("1k", None, 48, 10),
+                ("1.5k", None, 7, 1),
+                ("2k", None, 10, 1),
+            ]
+        );
+        // 4k waits on a live artifact-size check.
+        assert!(!tiers.iter().any(|(name, ..)| *name == "4k"));
+        for ids in [[FLUX_3_V1, FLUX_3_V2], [FLUX_3_V2, FLUX_3_V1]] {
+            assert!(bound(&ids, &ids).1.is_err());
+            let (targets, pricing) = bound(&ids, &ids[..1]);
+            assert!(matches!(
+                validate_and_project(&targets, &pricing.unwrap()),
+                Err(Error::PricingMismatch)
+            ));
+        }
+    }
+
     #[test]
     fn mixed_contracts_are_order_independent_and_credentials_are_isolated() {
         let (targets, pricing) = mixed_contract_inputs(false);
         let projected = validate_and_project(&targets, &pricing).unwrap();
-        assert_eq!(projected.len(), 10);
+        assert_eq!(projected.len(), 14);
         // Nano Banana 2.1 is its own target beside Flash: 3.36¢, 5.04¢ and
         // 11.3¢ per image at 1k, 2k and 4k.
         let nano = projected
@@ -801,6 +845,33 @@ mod tests {
             .find(|preset| preset.name == "2k-21:9")
             .unwrap();
         assert_eq!((banner.width, banner.height), (Some(3168), Some(1344)));
+        // Each FLUX.2 model prices its own megapixel rates at the shared
+        // sizes: Klein 4B 1k is 7/5¢ and 4k 17/10¢, Klein 9B 4k 21/10¢,
+        // Flex 2k 10¢ and Max 4k 16¢.
+        for (contract_id, preset_name, expected) in [
+            ("hubu.flux-2-klein-4b.text-to-image/v1", "1k-1:1", (7, 5)),
+            ("hubu.flux-2-klein-4b.text-to-image/v1", "4k-16:9", (17, 10)),
+            ("hubu.flux-2-klein-9b.text-to-image/v1", "4k-1:1", (21, 10)),
+            ("hubu.flux-2-flex.text-to-image/v1", "2k-4:5", (10, 1)),
+            ("hubu.flux-2-max.text-to-image/v1", "4k-2:3", (16, 1)),
+        ] {
+            let preset = projected
+                .iter()
+                .find(|contract| contract.contract == contract_id)
+                .and_then(|contract| {
+                    contract
+                        .capability
+                        .presets
+                        .iter()
+                        .find(|preset| preset.name == preset_name)
+                })
+                .unwrap();
+            assert_eq!(
+                (preset.rate_numerator_minor, preset.rate_denominator),
+                expected,
+                "{contract_id} {preset_name}"
+            );
+        }
         // An edit contract on the same model keeps its own prices.
         assert!(projected.iter().any(|contract| {
             contract.contract == "hubu.gemini-3.1-flash-image.image-edit/v1"

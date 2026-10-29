@@ -626,6 +626,1027 @@
       ]
     },
     {
+      "contract": "hubu.flux-2-klein-4b.text-to-image/v1",
+      "pricing_version": "bfl-flux-2-klein-4b-usd-2026-10-21-v1",
+      "pricing_reviewed_on": "2026-10-21",
+      "target": {
+        "provider_config_version": "hubu-flux-2-klein-4b-t2i-2026-10-28-v1",
+        "workload_type": "image_generation",
+        "provider": "flux",
+        "adapter": "flux2_api",
+        "model": "flux-2-klein-4b",
+        "active": true,
+        "execution_enabled": true,
+        "settings": {
+          "type": "pack",
+          "config": {
+            "pack_id": "bfl-flux-2-klein-4b",
+            "pack_version": "2026-10-28.1",
+            "pack_digest": "sha256:d7c747b420fb57ba6be5b431c35674867b709fdb4a3e4c79350e33386bc837e5",
+            "archetype": "async_poll"
+          }
+        }
+      },
+      "capability": {
+        "image_count": 1,
+        "output_formats": [
+          "png",
+          "jpeg"
+        ],
+        "presets": [
+          {
+            "name": "1k-1:1",
+            "width": 1024,
+            "height": 1024,
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-16:9",
+            "width": 1344,
+            "height": 768,
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-9:16",
+            "width": 768,
+            "height": 1344,
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-3:2",
+            "width": 1248,
+            "height": 832,
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-2:3",
+            "width": 832,
+            "height": 1248,
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-4:5",
+            "width": 896,
+            "height": 1120,
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "2k-1:1",
+            "width": 1440,
+            "height": 1440,
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-16:9",
+            "width": 1920,
+            "height": 1088,
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-9:16",
+            "width": 1088,
+            "height": 1920,
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-3:2",
+            "width": 1728,
+            "height": 1152,
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-2:3",
+            "width": 1152,
+            "height": 1728,
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-4:5",
+            "width": 1280,
+            "height": 1600,
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "4k-1:1",
+            "width": 2048,
+            "height": 2048,
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-16:9",
+            "width": 2688,
+            "height": 1536,
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-9:16",
+            "width": 1536,
+            "height": 2688,
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-3:2",
+            "width": 2496,
+            "height": 1664,
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-2:3",
+            "width": 1664,
+            "height": 2496,
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-4:5",
+            "width": 1792,
+            "height": 2240,
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "4k"
+            }
+          }
+        ],
+        "megapixels": {
+          "rounding": "ceil",
+          "pixels_per_megapixel": 1048576,
+          "minimum": 1
+        }
+      },
+      "policies": {
+        "generation_retries": 0,
+        "fallback": false,
+        "poll": "bfl-async-status-poll-500ms-v1",
+        "artifact_delivery": "bfl-delivery-single-region-label-v1",
+        "recovery": "hubu-durable-async-resume-v1"
+      },
+      "pricing_rules": [
+        {
+          "rule_id": "bfl-flux-2-klein-4b-mp-2026-10-21-v1",
+          "provider": "flux",
+          "model": "flux-2-klein-4b",
+          "currency": "USD",
+          "components": [
+            {
+              "unit": "image",
+              "rate_numerator_minor": 14,
+              "rate_denominator": 10
+            },
+            {
+              "unit": "additional_megapixel",
+              "rate_numerator_minor": 1,
+              "rate_denominator": 10
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "contract": "hubu.flux-2-klein-9b.text-to-image/v1",
+      "pricing_version": "bfl-flux-2-klein-9b-usd-2026-10-21-v1",
+      "pricing_reviewed_on": "2026-10-21",
+      "target": {
+        "provider_config_version": "hubu-flux-2-klein-9b-t2i-2026-10-28-v1",
+        "workload_type": "image_generation",
+        "provider": "flux",
+        "adapter": "flux2_api",
+        "model": "flux-2-klein-9b",
+        "active": true,
+        "execution_enabled": true,
+        "settings": {
+          "type": "pack",
+          "config": {
+            "pack_id": "bfl-flux-2-klein-9b",
+            "pack_version": "2026-10-28.1",
+            "pack_digest": "sha256:7a5da88b7ef4339144e7b4d08d57bdb18328b114e8c665051412063d7576cf42",
+            "archetype": "async_poll"
+          }
+        }
+      },
+      "capability": {
+        "image_count": 1,
+        "output_formats": [
+          "png",
+          "jpeg"
+        ],
+        "presets": [
+          {
+            "name": "1k-1:1",
+            "width": 1024,
+            "height": 1024,
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-16:9",
+            "width": 1344,
+            "height": 768,
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-9:16",
+            "width": 768,
+            "height": 1344,
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-3:2",
+            "width": 1248,
+            "height": 832,
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-2:3",
+            "width": 832,
+            "height": 1248,
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-4:5",
+            "width": 896,
+            "height": 1120,
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "2k-1:1",
+            "width": 1440,
+            "height": 1440,
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-16:9",
+            "width": 1920,
+            "height": 1088,
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-9:16",
+            "width": 1088,
+            "height": 1920,
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-3:2",
+            "width": 1728,
+            "height": 1152,
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-2:3",
+            "width": 1152,
+            "height": 1728,
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-4:5",
+            "width": 1280,
+            "height": 1600,
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "4k-1:1",
+            "width": 2048,
+            "height": 2048,
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-16:9",
+            "width": 2688,
+            "height": 1536,
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-9:16",
+            "width": 1536,
+            "height": 2688,
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-3:2",
+            "width": 2496,
+            "height": 1664,
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-2:3",
+            "width": 1664,
+            "height": 2496,
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-4:5",
+            "width": 1792,
+            "height": 2240,
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "4k"
+            }
+          }
+        ],
+        "megapixels": {
+          "rounding": "ceil",
+          "pixels_per_megapixel": 1048576,
+          "minimum": 1
+        }
+      },
+      "policies": {
+        "generation_retries": 0,
+        "fallback": false,
+        "poll": "bfl-async-status-poll-500ms-v1",
+        "artifact_delivery": "bfl-delivery-single-region-label-v1",
+        "recovery": "hubu-durable-async-resume-v1"
+      },
+      "pricing_rules": [
+        {
+          "rule_id": "bfl-flux-2-klein-9b-mp-2026-10-21-v1",
+          "provider": "flux",
+          "model": "flux-2-klein-9b",
+          "currency": "USD",
+          "components": [
+            {
+              "unit": "image",
+              "rate_numerator_minor": 15,
+              "rate_denominator": 10
+            },
+            {
+              "unit": "additional_megapixel",
+              "rate_numerator_minor": 2,
+              "rate_denominator": 10
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "contract": "hubu.flux-2-flex.text-to-image/v1",
+      "pricing_version": "bfl-flux-2-flex-usd-2026-10-21-v1",
+      "pricing_reviewed_on": "2026-10-21",
+      "target": {
+        "provider_config_version": "hubu-flux-2-flex-t2i-2026-10-28-v1",
+        "workload_type": "image_generation",
+        "provider": "flux",
+        "adapter": "flux2_api",
+        "model": "flux-2-flex",
+        "active": true,
+        "execution_enabled": true,
+        "settings": {
+          "type": "pack",
+          "config": {
+            "pack_id": "bfl-flux-2-flex",
+            "pack_version": "2026-10-28.1",
+            "pack_digest": "sha256:551832acfec2c19c48b7906ae64dbf032ff4c0ddc674c8247a8f5efee02735b8",
+            "archetype": "async_poll"
+          }
+        }
+      },
+      "capability": {
+        "image_count": 1,
+        "output_formats": [
+          "png",
+          "jpeg"
+        ],
+        "presets": [
+          {
+            "name": "1k-1:1",
+            "width": 1024,
+            "height": 1024,
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-16:9",
+            "width": 1344,
+            "height": 768,
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-9:16",
+            "width": 768,
+            "height": 1344,
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-3:2",
+            "width": 1248,
+            "height": 832,
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-2:3",
+            "width": 832,
+            "height": 1248,
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-4:5",
+            "width": 896,
+            "height": 1120,
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "2k-1:1",
+            "width": 1440,
+            "height": 1440,
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-16:9",
+            "width": 1920,
+            "height": 1088,
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-9:16",
+            "width": 1088,
+            "height": 1920,
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-3:2",
+            "width": 1728,
+            "height": 1152,
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-2:3",
+            "width": 1152,
+            "height": 1728,
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-4:5",
+            "width": 1280,
+            "height": 1600,
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "4k-1:1",
+            "width": 2048,
+            "height": 2048,
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-16:9",
+            "width": 2688,
+            "height": 1536,
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-9:16",
+            "width": 1536,
+            "height": 2688,
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-3:2",
+            "width": 2496,
+            "height": 1664,
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-2:3",
+            "width": 1664,
+            "height": 2496,
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-4:5",
+            "width": 1792,
+            "height": 2240,
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "4k"
+            }
+          }
+        ],
+        "megapixels": {
+          "rounding": "ceil",
+          "pixels_per_megapixel": 1048576,
+          "minimum": 1
+        }
+      },
+      "policies": {
+        "generation_retries": 0,
+        "fallback": false,
+        "poll": "bfl-async-status-poll-500ms-v1",
+        "artifact_delivery": "bfl-delivery-single-region-label-v1",
+        "recovery": "hubu-durable-async-resume-v1"
+      },
+      "pricing_rules": [
+        {
+          "rule_id": "bfl-flux-2-flex-mp-2026-10-21-v1",
+          "provider": "flux",
+          "model": "flux-2-flex",
+          "currency": "USD",
+          "components": [
+            {
+              "unit": "image",
+              "rate_numerator_minor": 5,
+              "rate_denominator": 1
+            },
+            {
+              "unit": "additional_megapixel",
+              "rate_numerator_minor": 5,
+              "rate_denominator": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "contract": "hubu.flux-2-max.text-to-image/v1",
+      "pricing_version": "bfl-flux-2-max-usd-2026-10-21-v1",
+      "pricing_reviewed_on": "2026-10-21",
+      "target": {
+        "provider_config_version": "hubu-flux-2-max-t2i-2026-10-28-v1",
+        "workload_type": "image_generation",
+        "provider": "flux",
+        "adapter": "flux2_api",
+        "model": "flux-2-max",
+        "active": true,
+        "execution_enabled": true,
+        "settings": {
+          "type": "pack",
+          "config": {
+            "pack_id": "bfl-flux-2-max",
+            "pack_version": "2026-10-28.1",
+            "pack_digest": "sha256:8596163bbe94132f63558f11308f990b91564b8aa82e04996f6fb128b1d410bf",
+            "archetype": "async_poll"
+          }
+        }
+      },
+      "capability": {
+        "image_count": 1,
+        "output_formats": [
+          "png",
+          "jpeg"
+        ],
+        "presets": [
+          {
+            "name": "1k-1:1",
+            "width": 1024,
+            "height": 1024,
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-16:9",
+            "width": 1344,
+            "height": 768,
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-9:16",
+            "width": 768,
+            "height": 1344,
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-3:2",
+            "width": 1248,
+            "height": 832,
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-2:3",
+            "width": 832,
+            "height": 1248,
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-4:5",
+            "width": 896,
+            "height": 1120,
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "2k-1:1",
+            "width": 1440,
+            "height": 1440,
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-16:9",
+            "width": 1920,
+            "height": 1088,
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-9:16",
+            "width": 1088,
+            "height": 1920,
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-3:2",
+            "width": 1728,
+            "height": 1152,
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-2:3",
+            "width": 1152,
+            "height": 1728,
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-4:5",
+            "width": 1280,
+            "height": 1600,
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "4k-1:1",
+            "width": 2048,
+            "height": 2048,
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-16:9",
+            "width": 2688,
+            "height": 1536,
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-9:16",
+            "width": 1536,
+            "height": 2688,
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-3:2",
+            "width": 2496,
+            "height": 1664,
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-2:3",
+            "width": 1664,
+            "height": 2496,
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-4:5",
+            "width": 1792,
+            "height": 2240,
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "4k"
+            }
+          }
+        ],
+        "megapixels": {
+          "rounding": "ceil",
+          "pixels_per_megapixel": 1048576,
+          "minimum": 1
+        }
+      },
+      "policies": {
+        "generation_retries": 0,
+        "fallback": false,
+        "poll": "bfl-async-status-poll-500ms-v1",
+        "artifact_delivery": "bfl-delivery-single-region-label-v1",
+        "recovery": "hubu-durable-async-resume-v1"
+      },
+      "pricing_rules": [
+        {
+          "rule_id": "bfl-flux-2-max-mp-2026-10-21-v1",
+          "provider": "flux",
+          "model": "flux-2-max",
+          "currency": "USD",
+          "components": [
+            {
+              "unit": "image",
+              "rate_numerator_minor": 7,
+              "rate_denominator": 1
+            },
+            {
+              "unit": "additional_megapixel",
+              "rate_numerator_minor": 3,
+              "rate_denominator": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "contract": "hubu.flux-3-image.text-to-image/v2",
+      "pricing_version": "bfl-flux-3-image-usd-2026-10-21-v2",
+      "pricing_reviewed_on": "2026-10-21",
+      "target": {
+        "provider_config_version": "hubu-flux-3-image-t2i-2026-10-28-v2",
+        "workload_type": "image_generation",
+        "provider": "flux",
+        "adapter": "flux2_api",
+        "model": "flux-3-image",
+        "active": true,
+        "execution_enabled": true,
+        "settings": {
+          "type": "pack",
+          "config": {
+            "pack_id": "bfl-flux-3-image",
+            "pack_version": "2026-10-28.1",
+            "pack_digest": "sha256:9ec18c77ee991b01f37bb272ace093f725fcf13f57eb2c63682518bbed474e44",
+            "archetype": "async_poll"
+          }
+        }
+      },
+      "capability": {
+        "image_count": 1,
+        "output_formats": [
+          "png",
+          "jpeg"
+        ],
+        "presets": [
+          {
+            "name": "768sq"
+          },
+          {
+            "name": "1k"
+          },
+          {
+            "name": "1.5k"
+          },
+          {
+            "name": "2k"
+          }
+        ]
+      },
+      "policies": {
+        "generation_retries": 0,
+        "fallback": false,
+        "poll": "bfl-async-status-poll-500ms-v1",
+        "artifact_delivery": "bfl-delivery-single-region-label-v1",
+        "recovery": "hubu-durable-async-resume-v1"
+      },
+      "pricing_rules": [
+        {
+          "rule_id": "bfl-flux-3-image-768sq-2026-10-21-v2",
+          "provider": "flux",
+          "model": "flux-3-image",
+          "currency": "USD",
+          "selector": {
+            "image_size": "768sq"
+          },
+          "components": [
+            {
+              "unit": "image",
+              "rate_numerator_minor": 41,
+              "rate_denominator": 10
+            }
+          ]
+        },
+        {
+          "rule_id": "bfl-flux-3-image-1k-2026-10-21-v2",
+          "provider": "flux",
+          "model": "flux-3-image",
+          "currency": "USD",
+          "selector": {
+            "image_size": "1k"
+          },
+          "components": [
+            {
+              "unit": "image",
+              "rate_numerator_minor": 48,
+              "rate_denominator": 10
+            }
+          ]
+        },
+        {
+          "rule_id": "bfl-flux-3-image-1.5k-2026-10-21-v2",
+          "provider": "flux",
+          "model": "flux-3-image",
+          "currency": "USD",
+          "selector": {
+            "image_size": "1.5k"
+          },
+          "components": [
+            {
+              "unit": "image",
+              "rate_numerator_minor": 7,
+              "rate_denominator": 1
+            }
+          ]
+        },
+        {
+          "rule_id": "bfl-flux-3-image-2k-2026-10-21-v2",
+          "provider": "flux",
+          "model": "flux-3-image",
+          "currency": "USD",
+          "selector": {
+            "image_size": "2k"
+          },
+          "components": [
+            {
+              "unit": "image",
+              "rate_numerator_minor": 10,
+              "rate_denominator": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
       "contract": "hubu.gemini-3.1-flash-lite-image.text-to-image/v2",
       "pricing_version": "google-gemini-3.1-flash-lite-image-usd-2026-10-28-v2",
       "pricing_reviewed_on": "2026-10-28",

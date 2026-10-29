@@ -16,7 +16,15 @@ const GOOGLE_GEMINI_DEVELOPER_IMAGE_EDIT_V2: &str =
     include_str!("../../../../packs/verified/google-gemini-developer-image-edit-v2.toml");
 const BFL_FLUX_2: &str = include_str!("../../../../packs/verified/bfl-flux-2.toml");
 const BFL_FLUX_2_V2: &str = include_str!("../../../../packs/verified/bfl-flux-2-v2.toml");
+const BFL_FLUX_2_MAX: &str = include_str!("../../../../packs/verified/bfl-flux-2-max.toml");
+const BFL_FLUX_2_FLEX: &str = include_str!("../../../../packs/verified/bfl-flux-2-flex.toml");
+const BFL_FLUX_2_KLEIN_4B: &str =
+    include_str!("../../../../packs/verified/bfl-flux-2-klein-4b.toml");
+const BFL_FLUX_2_KLEIN_9B: &str =
+    include_str!("../../../../packs/verified/bfl-flux-2-klein-9b.toml");
 const BFL_FLUX_3_IMAGE: &str = include_str!("../../../../packs/verified/bfl-flux-3-image.toml");
+const BFL_FLUX_3_IMAGE_V2: &str =
+    include_str!("../../../../packs/verified/bfl-flux-3-image-v2.toml");
 
 /// Every verified pack, validated.
 pub fn verified_packs() -> Vec<Pack> {
@@ -27,7 +35,12 @@ pub fn verified_packs() -> Vec<Pack> {
         GOOGLE_GEMINI_DEVELOPER_IMAGE_EDIT_V2,
         BFL_FLUX_2,
         BFL_FLUX_2_V2,
+        BFL_FLUX_2_MAX,
+        BFL_FLUX_2_FLEX,
+        BFL_FLUX_2_KLEIN_4B,
+        BFL_FLUX_2_KLEIN_9B,
         BFL_FLUX_3_IMAGE,
+        BFL_FLUX_3_IMAGE_V2,
     ]
     .into_iter()
     .map(|source| Pack::from_toml_str(source).expect("verified packs are valid"))
@@ -154,7 +167,7 @@ mod tests {
             projected += 1;
         }
         assert_eq!(
-            projected, 15,
+            projected, 20,
             "every shipped contract comes from a verified pack"
         );
     }
@@ -343,19 +356,25 @@ mod tests {
         submit: Result<TransportResponse, TransportFailure>,
         polls: Arc<std::sync::Mutex<Vec<TransportResponse>>>,
         posts: Arc<std::sync::Mutex<u32>>,
+        /// Every submission's URL and body, in order.
+        sent: Arc<std::sync::Mutex<Vec<(String, Value)>>>,
         artifact: Vec<u8>,
     }
     impl SyncTransport for FluxTransport {
         fn post_json(
             &self,
-            _: &Url,
+            url: &Url,
             auth: (&str, &str),
             _: &BTreeMap<String, String>,
-            _: &Value,
+            body: &Value,
             _: Duration,
         ) -> Result<TransportResponse, TransportFailure> {
             assert_eq!(auth.0, "x-key");
             *self.posts.lock().unwrap() += 1;
+            self.sent
+                .lock()
+                .unwrap()
+                .push((url.to_string(), body.clone()));
             self.submit.clone()
         }
         fn get_json(
@@ -420,6 +439,7 @@ mod tests {
             submit,
             polls: Arc::new(std::sync::Mutex::new(polls)),
             posts: Arc::default(),
+            sent: Arc::default(),
             artifact,
         };
         let posts = transport.posts.clone();
@@ -686,6 +706,7 @@ mod tests {
                            "result": {"sample": "https://delivery.us7.bfl.ai/out.png"}}),
                 )])),
                 posts: Arc::default(),
+                sent: Arc::default(),
                 artifact,
             };
             AsyncPollEngine::new(v2.clone(), "flux-2-pro", transport, 1 << 20)
@@ -772,6 +793,7 @@ mod tests {
                 submit: Ok(accepted()),
                 polls: Arc::new(std::sync::Mutex::new(polls)),
                 posts: Arc::default(),
+                sent: Arc::default(),
                 artifact: PNG.to_vec(),
             };
             let posts = transport.posts.clone();
@@ -1073,6 +1095,241 @@ mod tests {
             )
             .unwrap();
         assert_eq!(settled.budget_units, 135_120);
+    }
+
+    /// The FLUX.2 models HUB-253 adds: pack ID, model, BFL endpoint, and the
+    /// estimate in units (10,000 per cent) at 1, 2 and 4 billed megapixels.
+    const NEW_FLUX_2: [(&str, &str, &str, [i64; 3]); 4] = [
+        (
+            "bfl-flux-2-klein-4b",
+            "flux-2-klein-4b",
+            "https://api.bfl.ai/v1/flux-2-klein-4b",
+            [14_000, 15_000, 17_000],
+        ),
+        (
+            "bfl-flux-2-klein-9b",
+            "flux-2-klein-9b",
+            "https://api.bfl.ai/v1/flux-2-klein-9b",
+            [15_000, 17_000, 21_000],
+        ),
+        (
+            "bfl-flux-2-flex",
+            "flux-2-flex",
+            "https://api.bfl.ai/v1/flux-2-flex",
+            [50_000, 100_000, 200_000],
+        ),
+        (
+            "bfl-flux-2-max",
+            "flux-2-max",
+            "https://api.bfl.ai/v1/flux-2-max",
+            [70_000, 100_000, 160_000],
+        ),
+    ];
+
+    /// Each new model is its own target on its own endpoint, priced at BFL's
+    /// first-megapixel plus additional-megapixel rates for that model.
+    #[test]
+    fn new_flux_2_models_route_explicitly_and_price_their_own_megapixels() {
+        let pro_sizes = flux_v2().output_sizes("flux-2-pro");
+        for (pack_id, model, endpoint, [one, two, four]) in NEW_FLUX_2 {
+            let flux = pack(pack_id);
+            assert_eq!(flux.request_url().as_str(), endpoint);
+            assert_eq!(flux.models().len(), 1);
+            // No pack answers for another model, so nothing is silently
+            // upgraded or downgraded.
+            for other in ["flux-2-pro", "flux-2-max", "flux-2-klein-4b"] {
+                if other != model {
+                    let input = json!({"prompt": "x", "image_size": "1k"});
+                    assert!(flux.prepare(other, &input).is_err(), "{model} {other}");
+                }
+            }
+            // The same certified sizes as FLUX.2 [pro] v2.
+            let sizes = flux.output_sizes(model);
+            assert_eq!(sizes, pro_sizes, "{model}");
+            for size in &sizes {
+                let mut input = json!({"prompt": "x"});
+                for (name, value) in &size.when {
+                    input[name] = json!(value);
+                }
+                let expected = match size.when["image_size"].as_str() {
+                    "1k" => one,
+                    "2k" => two,
+                    _ => four,
+                };
+                let frozen = snapshot_for(&flux, model, &input);
+                assert_eq!(frozen.estimated_units, expected, "{model} {size:?}");
+                let prepared = flux.prepare(model, &input).unwrap();
+                assert_eq!(
+                    (&prepared.body["width"], &prepared.body["height"]),
+                    (&json!(size.width), &json!(size.height))
+                );
+            }
+        }
+    }
+
+    /// Only Flex exposes steps and guidance, within BFL's ranges, and neither
+    /// changes the price.
+    #[test]
+    fn only_flex_takes_steps_and_guidance() {
+        let flex = pack("bfl-flux-2-flex");
+        let input = |options: Value| {
+            json!({"prompt": "a poster", "image_size": "2k", "aspect_ratio": "4:5",
+                   "options": options})
+        };
+        let tuned = input(json!({"steps": 28, "guidance": 3.5, "seed": 9}));
+        let prepared = flex.prepare("flux-2-flex", &tuned).unwrap();
+        assert_eq!(
+            prepared.body,
+            json!({"prompt": "a poster", "width": 1280, "height": 1600, "seed": 9,
+                   "steps": 28, "guidance": 3.5})
+        );
+        assert_eq!(
+            snapshot_for(&flex, "flux-2-flex", &tuned).estimated_units,
+            snapshot_for(&flex, "flux-2-flex", &input(json!({}))).estimated_units
+        );
+        // Left to BFL's defaults when omitted.
+        let plain = flex.prepare("flux-2-flex", &input(json!({}))).unwrap();
+        assert!(plain.body.get("steps").is_none() && plain.body.get("guidance").is_none());
+        for (options, ok) in [
+            (json!({"steps": 1, "guidance": 1.5}), true),
+            (json!({"steps": 50, "guidance": 10}), true),
+            (json!({"steps": 0}), false),
+            (json!({"steps": 51}), false),
+            (json!({"steps": 2.5}), false),
+            (json!({"guidance": 1.4}), false),
+            (json!({"guidance": 10.5}), false),
+            (json!({"guidance": 3.25}), false),
+        ] {
+            assert_eq!(
+                flex.prepare("flux-2-flex", &input(options.clone())).is_ok(),
+                ok,
+                "{options}"
+            );
+        }
+        for (pack_id, model) in [
+            ("bfl-flux-2-klein-4b", "flux-2-klein-4b"),
+            ("bfl-flux-2-klein-9b", "flux-2-klein-9b"),
+            ("bfl-flux-2-max", "flux-2-max"),
+        ] {
+            let other = pack(pack_id);
+            for options in [json!({"steps": 28}), json!({"guidance": 3.5})] {
+                assert!(other.prepare(model, &input(options)).is_err(), "{model}");
+            }
+        }
+        for options in [json!({"steps": 28}), json!({"guidance": 3.5})] {
+            assert!(flux_v2().prepare("flux-2-pro", &input(options)).is_err());
+        }
+    }
+
+    /// Every new model keeps BFL's asynchronous lifecycle: one submission to
+    /// its own endpoint, settlement from reported credits (fractional cents
+    /// included), an ambiguous submission reconciled, never resubmitted, and a
+    /// definitive rejection released.
+    #[test]
+    fn new_flux_2_models_settle_credits_and_never_resubmit_ambiguous_work() {
+        for (pack_id, model, endpoint, [one, ..]) in NEW_FLUX_2 {
+            let flux = Arc::new(pack(pack_id));
+            let input = json!({"prompt": "a lighthouse", "image_size": "1k"});
+            let request = flux.prepare(model, &input).unwrap().request;
+            let run = |submit: Result<TransportResponse, TransportFailure>, credits: f64| {
+                let transport = FluxTransport {
+                    submit,
+                    polls: Arc::new(std::sync::Mutex::new(vec![bfl(
+                        200,
+                        json!({"id": "job-1", "status": "Ready", "cost": credits,
+                               "result": {"sample": "https://delivery.us7.bfl.ai/out.png"}}),
+                    )])),
+                    posts: Arc::default(),
+                    sent: Arc::default(),
+                    artifact: png(1024, 1024),
+                };
+                let sent = transport.sent.clone();
+                let result = AsyncPollEngine::new(flux.clone(), model, transport, 1 << 20)
+                    .unwrap()
+                    .with_poll_interval_for_tests(Duration::from_millis(1))
+                    .invoke(&request, &input, &secret_for_test("secret-canary"), None);
+                let sent = sent.lock().unwrap().clone();
+                (result, sent)
+            };
+            // BFL reports credits worth one cent each: 1.4 credits is 1.4¢.
+            let credits = one as f64 / 10_000.0;
+            let (outcome, sent) = run(Ok(accepted()), credits);
+            let outcome = outcome.unwrap();
+            assert_eq!(sent.len(), 1, "{model}");
+            assert_eq!(sent[0].0, endpoint);
+            assert_eq!(
+                sent[0].1,
+                json!({"prompt": "a lighthouse", "width": 1024, "height": 1024})
+            );
+            let frozen = snapshot_for(&flux, model, &input);
+            let settled = frozen
+                .settle_precise(
+                    outcome.usage.as_ref().unwrap(),
+                    outcome.actual_vendor_cost.as_ref(),
+                    frozen.estimated_units,
+                )
+                .unwrap();
+            assert_eq!(settled.budget_units, one, "{model}");
+
+            let (ambiguous, sent) = run(
+                Err(TransportFailure::UnknownOutcome { request_id: None }),
+                credits,
+            );
+            let failure = ambiguous.unwrap_err();
+            assert_eq!(failure.spend_disposition, SpendDisposition::Reconcile);
+            assert_eq!(sent.len(), 1, "{model} ambiguous work is never resubmitted");
+
+            let (rejected, _) = run(Ok(bfl(422, Value::Null)), credits);
+            assert_eq!(
+                rejected.unwrap_err().spend_disposition,
+                SpendDisposition::Release
+            );
+        }
+    }
+
+    fn flux_3_v2() -> Pack {
+        verified_packs()
+            .into_iter()
+            .find(|pack| {
+                pack.pack_id() == "bfl-flux-3-image" && pack.pack_version() == "2026-10-28.1"
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn flux_3_v2_offers_768sq_and_1_5k_tiers_but_not_4k() {
+        let (v1, v2) = (pack("bfl-flux-3-image"), flux_3_v2());
+        assert_eq!(
+            v2.request_url().as_str(),
+            "https://api.bfl.ai/v1/flux-3-image"
+        );
+        for (tier, units) in [
+            ("768sq", 41_000),
+            ("1k", 48_000),
+            ("1.5k", 70_000),
+            ("2k", 100_000),
+        ] {
+            for ratio in ["21:9", "1:1", "9:21"] {
+                let input = json!({"prompt": "x", "image_size": tier, "aspect_ratio": ratio});
+                let prepared = v2.prepare("flux-3-image", &input).unwrap();
+                assert_eq!(prepared.body["resolution"], tier);
+                assert_eq!(prepared.body["grounding"], false);
+                assert_eq!(
+                    snapshot_for(&v2, "flux-3-image", &input).estimated_units,
+                    units,
+                    "{tier} {ratio}"
+                );
+            }
+        }
+        // 4k waits on a live artifact-size check; v1 keeps its two tiers.
+        assert!(v2
+            .prepare("flux-3-image", &json!({"prompt": "x", "image_size": "4k"}))
+            .is_err());
+        for tier in ["768sq", "1.5k"] {
+            assert!(v1
+                .prepare("flux-3-image", &json!({"prompt": "x", "image_size": tier}))
+                .is_err());
+        }
     }
 
     #[test]

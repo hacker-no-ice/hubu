@@ -32,7 +32,7 @@ const MANAGED_GONGBU_CALLER_ACCOUNT: &str = "gongbu-caller";
 const PROVIDER_CONTRACTS_DOCUMENT: &str =
     include_str!("../../../contracts/provider-contracts-v1.json");
 const PROVIDER_CONTRACTS_DOCUMENT_SHA256: &str =
-    "5bad24730152b1155773386d107df7c7c2b038a9f77150f4bea05da752edcadf";
+    "5c8b25adadc5ce2edb65bed9958924b9a845a49fa42e7ca7ea572237cf511732";
 const MANAGED_CREDENTIAL_IGNORE: &[u8] =
     b"# Hubu-managed credentials. Do not edit or remove.\n*\n!.gitignore\n";
 
@@ -5498,6 +5498,78 @@ live_spend_acknowledgement = "{LIVE_SPEND_ACKNOWLEDGEMENT}"
         let both = source(&[
             "hubu.gemini-3.1-flash-image.text-to-image/v1",
             "hubu.gemini-3.1-flash-image.text-to-image/v2",
+        ]);
+        assert!(validate_provider_source(&both).is_err());
+    }
+
+    #[test]
+    fn every_flux_model_binds_with_one_key_and_flux_3_binds_one_revision() {
+        let source = |contracts: &[&str]| {
+            let bindings: String = contracts
+                .iter()
+                .map(|contract| {
+                    format!(
+                        "[[contract_bindings]]\ncontract = \"{contract}\"\ncredential = \"bfl\"\n"
+                    )
+                })
+                .collect();
+            toml::from_str::<ProvidersSource>(&format!(
+                r#"schema_version = 1
+mode = "live"
+maximum_spend_minor = 25
+live_spend_acknowledgement = "{LIVE_SPEND_ACKNOWLEDGEMENT}"
+{bindings}"#
+            ))
+            .unwrap()
+        };
+        let all = [
+            "hubu.flux-2-klein-4b.text-to-image/v1",
+            "hubu.flux-2-klein-9b.text-to-image/v1",
+            "hubu.flux-2-pro.text-to-image/v2",
+            "hubu.flux-2-flex.text-to-image/v1",
+            "hubu.flux-2-max.text-to-image/v1",
+            "hubu.flux-3-image.text-to-image/v2",
+        ];
+        let providers = source(&all);
+        validate_provider_source(&providers).unwrap();
+        let entries = provider_contract_catalog_entries(&providers, true);
+        assert_eq!(entries.len(), all.len());
+        let price = |contract: &str, preset: &str| {
+            let preset = entries
+                .iter()
+                .find(|entry| entry.contract == contract)
+                .unwrap()
+                .capability
+                .presets
+                .iter()
+                .find(|candidate| candidate.name == preset)
+                .unwrap();
+            (preset.rate_numerator_minor, preset.rate_denominator)
+        };
+        // Exploration stays cheap and premium stays explicit: 7/5¢ for a
+        // Klein 4B square, 7¢ for Max, and FLUX 3's new tiers at 4.1¢ / 7¢.
+        assert_eq!(
+            price("hubu.flux-2-klein-4b.text-to-image/v1", "1k-1:1"),
+            (7, 5)
+        );
+        assert_eq!(price("hubu.flux-2-max.text-to-image/v1", "1k-1:1"), (7, 1));
+        assert_eq!(
+            price("hubu.flux-3-image.text-to-image/v2", "768sq"),
+            (41, 10)
+        );
+        assert_eq!(price("hubu.flux-3-image.text-to-image/v2", "1.5k"), (7, 1));
+        let mut composite = providers.clone();
+        composite.catalog_version = Some("operator-flux-2026-10-28-v1".into());
+        let pricing = render_pricing_catalog(&composite).unwrap();
+        assert!(pricing["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|rule| rule["rule_id"] == "bfl-flux-2-flex-mp-2026-10-21-v1"));
+        // v1 and v2 are revisions of one FLUX 3 target; a profile binds one.
+        let both = source(&[
+            "hubu.flux-3-image.text-to-image/v1",
+            "hubu.flux-3-image.text-to-image/v2",
         ]);
         assert!(validate_provider_source(&both).is_err());
     }
