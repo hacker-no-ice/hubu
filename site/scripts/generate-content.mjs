@@ -31,6 +31,7 @@ const unpublishedSources = new Set([
   "docs/governance-observability-qualification.md", // maintainer validation evidence
   "docs/ledger-accounting.md", // ledger posting internals
   "docs/operations/repository-security.md", // repository/CI hardening for maintainers
+  "docs/operations/dependabot-triage.md", // maintainer dependency triage routine
   "docs/operations/benchmarking.md", // developer benchmarking
   "docs/operations/gongbu-sandbox.md", // developer manual-test sandbox
   "docs/operations/live-provider-testing.md", // superseded; the site redirects to live-providers
