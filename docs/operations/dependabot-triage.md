@@ -75,8 +75,9 @@ breaking change, a removed API, or a raised minimum Rust or Node version.
    [Alerts without a PR](#alerts-without-a-pr).
 6. Update the triage issue.
 
-Dependabot only accepts a command comment whose body is the command alone, so
-`@dependabot rebase` and `@dependabot recreate` comments carry no prefix. Never
+`@dependabot rebase` and `@dependabot recreate` comments may carry the
+command alone, without the agent prefix, as `AGENTS.md` allows for bot
+commands. Never
 post `@dependabot ignore`, `@dependabot close` or `@dependabot merge`.
 
 ## Merge rules
