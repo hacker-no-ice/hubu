@@ -32,7 +32,7 @@ const MANAGED_GONGBU_CALLER_ACCOUNT: &str = "gongbu-caller";
 const PROVIDER_CONTRACTS_DOCUMENT: &str =
     include_str!("../../../contracts/provider-contracts-v1.json");
 const PROVIDER_CONTRACTS_DOCUMENT_SHA256: &str =
-    "ab28ebbbd2cdf0de6118dafcbd180c906966b4826f8bf637e41c731665f4c4c8";
+    "5bad24730152b1155773386d107df7c7c2b038a9f77150f4bea05da752edcadf";
 const MANAGED_CREDENTIAL_IGNORE: &[u8] =
     b"# Hubu-managed credentials. Do not edit or remove.\n*\n!.gitignore\n";
 
@@ -5429,6 +5429,7 @@ live_spend_acknowledgement = "{LIVE_SPEND_ACKNOWLEDGEMENT}"
         let providers = source(&[
             "hubu.gemini-3.1-flash-lite-image.text-to-image/v2",
             "hubu.gemini-3.1-flash-image.text-to-image/v2",
+            "hubu.gemini-nano-banana-2.1.text-to-image/v1",
             "hubu.gemini-3-pro-image.text-to-image/v1",
             "hubu.gemini-3-pro-image.image-edit/v1",
         ]);
@@ -5440,7 +5441,7 @@ live_spend_acknowledgement = "{LIVE_SPEND_ACKNOWLEDGEMENT}"
             .iter()
             .any(|rule| rule["rule_id"] == "google-gemini-3-pro-image-4k-2026-10-28-v1"));
         let entries = provider_contract_catalog_entries(&providers, true);
-        assert_eq!(entries.len(), 4);
+        assert_eq!(entries.len(), 5);
         let entry = |contract: &str| {
             entries
                 .iter()
@@ -5474,6 +5475,22 @@ live_spend_acknowledgement = "{LIVE_SPEND_ACKNOWLEDGEMENT}"
         assert_eq!(price("1k-16:9"), (Some(1376), Some(768), 134, 10));
         assert_eq!(price("2k-1:1"), (Some(2048), Some(2048), 134, 10));
         assert_eq!(price("4k-21:9"), (Some(6336), Some(2688), 24, 1));
+        let nano = entry("hubu.gemini-nano-banana-2.1.text-to-image/v1");
+        let nano_4k = nano
+            .capability
+            .presets
+            .iter()
+            .find(|preset| preset.name == "4k-16:9")
+            .unwrap();
+        assert_eq!(
+            (
+                nano_4k.width,
+                nano_4k.height,
+                nano_4k.rate_numerator_minor,
+                nano_4k.rate_denominator
+            ),
+            (Some(5504), Some(3072), 113, 10)
+        );
         // An edit preset shows the output image's price.
         let pro_edit = entry("hubu.gemini-3-pro-image.image-edit/v1");
         assert_eq!(pro_edit.capability.presets.len(), 30);

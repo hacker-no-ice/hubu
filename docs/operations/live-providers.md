@@ -2,7 +2,8 @@
 
 This is the external operator entry point for billable Gongbu provider work.
 Hubu currently ships live provider contracts for the Gemini Developer API
-(Flash Lite Image, Flash Image and Pro Image), FLUX.2 and FLUX 3. All use the
+(Flash Lite Image, Flash Image, Nano Banana 2.1 and Pro Image), FLUX.2 and
+FLUX 3. All use the
 same governance,
 credential, pricing, spend, retry, reconciliation, artifact, and qualification
 boundaries described here. This page owns that shared operational procedure.
@@ -25,6 +26,7 @@ and must not contact a provider.
 | --- | --- | --- |
 | Gemini Developer API | `google` / `gemini_developer_image` through the Lite and non-Lite Gemini 3.1 Flash Image contracts | AI Studio API key, synchronous inline response; Lite is 1K-only, non-Lite supports 1K/2K/4K |
 | Gemini 3 Pro Image | `google` / `gemini_developer_image` / `gemini-3-pro-image` through [`hubu.gemini-3-pro-image.text-to-image/v1`](gemini-provider-contract.md#v2-contracts-aspect-ratios-and-gemini-3-pro-image) and its image-edit contract, bound only when the operator names them; Lite and Flash `/v2` add aspect ratios | Same transport; 1K/2K/4K at ten aspect ratios, 13.4¢ per 1K/2K and 24¢ per 4K image, text and thinking tokens unpriced |
+| Gemini Nano Banana 2.1 | `google` / `gemini_developer_image` / `gemini-nano-banana-2.1` through `hubu.gemini-nano-banana-2.1.text-to-image/v1` and its image-edit contract, bound only when the operator names them | Same transport and ratios; 3.36¢, 5.04¢ and 11.3¢ per 1K, 2K and 4K image |
 | FLUX.2 Pro | `flux` / `flux2_api` through `hubu.flux-2-pro.text-to-image/v1`, or `/v2` for aspect ratios and per-megapixel pricing | Managed target and prices, asynchronous submit and polling, BFL artifact delivery and durable resume |
 | FLUX 3 Image | `flux` / `flux2_api` through [`hubu.flux-3-image.text-to-image/v1`](flux-provider-contract.md#flux-3-image-contract) | Tier-priced 1K/2K at any aspect ratio, web-search grounding off, same BFL polling and delivery |
 

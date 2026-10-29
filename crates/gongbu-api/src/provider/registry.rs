@@ -795,6 +795,7 @@ mod tests {
             ),
             ("google", "gemini_developer_image", "gemini-3.1-flash-image"),
             ("google", "gemini_developer_image", "gemini-3-pro-image"),
+            ("google", "gemini_developer_image", "gemini-nano-banana-2.1"),
             ("flux", "flux2_api", "flux-2-pro"),
             ("flux", "flux2_api", "flux-3-image"),
         ] {
@@ -802,7 +803,7 @@ mod tests {
             assert_eq!(catalog.resolve_active(&key).unwrap().adapter, adapter);
         }
         let execution_targets = catalog.execution_targets();
-        assert_eq!(execution_targets.len(), 8);
+        assert_eq!(execution_targets.len(), 10);
         // Pro is its own target, discovered by model beside Flash and Lite,
         // with an aspect-ratio certified size at every tier.
         let pro = execution_targets

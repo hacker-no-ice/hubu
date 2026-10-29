@@ -11,9 +11,10 @@
 # and https://ai.google.dev/gemini-api/docs/image-generation. Output images
 # keep the text-to-image per-image rates of
 # google-gemini-developer-image-v2.toml, at the same certified sizes. Each
-# input image is billed as input tokens: on Flash Image and Flash Lite Image
-# at the Gemini 3 default of 1,120 tokens, 1,120 × $0.50 per 1M = 0.056¢ and
-# 1,120 × $0.25 per 1M = 0.028¢; on Pro Image Google sets an input image at
+# input image is billed as input tokens: on Flash Image, Flash Lite Image and
+# Nano Banana 2.1 at the Gemini 3 default of 1,120 tokens, 1,120 × $0.50 per
+# 1M = 0.056¢, 1,120 × $0.25 per 1M = 0.028¢ and 1,120 × $1.50 per 1M =
+# 0.168¢; on Pro Image Google sets an input image at
 # 560 tokens, 560 × $2.00 per 1M = 0.112¢. Text prompt input tokens and text
 # and thinking output tokens stay unpriced, as in v1.
 schema_version = 1
@@ -259,6 +260,41 @@ selector = { image_size = "4k" }
 components = [
   { unit = "image", rate_numerator_minor = 151, rate_denominator = 10 },
   { unit = "input_image", rate_numerator_minor = 56, rate_denominator = 1000 },
+]
+
+# Gemini Nano Banana 2.1, the successor to Flash Image. An explicit model
+# beside it, never a default or a silent upgrade.
+[[models]]
+model = "gemini-nano-banana-2.1"
+provider_config_version = "hubu-gemini-nano-banana-2.1-edit-2026-10-28-v1"
+pricing_version = "google-gemini-nano-banana-2.1-edit-usd-2026-10-28-v1"
+pricing_reviewed_on = "2026-10-28"
+
+[[models.pricing_rules]]
+rule_id = "google-gemini-nano-banana-2.1-edit-1k-2026-10-28-v1"
+currency = "USD"
+selector = { image_size = "1k" }
+components = [
+  { unit = "image", rate_numerator_minor = 336, rate_denominator = 100 },
+  { unit = "input_image", rate_numerator_minor = 168, rate_denominator = 1000 },
+]
+
+[[models.pricing_rules]]
+rule_id = "google-gemini-nano-banana-2.1-edit-2k-2026-10-28-v1"
+currency = "USD"
+selector = { image_size = "2k" }
+components = [
+  { unit = "image", rate_numerator_minor = 504, rate_denominator = 100 },
+  { unit = "input_image", rate_numerator_minor = 168, rate_denominator = 1000 },
+]
+
+[[models.pricing_rules]]
+rule_id = "google-gemini-nano-banana-2.1-edit-4k-2026-10-28-v1"
+currency = "USD"
+selector = { image_size = "4k" }
+components = [
+  { unit = "image", rate_numerator_minor = 113, rate_denominator = 10 },
+  { unit = "input_image", rate_numerator_minor = 168, rate_denominator = 1000 },
 ]
 
 # Gemini 3 Pro Image (Nano Banana Pro). Never a default: an operator binds its

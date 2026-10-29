@@ -154,7 +154,7 @@ mod tests {
             projected += 1;
         }
         assert_eq!(
-            projected, 13,
+            projected, 15,
             "every shipped contract comes from a verified pack"
         );
     }
@@ -863,6 +863,8 @@ mod tests {
             ("gemini-3-pro-image", "4k", "9:16", (3072, 5504)),
             ("gemini-3.1-flash-image", "2k", "4:5", (1856, 2304)),
             ("gemini-3.1-flash-image", "4k", "3:2", (5056, 3392)),
+            ("gemini-nano-banana-2.1", "2k", "16:9", (2752, 1536)),
+            ("gemini-nano-banana-2.1", "4k", "2:3", (3392, 5056)),
             ("gemini-3.1-flash-lite-image", "1k", "3:4", (896, 1200)),
         ] {
             let prepared = gemini
@@ -892,6 +894,7 @@ mod tests {
         let dimensions = square.request.output_dimensions.unwrap();
         assert_eq!((dimensions.width, dimensions.height), (2048, 2048));
         assert_eq!(gemini.output_sizes("gemini-3-pro-image").len(), 30);
+        assert_eq!(gemini.output_sizes("gemini-nano-banana-2.1").len(), 30);
         assert_eq!(gemini.output_sizes("gemini-3.1-flash-lite-image").len(), 10);
         // Not offered: Lite above 1k, ratios outside the shared published
         // set, 0.5k, more than one image, or no tier.
@@ -911,6 +914,10 @@ mod tests {
             (
                 "gemini-3.1-flash-image",
                 json!({"prompt": "x", "image_size": "0.5k"}),
+            ),
+            (
+                "gemini-nano-banana-2.1",
+                json!({"prompt": "x", "image_size": "1k", "aspect_ratio": "8:1"}),
             ),
             (
                 "gemini-3-pro-image",
@@ -948,6 +955,9 @@ mod tests {
             ("gemini-3.1-flash-image", "2k", 101_000),
             ("gemini-3.1-flash-image", "4k", 151_000),
             ("gemini-3.1-flash-lite-image", "1k", 33_600),
+            ("gemini-nano-banana-2.1", "1k", 33_600),
+            ("gemini-nano-banana-2.1", "2k", 50_400),
+            ("gemini-nano-banana-2.1", "4k", 113_000),
         ] {
             for ratio in ["1:1", "21:9", "9:16"] {
                 let frozen = snapshot_for(
@@ -959,7 +969,8 @@ mod tests {
             }
         }
         // A Pro edit adds 0.112¢ per input image: two inputs at 4k are
-        // 24 + 2 × 0.112 = 24.224¢. Flash keeps 0.056¢ and Lite 0.028¢.
+        // 24 + 2 × 0.112 = 24.224¢. Flash keeps 0.056¢, Lite 0.028¢, and
+        // Nano Banana 2.1 bills 1,120 tokens at $1.50 per 1M: 0.168¢.
         let edit = pack_at("google-gemini-developer-image-edit", GEMINI_V2);
         let inputs = json!([
             "0f5c2a64-3f0e-4c9b-9a51-2b7d1c4e8a10",
@@ -970,6 +981,7 @@ mod tests {
             ("gemini-3-pro-image", "1k", 136_240),
             ("gemini-3.1-flash-image", "1k", 68_120),
             ("gemini-3.1-flash-lite-image", "1k", 34_160),
+            ("gemini-nano-banana-2.1", "2k", 53_760),
         ] {
             let frozen = snapshot_for(
                 &edit,

@@ -115,9 +115,11 @@ target, such as `hubu.flux-2-pro.text-to-image/v1` and its
 [`/v2`](../../../operations/flux-provider-contract.md#contract-v2-aspect-ratios-and-per-megapixel-pricing),
 or `hubu.gemini-3.1-flash-image.text-to-image/v1` and its
 [`/v2`](../../../operations/gemini-provider-contract.md#v2-contracts-aspect-ratios-and-gemini-3-pro-image),
-are alternatives: bind one of them. Gemini 3 Pro Image is a separate model
-with its own contracts (`hubu.gemini-3-pro-image.text-to-image/v1` and
-`hubu.gemini-3-pro-image.image-edit/v1`); it is available only when bound.
+are alternatives: bind one of them. Gemini Nano Banana 2.1 and Gemini 3 Pro
+Image are separate models with their own contracts
+(`hubu.gemini-nano-banana-2.1.text-to-image/v1`,
+`hubu.gemini-3-pro-image.text-to-image/v1` and their `image-edit/v1`
+contracts); each is available only when bound.
 
 ```toml
 [[contract_bindings]]

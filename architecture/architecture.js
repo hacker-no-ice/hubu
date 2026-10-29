@@ -87,8 +87,8 @@ const sharedLinks = {
   gongbuAsyncEngine: ["Async submit-and-poll pack engine", "crates/gongbu-api/src/provider/pack_async.rs"],
   verifiedGeminiPack: ["Verified Gemini provider pack", "packs/verified/google-gemini-developer-image.toml"],
   verifiedGeminiEditPack: ["Verified Gemini image-edit pack", "packs/verified/google-gemini-developer-image-edit.toml"],
-  verifiedGeminiV2Pack: ["Verified Gemini v2 pack (aspect ratios, Gemini 3 Pro Image)", "packs/verified/google-gemini-developer-image-v2.toml"],
-  verifiedGeminiEditV2Pack: ["Verified Gemini v2 image-edit pack (aspect ratios, Gemini 3 Pro Image)", "packs/verified/google-gemini-developer-image-edit-v2.toml"],
+  verifiedGeminiV2Pack: ["Verified Gemini v2 pack (aspect ratios, Nano Banana 2.1, Gemini 3 Pro Image)", "packs/verified/google-gemini-developer-image-v2.toml"],
+  verifiedGeminiEditV2Pack: ["Verified Gemini v2 image-edit pack (aspect ratios, Nano Banana 2.1, Gemini 3 Pro Image)", "packs/verified/google-gemini-developer-image-edit-v2.toml"],
   providerPacks: ["Provider pack schema v1", "docs/provider-packs.md"],
   gongbuProviderConfig: ["Provider configuration", "docs/configuration/local-stack/v1/providers-toml.md"],
   liveProviders: ["Live provider operations", "docs/operations/live-providers.md"],
@@ -703,7 +703,7 @@ const components = {
     summary: "The human's tool for setup, administration, and running the local stack. It validates provider contracts before activation and only manages services it launched.",
     viewBox: "0 0 1280 760",
     copy:
-      "The CLI is the human developer surface and local-stack launcher. For the Gemini Lite, Flash and Pro, and FLUX provider contracts it renders one explicitly versioned composite catalog, reports independent non-network readiness facts, and invokes Gongbu's production validator before activation. It stages updates for explicit activation, reconciles only launcher-owned services in dependency order, configures Codex MCP discovery, and preserves backend ownership boundaries.",
+      "The CLI is the human developer surface and local-stack launcher. For the Gemini Lite, Flash, Nano Banana 2.1 and Pro, and FLUX provider contracts it renders one explicitly versioned composite catalog, reports independent non-network readiness facts, and invokes Gongbu's production validator before activation. It stages updates for explicit activation, reconciles only launcher-owned services in dependency order, configures Codex MCP discovery, and preserves backend ownership boundaries.",
     responsibilities: [
       ["Local gallery", "`hubu gallery export` uses the selected profile to read the operation registry, Hubu settlement history, and Gongbu artifact bytes directly into local files. It does not start the MCP server or provider worker."],
       ["Save folders", "`hubu folders allow` maps short names to project folders. Agents save artifacts only into these names; `hubu artifact save` is the CLI form of the same save."],
@@ -941,7 +941,7 @@ const sidebarHighlights = {
     "Gongbu runs as a separate execution-plane process.",
     "Startup selects no account or agent; Hubu authorization attributes each new execution.",
     "The FLUX provider contract freezes target, dimensions, pricing, policies, and non-live qualification state.",
-    "Gemini Lite, Flash and Pro keep distinct targets while sharing an allowed Google credential; FLUX remains credential-isolated, and every execution keeps distinct attempts and artifacts.",
+    "Gemini Lite, Flash, Nano Banana 2.1 and Pro keep distinct targets while sharing an allowed Google credential; FLUX remains credential-isolated, and every execution keeps distinct attempts and artifacts.",
     "Persisted token replay is local before Hubu resolution.",
     "It owns workflows, credentials, provider calls, exact receipts, and artifacts.",
   ],

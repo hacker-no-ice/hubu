@@ -12,7 +12,7 @@ use thiserror::Error;
 
 const CONTRACT_DOCUMENT: &str = include_str!("../../../../contracts/provider-contracts-v1.json");
 const CONTRACT_DOCUMENT_SHA256: &str =
-    "ab28ebbbd2cdf0de6118dafcbd180c906966b4826f8bf637e41c731665f4c4c8";
+    "5bad24730152b1155773386d107df7c7c2b038a9f77150f4bea05da752edcadf";
 
 #[derive(Debug, Error)]
 pub(crate) enum Error {
@@ -747,7 +747,27 @@ mod tests {
     fn mixed_contracts_are_order_independent_and_credentials_are_isolated() {
         let (targets, pricing) = mixed_contract_inputs(false);
         let projected = validate_and_project(&targets, &pricing).unwrap();
-        assert_eq!(projected.len(), 8);
+        assert_eq!(projected.len(), 10);
+        // Nano Banana 2.1 is its own target beside Flash: 3.36¢, 5.04¢ and
+        // 11.3¢ per image at 1k, 2k and 4k.
+        let nano = projected
+            .iter()
+            .find(|contract| contract.contract == "hubu.gemini-nano-banana-2.1.text-to-image/v1")
+            .unwrap();
+        assert_eq!(nano.target.model, "gemini-nano-banana-2.1");
+        for preset in &nano.capability.presets {
+            let expected = match preset.when["image_size"].as_str() {
+                "1k" => (336, 100),
+                "2k" => (504, 100),
+                _ => (113, 10),
+            };
+            assert_eq!(
+                (preset.rate_numerator_minor, preset.rate_denominator),
+                expected,
+                "{}",
+                preset.name
+            );
+        }
         // Pro prices per image by tier at every aspect ratio: 13.4¢ at 1k
         // and 2k, 24¢ at 4k, beside Flash and Lite.
         let pro = projected

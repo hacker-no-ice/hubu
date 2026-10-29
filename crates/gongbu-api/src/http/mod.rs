@@ -2464,7 +2464,9 @@ mod tests {
                 "hubu.gemini-3.1-flash-image.image-edit/v1",
                 "hubu.gemini-3.1-flash-lite-image.image-edit/v1",
                 "hubu.gemini-3.1-flash-image.text-to-image/v1",
-                "hubu.gemini-3.1-flash-lite-image.text-to-image/v1"
+                "hubu.gemini-3.1-flash-lite-image.text-to-image/v1",
+                "hubu.gemini-nano-banana-2.1.image-edit/v1",
+                "hubu.gemini-nano-banana-2.1.text-to-image/v1"
             ])
         );
         let gemini_full = contracts

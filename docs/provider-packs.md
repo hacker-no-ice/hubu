@@ -23,7 +23,8 @@ its own contract revision: `bfl-flux-2.toml` backs FLUX.2 [pro] v1 and
 `bfl-flux-2-v2.toml` backs v2. `bfl-flux-3-image.toml` backs FLUX 3 Image.
 `google-gemini-developer-image.toml` and `google-gemini-developer-image-edit.toml`
 back the Gemini v1 contracts; their `-v2.toml` successors back the Flash and
-Lite `/v2` contracts, which add aspect ratios, and Gemini 3 Pro Image.
+Lite `/v2` contracts, which add aspect ratios, and Gemini Nano Banana 2.1 and
+Gemini 3 Pro Image.
 
 A pack with `size_presets` may still price by a selector: the Gemini v2 packs
 certify a size for every `image_size` and `aspect_ratio` pair but price per
