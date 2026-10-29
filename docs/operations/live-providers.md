@@ -24,7 +24,8 @@ and must not contact a provider.
 | --- | --- | --- |
 | Gemini Developer API | `google` / `gemini_developer_image` through the Lite and non-Lite Gemini 3.1 Flash Image contracts | AI Studio API key, synchronous inline response; Lite is 1K-only, non-Lite supports 1K/2K/4K |
 | FLUX.2 Pro | `flux` / `flux2_api` through `hubu.flux-2-pro.text-to-image/v1`, or `/v2` for aspect ratios and per-megapixel pricing | Managed target and prices, asynchronous submit and polling, BFL artifact delivery and durable resume |
-| FLUX 3 Image | `flux` / `flux2_api` through [`hubu.flux-3-image.text-to-image/v1`](flux-provider-contract.md#flux-3-image-contract) | Tier-priced 1K/2K at any aspect ratio, web-search grounding off, same BFL polling and delivery |
+| FLUX.2 [klein] 4B / 9B, [flex], [max] | `flux` / `flux2_api` through [`hubu.flux-2-klein-4b`, `hubu.flux-2-klein-9b`, `hubu.flux-2-flex` and `hubu.flux-2-max` `.text-to-image/v1`](flux-provider-contract.md#flux2-klein-flex-and-max-contracts) | Each model its own target and endpoint, priced per megapixel at its own BFL rates with the FLUX.2 [pro] v2 sizes; Flex alone takes steps and guidance |
+| FLUX 3 Image | `flux` / `flux2_api` through [`hubu.flux-3-image.text-to-image/v1`](flux-provider-contract.md#flux-3-image-contract), or [`/v2`](flux-provider-contract.md#flux-3-image-contract-v2-768sq-and-15k-tiers) for the 768sq and 1.5K tiers | Tier-priced at any aspect ratio, web-search grounding off, same BFL polling and delivery |
 
 Other adapter IDs can remain available for operator-managed configurations,
 but they are not additional supported integrations in this guide.

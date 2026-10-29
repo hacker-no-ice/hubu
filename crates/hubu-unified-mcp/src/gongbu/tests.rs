@@ -459,3 +459,31 @@ fn edit_targets_publish_their_input_image_parameter_and_price() {
     .result;
     assert_eq!(result["isError"], true, "{result}");
 }
+
+#[test]
+fn flux_3_resolution_tiers_are_listed_and_unknown_sizes_refused() {
+    const CATALOG: &str = r#"{"schema_version":2,"targets":[{"target_id":"gongbu:target:v1:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","workload_type":"image_generation","provider":"flux","model":"flux-3-image","execution_scope":{"schema_version":1,"provider":"provider:flux:bfl","executor":"executor:gongbu:image","capability":"capability:image:generate","billing_merchant":"merchant:black-forest-labs"},"image_sizes":["1.5k","1k","2k","768sq"],"pricing":[{"rule_id":"768sq","selector":{"image_size":"768sq"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":41,"rate_denominator":10}]},{"rule_id":"1.5k","selector":{"image_size":"1.5k"},"currency":"USD","components":[{"unit":"image","rate_numerator_minor":7,"rate_denominator":1}]}]}]}"#;
+    let list = |catalog: &'static str| {
+        let (endpoint, _) = mock_server(vec![("200 OK", "application/json", catalog)]);
+        call_tool(
+            &client(&endpoint, "secret"),
+            "gongbu_list_execution_targets",
+            json!({}),
+            None,
+        )
+        .result
+    };
+    let result = list(CATALOG);
+    assert_eq!(result["isError"], false, "{result}");
+    assert_eq!(
+        result["structuredContent"]["targets"][0]["image_sizes"],
+        json!(["1.5k", "1k", "2k", "768sq"])
+    );
+    // A size Gongbu never prices is not a usable target.
+    let unknown: &'static str = Box::leak(
+        CATALOG
+            .replace(r#""768sq"]"#, r#""768sq","8k"]"#)
+            .into_boxed_str(),
+    );
+    assert_eq!(list(unknown)["isError"], true);
+}
