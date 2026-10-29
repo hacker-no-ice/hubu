@@ -205,10 +205,6 @@ enter reconciliation instead of being released optimistically. The exact
 conversion rules are in
 [precise external cost and budget conversion](spend-executor-contract.md#precise-external-cost-and-budget-conversion).
 
-A [task budget](task-budgets.md) caps the spend for one task inside an agent
-budget. While open, it holds back its unused part from other spend. Spend that
-carries its trusted `task_id` must fit it. Closing it returns the unused part.
-
 An executor cannot settle above its maximum. After the claim lease expires, a
 human reviewing provider evidence may confirm a legitimate billed overrun; Hubu
 then consumes the full charge and lets the remaining balance become negative.

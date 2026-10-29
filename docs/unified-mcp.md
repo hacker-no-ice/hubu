@@ -230,11 +230,6 @@ only when the human answers yes at its one-time prompt or passes
 `--trust-client-approval`, and keeps the setting on re-runs unless
 `--no-trust-client-approval` is passed.
 
-`hubu_open_task_budget` and `hubu_close_task_budget` need no human prompt or
-trust gate. They only re-partition the agent's own budget and never authorize
-spend. Opening one binds it to the MCP session, so later spend operations in
-that session carry its task. See [task budgets](task-budgets.md).
-
 Spend approval resolution uses the narrower
 `HUBU_MCP_TRUST_SPEND_APPROVAL=1` gate. `hubu init codex` always renders that
 gate together with the per-tool native prompt, without enabling the broader

@@ -128,37 +128,6 @@ fn all_tool_definitions() -> Vec<Value> {
                 "budget_id": { "type": "string", "minLength": 1 }
             }), &["budget_id"]),
         ),
-        agent_write_tool(
-            "hubu_open_task_budget",
-            "Open a task budget: reserve part of the agent's budget for one task, such as \"design this landing page for $3\". Spend from this session then draws from it and is denied once it would exceed it. Repeating the same request returns the open budget. Close it when the task ends to return the unused amount.",
-            json_schema_required(json!({
-                "agent_id": { "type": "string", "minLength": 1 },
-                "task_id": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 512,
-                    "description": "Short stable name for the task, such as landing-page"
-                },
-                "amount": spend_amount_input_schema(),
-                "currency": spend_currency_input_schema(),
-                "reason": { "type": "string" }
-            }), &["agent_id", "task_id", "amount"]),
-        ),
-        agent_write_tool(
-            "hubu_close_task_budget",
-            "Close a task budget when its task ends. The unused amount returns to the agent budget. Refused while an authorization under it is outstanding.",
-            json_schema_required(json!({
-                "task_budget_id": { "type": "string", "minLength": 1 }
-            }), &["task_budget_id"]),
-        ),
-        read_tool(
-            "hubu_list_task_budgets",
-            "List open task budgets with spend so far (settled plus frozen) and remaining; include_all adds closed ones.",
-            json_schema(json!({
-                "agent_id": { "type": "string" },
-                "include_all": { "type": "boolean", "default": false }
-            })),
-        ),
         approval_tool(
             "hubu_set_spending_target",
             "Set an advisory spending target for the active Hubu user. Requires a human click.",
@@ -445,24 +414,6 @@ fn write_tool(name: &str, description: &str, input_schema: Value) -> Value {
             human_approval: "conditional",
             client_approval_mode: "auto",
             runtime_approval: "hubu_policy_needs_approval",
-        },
-    )
-}
-
-/// A write an agent may make without a human click: it only re-partitions
-/// the agent's own budget and never authorizes spend.
-fn agent_write_tool(name: &str, description: &str, input_schema: Value) -> Value {
-    tool(
-        name,
-        description,
-        input_schema,
-        ToolAnnotations {
-            read_only: false,
-            destructive: false,
-            idempotent: true,
-            human_approval: "none",
-            client_approval_mode: "auto",
-            runtime_approval: "none",
         },
     )
 }

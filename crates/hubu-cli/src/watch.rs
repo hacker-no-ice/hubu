@@ -595,7 +595,6 @@ fn render(
                 width,
             );
         }
-        task_budget_lines(&mut out, row, single, name_width, content, style, width);
     }
     if rows.is_empty() {
         line(
@@ -661,54 +660,6 @@ fn render(
         }
     }
     Ok(out)
-}
-
-/// One line per open task budget under its agent: spend so far against the
-/// task's cap and what is left. Spend includes outstanding reservations.
-fn task_budget_lines(
-    out: &mut String,
-    row: &Value,
-    single: bool,
-    name_width: usize,
-    content: usize,
-    style: terminal::TerminalStyle,
-    width: usize,
-) {
-    let indent = if single {
-        " ".to_string()
-    } else {
-        " ".repeat(name_width + 2)
-    };
-    for task in row["task_budgets"].as_array().into_iter().flatten() {
-        let used = money_of(task, "consumed_cents")
-            .zip(money_of(task, "frozen_cents"))
-            .and_then(|(consumed, frozen)| {
-                consumed
-                    .amount
-                    .checked_add(frozen.amount)
-                    .map(|amount| money::Money::new(amount, consumed.currency))
-            })
-            .map(|used| money::format_money(used, money::Direction::Up))
-            .unwrap_or_else(|| "—".into());
-        let detail = format!(
-            "  {used} of {} · {} left",
-            shown(task, "limit_cents"),
-            shown(task, "remaining_cents")
-        );
-        let prefix = format!("{indent}↳ task ");
-        let task_id = text(
-            &task["task_id"],
-            content
-                .saturating_sub(display_width(&prefix) + display_width(&detail))
-                .max(4),
-        );
-        line(
-            out,
-            &[(format!("{prefix}{task_id}{detail}"), None)],
-            style,
-            width,
-        );
-    }
 }
 
 #[cfg(test)]
@@ -789,36 +740,6 @@ mod tests {
             70
         )
         .is_err());
-    }
-    #[test]
-    fn open_task_budgets_show_spend_so_far_under_their_agent() {
-        let mut s = snapshot();
-        let money = |units: &str| json!({"units": units, "scale": 6, "currency": "usd"});
-        s["rows"][0]["task_budgets"] = json!([{
-            "task_budget_id": "tbg_0123456789ab", "task_id": "landing-page\u{1b}[31m",
-            "limit": money("3000000"), "consumed": money("1234000"),
-            "frozen": money("500000"), "remaining": money("1266000"),
-        }]);
-        let o = options(vec![]).unwrap();
-        let one = output(&s, &o);
-        let task_line = one
-            .lines()
-            .find(|line| line.contains("↳ task"))
-            .expect("task budget line");
-        assert!(task_line.contains("landing-page"));
-        assert!(!task_line.contains('\u{1b}'));
-        assert!(task_line.contains("$1.734 of $3.00 · $1.266 left"));
-        let mut second = s["rows"][0].clone();
-        second["agent_id"] = json!("b");
-        second["name"] = json!("research-bot");
-        second["task_budgets"] = json!([]);
-        s["rows"].as_array_mut().unwrap().push(second);
-        let multi = output(&s, &o);
-        assert_eq!(
-            multi.lines().filter(|line| line.contains("↳ task")).count(),
-            1
-        );
-        assert!(multi.lines().all(|line| display_width(line) <= 70));
     }
     #[test]
     fn flags_validate_range_and_display_only_filter() {

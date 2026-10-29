@@ -249,14 +249,6 @@ pub(super) fn route_tool_call_v1(
         name if super::governance::is_tool(name) => {
             get_request(super::governance::request_path(name, &arguments)?)
         }
-        super::task_budget::OPEN_TOOL => {
-            post_request("/task-budgets", super::task_budget::open_body(arguments)?)
-        }
-        super::task_budget::CLOSE_TOOL => post_request(
-            "/task-budgets/close",
-            super::task_budget::close_body(arguments)?,
-        ),
-        super::task_budget::LIST_TOOL => get_request(super::task_budget::list_path(&arguments)?),
         "hubu_list_agents" => get_request("/agents"),
         "hubu_list_budgets" => {
             if arguments

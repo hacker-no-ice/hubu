@@ -1,6 +1,6 @@
 {
   "contract_version": "hubu-gongbu-mcp-v1",
-  "routing_revision": 16,
+  "routing_revision": 17,
   "tools": [
     { "name": "gongbu_create_execution", "owner": "gongbu" },
     { "name": "gongbu_get_artifact", "owner": "gongbu" },
@@ -10,7 +10,6 @@
     { "name": "hubu_apply_policy", "owner": "hubu" },
     { "name": "hubu_authorize_spend", "owner": "hubu" },
     { "name": "hubu_budget_history", "owner": "hubu" },
-    { "name": "hubu_close_task_budget", "owner": "hubu" },
     { "name": "hubu_create_budget", "owner": "hubu" },
     { "name": "hubu_feedback_guidance", "owner": "router" },
     { "name": "hubu_get_authorization_record", "owner": "hubu" },
@@ -24,9 +23,7 @@
     { "name": "hubu_list_claims_requiring_reconciliation", "owner": "hubu" },
     { "name": "hubu_list_governance_records", "owner": "hubu" },
     { "name": "hubu_list_ledger", "owner": "hubu" },
-    { "name": "hubu_list_task_budgets", "owner": "hubu" },
     { "name": "hubu_list_users", "owner": "hubu" },
-    { "name": "hubu_open_task_budget", "owner": "hubu" },
     { "name": "hubu_operation_status", "owner": "router" },
     { "name": "hubu_policy_diff", "owner": "hubu" },
     { "name": "hubu_policy_history", "owner": "hubu" },

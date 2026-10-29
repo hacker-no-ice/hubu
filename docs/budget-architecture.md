@@ -64,10 +64,5 @@ holds preserve their authorizing version and can finalize after revocation.
 This change introduces no lifecycle states and no Hubu/Gongbu dependency or
 storage-boundary changes.
 
-[Task budgets](task-budgets.md) open and close under the same order: the budget
-manager, then the governance repository. Spend reservation reads open task
-budgets after taking both locks, so an allocation check and a reservation never
-interleave.
-
 See the [interactive budget diagram](../architecture/index.html) and
 [public facade](../crates/hubu-core/src/budget/manager.rs) for ownership and source.

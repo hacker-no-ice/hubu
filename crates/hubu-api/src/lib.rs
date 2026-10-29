@@ -2,7 +2,6 @@ mod agent_identity;
 mod financial_observer;
 mod governance;
 mod history;
-mod task_budget;
 use std::{
     collections::{BTreeMap, HashMap},
     env,
@@ -1733,9 +1732,6 @@ struct BudgetHoldHttpResponse {
     consumed_amount_cents: i64,
     frozen_amount_cents: i64,
     remaining_amount_cents: i64,
-    /// Public `tbg_` id of the task budget this hold was reserved under.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    task_budget_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2042,10 +2038,6 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
         ("GET", "/budgets") => {
             list_budgets_at(state, query_flag(&request, "all"), request_now).map(to_json)
         }
-        ("POST", task_budget::OPEN_ROUTE) => task_budget::open(request.body, state, request_now),
-        ("POST", task_budget::CLOSE_ROUTE) => task_budget::close(request.body, state, request_now),
-        ("GET", task_budget::OPEN_ROUTE) => task_budget::list(&request, state),
-        ("GET", task_budget::SHOW_ROUTE) => task_budget::show(&request, state),
         ("POST", "/spend/authorize") => {
             authorize_spend_at(request.body, state, request_now).map(to_json)
         }
@@ -2113,9 +2105,6 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
                 return response;
             }
             if let Some(response) = registration_error_response(&error) {
-                return response;
-            }
-            if let Some(response) = task_budget::error_response(&error) {
                 return response;
             }
             if matches!(
@@ -6193,7 +6182,6 @@ fn budget_hold_response(update: BudgetHoldUpdate) -> BudgetHoldHttpResponse {
             consumed_amount_cents: response.balance.consumed_amount.legacy_cents_ceil(),
             frozen_amount_cents: response.balance.frozen_amount.legacy_cents_ceil(),
             remaining_amount_cents: response.balance.remaining_amount.legacy_cents_floor(),
-            task_budget_id: hold_task_budget_id(&response.hold),
         },
         BudgetHoldUpdate::Released(response) => BudgetHoldHttpResponse {
             hold_id: response.hold.id.to_string(),
@@ -6216,7 +6204,6 @@ fn budget_hold_response(update: BudgetHoldUpdate) -> BudgetHoldHttpResponse {
             consumed_amount_cents: response.balance.consumed_amount.legacy_cents_ceil(),
             frozen_amount_cents: response.balance.frozen_amount.legacy_cents_ceil(),
             remaining_amount_cents: response.balance.remaining_amount.legacy_cents_floor(),
-            task_budget_id: hold_task_budget_id(&response.hold),
         },
         BudgetHoldUpdate::Frozen(response) => frozen_budget_hold_response(response),
     }
@@ -6244,7 +6231,6 @@ fn frozen_budget_hold_response(response: ReserveBudgetResponse) -> BudgetHoldHtt
         consumed_amount_cents: response.balance.consumed_amount.legacy_cents_ceil(),
         frozen_amount_cents: response.balance.frozen_amount.legacy_cents_ceil(),
         remaining_amount_cents: response.balance.remaining_amount.legacy_cents_floor(),
-        task_budget_id: hold_task_budget_id(&response.hold),
     }
 }
 
@@ -6264,14 +6250,7 @@ fn budget_hold_state_response(
         consumed_amount_cents: balance.consumed_amount.legacy_cents_ceil(),
         frozen_amount_cents: balance.frozen_amount.legacy_cents_ceil(),
         remaining_amount_cents: balance.remaining_amount.legacy_cents_floor(),
-        task_budget_id: hold_task_budget_id(&hold),
     }
-}
-
-fn hold_task_budget_id(hold: &BudgetHold) -> Option<String> {
-    hold.task_budget_id
-        .as_ref()
-        .map(hubu_core::budget::public_task_budget_id)
 }
 
 fn budget_response(budget: BudgetWithBalance, state: &ServerState) -> Result<BudgetHttpResponse> {
@@ -10577,222 +10556,6 @@ lease_profiles:
         assert!(retry_error
             .to_string()
             .contains("spend auth token has already been used"));
-        std::fs::remove_file(path).ok();
-    }
-
-    #[test]
-    fn task_budget_caps_a_design_task_and_returns_unused_budget_on_close() {
-        let path =
-            std::env::temp_dir().join(format!("hubu-api-task-budget-{}.sqlite", UserId::new()));
-        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
-        init(
-            json!({"display_name": "Alice Example", "email": "alice@example.com"}).to_string(),
-            &state,
-        )
-        .expect("init should create a user");
-        let agent = register_agent(
-            json!({"name": "designer", "version": "v1"}).to_string(),
-            &state,
-        )
-        .expect("agent should register");
-        add_policy(
-            json!({"agent_id": agent.agent_id, "daily_limit_cents": 1_000}).to_string(),
-            &state,
-        )
-        .expect("policy should apply");
-        create_test_agent_budget(&state, &agent.agent_id, 1_000);
-
-        let opened = route(
-            authenticated_json_request(
-                "/task-budgets",
-                json!({
-                    "agent_id": agent.agent_id,
-                    "task_id": "landing-page",
-                    "amount": "3.00",
-                    "reason": "design this landing page for $3",
-                }),
-            ),
-            &state,
-        );
-        assert_eq!(opened.status, 200, "{}", opened.body);
-        let task_budget_id = opened.body["task_budget"]["task_budget_id"]
-            .as_str()
-            .unwrap()
-            .to_string();
-        assert!(task_budget_id.starts_with("tbg_"));
-        assert_eq!(opened.body["task_budget"]["state"], "open");
-        assert_eq!(
-            opened.body["task_budget"]["amount_limit"]["units"],
-            "3000000"
-        );
-        assert!(opened.body["task_budget"]
-            .get("amount_limit_cents")
-            .is_none());
-
-        let authorize = |operation_key: &str, amount: &str| {
-            authorize_spend(
-                json!({
-                    "operation_key": operation_key,
-                    "account_id": agent.account_id,
-                    "amount": amount,
-                    "reason": "landing page draft",
-                    "merchant": "gongbu.image",
-                    "task_id": "landing-page",
-                })
-                .to_string(),
-                &state,
-            )
-            .expect("authorization should not error")
-        };
-        let draft = authorize("draft-1", "2.50");
-        assert_eq!(draft.decision, "allow");
-        let hold = draft.budget_hold.as_ref().unwrap();
-        assert_eq!(
-            hold.task_budget_id.as_deref(),
-            Some(task_budget_id.as_str())
-        );
-        let record = route(
-            authenticated_get_request(&format!(
-                "/spend/authorizations/show?authorization_id={}",
-                draft.decision_id
-            )),
-            &state,
-        );
-        assert_eq!(record.status, 200, "{}", record.body);
-        assert_eq!(
-            record.body["authorization_record"]["budget_hold"]["task_budget_id"],
-            task_budget_id.as_str()
-        );
-
-        let claim = claim_executor_spend(
-            json!({
-                "spend_auth_token_id": draft.auth_token_id,
-                "account_id": agent.account_id,
-                "amount_cents": 250,
-                "merchant": "gongbu.image",
-                "task_id": "landing-page",
-            })
-            .to_string(),
-            &state,
-        )
-        .expect("executor should claim");
-        settle_executor_spend(
-            json!({
-                "claim_id": claim.claim_id,
-                "receipt": precise_settlement_receipt_json(1_234, 3),
-            })
-            .to_string(),
-            &state,
-        )
-        .expect("executor should settle");
-
-        // The ledger charged 1.234, so 1.766 remains; 2.00 is denied.
-        let denied = authorize("draft-2", "2.00");
-        assert_eq!(denied.decision, "deny");
-        assert_eq!(
-            denied.reasons,
-            vec![hubu_core::app::TASK_BUDGET_INSUFFICIENT.to_string()]
-        );
-        let shown = route(
-            authenticated_get_request(&format!(
-                "/task-budgets/show?agent_id={}&task_id=landing-page",
-                agent.agent_id
-            )),
-            &state,
-        );
-        assert_eq!(shown.status, 200, "{}", shown.body);
-        assert_eq!(
-            shown.body["task_budget"]["consumed_amount"]["units"],
-            "1234000"
-        );
-        assert_eq!(
-            shown.body["task_budget"]["remaining_amount"]["units"],
-            "1766000"
-        );
-        assert_eq!(shown.body["task_budget"]["settled_authorizations"], 1);
-
-        let listed = route(authenticated_get_request("/task-budgets"), &state);
-        assert_eq!(listed.body["task_budgets"].as_array().unwrap().len(), 1);
-
-        let closed = route(
-            authenticated_json_request(
-                "/task-budgets/close",
-                json!({"task_budget_id": task_budget_id}),
-            ),
-            &state,
-        );
-        assert_eq!(closed.status, 200, "{}", closed.body);
-        assert_eq!(closed.body["task_budget"]["state"], "closed");
-        assert_eq!(
-            closed.body["task_budget"]["returned_amount"]["units"],
-            "1766000"
-        );
-        assert_eq!(closed.body["idempotent_replay"], false);
-        let listed = route(authenticated_get_request("/task-budgets"), &state);
-        assert!(listed.body["task_budgets"].as_array().unwrap().is_empty());
-        let all = route(authenticated_get_request("/task-budgets?all=true"), &state);
-        assert_eq!(all.body["task_budgets"].as_array().unwrap().len(), 1);
-
-        // With the task closed, task spend draws from the agent budget again.
-        let after = authorize("draft-3", "2.00");
-        assert_eq!(after.decision, "allow");
-        assert!(after.budget_hold.as_ref().unwrap().task_budget_id.is_none());
-        std::fs::remove_file(path).ok();
-    }
-
-    #[test]
-    fn task_budget_routes_return_typed_errors() {
-        let path = std::env::temp_dir().join(format!(
-            "hubu-api-task-budget-errors-{}.sqlite",
-            UserId::new()
-        ));
-        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
-        init(
-            json!({"display_name": "Alice Example", "email": "alice@example.com"}).to_string(),
-            &state,
-        )
-        .unwrap();
-        let agent = register_agent(
-            json!({"name": "designer", "version": "v1"}).to_string(),
-            &state,
-        )
-        .unwrap();
-        let open = |amount: &str, task: &str| {
-            route(
-                authenticated_json_request(
-                    "/task-budgets",
-                    json!({"agent_id": agent.agent_id, "task_id": task, "amount": amount}),
-                ),
-                &state,
-            )
-        };
-        let no_budget = open("3.00", "design");
-        assert_eq!(no_budget.status, 409);
-        assert_eq!(no_budget.body["error_code"], "no_available_budget");
-        create_test_agent_budget(&state, &agent.agent_id, 500);
-        assert_eq!(
-            open("5.01", "design").body["error_code"],
-            "insufficient_unallocated_budget"
-        );
-        assert_eq!(
-            open("3.00", " design").body["error_code"],
-            "invalid_task_budget"
-        );
-        assert_eq!(open("3.00", "design").status, 200);
-        assert_eq!(open("3.00", "design").body["idempotent_replay"], true);
-        assert_eq!(
-            open("2.00", "design").body["error_code"],
-            "task_budget_conflict"
-        );
-        let unknown = route(
-            authenticated_json_request(
-                "/task-budgets/close",
-                json!({"task_budget_id": "tbg_000000000000"}),
-            ),
-            &state,
-        );
-        assert_eq!(unknown.status, 404);
-        assert_eq!(unknown.body["error_code"], "unknown_task_budget");
         std::fs::remove_file(path).ok();
     }
 

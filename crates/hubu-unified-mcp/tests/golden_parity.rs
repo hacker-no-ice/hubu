@@ -167,30 +167,6 @@ fn cases() -> Vec<GoldenCase> {
             meta: None,
         },
         GoldenCase {
-            name: "hubu_list_task_budgets",
-            owner: hubu,
-            method: "GET",
-            path: "/task-budgets",
-            arguments: json!({}),
-            meta: None,
-        },
-        GoldenCase {
-            name: "hubu_open_task_budget",
-            owner: hubu,
-            method: "POST",
-            path: "/task-budgets",
-            arguments: json!({"agent_id":"agt_107","task_id":"landing-page","amount":"3"}),
-            meta: None,
-        },
-        GoldenCase {
-            name: "hubu_close_task_budget",
-            owner: hubu,
-            method: "POST",
-            path: "/task-budgets/close",
-            arguments: json!({"task_budget_id":"tbg_0123456789ab"}),
-            meta: None,
-        },
-        GoldenCase {
             name: "hubu_list_claims_requiring_reconciliation",
             owner: hubu,
             method: "GET",
@@ -383,8 +359,8 @@ fn assert_complete_unique_matrix(cases: &[GoldenCase]) {
     );
     assert_eq!(
         cases.len(),
-        39,
-        "golden matrix must contain exactly 39 cases"
+        36,
+        "golden matrix must contain exactly 36 cases"
     );
     let fixture = routing_fixture();
     let expected_names = fixture["tools"]
@@ -397,8 +373,8 @@ fn assert_complete_unique_matrix(cases: &[GoldenCase]) {
     let expected = expected_names.iter().copied().collect::<BTreeSet<_>>();
     assert_eq!(
         expected_names.len(),
-        39,
-        "routing fixture must map 39 tools"
+        36,
+        "routing fixture must map 36 tools"
     );
     assert_eq!(
         expected.len(),
@@ -414,7 +390,7 @@ fn assert_complete_unique_matrix(cases: &[GoldenCase]) {
             .iter()
             .filter(|case| case.owner == Owner::Hubu)
             .count(),
-        34
+        31
     );
     assert_eq!(
         cases

@@ -114,16 +114,6 @@ impl NormalizedHarnessIdentity {
         &self.platform
     }
 
-    /// Correlate a Codex or Claude Code call with the task budget this MCP
-    /// session opened. Those harnesses carry no trusted task correlation of
-    /// their own; a platform-invocation envelope keeps its own `task_id`.
-    pub(crate) fn with_session_task(mut self, task_id: Option<&str>) -> Self {
-        if self.hubu_invocation_id.is_none() && self.task_id.is_none() {
-            self.task_id = task_id.map(str::to_owned);
-        }
-        self
-    }
-
     fn validate(&self) -> Result<()> {
         validate_platform(&self.platform)?;
         validate_identifier(
@@ -567,9 +557,7 @@ impl OperationRegistry {
                 || existing.codex_call_id != identity.codex_call_id
                 || existing.claude_tool_use_id != identity.claude_tool_use_id
                 || existing.hubu_invocation_id != identity.hubu_invocation_id
-                // Session task correlation is recorded at allocation; a
-                // redelivered harness call keeps it even after the task closes.
-                || (identity.hubu_invocation_id.is_some() && existing.task_id != identity.task_id)
+                || existing.task_id != identity.task_id
             {
                 bail!("trusted harness call identity was already used for a different operation; refusing backend access");
             }
@@ -1710,25 +1698,6 @@ impl OperationRegistry {
             result_code,
             updated_at: persisted.10,
         })
-    }
-
-    /// The Hubu authorization record id of an operation that carries a
-    /// trusted task correlation; `None` when it has no task or no record yet.
-    pub(crate) fn task_operation_authorization_id(
-        &self,
-        operation_handle: &str,
-    ) -> Result<Option<String>> {
-        validate_public_operation_handle(operation_handle)?;
-        self.connection
-            .query_row(
-                "SELECT COALESCE(decision_id, approval_request_id) FROM harness_operations
-                 WHERE operation_handle = ?1 AND task_id IS NOT NULL",
-                [operation_handle],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .optional()
-            .map(Option::flatten)
-            .map_err(Into::into)
     }
 
     pub(crate) fn fail_pre_execution_operation(
