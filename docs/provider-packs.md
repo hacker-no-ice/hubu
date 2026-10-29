@@ -6,7 +6,7 @@ becomes a pack change instead of Rust code and a release.
 
 > **Status.** Schema v1 is defined, Gongbu validates and loads packs, and the
 > `sync_fixed` and `async_poll` engines run them. Every shipped contract
-> (Gemini and FLUX.2) runs from a verified pack in `packs/verified/`. The
+> (Gemini, FLUX.2 and FLUX 3) runs from a verified pack in `packs/verified/`. The
 > `hubu provider` commands that activate your own packs arrive in a later
 > release.
 
@@ -20,7 +20,20 @@ pinned to the pack's content digest. Gongbu's tests fail if a pack and its
 contract entries disagree, so a pack change ships with a matching contract
 update. Successive versions of one pack can ship side by side, each backing
 its own contract revision: `bfl-flux-2.toml` backs FLUX.2 [pro] v1 and
-`bfl-flux-2-v2.toml` backs v2. `bfl-flux-3-image.toml` backs FLUX 3 Image.
+`bfl-flux-2-v2.toml` backs v2. `bfl-flux-3-image.toml` and
+`bfl-flux-3-image-v2.toml` back FLUX 3 Image v1 and v2. FLUX.2 [klein] 4B and
+9B, [flex] and [max] each have their own pack (`bfl-flux-2-klein-4b.toml`,
+`bfl-flux-2-klein-9b.toml`, `bfl-flux-2-flex.toml`, `bfl-flux-2-max.toml`),
+because BFL serves each model at its own endpoint.
+`google-gemini-developer-image.toml` and `google-gemini-developer-image-edit.toml`
+back the Gemini v1 contracts; their `-v2.toml` successors back the Flash and
+Lite `/v2` contracts, which add aspect ratios, and Gemini Nano Banana 2.1 and
+Gemini 3 Pro Image.
+
+A pack with `size_presets` may still price by a selector: the Gemini v2 packs
+certify a size for every `image_size` and `aspect_ratio` pair but price per
+image by the `image_size` selector alone, so a contract preset named
+`2k-16:9` carries the price of the `2k` rule.
 
 ## What a pack declares and what engines own
 
@@ -256,11 +269,12 @@ spend is reserved.
 | Field | Rules |
 | --- | --- |
 | `name` | Required lowercase identifier the agent uses. `model`, `output_width` and `output_height` are reserved for the selected target's model ID and certified output dimensions. |
-| `type` | Required: `string`, `integer`, `boolean`, `enum` or `images` (see [input images](#input-images)). |
+| `type` | Required: `string`, `integer`, `decimal`, `boolean`, `enum` or `images` (see [input images](#input-images)). |
 | `field` | Optional provider request field. Defaults to `name`. |
 | `required` / `default` | A required parameter has no default. A default must satisfy the bounds. |
 | `max_length` | Required on `string` parameters. |
-| `min` / `max` | `integer`, or the image count of an `images` parameter. |
+| `min` / `max` | `integer`, `decimal` (counted in units of its `scale`), or the image count of an `images` parameter. |
+| `scale` | Required on `decimal`, and only there: the fractional digits allowed, 1 to 6. A value is checked from its decimal text, so with `scale = 1`, `min = 15` and `max = 100`, 1.5 to 10 in steps of 0.1 are accepted and 2.25 is refused. |
 | `values` | `enum` only: unique, lowercase selector values. |
 | `quantity` | `integer` only: the priced quantity it sets (`image_count`, `input_tokens`, `max_output_tokens`, `results`, `pages`, `seconds`). Needs `min >= 0` and a `max`, so every hold is bounded. `megapixels` and `additional_megapixels` are derived from the certified size, never set by a parameter. `input_images` is set only by an `images` parameter. |
 | `selector` | `enum` only: the pricing selector key it sets. |
@@ -500,3 +514,5 @@ version without changing those per-model rules.
 - [Gongbu execution](gongbu-execution.md)
 - [`providers.toml` reference](configuration/local-stack/v1/providers-toml.md)
 - [Upgrading to v0.2.5](operations/upgrading-to-v0.2.5.md)
+- [Provider catalog check](operations/catalog-check.md): the weekly check for
+  price drift, new models and deprecations

@@ -49,6 +49,9 @@ pub enum AdmissionDenialReason {
     NoAvailableBudget,
     InsufficientBudget,
     BudgetUnavailable,
+    /// Also reads `insufficient_task_budget`, recorded by the retired task
+    /// budgets on unreleased development databases.
+    #[serde(alias = "insufficient_task_budget")]
     Unknown,
 }
 
@@ -534,4 +537,17 @@ pub struct LifecycleSnapshot {
     pub capture_markers: Vec<LifecycleCaptureMarker>,
     /// Aggregate metadata only; excluded from enumerable fact totals.
     pub coverage_inventories: Vec<LifecycleCoverageInventory>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retired_task_budget_denials_read_as_unknown() {
+        let reason: AdmissionDenialReason =
+            serde_json::from_str("\"insufficient_task_budget\"").unwrap();
+        assert_eq!(reason, AdmissionDenialReason::Unknown);
+        assert_eq!(serde_json::to_string(&reason).unwrap(), "\"unknown\"");
+    }
 }
