@@ -2741,6 +2741,75 @@ fn proposed_task_budget_binds_session_spend_until_a_human_closes_it() {
 }
 
 #[test]
+fn reading_an_earlier_proposal_or_close_keeps_the_newer_binding() {
+    let money =
+        |units: &str| json!({"units": units, "scale": 6, "currency": "usd", "display": "x"});
+    let approval = |id: &str, kind: &str, status: &str, budget: Value| {
+        json!({
+            "approval_request_id": id, "kind": kind, "status": status,
+            "review": {"agent_id": "agt_1", "task_id": "landing-page", "currency": "usd",
+                "amount_limit": money("3000000")},
+            "task_budget": budget,
+        })
+    };
+    let old_closed = json!({
+        "task_budget_id": "tbg_old000000000", "task_id": "landing-page", "state": "closed",
+        "agent_id": "agt_1", "budget_id": "bgt_1", "currency": "usd",
+        "amount_limit": money("3000000"), "consumed_amount": money("0"),
+        "frozen_amount": money("0"), "remaining_amount": money("0"),
+    });
+    let responses = vec![
+        (200, json!({"approval": approval("tba_new000000000", "task_budget_open", "pending", Value::Null),
+            "task_budget": null, "idempotent_replay": false}).to_string()),
+        (200, approval("tba_old000000000", "task_budget_open", "denied", Value::Null).to_string()),
+        (200, approval("tba_oldclose0000", "task_budget_close", "approved", old_closed).to_string()),
+        (200, json!({"decision": "deny", "reasons": ["task budget proposal is waiting for human approval"],
+            "payment": null}).to_string()),
+        (200, approval("tba_new000000000", "task_budget_open", "denied", Value::Null).to_string()),
+        (200, json!({"decision": "deny", "reasons": ["policy"], "payment": null}).to_string()),
+    ];
+    let (endpoint, requests, handle) = scripted_http_server(responses);
+    let server = server_with_backends(&endpoint, None, false, None);
+    let get_approval = |id: &str| {
+        tool_call(
+            &server,
+            "hubu_get_spend_approval",
+            json!({"approval_request_id": id}),
+            None,
+        );
+        requests.recv_timeout(Duration::from_secs(2)).unwrap();
+    };
+    let spend_task_id = |tool_use_id: &str| {
+        tool_call(
+            &server,
+            "hubu_authorize_spend",
+            json!({"account_id": "acct_1", "amount": "2.00", "reason": "draft", "merchant": "gongbu.image"}),
+            Some(json!({"claudecode/toolUseId": tool_use_id})),
+        );
+        request_body(&requests.recv_timeout(Duration::from_secs(2)).unwrap())["task_id"].clone()
+    };
+
+    tool_call(
+        &server,
+        "hubu_open_task_budget",
+        json!({"agent_id": "agt_1", "task_id": "landing-page", "amount": "3"}),
+        None,
+    );
+    requests.recv_timeout(Duration::from_secs(2)).unwrap();
+
+    // An earlier denied proposal and an earlier closed budget for the same
+    // task leave the pending proposal's binding, so its spend is still gated.
+    get_approval("tba_old000000000");
+    get_approval("tba_oldclose0000");
+    assert_eq!(spend_task_id("toolu_0"), "landing-page");
+
+    // Denying the bound proposal ends the binding.
+    get_approval("tba_new000000000");
+    assert_eq!(spend_task_id("toolu_1"), Value::Null);
+    handle.join().unwrap();
+}
+
+#[test]
 fn task_budget_tool_arguments_fail_before_network() {
     let server = server_with_backends("http://127.0.0.1:1", None, false, None);
     for (name, arguments) in [

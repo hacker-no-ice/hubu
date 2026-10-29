@@ -196,8 +196,10 @@ execution) carry its `task_id`. Hubu denies them until the proposal is
 approved, then the task budget caps them. A close request keeps the binding, so
 Hubu refuses new spend while it is pending. The binding ends when the session
 sees the task budget closed, or its proposal denied or expired, through a close
-result or `hubu_get_spend_approval` / `hubu_resolve_spend_approval`. Proposing
-another task replaces it. A closed task budget's task otherwise draws from the
+result or `hubu_get_spend_approval` / `hubu_resolve_spend_approval`. Only the
+bound proposal and the task budget it opened count: reading an earlier
+proposal or closed task budget for the same task leaves the binding in place.
+Proposing another task replaces it. A closed task budget's task otherwise draws from the
 agent budget. A redelivered harness call keeps the task recorded when it was
 first allocated. A platform-invocation envelope keeps its own trusted
 `task_id`.

@@ -1127,17 +1127,17 @@ impl Server {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(task_budget);
     }
 
-    pub(crate) fn unbind_task_budget(&self, task_id: &str) {
-        let mut active = self
-            .active_task_budget
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if active
-            .as_ref()
-            .is_some_and(|active| active.task_id == task_id)
-        {
-            *active = None;
-        }
+    /// Change this session's binding under its lock.
+    pub(crate) fn update_task_budget(
+        &self,
+        update: impl FnOnce(&mut Option<hubu::ActiveTaskBudget>),
+    ) {
+        update(
+            &mut self
+                .active_task_budget
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
     }
 
     /// Spend so far against the task budget an operation drew from, if any.

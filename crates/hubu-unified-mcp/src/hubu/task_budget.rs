@@ -22,10 +22,15 @@ pub(crate) const PROPOSAL_PATH: &str = "/task-budgets/proposals";
 pub(crate) const CLOSE_REQUEST_PATH: &str = "/task-budgets/close-requests";
 const SOURCE: &str = "hubu-unified-mcp";
 
-/// The task this session's spend operations carry.
+/// The task this session's spend operations carry, and the proposal and task
+/// budget that bound it. Only results about this exact proposal or task budget
+/// end the binding, so replaying an older proposal or close request for the
+/// same task cannot unbind a newer one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ActiveTaskBudget {
     pub(crate) task_id: String,
+    pub(crate) approval_request_id: Option<String>,
+    pub(crate) task_budget_id: Option<String>,
 }
 
 fn object<'a>(arguments: &'a Value, tool: &str) -> Result<&'a serde_json::Map<String, Value>> {
@@ -113,31 +118,49 @@ pub(super) fn observe_result(server: &Server, name: &str, mut result: Value) -> 
         return result;
     };
     let approval_status = content.pointer("/approval/status").and_then(Value::as_str);
+    let approval_request_id = string_at(content, "/approval/approval_request_id");
+    let task_budget_id = string_at(content, "/task_budget/task_budget_id");
     let task_budget_state = content
         .pointer("/task_budget/state")
         .and_then(Value::as_str);
-    let Some(task_id) = content
-        .pointer("/approval/review/task_id")
-        .or_else(|| content.pointer("/task_budget/task_id"))
-        .and_then(Value::as_str)
-        .map(str::to_owned)
+    let Some(task_id) = string_at(content, "/approval/review/task_id")
+        .or_else(|| string_at(content, "/task_budget/task_id"))
     else {
         return result;
     };
     let binding = match (name, approval_status, task_budget_state) {
         (OPEN_TOOL, Some("pending"), _) => {
-            server.bind_task_budget(ActiveTaskBudget { task_id });
+            server.bind_task_budget(ActiveTaskBudget {
+                task_id,
+                approval_request_id,
+                task_budget_id: None,
+            });
             "A human must approve this proposal (approval_request_id) before the task budget opens. Until then it reserves nothing and spend tools in this session are denied."
         }
         (OPEN_TOOL, _, Some("open")) => {
-            server.bind_task_budget(ActiveTaskBudget { task_id });
+            server.bind_task_budget(ActiveTaskBudget {
+                task_id,
+                approval_request_id,
+                task_budget_id,
+            });
             "Spend tools in this session now draw from this task budget until it closes. Each request still goes through the normal approval policy."
         }
         (CLOSE_TOOL, Some("pending"), _) => {
+            // Hubu accepts a close request only for an open task budget, so a
+            // binding still waiting on its proposal learns its task budget here.
+            if let Some(task_budget_id) = task_budget_id {
+                server.update_task_budget(|active| {
+                    if let Some(active) = active.as_mut().filter(|active| {
+                        active.task_id == task_id && active.task_budget_id.is_none()
+                    }) {
+                        active.task_budget_id = Some(task_budget_id);
+                    }
+                });
+            }
             "A human must approve closing this task budget (approval_request_id) after checking the task is done. Until then new spend in this session is refused; if the human rejects the close, spending resumes."
         }
         (CLOSE_TOOL, _, Some("closed")) => {
-            server.unbind_task_budget(&task_id);
+            unbind_task_budget(server, task_budget_id.as_deref());
             "This task budget is closed; its unused amount returned to the agent budget. Spend tools in this session draw from the agent budget again."
         }
         _ => return result,
@@ -147,25 +170,58 @@ pub(super) fn observe_result(server: &Server, name: &str, mut result: Value) -> 
 }
 
 /// Update this session's binding from a task budget approval read or
-/// resolution: a closed task budget, or a denied or expired proposal, ends it.
+/// resolution. Approving the bound proposal records its task budget; denying
+/// or expiring the bound proposal, or closing the bound task budget, ends it.
 pub(crate) fn observe_approval(server: &Server, approval: &Value) {
-    let Some(task_id) = approval.pointer("/review/task_id").and_then(Value::as_str) else {
-        return;
-    };
+    let approval_request_id = string_at(approval, "/approval_request_id");
+    let task_budget_id = string_at(approval, "/task_budget/task_budget_id");
     let kind = approval.get("kind").and_then(Value::as_str);
     let status = approval.get("status").and_then(Value::as_str);
-    let closed = approval
+    let state = approval
         .pointer("/task_budget/state")
-        .and_then(Value::as_str)
-        == Some("closed");
-    let ended = match kind {
-        Some("task_budget_open") => matches!(status, Some("denied" | "expired")),
-        Some("task_budget_close") => closed,
-        _ => false,
+        .and_then(Value::as_str);
+    server.update_task_budget(|active| {
+        let Some(bound) = active.as_mut() else {
+            return;
+        };
+        let bound_proposal =
+            approval_request_id.is_some() && bound.approval_request_id == approval_request_id;
+        match (kind, status, state) {
+            (Some("task_budget_open"), Some("denied" | "expired"), _) if bound_proposal => {
+                *active = None;
+            }
+            (Some("task_budget_open"), Some("approved"), _) if bound_proposal => {
+                bound.task_budget_id = task_budget_id;
+            }
+            (Some("task_budget_close"), _, Some("closed"))
+                if task_budget_id.is_some() && bound.task_budget_id == task_budget_id =>
+            {
+                *active = None;
+            }
+            _ => {}
+        }
+    });
+}
+
+fn unbind_task_budget(server: &Server, task_budget_id: Option<&str>) {
+    let Some(task_budget_id) = task_budget_id else {
+        return;
     };
-    if ended {
-        server.unbind_task_budget(task_id);
-    }
+    server.update_task_budget(|active| {
+        if active
+            .as_ref()
+            .is_some_and(|active| active.task_budget_id.as_deref() == Some(task_budget_id))
+        {
+            *active = None;
+        }
+    });
+}
+
+fn string_at(value: &Value, pointer: &str) -> Option<String> {
+    value
+        .pointer(pointer)
+        .and_then(Value::as_str)
+        .map(str::to_owned)
 }
 
 fn set_session_binding(result: &mut Value, binding: &str) {
