@@ -30,10 +30,45 @@ sites, resellers and blog posts, which can lag or disagree.
 | Google | [Gemini deprecations](https://ai.google.dev/gemini-api/docs/deprecations) | Shutdown dates and recommended replacements |
 | Black Forest Labs | [BFL documentation](https://docs.bfl.ai/) and its [index](https://docs.bfl.ml/llms.txt) | Model families, endpoint paths, preview versus stable endpoints |
 | Black Forest Labs | [BFL release notes](https://docs.bfl.ai/release-notes) | New models, endpoint changes, deprecations |
-| Black Forest Labs | [BFL pricing](https://bfl.ai/pricing) | Per-megapixel and per-tier rates |
+| Black Forest Labs | [BFL pricing](https://bfl.ai/pricing) | Per-megapixel and per-tier rates (see [Reading BFL prices](#reading-bfl-prices)) |
 
 If a page can't be fetched, say so in the report and check the rest. Never
-treat an unreachable page as "no change".
+treat an unreachable page as "no change". The routine's cloud environment must
+allow `ai.google.dev`, `docs.bfl.ai`, `docs.bfl.ml` and `bfl.ai` in its network
+settings; otherwise every fetch fails to resolve.
+
+### Reading BFL prices
+
+BFL's pricing page fills in its price table with JavaScript, so a plain page
+fetch shows empty cells. The page's HTML also carries schema.org JSON-LD
+`Product` entries with each model's prices, which a plain request can read:
+
+```bash
+curl -sL https://bfl.ai/pricing -A 'Mozilla/5.0' | python3 -I -c '
+import json, re, sys
+html = sys.stdin.read()
+for block in re.findall(r"<script[^>]*application/ld\+json[^>]*>(.*?)</script>", html, re.S):
+    try:
+        data = json.loads(block)
+    except ValueError:
+        continue
+    items = data if isinstance(data, list) else data.get("@graph", [data])
+    for item in items:
+        if not isinstance(item, dict) or item.get("@type") != "Product":
+            continue
+        offer = item.get("offers")
+        specs = offer.get("priceSpecification", []) if isinstance(offer, dict) else []
+        prices = [(s.get("name"), s.get("price")) for s in specs if isinstance(s, dict)]
+        print(item.get("name"), prices or "no price breakdown")
+'
+```
+
+FLUX.2 models list `First megapixel` and `Additional megapixels` in USD.
+FLUX 3 models list one price per resolution tier. A model printed with
+`no price breakdown` (on 2026-10-29, FLUX.2 [flex]) can't be verified this way:
+report it as not verifiable rather than as unchanged. If the JSON-LD
+disappears or no longer parses, report BFL pricing as not verifiable for that
+run.
 
 ## Procedure
 
