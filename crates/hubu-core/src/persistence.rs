@@ -7,13 +7,11 @@ mod history;
 mod human_lifecycle;
 mod lifecycle;
 mod lifecycle_coverage;
-mod task_budget;
 pub use authorization_void::{AuthorizationVoidError, AuthorizationVoidResult};
 pub use automatic_lifecycle::SelectedSpendPolicy;
 pub use history::HistorySnapshot;
 pub(crate) use lifecycle::append_lifecycle_event_in_transaction;
 pub use lifecycle::AppendLifecycleResult;
-pub use task_budget::TaskBudgetRepository;
 
 use std::path::Path;
 use std::str::FromStr;
@@ -1102,9 +1100,6 @@ impl SqliteGovernanceRepository {
         // The legacy budget-table rebuild must disable foreign keys, so it owns
         // its immediate transaction instead of joining an init phase.
         self.migrate_versioned_budgets()?;
-        // Hold reads include the task budget column, so add it before any
-        // later phase loads holds.
-        self.in_init_transaction(Self::init_task_budget_schema)?;
         self.in_init_transaction(Self::init_spend_migrations)?;
         // The accounting-scale migration backs the database up with
         // `VACUUM INTO`, which cannot run inside a transaction, so it runs
@@ -4789,8 +4784,7 @@ fn load_budget_hold_by_claim_id(
 ) -> Result<Option<BudgetHold>, StorageError> {
     conn.query_row(
         "SELECT id, budget_id, budget_version_id, spend_decision_id, amount,
-                currency, status, executor_claim_id, created_at, updated_at, expires_at,
-                task_budget_id
+                currency, status, executor_claim_id, created_at, updated_at, expires_at
          FROM budget_holds
          WHERE executor_claim_id = ?1",
         params![claim_id.to_string()],
@@ -4920,7 +4914,6 @@ fn budget_hold_from_row(row: &rusqlite::Row<'_>) -> Result<BudgetHold, rusqlite:
     let created_at: String = row.get(8)?;
     let updated_at: String = row.get(9)?;
     let expires_at: String = row.get(10)?;
-    let task_budget_id: Option<String> = row.get(11)?;
     Ok(BudgetHold {
         id: parse_id(&id)?,
         budget_id: parse_id(&budget_id)?,
@@ -4933,7 +4926,6 @@ fn budget_hold_from_row(row: &rusqlite::Row<'_>) -> Result<BudgetHold, rusqlite:
         created_at: parse_timestamp(&created_at)?,
         updated_at: parse_timestamp(&updated_at)?,
         expires_at: parse_timestamp(&expires_at)?,
-        task_budget_id: parse_optional_id(task_budget_id)?,
     })
 }
 
@@ -5332,9 +5324,8 @@ fn insert_budget_hold(conn: &Connection, hold: &BudgetHold) -> Result<(), Storag
         "INSERT INTO budget_holds
          (id, budget_id, budget_version_id, spend_decision_id, amount_cents,
           currency, status, executor_claim_id, created_at, updated_at, expires_at,
-          amount, amount_scale, spend_asset, spend_exact_amount, spend_exact_scale,
-          task_budget_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 6, ?6, ?13, 6, ?14)",
+          amount, amount_scale, spend_asset, spend_exact_amount, spend_exact_scale)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 6, ?6, ?13, 6)",
         params![
             hold.id.to_string(),
             hold.budget_id.to_string(),
@@ -5351,7 +5342,6 @@ fn insert_budget_hold(conn: &Connection, hold: &BudgetHold) -> Result<(), Storag
             // Until spend in other assets exists, a hold is requested in its
             // budget currency at accounting scale.
             amount.units().to_string(),
-            hold.task_budget_id.as_ref().map(ToString::to_string),
         ],
     )?;
     Ok(())
@@ -5714,8 +5704,7 @@ fn load_budget_balances_from(conn: &Connection) -> Result<Vec<BudgetBalance>, St
 fn load_budget_holds_from(conn: &Connection) -> Result<Vec<BudgetHold>, StorageError> {
     let mut stmt = conn.prepare(
         "SELECT id, budget_id, budget_version_id, spend_decision_id, amount,
-                    currency, status, executor_claim_id, created_at, updated_at, expires_at,
-                    task_budget_id
+                    currency, status, executor_claim_id, created_at, updated_at, expires_at
              FROM budget_holds
              ORDER BY created_at ASC",
     )?;
@@ -6614,7 +6603,6 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             expires_at: Utc::now() + Duration::minutes(5),
-            task_budget_id: None,
         };
         let token = SpendAuthTokenRecord {
             id: SpendAuthTokenId::new(),
@@ -6786,7 +6774,6 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             expires_at: claim_expires_at,
-            task_budget_id: None,
         };
 
         repo.save_spend_decision(&decision).unwrap();
@@ -8838,7 +8825,6 @@ mod tests {
             created_at: now,
             updated_at: now,
             expires_at: now + Duration::hours(1),
-            task_budget_id: None,
         };
         let historical_new_balance = BudgetBalance {
             budget_id: created.budget.id.clone(),
@@ -9274,7 +9260,6 @@ mod tests {
             created_at: Utc::now() - Duration::minutes(10),
             updated_at: Utc::now() - Duration::minutes(10),
             expires_at: Utc::now() - Duration::minutes(5),
-            task_budget_id: None,
         };
 
         repo.save_budget_with_balance(&budget, &budget_version, &initial_balance)

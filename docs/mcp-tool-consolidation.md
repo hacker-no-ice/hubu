@@ -73,9 +73,6 @@ not forwarded as a backend query parameter.
 | `hubu_update_budget` | Hubu | Version-pinned cap change; human gate |
 | `hubu_budget_history` | Hubu | Inspect immutable revisions |
 | `hubu_revoke_budget` | Hubu | Emergency owner control; human gate |
-| `hubu_open_task_budget` | Hubu | Reserve part of the agent budget for one task and bind it to this session; no human gate ([task budgets](task-budgets.md)) |
-| `hubu_close_task_budget` | Hubu | End a task and return its unused amount; no human gate |
-| `hubu_list_task_budgets` | Hubu | Task spend so far and remaining |
 | `hubu_show_spending_targets` | Hubu | Advisory targets and allocations |
 | `hubu_set_spending_target` | Hubu | Advisory target administration; human gate |
 | `hubu_revoke_spending_target` | Hubu | Advisory target administration; human gate |

@@ -51,7 +51,7 @@ pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 pub const UNIFIED_CONTRACT_VERSION: &str = "hubu-gongbu-mcp-v1";
 pub const EXECUTOR_CONTRACT_VERSION: &str = "hubu-spend-executor-v4.5";
 pub const HUBU_ROUTING_CONTRACT_VERSION: &str = "hubu-mcp-routing-v1";
-pub const ROUTING_REVISION: u32 = 16;
+pub const ROUTING_REVISION: u32 = 17;
 
 const HUBU_ENDPOINT_ENV: &str = "HUBU_UNIFIED_HUBU_ENDPOINT";
 const HUBU_TOKEN_ENV: &str = "HUBU_UNIFIED_HUBU_BEARER_TOKEN";
@@ -94,7 +94,6 @@ const DOMAIN_TOOLS: &[(&str, BackendOwner)] = &[
     ("hubu_apply_policy", BackendOwner::Hubu),
     ("hubu_authorize_spend", BackendOwner::Hubu),
     ("hubu_budget_history", BackendOwner::Hubu),
-    ("hubu_close_task_budget", BackendOwner::Hubu),
     ("hubu_create_budget", BackendOwner::Hubu),
     ("hubu_get_executor_claim", BackendOwner::Hubu),
     ("hubu_get_governance_record", BackendOwner::Hubu),
@@ -109,10 +108,8 @@ const DOMAIN_TOOLS: &[(&str, BackendOwner)] = &[
     ),
     ("hubu_list_governance_records", BackendOwner::Hubu),
     ("hubu_list_ledger", BackendOwner::Hubu),
-    ("hubu_list_task_budgets", BackendOwner::Hubu),
     ("hubu_list_authorization_records", BackendOwner::Hubu),
     ("hubu_list_users", BackendOwner::Hubu),
-    ("hubu_open_task_budget", BackendOwner::Hubu),
     ("hubu_policy_diff", BackendOwner::Hubu),
     ("hubu_policy_history", BackendOwner::Hubu),
     ("hubu_reconcile_vendor_billed_claim", BackendOwner::Hubu),
@@ -536,8 +533,6 @@ pub struct Server {
     operation_registry: Arc<OperationRegistryCapability>,
     meta_shape_diagnostics: bool,
     save_folders_path: Option<PathBuf>,
-    /// Task budget this session opened; new spend operations carry its task.
-    active_task_budget: Arc<Mutex<Option<hubu::ActiveTaskBudget>>>,
     #[cfg(test)]
     use_capability_snapshot_for_test: bool,
 }
@@ -681,7 +676,6 @@ impl Server {
             operation_registry: Arc::new(operation_registry),
             meta_shape_diagnostics,
             save_folders_path,
-            active_task_budget: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             use_capability_snapshot_for_test: false,
         })
@@ -1085,94 +1079,10 @@ impl Server {
                 "Hubu billable tools require an available operation registry; configure {OPERATION_STATE_PATH_ENV} to an absolute writable SQLite file"
             );
         };
-        let active = self.active_task_budget();
-        let identity = identity
-            .clone()
-            .with_session_task(active.as_ref().map(|active| active.task_id.as_str()));
         registry
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .resolve_or_allocate(&identity, tool_name, arguments)
-    }
-
-    pub(crate) fn active_task_budget(&self) -> Option<hubu::ActiveTaskBudget> {
-        self.active_task_budget
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-    }
-
-    pub(crate) fn bind_task_budget(&self, task_budget: hubu::ActiveTaskBudget) {
-        *self
-            .active_task_budget
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(task_budget);
-    }
-
-    pub(crate) fn unbind_task_budget(&self, task_budget_id: &str) {
-        let mut active = self
-            .active_task_budget
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if active
-            .as_ref()
-            .is_some_and(|active| active.task_budget_id == task_budget_id)
-        {
-            *active = None;
-        }
-    }
-
-    /// Spend so far against the task budget an operation drew from, if any.
-    ///
-    /// The task budget is the one Hubu recorded on the operation's hold, read
-    /// from its authorization record (reusing `observed` when the status path
-    /// already fetched it), never a lookup by task name.
-    fn operation_task_budget(
-        &self,
-        operation_handle: &str,
-        observed: Option<&StandaloneAuthorizationObservation>,
-    ) -> Option<Value> {
-        let OperationRegistryCapability::Available(registry) = self.operation_registry.as_ref()
-        else {
-            return None;
-        };
-        let authorization_id = registry
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .task_operation_authorization_id(operation_handle)
-            .ok()
-            .flatten()?;
-        let fetched;
-        let record = match observed {
-            Some(StandaloneAuthorizationObservation::Verified(record)) => record,
-            _ => {
-                let response = hubu::call_tool(
-                    self,
-                    Value::Null,
-                    ToolCall {
-                        name: "hubu_get_authorization_record".into(),
-                        arguments: json!({"authorization_id": authorization_id}),
-                        meta: None,
-                    },
-                );
-                fetched = response
-                    .get("result")
-                    .filter(|result| result.get("isError") != Some(&Value::Bool(true)))
-                    .and_then(|result| result.pointer("/structuredContent/authorization_record"))
-                    .filter(|record| {
-                        record
-                            .get("authorization_id")
-                            .and_then(Value::as_str)
-                            .is_some_and(|returned| {
-                                same_approval_request_id(&authorization_id, returned)
-                            })
-                    })
-                    .cloned()?;
-                &fetched
-            }
-        };
-        let task_budget_id = record.pointer("/budget_hold/task_budget_id")?.as_str()?;
-        hubu::status_task_budget(self, task_budget_id)
+            .resolve_or_allocate(identity, tool_name, arguments)
     }
 
     fn mark_harness_operation_dispatch_started(
@@ -1445,18 +1355,13 @@ impl Server {
         };
         self.synchronize_pending_approval_for_handle(operation_handle);
         match self.durable_operation_status(operation_handle) {
-            Ok(status) => {
-                let observation = self.observe_standalone_authorization(operation_handle);
-                let result = match &observation {
-                    Some(observation) => {
-                        standalone_authorization_status_result(&status, observation)
-                    }
-                    None => operation_status_result(&status),
-                };
-                let task_budget =
-                    self.operation_task_budget(operation_handle, observation.as_ref());
-                success_response(id, with_task_budget(result, task_budget))
-            }
+            Ok(status) => match self.observe_standalone_authorization(operation_handle) {
+                Some(observation) => success_response(
+                    id,
+                    standalone_authorization_status_result(&status, &observation),
+                ),
+                None => success_response(id, operation_status_result(&status)),
+            },
             Err(_) => error_response(
                 id,
                 -32000,
@@ -1737,23 +1642,6 @@ fn operation_status_result(status: &operation_registry::DurableOperationStatus) 
         "structuredContent": projection,
         "isError": false
     })
-}
-
-/// Add the task budget an operation drew from to its status projection.
-fn with_task_budget(mut result: Value, task_budget: Option<Value>) -> Value {
-    let Some(task_budget) = task_budget else {
-        return result;
-    };
-    if let Some(projection) = result
-        .get_mut("structuredContent")
-        .and_then(Value::as_object_mut)
-    {
-        projection.insert("task_budget".into(), task_budget);
-    }
-    if let Some(projection) = result.get("structuredContent").cloned() {
-        result["content"] = json!([{"type":"text", "text": serde_json::to_string(&projection).expect("operation status serializes")}]);
-    }
-    result
 }
 
 /// What Hubu reported for a standalone authorization's authorization record.
@@ -2645,7 +2533,7 @@ mod tests {
 
         assert_eq!(capability["contract_version"], UNIFIED_CONTRACT_VERSION);
         assert_eq!(capability["routing_revision"], ROUTING_REVISION);
-        assert_eq!(capability["tools"].as_array().unwrap().len(), 46);
+        assert_eq!(capability["tools"].as_array().unwrap().len(), 43);
         assert_eq!(capability["backends"]["hubu"]["state"], "unavailable");
         assert!(!serialized.contains("hubu.test"));
         assert!(!serialized.contains("gongbu.test"));

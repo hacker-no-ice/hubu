@@ -5,8 +5,8 @@ use hubu_common::money::{Amount, Currency};
 use super::state::BudgetState;
 use crate::budget::dto::{
     BudgetWithBalance, CreateSingleBudgetRequest, CreateSingleBudgetResponse, EvaluatedBudget,
-    ExpireBudgetHoldResponse, ReleaseBudgetResponse, ReservationAllocation, ReserveBudgetRequest,
-    ReserveBudgetResponse, SettleBudgetResponse,
+    ExpireBudgetHoldResponse, ReleaseBudgetResponse, ReserveBudgetRequest, ReserveBudgetResponse,
+    SettleBudgetResponse,
 };
 use crate::budget::error::BudgetManagerError;
 use crate::budget::model::{Budget, BudgetBalance, BudgetHold, BudgetVersion};
@@ -189,21 +189,6 @@ impl BudgetManager {
         now: DateTime<Utc>,
     ) -> Result<ReserveBudgetResponse, BudgetManagerError> {
         self.state.reserve_budget_at(request, now)
-    }
-
-    /// Reserve from a budget while respecting its open task allocations.
-    ///
-    /// `allocation.held_for_other_tasks` is the unused headroom of open task
-    /// budgets the spend may not draw from; the reservation must fit in the
-    /// remainder. A hold reserved for a task budget records its id.
-    pub fn reserve_budget_with_allocation_at(
-        &mut self,
-        request: ReserveBudgetRequest,
-        allocation: ReservationAllocation,
-        now: DateTime<Utc>,
-    ) -> Result<ReserveBudgetResponse, BudgetManagerError> {
-        self.state
-            .reserve_budget_with_allocation_at(request, allocation, now)
     }
 
     /// Bind a frozen hold to one executor claim and extend its execution lease.

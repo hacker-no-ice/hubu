@@ -10,8 +10,8 @@ use serde_json::json;
 
 use crate::budget::dto::{
     BudgetWithBalance, CreateSingleBudgetRequest, CreateSingleBudgetResponse, EvaluatedBudget,
-    ExpireBudgetHoldResponse, ReleaseBudgetResponse, ReservationAllocation, ReserveBudgetRequest,
-    ReserveBudgetResponse, SettleBudgetResponse,
+    ExpireBudgetHoldResponse, ReleaseBudgetResponse, ReserveBudgetRequest, ReserveBudgetResponse,
+    SettleBudgetResponse,
 };
 use crate::budget::error::BudgetManagerError;
 use crate::budget::model::{
@@ -367,17 +367,6 @@ impl BudgetState {
         request: ReserveBudgetRequest,
         now: DateTime<Utc>,
     ) -> Result<ReserveBudgetResponse, BudgetManagerError> {
-        self.reserve_budget_with_allocation_at(request, ReservationAllocation::default(), now)
-    }
-
-    /// Reserve from a budget that is effectively active at `now`, leaving the
-    /// headroom held for other open task budgets untouched.
-    pub(super) fn reserve_budget_with_allocation_at(
-        &mut self,
-        request: ReserveBudgetRequest,
-        allocation: ReservationAllocation,
-        now: DateTime<Utc>,
-    ) -> Result<ReserveBudgetResponse, BudgetManagerError> {
         if request.amount <= Amount::ZERO {
             log_budget_reservation_rejected(&request, "amount_must_be_positive");
             return Err(BudgetManagerError::AmountMustBePositive);
@@ -422,11 +411,7 @@ impl BudgetState {
                 BudgetManagerError::MissingBudgetBalance
             })?;
 
-        let unallocated = balance
-            .remaining_amount
-            .checked_sub(allocation.held_for_other_tasks)
-            .ok_or(BudgetManagerError::BalanceOverflow)?;
-        if unallocated < request.amount {
+        if balance.remaining_amount < request.amount {
             log_budget_reservation_rejected(&request, "insufficient_remaining_budget");
             return Err(BudgetManagerError::InsufficientRemainingBudget);
         }
@@ -453,7 +438,6 @@ impl BudgetState {
             created_at: now,
             updated_at: now,
             expires_at: request.expires_at,
-            task_budget_id: allocation.task_budget_id,
         };
 
         self.hold_id_by_spend_decision

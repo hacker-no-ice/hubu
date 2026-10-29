@@ -26,7 +26,6 @@ mod gallery;
 mod money;
 mod save_folders;
 mod stack;
-mod task_budget;
 mod terminal;
 mod watch;
 
@@ -1914,7 +1913,6 @@ fn budget(base_url: &CliContext, args: Vec<String>) -> Result<()> {
         "update" => budget_update(base_url, args),
         "history" => budget_history(base_url, args),
         "revoke" => budget_revoke(base_url, args),
-        "task" => task_budget::command(base_url, args),
         "-h" | "--help" | "help" => {
             print_budget_help();
             Ok(())
@@ -4056,7 +4054,6 @@ Usage:
   hubu budget update --budget-id ID --amount DECIMAL [--expected-revision N] [--reason TEXT] [--yes]
   hubu budget history --budget-id ID
   hubu budget list [--all]
-  hubu budget task open|close|list|show ...   (task-scoped budgets; see `hubu budget task --help`)
 
 Examples:
   hubu budget create --agent-id AGENT_ID --amount 25

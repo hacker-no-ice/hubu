@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use hubu_common::ids::{AgentId, BudgetId, SpendDecisionId, TaskBudgetId};
+use hubu_common::ids::{AgentId, BudgetId, SpendDecisionId};
 use hubu_common::money::{Amount, Currency};
 use hubu_common::time::TimePeriod;
 
@@ -30,15 +30,6 @@ pub struct ReserveBudgetRequest {
     pub amount: Amount,
     pub currency: Currency,
     pub expires_at: DateTime<Utc>,
-}
-
-/// Task allocation context for one reservation.
-#[derive(Debug, Clone, Default)]
-pub struct ReservationAllocation {
-    /// Task budget the hold is reserved under, if any.
-    pub task_budget_id: Option<TaskBudgetId>,
-    /// Unused headroom of other open task budgets on the same budget.
-    pub held_for_other_tasks: Amount,
 }
 
 #[derive(Debug, Clone)]
