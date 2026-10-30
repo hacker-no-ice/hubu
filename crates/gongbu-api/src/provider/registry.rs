@@ -802,12 +802,13 @@ mod tests {
             ("flux", "flux2_api", "flux-2-klein-9b"),
             ("flux", "flux2_api", "flux-2-flex"),
             ("flux", "flux2_api", "flux-2-max"),
+            ("flux", "flux2_api", "flux-3-image-klein"),
         ] {
             let key = TargetKey::new("image_generation", provider, adapter, model).unwrap();
             assert_eq!(catalog.resolve_active(&key).unwrap().adapter, adapter);
         }
         let execution_targets = catalog.execution_targets();
-        assert_eq!(execution_targets.len(), 14);
+        assert_eq!(execution_targets.len(), 15);
         // Pro is its own target, discovered by model beside Flash and Lite,
         // with an aspect-ratio certified size at every tier.
         let pro = execution_targets
@@ -843,6 +844,15 @@ mod tests {
             .find(|target| target.model == "flux-3-image")
             .unwrap();
         assert_eq!(flux_3.image_sizes, ["1k", "2k"]);
+        // Klein is discovered by its own model, at FLUX 3's four tiers and
+        // its own tier prices.
+        let klein = execution_targets
+            .iter()
+            .find(|target| target.model == "flux-3-image-klein")
+            .unwrap();
+        assert_eq!(klein.image_sizes, ["1.5k", "1k", "2k", "768sq"]);
+        assert_eq!(klein.pricing.len(), 4);
+        assert_ne!(klein.target_id, flux_3.target_id);
         let gemini_full = execution_targets
             .iter()
             .find(|target| {
