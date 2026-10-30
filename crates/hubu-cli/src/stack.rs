@@ -32,7 +32,7 @@ const MANAGED_GONGBU_CALLER_ACCOUNT: &str = "gongbu-caller";
 const PROVIDER_CONTRACTS_DOCUMENT: &str =
     include_str!("../../../contracts/provider-contracts-v1.json");
 const PROVIDER_CONTRACTS_DOCUMENT_SHA256: &str =
-    "5c8b25adadc5ce2edb65bed9958924b9a845a49fa42e7ca7ea572237cf511732";
+    "3daa9847abf05a2bd085ed6092931f411c3fe8c209a61331585239c1a25c889c";
 const MANAGED_CREDENTIAL_IGNORE: &[u8] =
     b"# Hubu-managed credentials. Do not edit or remove.\n*\n!.gitignore\n";
 
@@ -5529,6 +5529,7 @@ live_spend_acknowledgement = "{LIVE_SPEND_ACKNOWLEDGEMENT}"
             "hubu.flux-2-flex.text-to-image/v1",
             "hubu.flux-2-max.text-to-image/v1",
             "hubu.flux-3-image.text-to-image/v2",
+            "hubu.flux-3-image-klein.text-to-image/v1",
         ];
         let providers = source(&all);
         validate_provider_source(&providers).unwrap();
@@ -5558,6 +5559,11 @@ live_spend_acknowledgement = "{LIVE_SPEND_ACKNOWLEDGEMENT}"
             (41, 10)
         );
         assert_eq!(price("hubu.flux-3-image.text-to-image/v2", "1.5k"), (7, 1));
+        // FLUX 3 Image Klein binds beside FLUX 3 Image at its own tier prices.
+        assert_eq!(
+            price("hubu.flux-3-image-klein.text-to-image/v1", "1k"),
+            (9, 10)
+        );
         let mut composite = providers.clone();
         composite.catalog_version = Some("operator-flux-2026-10-28-v1".into());
         let pricing = render_pricing_catalog(&composite).unwrap();

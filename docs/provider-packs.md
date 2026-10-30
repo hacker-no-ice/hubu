@@ -21,7 +21,8 @@ contract entries disagree, so a pack change ships with a matching contract
 update. Successive versions of one pack can ship side by side, each backing
 its own contract revision: `bfl-flux-2.toml` backs FLUX.2 [pro] v1 and
 `bfl-flux-2-v2.toml` backs v2. `bfl-flux-3-image.toml` and
-`bfl-flux-3-image-v2.toml` back FLUX 3 Image v1 and v2. FLUX.2 [klein] 4B and
+`bfl-flux-3-image-v2.toml` back FLUX 3 Image v1 and v2, and
+`bfl-flux-3-image-klein.toml` backs FLUX 3 Image Klein. FLUX.2 [klein] 4B and
 9B, [flex] and [max] each have their own pack (`bfl-flux-2-klein-4b.toml`,
 `bfl-flux-2-klein-9b.toml`, `bfl-flux-2-flex.toml`, `bfl-flux-2-max.toml`),
 because BFL serves each model at its own endpoint.
