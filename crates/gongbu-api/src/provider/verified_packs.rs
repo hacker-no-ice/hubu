@@ -25,6 +25,8 @@ const BFL_FLUX_2_KLEIN_9B: &str =
 const BFL_FLUX_3_IMAGE: &str = include_str!("../../../../packs/verified/bfl-flux-3-image.toml");
 const BFL_FLUX_3_IMAGE_V2: &str =
     include_str!("../../../../packs/verified/bfl-flux-3-image-v2.toml");
+const BFL_FLUX_3_IMAGE_KLEIN: &str =
+    include_str!("../../../../packs/verified/bfl-flux-3-image-klein.toml");
 
 /// Every verified pack, validated.
 pub fn verified_packs() -> Vec<Pack> {
@@ -41,6 +43,7 @@ pub fn verified_packs() -> Vec<Pack> {
         BFL_FLUX_2_KLEIN_9B,
         BFL_FLUX_3_IMAGE,
         BFL_FLUX_3_IMAGE_V2,
+        BFL_FLUX_3_IMAGE_KLEIN,
     ]
     .into_iter()
     .map(|source| Pack::from_toml_str(source).expect("verified packs are valid"))
@@ -167,7 +170,7 @@ mod tests {
             projected += 1;
         }
         assert_eq!(
-            projected, 20,
+            projected, 21,
             "every shipped contract comes from a verified pack"
         );
     }
@@ -1330,6 +1333,136 @@ mod tests {
                 .prepare("flux-3-image", &json!({"prompt": "x", "image_size": tier}))
                 .is_err());
         }
+    }
+
+    /// FLUX 3 Image Klein is its own target on its own endpoint: the FLUX 3
+    /// tiers and ratios at Klein's own tier prices, with no grounding field,
+    /// which Klein's request schema refuses.
+    #[test]
+    fn flux_3_klein_routes_explicitly_and_prices_its_own_tiers() {
+        let klein = pack("bfl-flux-3-image-klein");
+        assert_eq!(
+            klein.request_url().as_str(),
+            "https://api.bfl.ai/v1/flux-3-image-klein"
+        );
+        assert_eq!(klein.models().len(), 1);
+        // Neither pack answers for the other model, so FLUX 3 Image is never
+        // silently swapped for Klein or the other way round.
+        let input = json!({"prompt": "x", "image_size": "1k"});
+        assert!(klein.prepare("flux-3-image", &input).is_err());
+        assert!(flux_3_v2().prepare("flux-3-image-klein", &input).is_err());
+        for (tier, units) in [
+            ("768sq", 8_000),
+            ("1k", 9_000),
+            ("1.5k", 11_000),
+            ("2k", 14_000),
+        ] {
+            for ratio in ["21:9", "16:9", "1:1", "9:21"] {
+                let input = json!({"prompt": "x", "image_size": tier, "aspect_ratio": ratio});
+                let prepared = klein.prepare("flux-3-image-klein", &input).unwrap();
+                assert_eq!(
+                    prepared.body,
+                    json!({"prompt": "x", "resolution": tier, "aspect_ratio": ratio})
+                );
+                assert_eq!(
+                    snapshot_for(&klein, "flux-3-image-klein", &input).estimated_units,
+                    units,
+                    "{tier} {ratio}"
+                );
+            }
+        }
+        // 4k waits on a live artifact-size check.
+        assert!(klein
+            .prepare(
+                "flux-3-image-klein",
+                &json!({"prompt": "x", "image_size": "4k"})
+            )
+            .is_err());
+        // Safety tolerance is capped at 5, as for FLUX 3 Image; Klein's
+        // other BFL options are not offered.
+        let with = |options: Value| {
+            klein.prepare(
+                "flux-3-image-klein",
+                &json!({"prompt": "x", "image_size": "1k", "options": options}),
+            )
+        };
+        assert_eq!(
+            with(json!({"safety_tolerance": 5})).unwrap().body["safety_tolerance"],
+            5
+        );
+        for options in [
+            json!({"safety_tolerance": 6}),
+            json!({"steps": 8}),
+            json!({"seed": 1}),
+            json!({"grounding": true}),
+        ] {
+            assert!(with(options.clone()).is_err(), "{options}");
+        }
+    }
+
+    /// Klein keeps BFL's asynchronous lifecycle: one submission to its own
+    /// endpoint, settlement from reported credits (fractional cents included),
+    /// an ambiguous submission reconciled, never resubmitted, and a definitive
+    /// rejection released.
+    #[test]
+    fn flux_3_klein_settles_credits_and_never_resubmits_ambiguous_work() {
+        let klein = Arc::new(pack("bfl-flux-3-image-klein"));
+        let model = "flux-3-image-klein";
+        let input = json!({"prompt": "a lighthouse", "image_size": "1k", "aspect_ratio": "16:9"});
+        let request = klein.prepare(model, &input).unwrap().request;
+        let run = |submit: Result<TransportResponse, TransportFailure>| {
+            let transport = FluxTransport {
+                submit,
+                polls: Arc::new(std::sync::Mutex::new(vec![bfl(
+                    200,
+                    // BFL reports credits worth one cent each: 0.9 is 0.9¢.
+                    json!({"id": "job-1", "status": "Ready", "cost": 0.9,
+                           "result": {"sample": "https://delivery.us7.bfl.ai/out.jpeg"}}),
+                )])),
+                posts: Arc::default(),
+                sent: Arc::default(),
+                artifact: PNG.to_vec(),
+            };
+            let sent = transport.sent.clone();
+            let result = AsyncPollEngine::new(klein.clone(), model, transport, 1 << 20)
+                .unwrap()
+                .with_poll_interval_for_tests(Duration::from_millis(1))
+                .invoke(&request, &input, &secret_for_test("secret-canary"), None);
+            let sent = sent.lock().unwrap().clone();
+            (result, sent)
+        };
+        let (outcome, sent) = run(Ok(accepted()));
+        let outcome = outcome.unwrap();
+        assert_eq!(
+            sent,
+            [(
+                "https://api.bfl.ai/v1/flux-3-image-klein".to_owned(),
+                json!({"prompt": "a lighthouse", "resolution": "1k", "aspect_ratio": "16:9"})
+            )]
+        );
+        let frozen = snapshot_for(&klein, model, &input);
+        assert_eq!(frozen.estimated_units, 9_000);
+        let settled = frozen
+            .settle_precise(
+                outcome.usage.as_ref().unwrap(),
+                outcome.actual_vendor_cost.as_ref(),
+                frozen.estimated_units,
+            )
+            .unwrap();
+        assert_eq!(settled.budget_units, 9_000);
+
+        let (ambiguous, sent) = run(Err(TransportFailure::UnknownOutcome { request_id: None }));
+        assert_eq!(
+            ambiguous.unwrap_err().spend_disposition,
+            SpendDisposition::Reconcile
+        );
+        assert_eq!(sent.len(), 1, "ambiguous work is never resubmitted");
+
+        let (rejected, _) = run(Ok(bfl(422, Value::Null)));
+        assert_eq!(
+            rejected.unwrap_err().spend_disposition,
+            SpendDisposition::Release
+        );
     }
 
     #[test]

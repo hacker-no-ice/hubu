@@ -165,6 +165,57 @@ check that BFL's 4k output fits the 20 MiB artifact bound, so a paid image is
 never refused at delivery. v1 and v2 are revisions of one target, so a
 profile binds one of them, and switching drains unfinished FLUX work first.
 
+### FLUX 3 Image Klein contract
+
+`hubu.flux-3-image-klein.text-to-image/v1` runs BFL's
+[FLUX 3 Image Klein](https://docs.bfl.ml/flux_3/flux3_image_klein.md) model
+(`flux-3-image-klein`) from the verified pack
+`packs/verified/bfl-flux-3-image-klein.toml`. Klein is BFL's compact,
+open-weights version of FLUX 3 Image. It is its own target beside FLUX 3
+Image, not a revision of it, so a profile can bind both with the same BFL
+key, and an agent gets Klein only by choosing its `model`.
+
+BFL publishes Klein in two variants. Klein (Distilled) is the step-distilled
+model and the only one BFL's API serves. Klein Base, the undistilled model
+for fine-tuning and research, has open weights but no hosted endpoint, so no
+contract offers it. The details below were checked on 2026-10-29 against
+BFL's API reference,
+[Generate an image with FLUX 3 Klein](https://docs.bfl.ml/api-reference/utility/generate-an-image-with-flux-3-klein.md).
+
+- **Request:** `POST https://api.bfl.ai/v1/flux-3-image-klein` with `prompt`,
+  `resolution` (from `image_size`), `aspect_ratio` and the optional
+  `options.safety_tolerance` (0 to 5). Klein has no web-search grounding,
+  and its request schema refuses unknown fields, so unlike FLUX 3 Image the
+  request carries no `grounding` field.
+- **Sizes:** `image_size` is `768sq`, `1k`, `1.5k` or `2k`, and
+  `aspect_ratio` is one of BFL's fixed ratios from `21:9` to `9:21`, `1:1`
+  by default. As for FLUX 3 Image, the contract certifies the tier and ratio
+  it sends, not a pixel size.
+- **Pricing:** by tier, at any aspect ratio, from
+  [bfl.ai/pricing](https://bfl.ai/pricing), reviewed on 2026-10-29 (pricing
+  version `bfl-flux-3-image-klein-usd-2026-10-29-v1`). The rendered page and
+  its JSON-LD product data agree. BFL's reported credits settle the actual
+  cost.
+- **Polling, statuses, delivery and recovery:** the same as FLUX.2.
+
+| Tier | Klein, USD per image | FLUX 3 Image v2, USD per image |
+| --- | --- | --- |
+| `768sq` | 0.008 | 0.041 |
+| `1k` | 0.009 | 0.048 |
+| `1.5k` | 0.011 | 0.07 |
+| `2k` | 0.014 | 0.10 |
+
+`4k` (USD 0.036) is not offered. As for FLUX 3 Image, it waits on a live
+check that BFL's 4k output fits the 20 MiB artifact bound.
+
+Not in this contract: input images and editing, `auto` aspect ratio, exact
+`width` and `height`, `seed`, `steps` (1 to 16), `output_format` (BFL
+defaults to JPEG; the contract accepts PNG and JPEG), safety tolerance above
+5, and more than one image per call. BFL warns that Klein's weights give
+weaker results without its prompt upsampler. Its API reference doesn't say
+whether the hosted endpoint applies it, and the contract sends the prompt
+as the agent wrote it. No live Klein call has been made yet.
+
 ## FLUX.2 [klein], [flex] and [max] contracts
 
 Three more FLUX.2 models run as their own targets beside FLUX.2 [pro], each
