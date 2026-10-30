@@ -1444,7 +1444,7 @@ mod tests {
         provider_targets::ProviderTargetConfig,
         secrets::{ProviderSecret, SecretError, SecretProvider, SecretReference},
     };
-    use image::{DynamicImage, ImageOutputFormat, RgbaImage};
+    use image::{DynamicImage, ImageFormat, RgbaImage};
     use serde_json::json;
     use std::{
         io::Cursor,
@@ -2074,7 +2074,7 @@ mod tests {
             .unwrap();
         let mut png = Vec::new();
         DynamicImage::ImageRgba8(RgbaImage::new(1024, 1024))
-            .write_to(&mut Cursor::new(&mut png), ImageOutputFormat::Png)
+            .write_to(&mut Cursor::new(&mut png), ImageFormat::Png)
             .unwrap();
         fixture
             .artifacts
@@ -2860,10 +2860,7 @@ mod tests {
             1,
             image::Rgba([1, 2, 3, 255]),
         ))
-        .write_to(
-            &mut std::io::Cursor::new(&mut png),
-            image::ImageOutputFormat::Png,
-        )
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
         .unwrap();
         let artifact = fixture
             .artifacts
@@ -4536,7 +4533,7 @@ mod tests {
         let created = execution(&call_create(&fixture, &request("operation-1")));
         let mut bytes = Vec::new();
         DynamicImage::ImageRgba8(RgbaImage::new(1, 1))
-            .write_to(&mut Cursor::new(&mut bytes), ImageOutputFormat::Png)
+            .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png)
             .unwrap();
         let artifact = fixture
             .artifacts

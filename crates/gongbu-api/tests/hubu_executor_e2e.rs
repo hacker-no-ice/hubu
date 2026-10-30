@@ -762,7 +762,7 @@ impl ProviderActivities for DeterministicProvider {
             1,
             image::Rgba([0, 96, 255, 255]),
         ))
-        .write_to(&mut Cursor::new(&mut png), image::ImageOutputFormat::Png)
+        .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
         .expect("encode deterministic PNG fixture");
         Ok(ProviderSuccess {
             request_id: Some(format!("mock-request:{}", execution.operation_key)),
