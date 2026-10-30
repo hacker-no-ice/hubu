@@ -771,9 +771,13 @@ impl PricingCatalog {
     }
 }
 
+/// Every `image_size` a pricing selector may name: the shared 1k/2k/4k
+/// presets and FLUX 3's 768sq and 1.5k resolution tiers.
+pub const IMAGE_SIZES: &[&str] = &["768sq", "1k", "1.5k", "2k", "4k"];
+
 fn normalize_image_size(value: &str) -> Result<String> {
     let value = value.trim().to_ascii_lowercase();
-    if matches!(value.as_str(), "1k" | "2k" | "4k") {
+    if IMAGE_SIZES.contains(&value.as_str()) {
         Ok(value)
     } else {
         Err(ContractError::Malformed("invalid image_size".into()))

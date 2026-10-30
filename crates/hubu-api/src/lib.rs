@@ -11514,6 +11514,108 @@ lease_profiles:
     }
 
     #[test]
+    fn gemini_pro_caps_need_approval_or_are_denied_before_any_token_exists() {
+        let path =
+            std::env::temp_dir().join(format!("hubu-api-gemini-pro-caps-{}.sqlite", UserId::new()));
+        let state = ServerState::new_with_db_path(&path).unwrap();
+        init(
+            json!({"display_name":"Alice Example","email":"alice@example.com"}).to_string(),
+            &state,
+        )
+        .unwrap();
+        let agent = register_agent(
+            json!({"name":"gemini-pro-agent","version":"v1"}).to_string(),
+            &state,
+        )
+        .unwrap();
+        // The dogfood shape: drafts run, a roughly 14¢ Pro cap needs a human,
+        // and caps over 20¢ are denied.
+        add_policy(
+            json!({
+                "agent_id": agent.agent_id,
+                "policy_yaml": r#"
+id: gemini_pro_caps
+version: 2026-10-28.1
+default_effect: needs_approval
+rules:
+  - id: deny_over_twenty_cents
+    effect: deny
+    reason: an image request may not exceed USD 0.20
+    when:
+      op: gt
+      field: amount
+      value:
+        money: "0.20"
+  - id: allow_drafts
+    effect: allow
+    reason: drafts up to USD 0.10 run without approval
+    when:
+      op: lte
+      field: amount
+      value:
+        money: "0.10"
+"#,
+            })
+            .to_string(),
+            &state,
+        )
+        .unwrap();
+        create_test_agent_budget(&state, &agent.agent_id, 500);
+        let authorize = |key: &str, amount: &str, model: &str, image_size: &str| {
+            route(
+                authenticated_json_request(
+                    "/spend/authorize",
+                    json!({
+                        "operation_key": key,
+                        "account_id": agent.account_id,
+                        "amount": amount,
+                        "reason": "governed Gemini image",
+                        "execution_scope": {
+                            "schema_version": 2,
+                            "provider": "provider:google:gemini-developer",
+                            "executor": "executor:gongbu:image",
+                            "capability": "capability:image:generate",
+                            "billing_merchant": "merchant:google",
+                            "model": model,
+                            "image_size": image_size
+                        }
+                    }),
+                ),
+                &state,
+            )
+        };
+
+        let flash = authorize(
+            "gemini-flash-draft",
+            "0.067",
+            "gemini-3.1-flash-image",
+            "1k",
+        );
+        assert_eq!(flash.body["decision"], "allow");
+        assert!(flash.body["auth_token_id"].is_string());
+
+        // A 1k Pro render is exactly USD 0.134: a human must approve it, and
+        // until then there is no token Gongbu could resolve to call Google.
+        let pro = authorize("gemini-pro-final", "0.134", "gemini-3-pro-image", "1k");
+        assert_eq!(pro.status, 200);
+        assert_eq!(pro.body["decision"], "needs_approval");
+        assert_eq!(pro.body["approval"]["status"], "pending");
+        assert!(pro.body["auth_token_id"].is_null());
+        assert!(pro.body["budget_hold"].is_null());
+        assert_eq!(
+            pro.body["approval"]["review"]["execution_scope"]["model"],
+            "gemini-3-pro-image"
+        );
+
+        // A 4k Pro render is USD 0.24: denied outright, never executable.
+        let denied = authorize("gemini-pro-4k", "0.24", "gemini-3-pro-image", "4k");
+        assert_eq!(denied.body["decision"], "deny");
+        assert!(denied.body["auth_token_id"].is_null());
+        assert!(denied.body["budget_hold"].is_null());
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
     fn authorization_replay_preserves_omitted_lease_profile_after_default_changes() {
         let (path, state, agent, authorization) =
             setup_executor_authorization("authorization-lease-restart");
