@@ -1,0 +1,136 @@
+# Verified provider pack: Black Forest Labs FLUX 3 Image text-to-image, v2
+# contract (HUB-253).
+#
+# Same BFL API, polling and delivery rules as bfl-flux-3-image.toml (the v1
+# contract, kept as is). v2 adds the 768sq and 1.5k resolution tiers.
+#
+# BFL prices FLUX 3 by resolution tier; the aspect ratio doesn't change the
+# price within a tier. Pricing reviewed 2026-10-21 against BFL's published
+# FLUX 3 Image rates. BFL doesn't publish the exact pixel size of each tier
+# and ratio, so this pack certifies the tier and ratio it sends, not a size.
+# Web-search grounding is always off: prompts are never sent to search.
+# contracts/provider-contracts-v1.json carries this pack's checked-in
+# projection, and Gongbu's tests fail if the two ever disagree.
+schema_version = 1
+pack_id = "bfl-flux-3-image"
+pack_version = "2026-10-28.1"
+provider = "flux"
+display_name = "Black Forest Labs FLUX 3 Image"
+billing_merchant = "merchant:black-forest-labs"
+capability = "capability:image:generate"
+workload_type = "image_generation"
+archetype = "async_poll"
+adapter = "flux2_api"
+pricing_trust = "verified"
+
+[transport]
+endpoint = "https://api.bfl.ai"
+api_version = "v1"
+# Regional API hosts receive the credential when BFL returns them for polling.
+allowed_hosts = ["api.bfl.ai", "api.*.bfl.ai"]
+auth_header = "x-key"
+credential = "bfl_flux3_image"
+timeout_ms = 270000
+
+[request]
+path = "/v1/flux-3-image"
+
+[request.body]
+prompt = "{{prompt}}"
+resolution = "{{image_size}}"
+aspect_ratio = "{{aspect_ratio}}"
+safety_tolerance = "{{options.safety_tolerance}}"
+grounding = false
+
+[[parameters]]
+name = "prompt"
+type = "string"
+required = true
+max_length = 32000
+
+[[parameters]]
+name = "image_count"
+type = "integer"
+min = 1
+max = 1
+default = 1
+quantity = "image_count"
+
+# BFL also offers 4k (about 16.8 MP). It waits on a live check that its output
+# fits Gongbu's artifact bound.
+[[parameters]]
+name = "image_size"
+type = "enum"
+values = ["768sq", "1k", "1.5k", "2k"]
+required = true
+selector = "image_size"
+
+[[parameters]]
+name = "aspect_ratio"
+type = "enum"
+values = ["21:9", "2:1", "16:9", "3:2", "7:5", "4:3", "5:4", "1:1", "4:5", "3:4", "5:7", "2:3", "9:16", "1:2", "9:21"]
+default = "1:1"
+
+[[parameters]]
+name = "options.safety_tolerance"
+type = "integer"
+min = 0
+max = 5
+
+[poll]
+job_id = "/id"
+path = "/v1/get_result"
+query = { id = "{{job_id}}" }
+url = "/polling_url"
+hosts = ["api.bfl.ai", "api.*.bfl.ai"]
+interval_ms = 500
+status = "/status"
+pending = ["pending", "reasoning", "generating"]
+ready = ["ready", "succeeded", "completed"]
+rejected = { "request moderated" = "provider_request_moderated", "content moderated" = "provider_content_moderated", "error" = "provider_error", "failed" = "provider_error", "rejected" = "provider_rejected" }
+ambiguous = { "task not found" = "provider_task_not_found" }
+
+[response]
+request_id_headers = ["x-request-id", "x-bfl-request-id"]
+provider_request_id = "/request_id"
+# BFL reports settled cost in credits; one credit is exactly USD 0.01.
+reported_cost = "/cost"
+reported_cost_scale = 2
+artifact_items = "/result"
+artifact_url = "/sample"
+
+[artifacts]
+media_types = ["image/png", "image/jpeg"]
+hosts = ["delivery.*.bfl.ai"]
+
+[[models]]
+model = "flux-3-image"
+provider_config_version = "hubu-flux-3-image-t2i-2026-10-28-v2"
+pricing_version = "bfl-flux-3-image-usd-2026-10-21-v2"
+pricing_reviewed_on = "2026-10-21"
+
+# USD 0.041 per 768sq image, USD 0.048 per 1k, USD 0.07 per 1.5k and USD 0.10
+# per 2k image, at any aspect ratio.
+[[models.pricing_rules]]
+rule_id = "bfl-flux-3-image-768sq-2026-10-21-v2"
+currency = "USD"
+selector = { image_size = "768sq" }
+components = [{ unit = "image", rate_numerator_minor = 41, rate_denominator = 10 }]
+
+[[models.pricing_rules]]
+rule_id = "bfl-flux-3-image-1k-2026-10-21-v2"
+currency = "USD"
+selector = { image_size = "1k" }
+components = [{ unit = "image", rate_numerator_minor = 48, rate_denominator = 10 }]
+
+[[models.pricing_rules]]
+rule_id = "bfl-flux-3-image-1.5k-2026-10-21-v2"
+currency = "USD"
+selector = { image_size = "1.5k" }
+components = [{ unit = "image", rate_numerator_minor = 7, rate_denominator = 1 }]
+
+[[models.pricing_rules]]
+rule_id = "bfl-flux-3-image-2k-2026-10-21-v2"
+currency = "USD"
+selector = { image_size = "2k" }
+components = [{ unit = "image", rate_numerator_minor = 10, rate_denominator = 1 }]

@@ -521,7 +521,7 @@ mod tests {
     use super::*;
     use crate::{
         provider_contract::{
-            AdapterCapabilities, AdapterOutcome, NormalizedRequest, ProviderFailure,
+            AdapterCapabilities, AdapterOutcome, NormalizedRequest, PricingUnit, ProviderFailure,
         },
         secrets::ProviderSecret,
     };
@@ -794,19 +794,65 @@ mod tests {
                 "gemini-3.1-flash-lite-image",
             ),
             ("google", "gemini_developer_image", "gemini-3.1-flash-image"),
+            ("google", "gemini_developer_image", "gemini-3-pro-image"),
+            ("google", "gemini_developer_image", "gemini-nano-banana-2.1"),
             ("flux", "flux2_api", "flux-2-pro"),
             ("flux", "flux2_api", "flux-3-image"),
+            ("flux", "flux2_api", "flux-2-klein-4b"),
+            ("flux", "flux2_api", "flux-2-klein-9b"),
+            ("flux", "flux2_api", "flux-2-flex"),
+            ("flux", "flux2_api", "flux-2-max"),
+            ("flux", "flux2_api", "flux-3-image-klein"),
         ] {
             let key = TargetKey::new("image_generation", provider, adapter, model).unwrap();
             assert_eq!(catalog.resolve_active(&key).unwrap().adapter, adapter);
         }
         let execution_targets = catalog.execution_targets();
-        assert_eq!(execution_targets.len(), 6);
+        assert_eq!(execution_targets.len(), 15);
+        // Pro is its own target, discovered by model beside Flash and Lite,
+        // with an aspect-ratio certified size at every tier.
+        let pro = execution_targets
+            .iter()
+            .find(|target| {
+                target.model == "gemini-3-pro-image" && target.workload_type == "image_generation"
+            })
+            .unwrap();
+        assert_eq!(pro.image_sizes, ["1k", "2k", "4k"]);
+        assert_eq!(pro.output_sizes.len(), 30);
+        // The new FLUX.2 models are explicit targets with megapixel pricing
+        // and the shared aspect-ratio sizes; none stands in for another.
+        for model in [
+            "flux-2-klein-4b",
+            "flux-2-klein-9b",
+            "flux-2-flex",
+            "flux-2-max",
+        ] {
+            let target = execution_targets
+                .iter()
+                .find(|target| target.model == model)
+                .unwrap();
+            assert_eq!(target.output_sizes.len(), 18, "{model}");
+            assert!(target.megapixels.is_some(), "{model}");
+            assert_eq!(target.pricing.len(), 1, "{model}");
+            assert_eq!(
+                target.pricing[0].components[1].unit,
+                PricingUnit::AdditionalMegapixel
+            );
+        }
         let flux_3 = execution_targets
             .iter()
             .find(|target| target.model == "flux-3-image")
             .unwrap();
         assert_eq!(flux_3.image_sizes, ["1k", "2k"]);
+        // Klein is discovered by its own model, at FLUX 3's four tiers and
+        // its own tier prices.
+        let klein = execution_targets
+            .iter()
+            .find(|target| target.model == "flux-3-image-klein")
+            .unwrap();
+        assert_eq!(klein.image_sizes, ["1.5k", "1k", "2k", "768sq"]);
+        assert_eq!(klein.pricing.len(), 4);
+        assert_ne!(klein.target_id, flux_3.target_id);
         let gemini_full = execution_targets
             .iter()
             .find(|target| {
