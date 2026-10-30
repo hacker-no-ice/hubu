@@ -29,7 +29,7 @@ use crate::{
         ProviderSuccess,
     },
 };
-use image::{DynamicImage, ImageOutputFormat, RgbaImage};
+use image::{DynamicImage, ImageFormat, RgbaImage};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -1523,7 +1523,7 @@ impl ProviderActivities for DeterministicProvider {
 fn fixture_png() -> Vec<u8> {
     let mut bytes = Vec::new();
     DynamicImage::ImageRgba8(RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255])))
-        .write_to(&mut Cursor::new(&mut bytes), ImageOutputFormat::Png)
+        .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png)
         .expect("in-memory PNG encoding");
     bytes
 }

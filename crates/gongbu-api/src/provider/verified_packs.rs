@@ -627,7 +627,7 @@ mod tests {
         image::GrayImage::new(width, height)
             .write_to(
                 &mut std::io::Cursor::new(&mut bytes),
-                image::ImageOutputFormat::Png,
+                image::ImageFormat::Png,
             )
             .unwrap();
         bytes

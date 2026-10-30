@@ -2766,7 +2766,7 @@ fn decimal_cost(value: &Value, scale: u32) -> Option<ActualVendorCost> {
 
 /// The pixel size an image header declares, without decoding the pixels.
 fn image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
-    image::io::Reader::new(std::io::Cursor::new(bytes))
+    image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
         .ok()?
         .into_dimensions()
@@ -4188,7 +4188,7 @@ mod tests {
         image::GrayImage::new(width, height)
             .write_to(
                 &mut std::io::Cursor::new(&mut bytes),
-                image::ImageOutputFormat::Png,
+                image::ImageFormat::Png,
             )
             .unwrap();
         bytes
