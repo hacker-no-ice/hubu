@@ -10,18 +10,40 @@ const GOOGLE_GEMINI_DEVELOPER_IMAGE: &str =
     include_str!("../../../../packs/verified/google-gemini-developer-image.toml");
 const GOOGLE_GEMINI_DEVELOPER_IMAGE_EDIT: &str =
     include_str!("../../../../packs/verified/google-gemini-developer-image-edit.toml");
+const GOOGLE_GEMINI_DEVELOPER_IMAGE_V2: &str =
+    include_str!("../../../../packs/verified/google-gemini-developer-image-v2.toml");
+const GOOGLE_GEMINI_DEVELOPER_IMAGE_EDIT_V2: &str =
+    include_str!("../../../../packs/verified/google-gemini-developer-image-edit-v2.toml");
 const BFL_FLUX_2: &str = include_str!("../../../../packs/verified/bfl-flux-2.toml");
 const BFL_FLUX_2_V2: &str = include_str!("../../../../packs/verified/bfl-flux-2-v2.toml");
+const BFL_FLUX_2_MAX: &str = include_str!("../../../../packs/verified/bfl-flux-2-max.toml");
+const BFL_FLUX_2_FLEX: &str = include_str!("../../../../packs/verified/bfl-flux-2-flex.toml");
+const BFL_FLUX_2_KLEIN_4B: &str =
+    include_str!("../../../../packs/verified/bfl-flux-2-klein-4b.toml");
+const BFL_FLUX_2_KLEIN_9B: &str =
+    include_str!("../../../../packs/verified/bfl-flux-2-klein-9b.toml");
 const BFL_FLUX_3_IMAGE: &str = include_str!("../../../../packs/verified/bfl-flux-3-image.toml");
+const BFL_FLUX_3_IMAGE_V2: &str =
+    include_str!("../../../../packs/verified/bfl-flux-3-image-v2.toml");
+const BFL_FLUX_3_IMAGE_KLEIN: &str =
+    include_str!("../../../../packs/verified/bfl-flux-3-image-klein.toml");
 
 /// Every verified pack, validated.
 pub fn verified_packs() -> Vec<Pack> {
     [
         GOOGLE_GEMINI_DEVELOPER_IMAGE,
         GOOGLE_GEMINI_DEVELOPER_IMAGE_EDIT,
+        GOOGLE_GEMINI_DEVELOPER_IMAGE_V2,
+        GOOGLE_GEMINI_DEVELOPER_IMAGE_EDIT_V2,
         BFL_FLUX_2,
         BFL_FLUX_2_V2,
+        BFL_FLUX_2_MAX,
+        BFL_FLUX_2_FLEX,
+        BFL_FLUX_2_KLEIN_4B,
+        BFL_FLUX_2_KLEIN_9B,
         BFL_FLUX_3_IMAGE,
+        BFL_FLUX_3_IMAGE_V2,
+        BFL_FLUX_3_IMAGE_KLEIN,
     ]
     .into_iter()
     .map(|source| Pack::from_toml_str(source).expect("verified packs are valid"))
@@ -148,7 +170,7 @@ mod tests {
             projected += 1;
         }
         assert_eq!(
-            projected, 7,
+            projected, 21,
             "every shipped contract comes from a verified pack"
         );
     }
@@ -337,19 +359,25 @@ mod tests {
         submit: Result<TransportResponse, TransportFailure>,
         polls: Arc<std::sync::Mutex<Vec<TransportResponse>>>,
         posts: Arc<std::sync::Mutex<u32>>,
+        /// Every submission's URL and body, in order.
+        sent: Arc<std::sync::Mutex<Vec<(String, Value)>>>,
         artifact: Vec<u8>,
     }
     impl SyncTransport for FluxTransport {
         fn post_json(
             &self,
-            _: &Url,
+            url: &Url,
             auth: (&str, &str),
             _: &BTreeMap<String, String>,
-            _: &Value,
+            body: &Value,
             _: Duration,
         ) -> Result<TransportResponse, TransportFailure> {
             assert_eq!(auth.0, "x-key");
             *self.posts.lock().unwrap() += 1;
+            self.sent
+                .lock()
+                .unwrap()
+                .push((url.to_string(), body.clone()));
             self.submit.clone()
         }
         fn get_json(
@@ -414,6 +442,7 @@ mod tests {
             submit,
             polls: Arc::new(std::sync::Mutex::new(polls)),
             posts: Arc::default(),
+            sent: Arc::default(),
             artifact,
         };
         let posts = transport.posts.clone();
@@ -680,6 +709,7 @@ mod tests {
                            "result": {"sample": "https://delivery.us7.bfl.ai/out.png"}}),
                 )])),
                 posts: Arc::default(),
+                sent: Arc::default(),
                 artifact,
             };
             AsyncPollEngine::new(v2.clone(), "flux-2-pro", transport, 1 << 20)
@@ -766,6 +796,7 @@ mod tests {
                 submit: Ok(accepted()),
                 polls: Arc::new(std::sync::Mutex::new(polls)),
                 posts: Arc::default(),
+                sent: Arc::default(),
                 artifact: PNG.to_vec(),
             };
             let posts = transport.posts.clone();
@@ -805,6 +836,635 @@ mod tests {
         assert_eq!(failure.spend_disposition, SpendDisposition::Release);
     }
 
+    /// The v2 Gemini packs (HUB-252): aspect ratios and Gemini 3 Pro Image.
+    const GEMINI_V2: &str = "2026-10-28.1";
+
+    fn pack_at(id: &str, version: &str) -> Pack {
+        verified_packs()
+            .into_iter()
+            .find(|pack| pack.pack_id() == id && pack.pack_version() == version)
+            .unwrap()
+    }
+
+    #[derive(Clone)]
+    struct CapturingTransport {
+        response: TransportResponse,
+        sent: Arc<std::sync::Mutex<Vec<Value>>>,
+    }
+    impl SyncTransport for CapturingTransport {
+        fn post_json(
+            &self,
+            url: &Url,
+            auth: (&str, &str),
+            _: &BTreeMap<String, String>,
+            body: &Value,
+            _: Duration,
+        ) -> Result<TransportResponse, TransportFailure> {
+            assert_eq!(
+                url.as_str(),
+                "https://generativelanguage.googleapis.com/v1beta/interactions"
+            );
+            assert_eq!(auth, ("x-goog-api-key", "k"));
+            self.sent.lock().unwrap().push(body.clone());
+            Ok(self.response.clone())
+        }
+        fn download(
+            &self,
+            _: &Url,
+            _: &ArtifactDownloadPolicy,
+            _: InvocationDeadline,
+        ) -> Result<Vec<u8>, ArtifactFetchError> {
+            Err(ArtifactFetchError::Failed)
+        }
+    }
+
+    #[test]
+    fn gemini_v2_sends_the_aspect_ratio_and_certifies_googles_size_for_it() {
+        let gemini = pack_at("google-gemini-developer-image", GEMINI_V2);
+        // Sizes from Google's image generation guide, per model and tier.
+        for (model, tier, ratio, size) in [
+            ("gemini-3-pro-image", "1k", "16:9", (1376, 768)),
+            ("gemini-3-pro-image", "2k", "21:9", (3168, 1344)),
+            ("gemini-3-pro-image", "4k", "9:16", (3072, 5504)),
+            ("gemini-3.1-flash-image", "2k", "4:5", (1856, 2304)),
+            ("gemini-3.1-flash-image", "4k", "3:2", (5056, 3392)),
+            ("gemini-nano-banana-2.1", "2k", "16:9", (2752, 1536)),
+            ("gemini-nano-banana-2.1", "4k", "2:3", (3392, 5056)),
+            ("gemini-3.1-flash-lite-image", "1k", "3:4", (896, 1200)),
+        ] {
+            let prepared = gemini
+                .prepare(
+                    model,
+                    &json!({"prompt": "a poster", "image_size": tier, "aspect_ratio": ratio}),
+                )
+                .unwrap();
+            assert_eq!(
+                prepared.body,
+                json!({"model": model, "input": [{"type": "text", "text": "a poster"}],
+                       "response_format": {"type": "image", "image_size": tier.to_uppercase(),
+                                           "aspect_ratio": ratio}}),
+                "{model} {tier} {ratio}"
+            );
+            let dimensions = prepared.request.output_dimensions.unwrap();
+            assert_eq!((dimensions.width, dimensions.height), size, "{model}");
+        }
+        // Without an aspect ratio, Google's text-to-image default: a square.
+        let square = gemini
+            .prepare(
+                "gemini-3-pro-image",
+                &json!({"prompt": "x", "image_size": "2k"}),
+            )
+            .unwrap();
+        assert_eq!(square.body["response_format"]["aspect_ratio"], "1:1");
+        let dimensions = square.request.output_dimensions.unwrap();
+        assert_eq!((dimensions.width, dimensions.height), (2048, 2048));
+        assert_eq!(gemini.output_sizes("gemini-3-pro-image").len(), 30);
+        assert_eq!(gemini.output_sizes("gemini-nano-banana-2.1").len(), 30);
+        assert_eq!(gemini.output_sizes("gemini-3.1-flash-lite-image").len(), 10);
+        // Not offered: Lite above 1k, ratios outside the shared published
+        // set, 0.5k, more than one image, or no tier.
+        for (model, input) in [
+            (
+                "gemini-3.1-flash-lite-image",
+                json!({"prompt": "x", "image_size": "2k"}),
+            ),
+            (
+                "gemini-3-pro-image",
+                json!({"prompt": "x", "image_size": "1k", "aspect_ratio": "1:4"}),
+            ),
+            (
+                "gemini-3-pro-image",
+                json!({"prompt": "x", "image_size": "1k", "aspect_ratio": "auto"}),
+            ),
+            (
+                "gemini-3.1-flash-image",
+                json!({"prompt": "x", "image_size": "0.5k"}),
+            ),
+            (
+                "gemini-nano-banana-2.1",
+                json!({"prompt": "x", "image_size": "1k", "aspect_ratio": "8:1"}),
+            ),
+            (
+                "gemini-3-pro-image",
+                json!({"prompt": "x", "image_size": "1k", "image_count": 2}),
+            ),
+            ("gemini-3-pro-image", json!({"prompt": "x"})),
+        ] {
+            assert!(gemini.prepare(model, &input).is_err(), "{model} {input}");
+        }
+        // The edit pack never guesses a shape: the agent names the ratio.
+        let edit = pack_at("google-gemini-developer-image-edit", GEMINI_V2);
+        let mut input = json!({"prompt": "x", "image_size": "1k",
+            "input_images": ["0f5c2a64-3f0e-4c9b-9a51-2b7d1c4e8a10"]});
+        assert!(edit.prepare("gemini-3-pro-image", &input).is_err());
+        input["aspect_ratio"] = json!("4:3");
+        let dimensions = edit
+            .prepare("gemini-3-pro-image", &input)
+            .unwrap()
+            .request
+            .output_dimensions
+            .unwrap();
+        assert_eq!((dimensions.width, dimensions.height), (1200, 896));
+    }
+
+    #[test]
+    fn gemini_v2_prices_per_image_by_tier_at_every_aspect_ratio() {
+        let gemini = pack_at("google-gemini-developer-image", GEMINI_V2);
+        // 10,000 units are one cent: Pro is 13.4¢ at 1k and 2k, 24¢ at 4k;
+        // Flash and Lite keep their v1 rates.
+        for (model, tier, units) in [
+            ("gemini-3-pro-image", "1k", 134_000),
+            ("gemini-3-pro-image", "2k", 134_000),
+            ("gemini-3-pro-image", "4k", 240_000),
+            ("gemini-3.1-flash-image", "1k", 67_000),
+            ("gemini-3.1-flash-image", "2k", 101_000),
+            ("gemini-3.1-flash-image", "4k", 151_000),
+            ("gemini-3.1-flash-lite-image", "1k", 33_600),
+            ("gemini-nano-banana-2.1", "1k", 33_600),
+            ("gemini-nano-banana-2.1", "2k", 50_400),
+            ("gemini-nano-banana-2.1", "4k", 113_000),
+        ] {
+            for ratio in ["1:1", "21:9", "9:16"] {
+                let frozen = snapshot_for(
+                    &gemini,
+                    model,
+                    &json!({"prompt": "x", "image_size": tier, "aspect_ratio": ratio}),
+                );
+                assert_eq!(frozen.estimated_units, units, "{model} {tier} {ratio}");
+            }
+        }
+        // A Pro edit adds 0.112¢ per input image: two inputs at 4k are
+        // 24 + 2 × 0.112 = 24.224¢. Flash keeps 0.056¢, Lite 0.028¢, and
+        // Nano Banana 2.1 bills 1,120 tokens at $1.50 per 1M: 0.168¢.
+        let edit = pack_at("google-gemini-developer-image-edit", GEMINI_V2);
+        let inputs = json!([
+            "0f5c2a64-3f0e-4c9b-9a51-2b7d1c4e8a10",
+            "1a6d3b75-4f1f-4dad-8b62-3c8e2d5f9b21"
+        ]);
+        for (model, tier, units) in [
+            ("gemini-3-pro-image", "4k", 242_240),
+            ("gemini-3-pro-image", "1k", 136_240),
+            ("gemini-3.1-flash-image", "1k", 68_120),
+            ("gemini-3.1-flash-lite-image", "1k", 34_160),
+            ("gemini-nano-banana-2.1", "2k", 53_760),
+        ] {
+            let frozen = snapshot_for(
+                &edit,
+                model,
+                &json!({"prompt": "x", "image_size": tier, "aspect_ratio": "16:9",
+                        "input_images": inputs}),
+            );
+            assert_eq!(frozen.estimated_units, units, "{model} {tier}");
+        }
+    }
+
+    #[test]
+    fn gemini_pro_edit_sends_its_inputs_and_settles_the_frozen_price() {
+        struct Drafts;
+        impl crate::provider::contract::InputImageSource for Drafts {
+            fn load(
+                &self,
+                _: &str,
+            ) -> crate::provider::contract::Result<crate::provider::contract::InputImage>
+            {
+                Ok(crate::provider::contract::InputImage {
+                    media_type: "image/png".into(),
+                    bytes: PNG.to_vec(),
+                })
+            }
+        }
+        let edit = Arc::new(pack_at("google-gemini-developer-image-edit", GEMINI_V2));
+        let encoded = base64::engine::general_purpose::STANDARD.encode(PNG);
+        let input = json!({"prompt": "make it dusk", "image_size": "2k", "aspect_ratio": "16:9",
+            "input_images": ["0f5c2a64-3f0e-4c9b-9a51-2b7d1c4e8a10"]});
+        let request = edit.prepare("gemini-3-pro-image", &input).unwrap().request;
+        let transport = CapturingTransport {
+            response: TransportResponse {
+                status: 200,
+                headers: BTreeMap::from([("x-goog-request-id".into(), "req-pro".into())]),
+                body: json!({
+                    "id": "interaction-1",
+                    "steps": [{"type": "model_output", "content": [
+                        {"type": "image", "mime_type": "image/png", "data": encoded}
+                    ]}],
+                    "usage": {"total_input_tokens": 580, "total_output_tokens": 1400,
+                              "total_thought_tokens": 260}
+                }),
+            },
+            sent: Arc::default(),
+        };
+        let sent = transport.sent.clone();
+        let engine =
+            SyncFixedEngine::new(edit.clone(), "gemini-3-pro-image", transport, 1 << 20).unwrap();
+        let submission = engine
+            .submit_with_inputs(
+                &request,
+                &input,
+                &Drafts,
+                &secret_for_test("k"),
+                None,
+                &crate::provider::contract::NoopProviderTransportObserver,
+            )
+            .unwrap();
+        let crate::provider::contract::AdapterSubmission::Complete(outcome) = submission else {
+            panic!("a sync pack completes in one call");
+        };
+        let sent = sent.lock().unwrap();
+        assert_eq!(
+            *sent,
+            [json!({
+                "model": "gemini-3-pro-image",
+                "input": [{"type": "text", "text": "make it dusk"},
+                          {"type": "image", "mime_type": "image/png", "data": encoded}],
+                "response_format": {"type": "image", "image_size": "2K", "aspect_ratio": "16:9"}
+            })]
+        );
+        assert_eq!(outcome.provider_request_id.as_deref(), Some("req-pro"));
+        let usage = outcome.usage.as_ref().unwrap();
+        assert_eq!(usage.images, Some(1));
+        // Recorded as settlement evidence; the rules do not price them.
+        assert_eq!(
+            (usage.input_tokens, usage.output_tokens),
+            (Some(580), Some(1400))
+        );
+        // 13.4¢ for the 2k image plus 0.112¢ for the input image, exactly.
+        let frozen = snapshot_for(&edit, "gemini-3-pro-image", &input);
+        assert_eq!(frozen.estimated_units, 135_120);
+        let settled = frozen
+            .settle_precise(
+                usage,
+                outcome.actual_vendor_cost.as_ref(),
+                frozen.estimated_units,
+            )
+            .unwrap();
+        assert_eq!(settled.budget_units, 135_120);
+    }
+
+    /// The FLUX.2 models HUB-253 adds: pack ID, model, BFL endpoint, and the
+    /// estimate in units (10,000 per cent) at 1, 2 and 4 billed megapixels.
+    const NEW_FLUX_2: [(&str, &str, &str, [i64; 3]); 4] = [
+        (
+            "bfl-flux-2-klein-4b",
+            "flux-2-klein-4b",
+            "https://api.bfl.ai/v1/flux-2-klein-4b",
+            [14_000, 15_000, 17_000],
+        ),
+        (
+            "bfl-flux-2-klein-9b",
+            "flux-2-klein-9b",
+            "https://api.bfl.ai/v1/flux-2-klein-9b",
+            [15_000, 17_000, 21_000],
+        ),
+        (
+            "bfl-flux-2-flex",
+            "flux-2-flex",
+            "https://api.bfl.ai/v1/flux-2-flex",
+            [50_000, 100_000, 200_000],
+        ),
+        (
+            "bfl-flux-2-max",
+            "flux-2-max",
+            "https://api.bfl.ai/v1/flux-2-max",
+            [70_000, 100_000, 160_000],
+        ),
+    ];
+
+    /// Each new model is its own target on its own endpoint, priced at BFL's
+    /// first-megapixel plus additional-megapixel rates for that model.
+    #[test]
+    fn new_flux_2_models_route_explicitly_and_price_their_own_megapixels() {
+        let pro_sizes = flux_v2().output_sizes("flux-2-pro");
+        for (pack_id, model, endpoint, [one, two, four]) in NEW_FLUX_2 {
+            let flux = pack(pack_id);
+            assert_eq!(flux.request_url().as_str(), endpoint);
+            assert_eq!(flux.models().len(), 1);
+            // No pack answers for another model, so nothing is silently
+            // upgraded or downgraded.
+            for other in ["flux-2-pro", "flux-2-max", "flux-2-klein-4b"] {
+                if other != model {
+                    let input = json!({"prompt": "x", "image_size": "1k"});
+                    assert!(flux.prepare(other, &input).is_err(), "{model} {other}");
+                }
+            }
+            // The same certified sizes as FLUX.2 [pro] v2.
+            let sizes = flux.output_sizes(model);
+            assert_eq!(sizes, pro_sizes, "{model}");
+            for size in &sizes {
+                let mut input = json!({"prompt": "x"});
+                for (name, value) in &size.when {
+                    input[name] = json!(value);
+                }
+                let expected = match size.when["image_size"].as_str() {
+                    "1k" => one,
+                    "2k" => two,
+                    _ => four,
+                };
+                let frozen = snapshot_for(&flux, model, &input);
+                assert_eq!(frozen.estimated_units, expected, "{model} {size:?}");
+                let prepared = flux.prepare(model, &input).unwrap();
+                assert_eq!(
+                    (&prepared.body["width"], &prepared.body["height"]),
+                    (&json!(size.width), &json!(size.height))
+                );
+            }
+        }
+    }
+
+    /// Only Flex exposes steps and guidance, within BFL's ranges, and neither
+    /// changes the price.
+    #[test]
+    fn only_flex_takes_steps_and_guidance() {
+        let flex = pack("bfl-flux-2-flex");
+        let input = |options: Value| {
+            json!({"prompt": "a poster", "image_size": "2k", "aspect_ratio": "4:5",
+                   "options": options})
+        };
+        let tuned = input(json!({"steps": 28, "guidance": 3.5, "seed": 9}));
+        let prepared = flex.prepare("flux-2-flex", &tuned).unwrap();
+        assert_eq!(
+            prepared.body,
+            json!({"prompt": "a poster", "width": 1280, "height": 1600, "seed": 9,
+                   "steps": 28, "guidance": 3.5})
+        );
+        assert_eq!(
+            snapshot_for(&flex, "flux-2-flex", &tuned).estimated_units,
+            snapshot_for(&flex, "flux-2-flex", &input(json!({}))).estimated_units
+        );
+        // Left to BFL's defaults when omitted.
+        let plain = flex.prepare("flux-2-flex", &input(json!({}))).unwrap();
+        assert!(plain.body.get("steps").is_none() && plain.body.get("guidance").is_none());
+        for (options, ok) in [
+            (json!({"steps": 1, "guidance": 1.5}), true),
+            (json!({"steps": 50, "guidance": 10}), true),
+            (json!({"steps": 0}), false),
+            (json!({"steps": 51}), false),
+            (json!({"steps": 2.5}), false),
+            (json!({"guidance": 1.4}), false),
+            (json!({"guidance": 10.5}), false),
+            (json!({"guidance": 3.25}), false),
+        ] {
+            assert_eq!(
+                flex.prepare("flux-2-flex", &input(options.clone())).is_ok(),
+                ok,
+                "{options}"
+            );
+        }
+        for (pack_id, model) in [
+            ("bfl-flux-2-klein-4b", "flux-2-klein-4b"),
+            ("bfl-flux-2-klein-9b", "flux-2-klein-9b"),
+            ("bfl-flux-2-max", "flux-2-max"),
+        ] {
+            let other = pack(pack_id);
+            for options in [json!({"steps": 28}), json!({"guidance": 3.5})] {
+                assert!(other.prepare(model, &input(options)).is_err(), "{model}");
+            }
+        }
+        for options in [json!({"steps": 28}), json!({"guidance": 3.5})] {
+            assert!(flux_v2().prepare("flux-2-pro", &input(options)).is_err());
+        }
+    }
+
+    /// Every new model keeps BFL's asynchronous lifecycle: one submission to
+    /// its own endpoint, settlement from reported credits (fractional cents
+    /// included), an ambiguous submission reconciled, never resubmitted, and a
+    /// definitive rejection released.
+    #[test]
+    fn new_flux_2_models_settle_credits_and_never_resubmit_ambiguous_work() {
+        for (pack_id, model, endpoint, [one, ..]) in NEW_FLUX_2 {
+            let flux = Arc::new(pack(pack_id));
+            let input = json!({"prompt": "a lighthouse", "image_size": "1k"});
+            let request = flux.prepare(model, &input).unwrap().request;
+            let run = |submit: Result<TransportResponse, TransportFailure>, credits: f64| {
+                let transport = FluxTransport {
+                    submit,
+                    polls: Arc::new(std::sync::Mutex::new(vec![bfl(
+                        200,
+                        json!({"id": "job-1", "status": "Ready", "cost": credits,
+                               "result": {"sample": "https://delivery.us7.bfl.ai/out.png"}}),
+                    )])),
+                    posts: Arc::default(),
+                    sent: Arc::default(),
+                    artifact: png(1024, 1024),
+                };
+                let sent = transport.sent.clone();
+                let result = AsyncPollEngine::new(flux.clone(), model, transport, 1 << 20)
+                    .unwrap()
+                    .with_poll_interval_for_tests(Duration::from_millis(1))
+                    .invoke(&request, &input, &secret_for_test("secret-canary"), None);
+                let sent = sent.lock().unwrap().clone();
+                (result, sent)
+            };
+            // BFL reports credits worth one cent each: 1.4 credits is 1.4¢.
+            let credits = one as f64 / 10_000.0;
+            let (outcome, sent) = run(Ok(accepted()), credits);
+            let outcome = outcome.unwrap();
+            assert_eq!(sent.len(), 1, "{model}");
+            assert_eq!(sent[0].0, endpoint);
+            assert_eq!(
+                sent[0].1,
+                json!({"prompt": "a lighthouse", "width": 1024, "height": 1024})
+            );
+            let frozen = snapshot_for(&flux, model, &input);
+            let settled = frozen
+                .settle_precise(
+                    outcome.usage.as_ref().unwrap(),
+                    outcome.actual_vendor_cost.as_ref(),
+                    frozen.estimated_units,
+                )
+                .unwrap();
+            assert_eq!(settled.budget_units, one, "{model}");
+
+            let (ambiguous, sent) = run(
+                Err(TransportFailure::UnknownOutcome { request_id: None }),
+                credits,
+            );
+            let failure = ambiguous.unwrap_err();
+            assert_eq!(failure.spend_disposition, SpendDisposition::Reconcile);
+            assert_eq!(sent.len(), 1, "{model} ambiguous work is never resubmitted");
+
+            let (rejected, _) = run(Ok(bfl(422, Value::Null)), credits);
+            assert_eq!(
+                rejected.unwrap_err().spend_disposition,
+                SpendDisposition::Release
+            );
+        }
+    }
+
+    fn flux_3_v2() -> Pack {
+        verified_packs()
+            .into_iter()
+            .find(|pack| {
+                pack.pack_id() == "bfl-flux-3-image" && pack.pack_version() == "2026-10-28.1"
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn flux_3_v2_offers_768sq_and_1_5k_tiers_but_not_4k() {
+        let (v1, v2) = (pack("bfl-flux-3-image"), flux_3_v2());
+        assert_eq!(
+            v2.request_url().as_str(),
+            "https://api.bfl.ai/v1/flux-3-image"
+        );
+        for (tier, units) in [
+            ("768sq", 41_000),
+            ("1k", 48_000),
+            ("1.5k", 70_000),
+            ("2k", 100_000),
+        ] {
+            for ratio in ["21:9", "1:1", "9:21"] {
+                let input = json!({"prompt": "x", "image_size": tier, "aspect_ratio": ratio});
+                let prepared = v2.prepare("flux-3-image", &input).unwrap();
+                assert_eq!(prepared.body["resolution"], tier);
+                assert_eq!(prepared.body["grounding"], false);
+                assert_eq!(
+                    snapshot_for(&v2, "flux-3-image", &input).estimated_units,
+                    units,
+                    "{tier} {ratio}"
+                );
+            }
+        }
+        // 4k waits on a live artifact-size check; v1 keeps its two tiers.
+        assert!(v2
+            .prepare("flux-3-image", &json!({"prompt": "x", "image_size": "4k"}))
+            .is_err());
+        for tier in ["768sq", "1.5k"] {
+            assert!(v1
+                .prepare("flux-3-image", &json!({"prompt": "x", "image_size": tier}))
+                .is_err());
+        }
+    }
+
+    /// FLUX 3 Image Klein is its own target on its own endpoint: the FLUX 3
+    /// tiers and ratios at Klein's own tier prices, with no grounding field,
+    /// which Klein's request schema refuses.
+    #[test]
+    fn flux_3_klein_routes_explicitly_and_prices_its_own_tiers() {
+        let klein = pack("bfl-flux-3-image-klein");
+        assert_eq!(
+            klein.request_url().as_str(),
+            "https://api.bfl.ai/v1/flux-3-image-klein"
+        );
+        assert_eq!(klein.models().len(), 1);
+        // Neither pack answers for the other model, so FLUX 3 Image is never
+        // silently swapped for Klein or the other way round.
+        let input = json!({"prompt": "x", "image_size": "1k"});
+        assert!(klein.prepare("flux-3-image", &input).is_err());
+        assert!(flux_3_v2().prepare("flux-3-image-klein", &input).is_err());
+        for (tier, units) in [
+            ("768sq", 8_000),
+            ("1k", 9_000),
+            ("1.5k", 11_000),
+            ("2k", 14_000),
+        ] {
+            for ratio in ["21:9", "16:9", "1:1", "9:21"] {
+                let input = json!({"prompt": "x", "image_size": tier, "aspect_ratio": ratio});
+                let prepared = klein.prepare("flux-3-image-klein", &input).unwrap();
+                assert_eq!(
+                    prepared.body,
+                    json!({"prompt": "x", "resolution": tier, "aspect_ratio": ratio})
+                );
+                assert_eq!(
+                    snapshot_for(&klein, "flux-3-image-klein", &input).estimated_units,
+                    units,
+                    "{tier} {ratio}"
+                );
+            }
+        }
+        // 4k waits on a live artifact-size check.
+        assert!(klein
+            .prepare(
+                "flux-3-image-klein",
+                &json!({"prompt": "x", "image_size": "4k"})
+            )
+            .is_err());
+        // Safety tolerance is capped at 5, as for FLUX 3 Image; Klein's
+        // other BFL options are not offered.
+        let with = |options: Value| {
+            klein.prepare(
+                "flux-3-image-klein",
+                &json!({"prompt": "x", "image_size": "1k", "options": options}),
+            )
+        };
+        assert_eq!(
+            with(json!({"safety_tolerance": 5})).unwrap().body["safety_tolerance"],
+            5
+        );
+        for options in [
+            json!({"safety_tolerance": 6}),
+            json!({"steps": 8}),
+            json!({"seed": 1}),
+            json!({"grounding": true}),
+        ] {
+            assert!(with(options.clone()).is_err(), "{options}");
+        }
+    }
+
+    /// Klein keeps BFL's asynchronous lifecycle: one submission to its own
+    /// endpoint, settlement from reported credits (fractional cents included),
+    /// an ambiguous submission reconciled, never resubmitted, and a definitive
+    /// rejection released.
+    #[test]
+    fn flux_3_klein_settles_credits_and_never_resubmits_ambiguous_work() {
+        let klein = Arc::new(pack("bfl-flux-3-image-klein"));
+        let model = "flux-3-image-klein";
+        let input = json!({"prompt": "a lighthouse", "image_size": "1k", "aspect_ratio": "16:9"});
+        let request = klein.prepare(model, &input).unwrap().request;
+        let run = |submit: Result<TransportResponse, TransportFailure>| {
+            let transport = FluxTransport {
+                submit,
+                polls: Arc::new(std::sync::Mutex::new(vec![bfl(
+                    200,
+                    // BFL reports credits worth one cent each: 0.9 is 0.9¢.
+                    json!({"id": "job-1", "status": "Ready", "cost": 0.9,
+                           "result": {"sample": "https://delivery.us7.bfl.ai/out.jpeg"}}),
+                )])),
+                posts: Arc::default(),
+                sent: Arc::default(),
+                artifact: PNG.to_vec(),
+            };
+            let sent = transport.sent.clone();
+            let result = AsyncPollEngine::new(klein.clone(), model, transport, 1 << 20)
+                .unwrap()
+                .with_poll_interval_for_tests(Duration::from_millis(1))
+                .invoke(&request, &input, &secret_for_test("secret-canary"), None);
+            let sent = sent.lock().unwrap().clone();
+            (result, sent)
+        };
+        let (outcome, sent) = run(Ok(accepted()));
+        let outcome = outcome.unwrap();
+        assert_eq!(
+            sent,
+            [(
+                "https://api.bfl.ai/v1/flux-3-image-klein".to_owned(),
+                json!({"prompt": "a lighthouse", "resolution": "1k", "aspect_ratio": "16:9"})
+            )]
+        );
+        let frozen = snapshot_for(&klein, model, &input);
+        assert_eq!(frozen.estimated_units, 9_000);
+        let settled = frozen
+            .settle_precise(
+                outcome.usage.as_ref().unwrap(),
+                outcome.actual_vendor_cost.as_ref(),
+                frozen.estimated_units,
+            )
+            .unwrap();
+        assert_eq!(settled.budget_units, 9_000);
+
+        let (ambiguous, sent) = run(Err(TransportFailure::UnknownOutcome { request_id: None }));
+        assert_eq!(
+            ambiguous.unwrap_err().spend_disposition,
+            SpendDisposition::Reconcile
+        );
+        assert_eq!(sent.len(), 1, "ambiguous work is never resubmitted");
+
+        let (rejected, _) = run(Ok(bfl(422, Value::Null)));
+        assert_eq!(
+            rejected.unwrap_err().spend_disposition,
+            SpendDisposition::Release
+        );
+    }
+
     #[test]
     #[ignore = "explicit live Google spend; see docs/operations/live-provider-testing.md"]
     fn live_gemini_pack_e2e_requires_explicit_spend_guard() {
@@ -829,25 +1489,34 @@ mod tests {
         .unwrap();
         let model = env::var("GONGBU_LIVE_GEMINI_DEVELOPER_MODEL")
             .expect("exact Gemini image model is required");
-        let pack = Arc::new(pack("google-gemini-developer-image"));
-        assert!(pack.model(&model).is_some(), "unknown Gemini image model");
-        let target = targets
-            .revisions()
-            .find(|target| {
-                target.provider == pack.provider()
-                    && target.adapter == pack.adapter_id()
-                    && target.model == model
-                    && target.is_active()
-                    && target
-                        .pack()
-                        .is_some_and(|config| config.pack_digest == pack.digest())
+        // The v1 or v2 pack revision the operator bound for this model.
+        let (pack, target) = verified_packs()
+            .into_iter()
+            .filter(|pack| {
+                pack.pack_id() == "google-gemini-developer-image" && pack.model(&model).is_some()
+            })
+            .find_map(|pack| {
+                let target = targets.revisions().find(|target| {
+                    target.provider == pack.provider()
+                        && target.adapter == pack.adapter_id()
+                        && target.model == model
+                        && target.is_active()
+                        && target
+                            .pack()
+                            .is_some_and(|config| config.pack_digest == pack.digest())
+                })?;
+                Some((Arc::new(pack.clone()), target))
             })
             .expect("the selected enabled Gemini pack target is required");
         let prompt =
             env::var("GONGBU_LIVE_GEMINI_DEVELOPER_PROMPT").expect("explicit prompt is required");
         let image_size = env::var("GONGBU_LIVE_GEMINI_DEVELOPER_IMAGE_SIZE")
             .expect("explicit image size is required");
-        let input = json!({"prompt": prompt, "image_size": image_size});
+        let mut input = json!({"prompt": prompt, "image_size": image_size});
+        // v2 only; without it a v2 target renders its default square.
+        if let Ok(aspect_ratio) = env::var("GONGBU_LIVE_GEMINI_DEVELOPER_ASPECT_RATIO") {
+            input["aspect_ratio"] = json!(aspect_ratio);
+        }
         let request = pack.prepare(&model, &input).unwrap().request;
         let snapshot = PricingCatalog::load(
             env::var("GONGBU_PRICING_CATALOG").expect("pricing catalog is required"),
@@ -879,7 +1548,7 @@ mod tests {
         let outcome = engine.invoke(&request, &input, &secret, None).unwrap();
         outcome.validate().unwrap();
         assert_eq!(outcome.artifacts.len(), 1);
-        image::load_from_memory(&outcome.artifacts[0].bytes)
+        let decoded = image::load_from_memory(&outcome.artifacts[0].bytes)
             .expect("Google returned a decodable image");
         let mut output = OpenOptions::new()
             .write(true)
@@ -890,6 +1559,14 @@ mod tests {
             .write_all(&outcome.artifacts[0].bytes)
             .expect("write complete output image");
         output.sync_all().expect("flush output image to disk");
+        // A v2 target certifies the exact size; the image is kept either way.
+        if let Some(size) = request.output_dimensions {
+            assert_eq!(
+                (decoded.width(), decoded.height()),
+                (size.width, size.height),
+                "Google returned a size other than the certified one"
+            );
+        }
         assert_eq!(
             snapshot
                 .settle(outcome.usage.as_ref().unwrap(), max_spend)

@@ -109,7 +109,9 @@ Prefix every agent-authored review reply or PR comment with
 `🤖 **<Agent>:**`, where `<Agent>` names the agent actually posting, such as
 `🤖 **Codex:**` or `🤖 **Claude:**`. Use `🤖 **<Agent> recommendation:**` when
 presenting a scope recommendation or requesting human judgment. Never post
-under another agent's name. Resolve a review thread only after its change is
+under another agent's name. A comment that only issues a bot command, such
+as `@dependabot rebase`, may omit the prefix when the bot needs the command
+alone. Resolve a review thread only after its change is
 verified, committed, pushed, and described in a reply that includes the fix
 commit and verification. Leave ambiguous, conflicting, optional, or
 out-of-scope requests unresolved with concise technical reasoning.
