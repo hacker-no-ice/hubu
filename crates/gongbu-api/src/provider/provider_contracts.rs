@@ -12,7 +12,7 @@ use thiserror::Error;
 
 const CONTRACT_DOCUMENT: &str = include_str!("../../../../contracts/provider-contracts-v1.json");
 const CONTRACT_DOCUMENT_SHA256: &str =
-    "160f81a950924beb58c2b5e0f452751b4cd1daa4517999606b495510d7588ae1";
+    "3daa9847abf05a2bd085ed6092931f411c3fe8c209a61331585239c1a25c889c";
 
 #[derive(Debug, Error)]
 pub(crate) enum Error {
@@ -401,17 +401,20 @@ fn project(contract_definition: &ContractDefinition) -> Result<CatalogContract, 
 }
 
 /// A size-selected preset's output price; edit rules also price input images.
+/// A preset that names its image size in `when` (an aspect-ratio preset) is
+/// priced by that size; otherwise its name is the size.
 fn size_preset_price(
     contract_definition: &ContractDefinition,
     preset: &Preset,
 ) -> Result<(String, (i64, i64)), Error> {
+    let image_size = preset.when.get("image_size").unwrap_or(&preset.name);
     let rule = contract_definition
         .pricing_rules
         .iter()
         .find(|rule| {
             rule.selector
                 .as_ref()
-                .is_some_and(|selector| selector.image_size() == Some(preset.name.as_str()))
+                .is_some_and(|selector| selector.image_size() == Some(image_size.as_str()))
         })
         .ok_or(Error::InvalidDocument)?;
     let component = rule
@@ -740,11 +743,193 @@ mod tests {
         }
     }
 
+    const FLUX_3_V1: &str = "hubu.flux-3-image.text-to-image/v1";
+    const FLUX_3_V2: &str = "hubu.flux-3-image.text-to-image/v2";
+
+    #[test]
+    fn flux_3_v2_adds_the_768sq_and_1_5k_tiers_and_never_binds_beside_v1() {
+        let (targets, pricing) = bound(&[FLUX_3_V2], &[FLUX_3_V2]);
+        let contracts = validate_and_project(&targets, &pricing.unwrap()).unwrap();
+        let [contract] = contracts.as_slice() else {
+            panic!("one contract");
+        };
+        let tiers: Vec<_> = contract
+            .capability
+            .presets
+            .iter()
+            .map(|preset| {
+                (
+                    preset.name.as_str(),
+                    preset.width,
+                    preset.rate_numerator_minor,
+                    preset.rate_denominator,
+                )
+            })
+            .collect();
+        assert_eq!(
+            tiers,
+            [
+                ("768sq", None, 41, 10),
+                ("1k", None, 48, 10),
+                ("1.5k", None, 7, 1),
+                ("2k", None, 10, 1),
+            ]
+        );
+        // 4k waits on a live artifact-size check.
+        assert!(!tiers.iter().any(|(name, ..)| *name == "4k"));
+        for ids in [[FLUX_3_V1, FLUX_3_V2], [FLUX_3_V2, FLUX_3_V1]] {
+            assert!(bound(&ids, &ids).1.is_err());
+            let (targets, pricing) = bound(&ids, &ids[..1]);
+            assert!(matches!(
+                validate_and_project(&targets, &pricing.unwrap()),
+                Err(Error::PricingMismatch)
+            ));
+        }
+    }
+
+    /// Klein is its own contract with its own tier prices; the mixed-contract
+    /// test below binds it beside FLUX 3 Image.
+    #[test]
+    fn flux_3_klein_is_its_own_target_with_its_own_tier_prices() {
+        const KLEIN: &str = "hubu.flux-3-image-klein.text-to-image/v1";
+        let (targets, pricing) = bound(&[KLEIN], &[KLEIN]);
+        let contracts = validate_and_project(&targets, &pricing.unwrap()).unwrap();
+        let [contract] = contracts.as_slice() else {
+            panic!("one contract");
+        };
+        let tiers: Vec<_> = contract
+            .capability
+            .presets
+            .iter()
+            .map(|preset| {
+                (
+                    preset.name.as_str(),
+                    preset.width,
+                    preset.rate_numerator_minor,
+                    preset.rate_denominator,
+                )
+            })
+            .collect();
+        assert_eq!(
+            tiers,
+            [
+                ("768sq", None, 8, 10),
+                ("1k", None, 9, 10),
+                ("1.5k", None, 11, 10),
+                ("2k", None, 14, 10),
+            ]
+        );
+        // 4k waits on a live artifact-size check.
+        assert!(!tiers.iter().any(|(name, ..)| *name == "4k"));
+    }
+
     #[test]
     fn mixed_contracts_are_order_independent_and_credentials_are_isolated() {
         let (targets, pricing) = mixed_contract_inputs(false);
         let projected = validate_and_project(&targets, &pricing).unwrap();
-        assert_eq!(projected.len(), 6);
+        assert_eq!(projected.len(), 15);
+        // Nano Banana 2.1 is its own target beside Flash: 3.36¢, 5.04¢ and
+        // 11.3¢ per image at 1k, 2k and 4k.
+        let nano = projected
+            .iter()
+            .find(|contract| contract.contract == "hubu.gemini-nano-banana-2.1.text-to-image/v1")
+            .unwrap();
+        assert_eq!(nano.target.model, "gemini-nano-banana-2.1");
+        for preset in &nano.capability.presets {
+            let expected = match preset.when["image_size"].as_str() {
+                "1k" => (336, 100),
+                "2k" => (504, 100),
+                _ => (113, 10),
+            };
+            assert_eq!(
+                (preset.rate_numerator_minor, preset.rate_denominator),
+                expected,
+                "{}",
+                preset.name
+            );
+        }
+        // Pro prices per image by tier at every aspect ratio: 13.4¢ at 1k
+        // and 2k, 24¢ at 4k, beside Flash and Lite.
+        let pro = projected
+            .iter()
+            .find(|contract| contract.contract == "hubu.gemini-3-pro-image.text-to-image/v1")
+            .unwrap();
+        assert_eq!(pro.target.model, "gemini-3-pro-image");
+        assert_eq!(
+            pro.pricing_version,
+            "google-gemini-3-pro-image-usd-2026-10-28-v1"
+        );
+        assert_eq!(pro.pricing_reviewed_on, "2026-10-28");
+        assert_eq!(pro.capability.presets.len(), 30);
+        for preset in &pro.capability.presets {
+            let expected = if preset.when["image_size"] == "4k" {
+                (24, 1)
+            } else {
+                (134, 10)
+            };
+            assert_eq!(
+                (preset.rate_numerator_minor, preset.rate_denominator),
+                expected,
+                "{}",
+                preset.name
+            );
+        }
+        let banner = pro
+            .capability
+            .presets
+            .iter()
+            .find(|preset| preset.name == "2k-21:9")
+            .unwrap();
+        assert_eq!((banner.width, banner.height), (Some(3168), Some(1344)));
+        // FLUX 3 Image Klein binds beside FLUX 3 Image as its own target,
+        // at its own tier prices: 0.9¢ at 1k against FLUX 3 Image's 4.8¢.
+        let klein = projected
+            .iter()
+            .find(|contract| contract.contract == "hubu.flux-3-image-klein.text-to-image/v1")
+            .unwrap();
+        let flux_3 = projected
+            .iter()
+            .find(|contract| contract.contract == "hubu.flux-3-image.text-to-image/v1")
+            .unwrap();
+        assert_eq!(klein.target.model, "flux-3-image-klein");
+        assert_ne!(klein.target.model, flux_3.target.model);
+        let klein_1k = klein
+            .capability
+            .presets
+            .iter()
+            .find(|preset| preset.name == "1k")
+            .unwrap();
+        assert_eq!(
+            (klein_1k.rate_numerator_minor, klein_1k.rate_denominator),
+            (9, 10)
+        );
+        // Each FLUX.2 model prices its own megapixel rates at the shared
+        // sizes: Klein 4B 1k is 7/5¢ and 4k 17/10¢, Klein 9B 4k 21/10¢,
+        // Flex 2k 10¢ and Max 4k 16¢.
+        for (contract_id, preset_name, expected) in [
+            ("hubu.flux-2-klein-4b.text-to-image/v1", "1k-1:1", (7, 5)),
+            ("hubu.flux-2-klein-4b.text-to-image/v1", "4k-16:9", (17, 10)),
+            ("hubu.flux-2-klein-9b.text-to-image/v1", "4k-1:1", (21, 10)),
+            ("hubu.flux-2-flex.text-to-image/v1", "2k-4:5", (10, 1)),
+            ("hubu.flux-2-max.text-to-image/v1", "4k-2:3", (16, 1)),
+        ] {
+            let preset = projected
+                .iter()
+                .find(|contract| contract.contract == contract_id)
+                .and_then(|contract| {
+                    contract
+                        .capability
+                        .presets
+                        .iter()
+                        .find(|preset| preset.name == preset_name)
+                })
+                .unwrap();
+            assert_eq!(
+                (preset.rate_numerator_minor, preset.rate_denominator),
+                expected,
+                "{contract_id} {preset_name}"
+            );
+        }
         // An edit contract on the same model keeps its own prices.
         assert!(projected.iter().any(|contract| {
             contract.contract == "hubu.gemini-3.1-flash-image.image-edit/v1"
