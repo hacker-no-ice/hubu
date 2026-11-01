@@ -12,7 +12,7 @@ use thiserror::Error;
 
 const CONTRACT_DOCUMENT: &str = include_str!("../../../../contracts/provider-contracts-v1.json");
 const CONTRACT_DOCUMENT_SHA256: &str =
-    "5c8b25adadc5ce2edb65bed9958924b9a845a49fa42e7ca7ea572237cf511732";
+    "3daa9847abf05a2bd085ed6092931f411c3fe8c209a61331585239c1a25c889c";
 
 #[derive(Debug, Error)]
 pub(crate) enum Error {
@@ -787,11 +787,47 @@ mod tests {
         }
     }
 
+    /// Klein is its own contract with its own tier prices; the mixed-contract
+    /// test below binds it beside FLUX 3 Image.
+    #[test]
+    fn flux_3_klein_is_its_own_target_with_its_own_tier_prices() {
+        const KLEIN: &str = "hubu.flux-3-image-klein.text-to-image/v1";
+        let (targets, pricing) = bound(&[KLEIN], &[KLEIN]);
+        let contracts = validate_and_project(&targets, &pricing.unwrap()).unwrap();
+        let [contract] = contracts.as_slice() else {
+            panic!("one contract");
+        };
+        let tiers: Vec<_> = contract
+            .capability
+            .presets
+            .iter()
+            .map(|preset| {
+                (
+                    preset.name.as_str(),
+                    preset.width,
+                    preset.rate_numerator_minor,
+                    preset.rate_denominator,
+                )
+            })
+            .collect();
+        assert_eq!(
+            tiers,
+            [
+                ("768sq", None, 8, 10),
+                ("1k", None, 9, 10),
+                ("1.5k", None, 11, 10),
+                ("2k", None, 14, 10),
+            ]
+        );
+        // 4k waits on a live artifact-size check.
+        assert!(!tiers.iter().any(|(name, ..)| *name == "4k"));
+    }
+
     #[test]
     fn mixed_contracts_are_order_independent_and_credentials_are_isolated() {
         let (targets, pricing) = mixed_contract_inputs(false);
         let projected = validate_and_project(&targets, &pricing).unwrap();
-        assert_eq!(projected.len(), 14);
+        assert_eq!(projected.len(), 15);
         // Nano Banana 2.1 is its own target beside Flash: 3.36¢, 5.04¢ and
         // 11.3¢ per image at 1k, 2k and 4k.
         let nano = projected
@@ -845,6 +881,28 @@ mod tests {
             .find(|preset| preset.name == "2k-21:9")
             .unwrap();
         assert_eq!((banner.width, banner.height), (Some(3168), Some(1344)));
+        // FLUX 3 Image Klein binds beside FLUX 3 Image as its own target,
+        // at its own tier prices: 0.9¢ at 1k against FLUX 3 Image's 4.8¢.
+        let klein = projected
+            .iter()
+            .find(|contract| contract.contract == "hubu.flux-3-image-klein.text-to-image/v1")
+            .unwrap();
+        let flux_3 = projected
+            .iter()
+            .find(|contract| contract.contract == "hubu.flux-3-image.text-to-image/v1")
+            .unwrap();
+        assert_eq!(klein.target.model, "flux-3-image-klein");
+        assert_ne!(klein.target.model, flux_3.target.model);
+        let klein_1k = klein
+            .capability
+            .presets
+            .iter()
+            .find(|preset| preset.name == "1k")
+            .unwrap();
+        assert_eq!(
+            (klein_1k.rate_numerator_minor, klein_1k.rate_denominator),
+            (9, 10)
+        );
         // Each FLUX.2 model prices its own megapixel rates at the shared
         // sizes: Klein 4B 1k is 7/5¢ and 4k 17/10¢, Klein 9B 4k 21/10¢,
         // Flex 2k 10¢ and Max 4k 16¢.
