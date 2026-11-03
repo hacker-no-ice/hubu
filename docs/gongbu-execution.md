@@ -175,7 +175,10 @@ sizes by parameter combination, such as aspect ratio, also lists
 rule, so the caller can compute the exact estimate. An image-edit target
 (`workload_type: "image_edit"`, scope capability `capability:image:edit`) lists
 `input_images`: the input parameter that takes artifact IDs and how many it
-accepts. It never returns adapter
+accepts. An edit target that prices its input images by size also lists
+`input_megapixels`: the megapixels one input image freezes
+(`single_image_ceiling`) and each of several freezes
+(`per_image_when_several`). It never returns adapter
 settings, credential references, endpoints, headers, configuration revisions,
 or configuration digests.
 
@@ -290,7 +293,10 @@ claim before anything is transmitted.
 
 The edit is its own governed operation with its own approval and ledger entry,
 priced from its own contract: the output image plus each input image where the
-provider charges for reading it. Its Hubu scope capability is
+provider charges for reading it. A provider that bills input images by size,
+such as [FLUX.2 [pro]](operations/flux-provider-contract.md#flux2-pro-image-editing),
+holds its ceiling for a single input image and settles the provider's reported
+cost. Its Hubu scope capability is
 `capability:image:edit`, so a policy can allow generation without allowing
 edits.
 

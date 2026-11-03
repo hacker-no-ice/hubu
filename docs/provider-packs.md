@@ -305,12 +305,14 @@ the claim, then the engine loads the verified bytes and sends one rendered
 | `required` | Must be `true`, with no default. |
 | `min` / `max` | Image count, from 1 to 16. `min` defaults to 1. |
 | `quantity` | Optional; only `input_images`, which an `input_image` price component prices. |
-| `item` | Required provider shape for one image. It must send `{{image.data}}` (base64 bytes) and may use `{{image.media_type}}`. |
+| `item` | Required provider shape for one image: a table, or a single placeholder string when the provider takes the data alone. It must send `{{image.data}}` (base64 bytes) and may use `{{image.media_type}}`. |
+| `fields` | Optional top-level body fields that receive the images in order, one each, for a provider that takes numbered fields rather than an array. Lists exactly `max` distinct names; fields past the last image are left out. |
 
-The parameter needs a body template, where its placeholder must be a whole
-element of an array; the engine replaces that element with the rendered items.
-Only the `sync_fixed` engine loads input images today. The verified Gemini edit
-pack declares:
+The parameter needs a body template. Without `fields`, its placeholder must be
+a whole element of an array, and the engine replaces that element with the
+rendered items. With `fields`, the template must not reference the parameter
+or any of those fields. The `sync_fixed` and `async_poll` engines load input
+images. The verified Gemini edit pack declares:
 
 ```toml
 [request.body]
@@ -325,6 +327,37 @@ max = 4
 quantity = "input_images"
 item = { type = "image", mime_type = "{{image.media_type}}", data = "{{image.data}}" }
 ```
+
+The verified FLUX.2 [pro] edit pack sends each image in its own field:
+
+```toml
+[[parameters]]
+name = "input_images"
+type = "images"
+required = true
+max = 4
+fields = ["input_image", "input_image_2", "input_image_3", "input_image_4"]
+item = "{{image.data}}"
+```
+
+#### Input megapixels
+
+A provider that bills input images by size declares how they are counted, and
+prices them with the `input_megapixel` unit:
+
+```toml
+[input_megapixels]
+single_image_ceiling = 4
+per_image_when_several = 1
+```
+
+One input image freezes `single_image_ceiling` megapixels, the most the
+provider bills for one image, because its size isn't known until the engine
+loads it. Each of several freezes `per_image_when_several`. Both must be
+positive. The rule needs an `images` parameter, the `async_poll` archetype and
+`response.reported_cost`: the frozen count is a ceiling, and the provider's
+reported cost settles the exact charge. A rule without an `input_megapixel`
+price, or that price without the rule, is rejected.
 
 ### `[[size_presets]]`
 

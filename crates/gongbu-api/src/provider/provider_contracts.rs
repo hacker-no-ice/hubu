@@ -2,7 +2,7 @@
 
 use super::{
     contract::{PricingCatalog, PricingRule, PricingUnit},
-    pack::MegapixelRule,
+    pack::{InputMegapixelRule, MegapixelRule},
     targets::{AdapterSettings, ProviderContractBinding, ProviderTargetConfig},
 };
 use serde::{Deserialize, Serialize};
@@ -12,7 +12,7 @@ use thiserror::Error;
 
 const CONTRACT_DOCUMENT: &str = include_str!("../../../../contracts/provider-contracts-v1.json");
 const CONTRACT_DOCUMENT_SHA256: &str =
-    "3daa9847abf05a2bd085ed6092931f411c3fe8c209a61331585239c1a25c889c";
+    "2af17d9561f370b688d9d5ec923339d96c68e49f24cba5f8d0ecdee97945dff0";
 
 #[derive(Debug, Error)]
 pub(crate) enum Error {
@@ -71,6 +71,9 @@ struct Capability {
     /// Set when the contract prices each image by its billed megapixels.
     #[serde(default)]
     megapixels: Option<MegapixelRule>,
+    /// Set when an edit contract prices its input images by megapixel.
+    #[serde(default)]
+    input_megapixels: Option<InputMegapixelRule>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -124,6 +127,8 @@ pub struct CatalogCapability {
     pub presets: Vec<CatalogPreset>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub megapixels: Option<MegapixelRule>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_megapixels: Option<InputMegapixelRule>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -382,6 +387,7 @@ fn project(contract_definition: &ContractDefinition) -> Result<CatalogContract, 
             output_formats: contract_definition.capability.output_formats.clone(),
             presets,
             megapixels: contract_definition.capability.megapixels.clone(),
+            input_megapixels: contract_definition.capability.input_megapixels.clone(),
         },
         policies: CatalogPolicies {
             generation_retries: contract_definition.policies.generation_retries,
@@ -456,6 +462,9 @@ fn megapixel_preset_price(
             PricingUnit::Image => 1,
             PricingUnit::Megapixel => billed,
             PricingUnit::AdditionalMegapixel => billed - 1,
+            // A preset's price is its output image; input images are priced
+            // per request.
+            unit if unit.prices_inputs() => continue,
             _ => return Err(Error::InvalidDocument),
         };
         let rate_denominator = i128::from(component.rate_denominator);
@@ -827,7 +836,7 @@ mod tests {
     fn mixed_contracts_are_order_independent_and_credentials_are_isolated() {
         let (targets, pricing) = mixed_contract_inputs(false);
         let projected = validate_and_project(&targets, &pricing).unwrap();
-        assert_eq!(projected.len(), 15);
+        assert_eq!(projected.len(), 16);
         // Nano Banana 2.1 is its own target beside Flash: 3.36¢, 5.04¢ and
         // 11.3¢ per image at 1k, 2k and 4k.
         let nano = projected

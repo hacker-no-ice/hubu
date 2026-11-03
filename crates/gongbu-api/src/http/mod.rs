@@ -2461,6 +2461,7 @@ mod tests {
                 "hubu.flux-2-klein-4b.text-to-image/v1",
                 "hubu.flux-2-klein-9b.text-to-image/v1",
                 "hubu.flux-2-max.text-to-image/v1",
+                "hubu.flux-2-pro.image-edit/v1",
                 "hubu.flux-2-pro.text-to-image/v1",
                 "hubu.flux-3-image-klein.text-to-image/v1",
                 "hubu.flux-3-image.text-to-image/v1",

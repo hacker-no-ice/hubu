@@ -16,6 +16,7 @@ const GOOGLE_GEMINI_DEVELOPER_IMAGE_EDIT_V2: &str =
     include_str!("../../../../packs/verified/google-gemini-developer-image-edit-v2.toml");
 const BFL_FLUX_2: &str = include_str!("../../../../packs/verified/bfl-flux-2.toml");
 const BFL_FLUX_2_V2: &str = include_str!("../../../../packs/verified/bfl-flux-2-v2.toml");
+const BFL_FLUX_2_EDIT: &str = include_str!("../../../../packs/verified/bfl-flux-2-edit.toml");
 const BFL_FLUX_2_MAX: &str = include_str!("../../../../packs/verified/bfl-flux-2-max.toml");
 const BFL_FLUX_2_FLEX: &str = include_str!("../../../../packs/verified/bfl-flux-2-flex.toml");
 const BFL_FLUX_2_KLEIN_4B: &str =
@@ -37,6 +38,7 @@ pub fn verified_packs() -> Vec<Pack> {
         GOOGLE_GEMINI_DEVELOPER_IMAGE_EDIT_V2,
         BFL_FLUX_2,
         BFL_FLUX_2_V2,
+        BFL_FLUX_2_EDIT,
         BFL_FLUX_2_MAX,
         BFL_FLUX_2_FLEX,
         BFL_FLUX_2_KLEIN_4B,
@@ -167,10 +169,16 @@ mod tests {
                     .map(|rule| serde_json::to_value(rule).unwrap())
                     .as_ref()
             );
+            assert_eq!(
+                contract["capability"].get("input_megapixels"),
+                pack.input_megapixel_rule()
+                    .map(|rule| serde_json::to_value(rule).unwrap())
+                    .as_ref()
+            );
             projected += 1;
         }
         assert_eq!(
-            projected, 21,
+            projected, 22,
             "every shipped contract comes from a verified pack"
         );
     }
@@ -735,6 +743,212 @@ mod tests {
             frozen.settle(&oversized, 75_000),
             Err(crate::provider::contract::ContractError::SettlementOverage)
         );
+    }
+
+    const DRAFT: &str = "0f5c2a64-3f0e-4c9b-9a51-2b7d1c4e8a10";
+    const SKETCH: &str = "1a6d3b75-4f1f-4dad-8b62-3c8e2d5f9b21";
+    const PHOTO: &str = "2b7e4c86-5a2a-4ebe-9c73-4d9f3e6a0c32";
+
+    /// FLUX.2 [pro] edits price the output as text-to-image does and each
+    /// input megapixel at 1.5¢: one input image freezes BFL's 4 megapixel
+    /// ceiling, and each of several bills 1 megapixel.
+    #[test]
+    fn flux_2_pro_edit_prices_input_megapixels_at_bfl_reference_rates() {
+        let edit = pack("bfl-flux-2-edit");
+        // 10,000 units are one cent.
+        for (tier, ratio, inputs, units) in [
+            // 3¢ output + 4 × 1.5¢ for one input image.
+            ("1k", "1:1", vec![DRAFT], 90_000),
+            // 3¢ output + 2 × 1.5¢.
+            ("1k", "1:1", vec![DRAFT, SKETCH], 60_000),
+            // 4.5¢ for a 2 megapixel output + 3 × 1.5¢.
+            ("2k", "16:9", vec![DRAFT, SKETCH, PHOTO], 90_000),
+            // 7.5¢ for a 4 megapixel output + 4 × 1.5¢.
+            ("4k", "4:5", vec![DRAFT], 135_000),
+        ] {
+            let input = json!({"prompt": "x", "image_size": tier, "aspect_ratio": ratio,
+                               "input_images": inputs});
+            let request = edit.prepare("flux-2-pro", &input).unwrap().request;
+            assert_eq!(request.workload(), "image_edit");
+            assert_eq!(
+                request.quantity("input_megapixels"),
+                Some(if inputs.len() == 1 {
+                    4
+                } else {
+                    inputs.len() as i64
+                })
+            );
+            let frozen = snapshot_for(&edit, "flux-2-pro", &input);
+            assert_eq!(frozen.estimated_units, units, "{tier} {ratio} {inputs:?}");
+        }
+        // The agent names the output shape; BFL would otherwise match the
+        // input image, which no preset certifies.
+        for input in [
+            json!({"prompt": "x", "image_size": "1k", "input_images": [DRAFT]}),
+            json!({"prompt": "x", "image_size": "1k", "aspect_ratio": "1:1", "input_images": []}),
+            json!({"prompt": "x", "image_size": "1k", "aspect_ratio": "1:1"}),
+            json!({"prompt": "x", "image_size": "1k", "aspect_ratio": "1:1",
+                   "input_images": [DRAFT, SKETCH, PHOTO, "3c8f5d97-6b3b-4fcf-8d84-5e0a4f7b1d43",
+                                    "4d906ea8-7c4c-4a0d-9e95-6f1b5a8c2e54"]}),
+            json!({"prompt": "x", "image_size": "1k", "aspect_ratio": "1:1",
+                   "input_images": [DRAFT], "input_megapixels": 1}),
+        ] {
+            assert!(edit.prepare("flux-2-pro", &input).is_err(), "{input}");
+        }
+    }
+
+    #[test]
+    fn flux_2_pro_edit_sends_numbered_inputs_and_settles_bfl_credits() {
+        struct Drafts;
+        impl crate::provider::contract::InputImageSource for Drafts {
+            fn load(
+                &self,
+                id: &str,
+            ) -> crate::provider::contract::Result<crate::provider::contract::InputImage>
+            {
+                let bytes = match id {
+                    DRAFT => PNG.to_vec(),
+                    SKETCH => png(2, 2),
+                    _ => {
+                        return Err(crate::provider::contract::ContractError::Provider {
+                            code: crate::provider::contract::INPUT_ARTIFACT_UNAVAILABLE.into(),
+                        })
+                    }
+                };
+                Ok(crate::provider::contract::InputImage {
+                    media_type: "image/png".into(),
+                    bytes,
+                })
+            }
+        }
+        let edit = Arc::new(pack("bfl-flux-2-edit"));
+        let input = json!({"prompt": "blend them", "image_size": "1k", "aspect_ratio": "1:1",
+                           "input_images": [DRAFT, SKETCH], "options": {"seed": 7}});
+        let request = edit.prepare("flux-2-pro", &input).unwrap().request;
+        let frozen = snapshot_for(&edit, "flux-2-pro", &input);
+        assert_eq!(frozen.estimated_units, 60_000);
+        let transport = FluxTransport {
+            submit: Ok(accepted()),
+            polls: Arc::new(std::sync::Mutex::new(vec![bfl(
+                200,
+                json!({"id": "job-1", "status": "Ready", "cost": 6,
+                       "result": {"sample": "https://delivery.us7.bfl.ai/out.png"}}),
+            )])),
+            posts: Arc::default(),
+            sent: Arc::default(),
+            artifact: png(1024, 1024),
+        };
+        let sent = transport.sent.clone();
+        let engine = AsyncPollEngine::new(edit.clone(), "flux-2-pro", transport, 1 << 20)
+            .unwrap()
+            .with_poll_interval_for_tests(Duration::from_millis(1));
+        let secret = secret_for_test("secret-canary");
+        let observer = crate::provider::contract::NoopProviderTransportObserver;
+        let submission = engine
+            .submit_with_inputs(&request, &input, &Drafts, &secret, None, &observer)
+            .unwrap();
+        // Each input image goes in its own numbered field, in order, beside
+        // the certified size; no array and no unused field is sent.
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let (url, body) = sent.lock().unwrap()[0].clone();
+        assert_eq!(url, "https://api.bfl.ai/v1/flux-2-pro");
+        assert_eq!(
+            body,
+            json!({"prompt": "blend them", "width": 1024, "height": 1024, "seed": 7,
+                   "input_image": encode(PNG), "input_image_2": encode(&png(2, 2))})
+        );
+        let crate::provider::contract::AdapterSubmission::Pending(operation) = submission else {
+            panic!("BFL accepts the job asynchronously");
+        };
+        let outcome = engine.poll(&request, &input, &secret, &operation).unwrap();
+        let usage = outcome.usage.clone().unwrap();
+        assert_eq!(
+            (
+                usage.megapixels,
+                usage.additional_megapixels,
+                usage.input_megapixels
+            ),
+            (Some(1), Some(0), Some(2))
+        );
+        // BFL's reported 6 credits settle exactly.
+        let settled = frozen
+            .settle_precise(&usage, outcome.actual_vendor_cost.as_ref(), 60_000)
+            .unwrap();
+        assert_eq!(settled.budget_units, 60_000);
+
+        // One small input image is held at the 4 megapixel ceiling, and BFL's
+        // reported cost for its 1 megapixel settles below the hold.
+        let single = json!({"prompt": "make it dusk", "image_size": "1k", "aspect_ratio": "1:1",
+                            "input_images": [DRAFT]});
+        let request = edit.prepare("flux-2-pro", &single).unwrap().request;
+        let frozen = snapshot_for(&edit, "flux-2-pro", &single);
+        assert_eq!(frozen.estimated_units, 90_000);
+        let transport = FluxTransport {
+            submit: Ok(accepted()),
+            polls: Arc::new(std::sync::Mutex::new(vec![bfl(
+                200,
+                json!({"id": "job-1", "status": "Ready", "cost": 4.5,
+                       "result": {"sample": "https://delivery.us7.bfl.ai/out.png"}}),
+            )])),
+            posts: Arc::default(),
+            sent: Arc::default(),
+            artifact: png(1024, 1024),
+        };
+        let engine = AsyncPollEngine::new(edit.clone(), "flux-2-pro", transport, 1 << 20)
+            .unwrap()
+            .with_poll_interval_for_tests(Duration::from_millis(1));
+        let crate::provider::contract::AdapterSubmission::Pending(operation) = engine
+            .submit_with_inputs(&request, &single, &Drafts, &secret, None, &observer)
+            .unwrap()
+        else {
+            panic!("BFL accepts the job asynchronously");
+        };
+        let outcome = engine.poll(&request, &single, &secret, &operation).unwrap();
+        let settled = frozen
+            .settle_precise(
+                &outcome.usage.unwrap(),
+                outcome.actual_vendor_cost.as_ref(),
+                90_000,
+            )
+            .unwrap();
+        assert_eq!(settled.budget_units, 45_000);
+    }
+
+    #[test]
+    fn flux_2_pro_edit_never_sends_without_its_input_images() {
+        let edit = Arc::new(pack("bfl-flux-2-edit"));
+        let secret = secret_for_test("secret-canary");
+        let observer = crate::provider::contract::NoopProviderTransportObserver;
+        // An artifact the account can't load releases before anything is sent.
+        let input = json!({"prompt": "x", "image_size": "1k", "aspect_ratio": "1:1",
+                           "input_images": [PHOTO]});
+        let code = crate::provider::contract::INPUT_ARTIFACT_UNAVAILABLE;
+        let request = edit.prepare("flux-2-pro", &input).unwrap().request;
+        let transport = FluxTransport {
+            submit: Ok(accepted()),
+            polls: Arc::default(),
+            posts: Arc::default(),
+            sent: Arc::default(),
+            artifact: Vec::new(),
+        };
+        let posts = transport.posts.clone();
+        let engine = AsyncPollEngine::new(edit.clone(), "flux-2-pro", transport, 1 << 20).unwrap();
+        let failure = engine
+            .submit_with_inputs(
+                &request,
+                &input,
+                &crate::provider::contract::NoInputImages,
+                &secret,
+                None,
+                &observer,
+            )
+            .unwrap_err();
+        assert_eq!(failure.code, code);
+        assert_eq!(failure.spend_disposition, SpendDisposition::Release);
+        // The in-process path has no input images either.
+        let failure = engine.invoke(&request, &input, &secret, None).unwrap_err();
+        assert_eq!(failure.code, code);
+        assert_eq!(*posts.lock().unwrap(), 0);
     }
 
     #[test]

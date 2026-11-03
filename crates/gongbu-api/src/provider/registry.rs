@@ -6,7 +6,7 @@ use super::{
         ADAPTER_ID as FLUX_ADAPTER_ID, MODEL_ID as FLUX_MODEL_ID, PROVIDER_ID as FLUX_PROVIDER_ID,
         SUPPORTED_PRESETS as FLUX_SUPPORTED_PRESETS,
     },
-    pack::{Archetype, MegapixelRule, OutputSize, Pack},
+    pack::{Archetype, InputMegapixelRule, MegapixelRule, OutputSize, Pack},
     pack_async::AsyncPollEngine,
     pack_sync::SyncFixedEngine,
     provider_contracts::{self, CatalogContract},
@@ -52,6 +52,10 @@ pub struct ExecutionTarget {
     /// targets.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_images: Option<InputImagesParameter>,
+    /// How input images become billed megapixels, when the target prices
+    /// them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_megapixels: Option<InputMegapixelRule>,
 }
 
 /// Where an edit target takes its input images: artifact IDs of images the
@@ -460,6 +464,7 @@ impl ValidatedProviderCatalog {
                     output_sizes,
                     megapixels: pack.and_then(|pack| pack.megapixel_rule().cloned()),
                     input_images: pack.and_then(|pack| pack.input_images_parameter()),
+                    input_megapixels: pack.and_then(|pack| pack.input_megapixel_rule().cloned()),
                 })
             })
             .collect()
@@ -808,7 +813,7 @@ mod tests {
             assert_eq!(catalog.resolve_active(&key).unwrap().adapter, adapter);
         }
         let execution_targets = catalog.execution_targets();
-        assert_eq!(execution_targets.len(), 15);
+        assert_eq!(execution_targets.len(), 16);
         // Pro is its own target, discovered by model beside Flash and Lite,
         // with an aspect-ratio certified size at every tier.
         let pro = execution_targets
@@ -882,8 +887,38 @@ mod tests {
         assert_eq!(gemini_full.image_sizes, ["1k", "2k", "4k"]);
         let flux = execution_targets
             .iter()
-            .find(|target| target.model == "flux-2-pro")
+            .find(|target| {
+                target.model == "flux-2-pro" && target.workload_type == "image_generation"
+            })
             .unwrap();
+        // FLUX.2 [pro] editing is its own edit target, publishing how its
+        // input images are counted beside its output megapixels.
+        let flux_edit = execution_targets
+            .iter()
+            .find(|target| target.model == "flux-2-pro" && target.workload_type == "image_edit")
+            .unwrap();
+        assert_ne!(flux_edit.target_id, flux.target_id);
+        assert_eq!(
+            flux_edit.execution_scope.capability,
+            "capability:image:edit"
+        );
+        assert_eq!(flux_edit.output_sizes.len(), 18);
+        assert!(flux_edit.megapixels.is_some());
+        let rule = flux_edit.input_megapixels.as_ref().unwrap();
+        assert_eq!(
+            (rule.single_image_ceiling, rule.per_image_when_several),
+            (4, 1)
+        );
+        let images = flux_edit.input_images.as_ref().unwrap();
+        assert_eq!(
+            (images.parameter.as_str(), images.min, images.max),
+            ("input_images", 1, 4)
+        );
+        assert_eq!(
+            flux_edit.pricing[0].components[2].unit,
+            PricingUnit::InputMegapixel
+        );
+        assert!(flux.input_megapixels.is_none());
         assert_eq!(flux.image_sizes, ["1k", "2k", "4k"]);
         assert_eq!(
             flux.execution_scope.billing_merchant,

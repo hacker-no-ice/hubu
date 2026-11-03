@@ -256,9 +256,61 @@ them uses the same BFL key as FLUX.2 [pro]; each binds as
 
 Not in these contracts: input images and editing, BFL's preview endpoints,
 prompt upsampling controls, WebP, safety tolerance above 5, more than one
-image per call, and arbitrary sizes. Reference-image pricing (from the same
-rate sheet) will apply once editing contracts ship. No live call has been
+image per call, and arbitrary sizes. Editing is FLUX.2 [pro] only so far; see
+[FLUX.2 [pro] image editing](#flux2-pro-image-editing). No live call has been
 made for these models yet.
+
+## FLUX.2 [pro] image editing
+
+`hubu.flux-2-pro.image-edit/v1` edits images with FLUX.2 [pro], from the
+verified pack `bfl-flux-2-edit.toml`. It is its own `image_edit` target, with
+scope capability `capability:image:edit`, beside FLUX.2 [pro] text-to-image.
+It binds as `[[contract_bindings]]` with its contract ID and the same BFL key.
+
+BFL edits on the same `/v1/flux-2-pro` endpoint when the request carries input
+images, with the same polling, delivery and recovery as
+[contract v2](#contract-v2-aspect-ratios-and-per-megapixel-pricing). The agent
+names input images by artifact ID, as for
+[any edit](../gongbu-execution.md#editing-an-image). The engine loads each
+one's verified bytes and sends them base64-encoded in BFL's numbered fields:
+`input_image`, `input_image_2`, `input_image_3` and `input_image_4`. BFL's API
+takes up to 8; the contract takes 1 to 4 to keep the request body bounded.
+
+The output keeps v2's 18 certified sizes, and `aspect_ratio` is required.
+Without a size BFL matches the input image's shape, which no preset can
+certify. `options.seed`, `options.safety_tolerance` (0 to 5) and
+`options.output_format` work as in v2.
+
+Prices come from [bfl.ai/pricing](https://bfl.ai/pricing), reviewed on
+2026-11-02. BFL lists them under FLUX.2 [pro] "Reference image(s)" and its
+notes:
+
+| Component | USD | Count |
+| --- | --- | --- |
+| Output image, first megapixel | 0.03 | One per image |
+| Output image, each additional megapixel | 0.015 | Billed output megapixels minus one |
+| Input image megapixel | 0.015 | One input image: its megapixels, rounded up, at most 4. Several: 1 each |
+
+The size of a single input image isn't known until the engine loads it. The
+estimate therefore freezes BFL's 4-megapixel ceiling for one input image, so
+the hold is an upper bound. BFL's reported credits settle the exact charge,
+and a smaller input image is never overcharged. For example:
+
+| Output | Input images | Hold, cents | Settled when BFL bills, cents |
+| --- | --- | --- | --- |
+| `1k` `1:1` (1 MP) | One 1 MP draft | 3 + 4 × 1.5 = 9 | 3 + 1.5 = 4.5 |
+| `1k` `1:1` (1 MP) | Two | 3 + 2 × 1.5 = 6 | 6 |
+| `2k` `16:9` (2 MP) | Three | 4.5 + 3 × 1.5 = 9 | 9 |
+
+Discovery publishes the counting rule as `input_megapixels`
+(`single_image_ceiling = 4`, `per_image_when_several = 1`), so an agent can
+compute the same hold.
+
+Not in this contract: editing with FLUX.2 [max], [flex], [klein] or FLUX 3
+Image, image URLs as inputs, more than 4 input images, masks, and the
+`match_input` size. No live edit call has been made yet. BFL documents that
+`input_image` takes a URL or base64 string; the first live call should
+confirm that raw base64 PNG and JPEG are accepted.
 
 ## Certified output dimensions
 
