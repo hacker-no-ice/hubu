@@ -25,7 +25,7 @@ browser, stop `hubu ui` and start it again.
 
 | Section | Actions |
 | --- | --- |
-| Overview | Spend against active budgets, pending approvals, automatic denials, unresolved reconciliations, recent decisions. |
+| Overview | Three groups: people and agents; the spend lifecycle (pending approvals, automatic denials, unresolved reconciliations, recent decisions); and policies and budgets (spend against limits, budgets near their limit, policies, spending targets). A non-zero approval or denial count is highlighted, and every tile opens the matching page, pre-filtered where it helps. |
 | Approvals | Review pending spend requests, then approve or deny them. |
 | Spend history | Authorization records filtered by agent and status, with details. Ledger transactions with their entries. |
 | Decisions | Governance records filtered by agent, category and time, with the summary for the same filter. |

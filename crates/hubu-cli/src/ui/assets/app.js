@@ -17,7 +17,7 @@ const VIEWS = [
   { id: "providers", label: "Providers & secrets", render: renderProviders },
 ];
 
-const state = { session: null, agents: [], counts: {} };
+const state = { session: null, agents: [], counts: {}, routeParams: new URLSearchParams() };
 
 // ---------- DOM helpers ----------
 
@@ -256,45 +256,97 @@ function confirmCapability({ title, summary, confirmLabel, danger, onConfirm }) 
 // ---------- views ----------
 
 async function renderOverview(view) {
-  const [summary, budgets, records, agents] = await Promise.all([
+  const [summary, budgets, records, agents, users, policies, targets] = await Promise.all([
     hubu("/governance/summary"),
     hubu("/budgets"),
-    hubu("/governance/records", { limit: "12" }),
+    hubu("/governance/records", { limit: "8" }),
     loadAgents(),
+    hubu("/users"),
+    hubu("/policies"),
+    hubu("/user/spending-target"),
   ]);
   const s = summary.summary || {};
   const backlog = s.backlog || {};
-  const consumed = {};
-  const limits = {};
-  for (const b of budgets.budgets || []) {
-    const cur = String(b.currency).toUpperCase();
-    consumed[cur] = (consumed[cur] || 0) + Number(b.consumed_amount.units) / 10 ** b.consumed_amount.scale;
-    limits[cur] = (limits[cur] || 0) + Number(b.amount_limit.units) / 10 ** b.amount_limit.scale;
-  }
+  const budgetRows = budgets.budgets || [];
+  const policyRows = policies.policies || [];
+  const totals = (field) => {
+    const sums = {};
+    for (const b of budgetRows) {
+      const cur = String(b.currency).toUpperCase();
+      sums[cur] = (sums[cur] || 0) + Number(b[field].units) / 10 ** b[field].scale;
+    }
+    return sums;
+  };
+  const consumed = totals("consumed_amount");
+  const limits = totals("amount_limit");
   const consumedText = Object.keys(consumed).length
     ? Object.entries(consumed).map(([c, v]) => `${v.toFixed(2)} ${c}`).join(" · ") : "0.00";
-  const limitText = Object.entries(limits).map(([c, v]) => `of ${v.toFixed(2)} ${c}`).join(" · ");
+  const limitText = Object.entries(limits).map(([c, v]) => `of ${v.toFixed(2)} ${c} in limits`).join(" · ");
   const denials = (s.automatic_denials || []).reduce((n, d) => n + (d.distinct_attempts || 0), 0);
   const activeAgents = agents.filter((a) => a.status === "active").length;
+  const activeUsers = (users.users || []).filter((u) => u.status === "active").length;
+  const nearLimit = budgetRows.filter((b) => {
+    const limit = Number(b.amount_limit.units);
+    return limit > 0 && (Number(b.consumed_amount.units) + Number(b.frozen_amount.units)) / limit >= 0.8;
+  }).length;
+  const overrides = policyRows.filter((p) => p.agent_id).length;
+  const hasDefault = policyRows.some((p) => !p.agent_id);
+  const exceededTargets = (targets.targets || []).filter((t) => t.is_exceeded).length;
 
   append(view, [
-    h("div", { class: "stats" }, [
-      stat("Spent in active budgets", consumedText, limitText || "no active budgets"),
-      stat("Pending approvals", backlog.pending_human_approvals ?? 0, "waiting on a human"),
-      stat("Automatic denials", denials, "policy and budget"),
-      stat("Unresolved reconciliations", backlog.unresolved_reconciliations ?? 0, "uncertain executor claims"),
-      stat("Active agents", activeAgents, `${agents.length} registered`),
-      stat("Spend attempts", s.distinct_attempts ?? 0, `${s.distinct_operations ?? 0} operations`),
+    section("People & agents", "Who can spend, and on whose behalf.", [
+      h("div", { class: "stats" }, [
+        stat("Human users", activeUsers, `${(users.users || []).length} registered · manage →`, { href: "#/users" }),
+        stat("Active agents", activeAgents, `${agents.length} registered · manage →`, { href: "#/agents" }),
+        stat("Inactive agents", agents.length - activeAgents, "suspended or retired", { href: "#/agents" }),
+      ]),
     ]),
-    card("Active budgets", budgetTable(budgets.budgets || [], false), null, true),
-    card("Recent decisions", decisionTable(records.records || []),
-      [h("a", { href: "#/decisions", class: "hint" }, "All decisions →")], true),
+    section("Spend lifecycle", "Requests, decisions and settlement, from policy check to provider receipt.", [
+      h("div", { class: "stats" }, [
+        stat("Pending approvals", backlog.pending_human_approvals ?? 0, "waiting on a human · review →",
+          { tone: "warn", href: "#/approvals" }),
+        stat("Automatic denials", denials, "policy and budget · view →",
+          { tone: "bad", href: "#/decisions?outcomes=automatic_deny" }),
+        stat("Unresolved reconciliations", backlog.unresolved_reconciliations ?? 0, "uncertain executor claims · view →",
+          { tone: "warn", href: "#/decisions?outcomes=reconciliation_required" }),
+        stat("Spend attempts", s.distinct_attempts ?? 0, `${s.distinct_operations ?? 0} operations · history →`, { href: "#/spend" }),
+      ]),
+      card("Recent decisions", decisionTable(records.records || []),
+        [h("a", { href: "#/decisions", class: "hint" }, "All decisions →")], true),
+    ]),
+    section("Policies & budgets", "The limits that decide what agents may spend.", [
+      h("div", { class: "stats" }, [
+        stat("Spent in active budgets", consumedText, limitText || "no active budgets", { href: "#/budgets" }),
+        stat("Budgets near their limit", nearLimit, `80%+ used or held · of ${budgetRows.length} · view →`,
+          { tone: "warn", href: "#/budgets" }),
+        stat("Policies", policyRows.length,
+          `${hasDefault ? "owner default" : "no owner default"} · ${overrides} agent override${overrides === 1 ? "" : "s"} · manage →`,
+          { href: "#/policies" }),
+        stat("Spending targets exceeded", exceededTargets, `${(targets.targets || []).length} active advisory target${(targets.targets || []).length === 1 ? "" : "s"} · view →`,
+          { tone: "warn", href: "#/users" }),
+      ]),
+      card("Active budgets", budgetTable(budgetRows, false), [h("a", { href: "#/budgets", class: "hint" }, "Manage budgets →")], true),
+    ]),
   ]);
 }
 
-function stat(label, value, sub) {
-  return h("div", { class: "card stat" }, h("div", { class: "label" }, label),
-    h("div", { class: "value" }, String(value)), h("div", { class: "sub" }, sub));
+/** A titled group of related tiles and tables on the overview. */
+function section(title, description, children) {
+  return h("section", { class: "overview-section", "aria-label": title },
+    h("div", { class: "section-head" }, h("h2", {}, title), h("p", { class: "hint" }, description)),
+    children);
+}
+
+/** A summary tile. `tone` colors it only when the value is non-zero, so an
+ * empty backlog stays calm; `href` makes the whole tile a link. */
+function stat(label, value, sub, { tone, href } = {}) {
+  const active = tone && Number(value) > 0;
+  const classes = ["card", "stat", active ? `tone-${tone}` : "", href ? "stat-link" : ""].join(" ").trim();
+  const content = [h("div", { class: "label" }, label),
+    h("div", { class: "value" }, String(value)), h("div", { class: "sub" }, sub)];
+  return href
+    ? h("a", { class: classes, href, "aria-label": `${label}: ${value}. Open` }, content)
+    : h("div", { class: classes }, content);
 }
 
 // Approvals
@@ -448,6 +500,12 @@ function pagedLoader(container, fetchPage, pick, renderRows) {
 
 // Decisions
 
+// Mirrors GovernanceOutcome in crates/hubu-core/src/spend/governance_query.rs.
+const OUTCOMES = ["policy_allow", "policy_deny", "policy_needs_approval", "automatic_allow", "automatic_deny",
+  "admission_failed", "escalated", "human_approved", "human_declined", "authorized", "authorization_released",
+  "execution_started", "execution_failed", "execution_settled", "execution_released", "reconciliation_required",
+  "reconciliation_resolved"];
+
 // Mirrors GovernanceCategory in crates/hubu-core/src/spend/governance_query.rs.
 const CATEGORIES = ["initial_policy", "automated_admission", "admission_failure", "human_escalation",
   "human_resolution", "authorization", "authorization_release", "execution_start", "execution_failure",
@@ -462,12 +520,14 @@ async function renderDecisions(view) {
       state.agents.map((a) => h("option", { value: a.agent_id }, a.display_name)))),
     h("label", {}, "Category", h("select", { name: "categories" }, h("option", { value: "" }, "Any"),
       CATEGORIES.map((c) => h("option", { value: c }, c.replaceAll("_", " "))))),
+    h("label", {}, "Outcome", h("select", { name: "outcomes" }, h("option", { value: "" }, "Any"),
+      OUTCOMES.map((o) => h("option", { value: o }, o.replaceAll("_", " "))))),
     h("label", {}, "From", h("input", { type: "datetime-local", name: "from" })),
     h("label", {}, "Before", h("input", { type: "datetime-local", name: "before" })),
     h("button", { type: "submit", class: "ghost" }, "Apply"));
   const query = () => {
     const v = formValues(filters);
-    return { agent_id: v.agent_id, categories: v.categories,
+    return { agent_id: v.agent_id, categories: v.categories, outcomes: v.outcomes,
       occurred_from: isoFromLocal(v.from), occurred_before: isoFromLocal(v.before) };
   };
   const load = pagedLoader(body, async (cursor) => {
@@ -475,6 +535,11 @@ async function renderDecisions(view) {
     if (!cursor) drawDecisionSummary(summaryBox, data.summary || {});
     return data;
   }, (data) => data.records || [], (rows) => decisionTable(rows));
+  // Links such as the overview's denial tile open this view pre-filtered.
+  for (const name of ["agent_id", "categories", "outcomes"]) {
+    const value = state.routeParams.get(name);
+    if (value && [...filters.elements[name].options].some((o) => o.value === value)) filters.elements[name].value = value;
+  }
   filters.addEventListener("submit", (e) => { e.preventDefault(); load(); });
   append(view, [summaryBox, card("Decision records", [h("div", { class: "body" }, filters), body], null, true)]);
   await load();
@@ -485,9 +550,9 @@ function drawDecisionSummary(container, s) {
   const denials = (s.automatic_denials || []);
   clear(container).append(h("div", { class: "stats" }, [
     stat("Facts", s.fact_count ?? 0, `${s.distinct_attempts ?? 0} attempts`),
-    stat("Pending approvals", backlog.pending_human_approvals ?? 0, "backlog now"),
+    stat("Pending approvals", backlog.pending_human_approvals ?? 0, "backlog now", { tone: "warn", href: "#/approvals" }),
     stat("Automatic denials", denials.reduce((n, d) => n + d.distinct_attempts, 0),
-      denials.map((d) => `${d.reason}: ${d.distinct_attempts}`).join(" · ") || "none"),
+      denials.map((d) => `${d.reason}: ${d.distinct_attempts}`).join(" · ") || "none", { tone: "bad" }),
     stat("Denied amount", (s.automatic_denied_requested?.per_currency || []).map(money).join(" · ") || "0.00", "requested, auto-denied"),
   ]));
 }
@@ -1264,7 +1329,8 @@ let routeToken = 0;
 
 async function route() {
   for (const open of document.querySelectorAll("dialog")) open.close();
-  const id = (location.hash.replace(/^#\/?/, "") || "overview").split("?")[0];
+  const [id, params] = (location.hash.replace(/^#\/?/, "") || "overview").split("?");
+  state.routeParams = new URLSearchParams(params || "");
   const viewDef = VIEWS.find((v) => v.id === id) || VIEWS[1];
   drawNav(viewDef.id);
   document.getElementById("title").textContent = viewDef.label;

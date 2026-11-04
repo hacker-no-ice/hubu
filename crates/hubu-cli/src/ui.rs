@@ -1277,6 +1277,30 @@ mod tests {
     }
 
     #[test]
+    fn decision_outcome_filter_matches_governance_outcomes() {
+        use hubu_core::spend::governance_query::GovernanceOutcome;
+        let start = APP_JS.find("const OUTCOMES = [").expect("OUTCOMES list");
+        let list = &APP_JS[start..];
+        let list = &list[list.find('[').unwrap() + 1..list.find("];").unwrap()];
+        let ui: Vec<&str> = list
+            .split(',')
+            .map(|item| item.trim().trim_matches('"'))
+            .filter(|item| !item.is_empty())
+            .collect();
+        for outcome in &ui {
+            serde_json::from_value::<GovernanceOutcome>(json!(outcome))
+                .unwrap_or_else(|_| panic!("UI outcome `{outcome}` is not a GovernanceOutcome"));
+        }
+        assert_eq!(
+            ui.len(),
+            17,
+            "update the UI list when GovernanceOutcome changes"
+        );
+        // The overview's denial tile links to a real outcome filter.
+        assert!(APP_JS.contains("#/decisions?outcomes=automatic_deny"));
+    }
+
+    #[test]
     fn request_head_parser_rejects_ambiguous_framing() {
         assert!(parse_head(b"GET / HTTP/1.1\r\nTransfer-Encoding: chunked").is_err());
         assert!(parse_head(b"GET / HTTP/1.1\r\nHost: a\r\nHost: b").is_err());
