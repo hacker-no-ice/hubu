@@ -462,6 +462,9 @@ pub enum PricingUnit {
     /// Each input image an edit request sends, priced where the provider
     /// charges for reading it.
     InputImage,
+    /// Billed megapixels of the input images an edit request sends, as the
+    /// pack's `input_megapixels` rule counts them.
+    InputMegapixel,
 }
 
 impl PricingUnit {
@@ -479,17 +482,18 @@ impl PricingUnit {
             Self::Megapixel => Some("megapixels"),
             Self::AdditionalMegapixel => Some("additional_megapixels"),
             Self::InputImage => Some("input_images"),
+            Self::InputMegapixel => Some("input_megapixels"),
         }
     }
 
     /// Whether a size-selected rule's units price only images: one `image`
     /// component, or per-image megapixel components with or without it,
-    /// plus any `input_image` component an edit adds. Size never selects a
-    /// token or request price.
+    /// plus any `input_image` or `input_megapixel` component an edit adds.
+    /// Size never selects a token or request price.
     pub fn prices_images_only(units: impl IntoIterator<Item = Self>) -> bool {
         let units: Vec<_> = units
             .into_iter()
-            .filter(|unit| *unit != Self::InputImage)
+            .filter(|unit| !unit.prices_inputs())
             .collect();
         units == [Self::Image]
             || (!units.is_empty()
@@ -499,6 +503,11 @@ impl PricingUnit {
                 && units.iter().all(|u| {
                     matches!(u, Self::Image | Self::Megapixel | Self::AdditionalMegapixel)
                 }))
+    }
+
+    /// Whether this unit prices the input images an edit sends.
+    pub fn prices_inputs(self) -> bool {
+        matches!(self, Self::InputImage | Self::InputMegapixel)
     }
 
     /// Whether a frozen quantity of zero is a real price. Only additional
@@ -519,11 +528,13 @@ pub const REQUEST_QUANTITIES: &[&str] = &[
     "megapixels",
     "additional_megapixels",
     "input_images",
+    "input_megapixels",
 ];
 
-/// Request quantities a pack derives from the output dimensions; no input
-/// parameter may set them.
-pub const DERIVED_QUANTITIES: &[&str] = &["megapixels", "additional_megapixels"];
+/// Request quantities a pack derives from the output dimensions or the input
+/// images; no input parameter may set them.
+pub const DERIVED_QUANTITIES: &[&str] =
+    &["megapixels", "additional_megapixels", "input_megapixels"];
 
 #[derive(Clone, Debug)]
 pub struct PricingCatalog(Arc<FrozenCatalog>);
@@ -1363,6 +1374,9 @@ pub struct NormalizedUsage {
     /// Input images the request sent to the provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_images: Option<i64>,
+    /// Billed megapixels of the input images the request sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_megapixels: Option<i64>,
 }
 impl NormalizedUsage {
     fn quantity_for(&self, unit: PricingUnit) -> Option<i64> {
@@ -1378,6 +1392,7 @@ impl NormalizedUsage {
             PricingUnit::Megapixel => self.megapixels,
             PricingUnit::AdditionalMegapixel => self.additional_megapixels,
             PricingUnit::InputImage => self.input_images,
+            PricingUnit::InputMegapixel => self.input_megapixels,
         }
         .filter(|v| *v >= 0)
     }

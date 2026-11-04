@@ -32,7 +32,7 @@ const MANAGED_GONGBU_CALLER_ACCOUNT: &str = "gongbu-caller";
 const PROVIDER_CONTRACTS_DOCUMENT: &str =
     include_str!("../../../contracts/provider-contracts-v1.json");
 const PROVIDER_CONTRACTS_DOCUMENT_SHA256: &str =
-    "3daa9847abf05a2bd085ed6092931f411c3fe8c209a61331585239c1a25c889c";
+    "2ed1523bc1dcfa99e856ddd8326d37563bcf10d26bd1bbbfb44665d45624b91d";
 const MANAGED_CREDENTIAL_IGNORE: &[u8] =
     b"# Hubu-managed credentials. Do not edit or remove.\n*\n!.gitignore\n";
 
@@ -470,6 +470,16 @@ struct ProviderContractCapability {
     /// Set when the contract prices each image by its billed megapixels.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     megapixels: Option<ProviderContractMegapixels>,
+    /// Set when an edit contract prices its input images by megapixel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    input_megapixels: Option<ProviderContractInputMegapixels>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderContractInputMegapixels {
+    single_image_ceiling: u32,
+    per_image_when_several: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -739,6 +749,9 @@ fn megapixel_preset_price(
             "image" => 1,
             "megapixel" => billed,
             "additional_megapixel" => billed - 1,
+            // A preset's price is its output image; input images are priced
+            // per request.
+            "input_image" | "input_megapixel" => continue,
             _ => return None,
         };
         let rate_denominator = i128::from(component.get("rate_denominator")?.as_i64()?);
@@ -5530,6 +5543,13 @@ live_spend_acknowledgement = "{LIVE_SPEND_ACKNOWLEDGEMENT}"
             "hubu.flux-2-max.text-to-image/v1",
             "hubu.flux-3-image.text-to-image/v2",
             "hubu.flux-3-image-klein.text-to-image/v1",
+            "hubu.flux-2-pro.image-edit/v1",
+            "hubu.flux-2-max.image-edit/v1",
+            "hubu.flux-2-flex.image-edit/v1",
+            "hubu.flux-2-klein-9b.image-edit/v1",
+            "hubu.flux-2-klein-4b.image-edit/v1",
+            "hubu.flux-3-image.image-edit/v1",
+            "hubu.flux-3-image-klein.image-edit/v1",
         ];
         let providers = source(&all);
         validate_provider_source(&providers).unwrap();
@@ -5563,6 +5583,32 @@ live_spend_acknowledgement = "{LIVE_SPEND_ACKNOWLEDGEMENT}"
         assert_eq!(
             price("hubu.flux-3-image-klein.text-to-image/v1", "1k"),
             (9, 10)
+        );
+        // FLUX.2 [pro] editing binds beside text-to-image; a preset's price
+        // is its output image, with input megapixels priced per request.
+        assert_eq!(price("hubu.flux-2-pro.image-edit/v1", "2k-16:9"), (9, 2));
+        // Every FLUX model edits beside its text-to-image target, each
+        // binding its own edit contract: 7¢ + 3¢ for a 2 MP [max] output,
+        // 5¢ per megapixel for [flex], and the [klein] rates.
+        assert_eq!(price("hubu.flux-2-max.image-edit/v1", "2k-16:9"), (10, 1));
+        assert_eq!(price("hubu.flux-2-flex.image-edit/v1", "2k-16:9"), (10, 1));
+        assert_eq!(
+            price("hubu.flux-2-klein-9b.image-edit/v1", "1k-1:1"),
+            (3, 2)
+        );
+        assert_eq!(
+            price("hubu.flux-2-klein-4b.image-edit/v1", "4k-4:5"),
+            (17, 10)
+        );
+        // FLUX 3 edits cost what text-to-image does at the same tier, at any
+        // aspect ratio; reference images are included.
+        assert_eq!(
+            price("hubu.flux-3-image.image-edit/v1", "1.5k-21:9"),
+            (7, 1)
+        );
+        assert_eq!(
+            price("hubu.flux-3-image-klein.image-edit/v1", "2k-9:16"),
+            (14, 10)
         );
         let mut composite = providers.clone();
         composite.catalog_version = Some("operator-flux-2026-10-28-v1".into());

@@ -13,9 +13,9 @@
 use super::{
     contract::{
         AdapterCapabilities, AdapterOutcome, AdapterSubmission, AsyncProviderOperation,
-        ContractError, NoopProviderTransportObserver, NormalizedRequest, PollingRecoveryContext,
-        ProviderAdapter, ProviderFailure, ProviderPhase, ProviderTransportInteraction,
-        ProviderTransportObserver,
+        ContractError, InputImageSource, NoInputImages, NoopProviderTransportObserver,
+        NormalizedRequest, PollingRecoveryContext, ProviderAdapter, ProviderFailure, ProviderPhase,
+        ProviderTransportInteraction, ProviderTransportObserver, INPUT_ARTIFACT_UNAVAILABLE,
     },
     http_kernel::InvocationDeadline,
     pack::{safe_job_id, select_path, Evidence, JobState, Pack, PollSpec, ProviderResponse},
@@ -161,10 +161,13 @@ impl<T: SyncTransport> AsyncPollEngine<T> {
             .map(|status| self.poll_spec().classify(status))
     }
 
+    /// Submit the job, with any input images loaded from `inputs` before
+    /// anything is transmitted.
     fn submit_inner(
         &self,
         request: &NormalizedRequest,
         input: &Value,
+        inputs: &dyn InputImageSource,
         secret: &ProviderSecret,
         vendor_idempotency_key: Option<&str>,
         observer: &dyn ProviderTransportObserver,
@@ -178,8 +181,13 @@ impl<T: SyncTransport> AsyncPollEngine<T> {
             .map_err(|_| pre_send("invalid_request"))?;
         let prepared = self
             .pack
-            .prepare(&self.model, input)
-            .map_err(|_| pre_send("invalid_request"))?;
+            .prepare_with_images(&self.model, input, inputs)
+            .map_err(|error| match error {
+                ContractError::Provider { code } if code == INPUT_ARTIFACT_UNAVAILABLE => {
+                    pre_send(INPUT_ARTIFACT_UNAVAILABLE)
+                }
+                _ => pre_send("invalid_request"),
+            })?;
         let (auth_name, auth_value) = self
             .auth(secret)
             .ok_or_else(|| pre_send("credential_invalid"))?;
@@ -707,6 +715,7 @@ impl<T: SyncTransport> ProviderAdapter for AsyncPollEngine<T> {
         match self.submit_inner(
             request,
             normalized_input,
+            &NoInputImages,
             secret,
             vendor_idempotency_key,
             observer,
@@ -728,6 +737,7 @@ impl<T: SyncTransport> ProviderAdapter for AsyncPollEngine<T> {
         self.submit_inner(
             request,
             normalized_input,
+            &NoInputImages,
             secret,
             vendor_idempotency_key,
             &NoopProviderTransportObserver,
@@ -745,6 +755,26 @@ impl<T: SyncTransport> ProviderAdapter for AsyncPollEngine<T> {
         self.submit_inner(
             request,
             normalized_input,
+            &NoInputImages,
+            secret,
+            vendor_idempotency_key,
+            observer,
+        )
+    }
+
+    fn submit_with_inputs(
+        &self,
+        request: &NormalizedRequest,
+        normalized_input: &Value,
+        inputs: &dyn InputImageSource,
+        secret: &ProviderSecret,
+        vendor_idempotency_key: Option<&str>,
+        observer: &dyn ProviderTransportObserver,
+    ) -> Result<AdapterSubmission, ProviderFailure> {
+        self.submit_inner(
+            request,
+            normalized_input,
+            inputs,
             secret,
             vendor_idempotency_key,
             observer,

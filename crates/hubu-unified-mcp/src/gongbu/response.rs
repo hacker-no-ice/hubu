@@ -262,6 +262,7 @@ pub(super) fn execution_target_catalog_result(
                                     | "megapixel"
                                     | "additional_megapixel"
                                     | "input_image"
+                                    | "input_megapixel"
                             ) && component.rate_numerator_minor >= 0
                                 && component.rate_denominator > 0
                         })
@@ -283,6 +284,11 @@ pub(super) fn execution_target_catalog_result(
                 })
                 && target.input_images.as_ref().is_none_or(|images| {
                     !images.parameter.is_empty() && 1 <= images.min && images.min <= images.max
+                })
+                && target.input_megapixels.as_ref().is_none_or(|rule| {
+                    rule.single_image_ceiling > 0
+                        && rule.per_image_when_several > 0
+                        && target.input_images.is_some()
                 })
         });
     if !valid {
@@ -800,6 +806,16 @@ struct ExecutionTargetResponse {
     megapixels: Option<ExecutionTargetMegapixels>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     input_images: Option<ExecutionTargetInputImages>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    input_megapixels: Option<ExecutionTargetInputMegapixels>,
+}
+
+/// How an image-edit target counts the billed megapixels of its input images.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ExecutionTargetInputMegapixels {
+    single_image_ceiling: u32,
+    per_image_when_several: u32,
 }
 
 /// The input parameter an image-edit target takes artifact IDs in.
