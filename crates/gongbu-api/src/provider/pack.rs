@@ -460,7 +460,8 @@ pub enum ParameterKind {
     Boolean,
     Enum,
     /// Artifact IDs of images earlier governed executions delivered to the
-    /// same account. The engine loads and sends their verified bytes.
+    /// same account, or pinned tokens of the operator's reference images. The
+    /// engine loads and sends their verified bytes.
     Images,
 }
 
@@ -1281,8 +1282,13 @@ impl Parameter {
             ParameterKind::Images => {
                 let ids = value.as_array().ok_or("must be an array of artifact IDs")?;
                 let unique: BTreeSet<_> = ids.iter().filter_map(Value::as_str).collect();
-                if unique.len() != ids.len() || !unique.iter().all(|id| valid_artifact_id(id)) {
-                    return Err("must name distinct artifact IDs".into());
+                if unique.len() != ids.len()
+                    || !unique.iter().all(|id| {
+                        valid_artifact_id(id)
+                            || crate::reference::ReferenceToken::parse(id).is_some()
+                    })
+                {
+                    return Err("must name distinct artifact IDs or reference images".into());
                 }
                 let count = ids.len() as i64;
                 if count < self.min.unwrap_or(1) || self.max.is_some_and(|max| count > max) {

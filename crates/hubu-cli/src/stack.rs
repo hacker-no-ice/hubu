@@ -160,6 +160,9 @@ struct GongbuSource {
     database_path: Option<PathBuf>,
     artifact_root: Option<PathBuf>,
     log_file: Option<PathBuf>,
+    /// The operator's folder of reference images edits may send. It is the
+    /// operator's own folder: the stack never creates, resets or removes it.
+    reference_images_root: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -1835,7 +1838,7 @@ fn render_generation(
         let gongbu_schema_version = negotiate_principal_neutral_gongbu_schema(gongbu_version)?;
         let provider_json =
             render_provider_config(providers, gongbu_schema_version, runtime_generation)?;
-        let config = json!({
+        let mut config = json!({
             "schema_version": gongbu_schema_version,
             "http": {"listen": gongbu.listen.expect("checked")},
             "state": {
@@ -1871,6 +1874,9 @@ fn render_generation(
             "logging": {"level": stack.runtime.log_level, "format": stack.runtime.log_format},
             "shutdown": {"worker_drain_timeout_ms": stack.runtime.worker_drain_timeout_ms},
         });
+        if let Some(root) = &gongbu.reference_images_root {
+            config["reference_images"] = json!({"root": root});
+        }
         write_generated_json(
             generation,
             "gongbu-server.json",

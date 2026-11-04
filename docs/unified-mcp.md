@@ -400,7 +400,9 @@ Discovery returns structured content containing only the opaque target ID,
 workload type, provider/model labels, authorization scope, supported
 `image_size` values, and exact configured price components. An image-edit
 target also returns `input_images`, naming the input parameter that takes the
-artifact IDs of earlier governed executions' images; see
+artifact IDs of earlier governed executions' images, or the pinned tokens
+`gongbu_list_reference_images` returns for the operator's
+[reference images](gongbu-execution.md#reference-images); see
 [editing an image](gongbu-execution.md#editing-an-image). It omits adapter
 settings, endpoints, headers, credentials, and provider configuration
 revisions. Execution tools accept only the discovered `target_id`; provider,
