@@ -10,6 +10,13 @@ on:
 permissions:
   contents: read
 
+# Superseded pull request pushes are cancelled. Every other event gets a
+# unique group, so main pushes and remediation dispatches always run to
+# completion and are never replaced by a later queued run.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   # Ordinary CI is deliberately unable to opt into external Gongbu or provider traffic.
@@ -17,9 +24,14 @@ env:
   GONGBU_SANDBOX_HUBU_MODE: mock
   GONGBU_SANDBOX_PROVIDER_MODE: mock
 
+# Rust jobs restore third-party dependency builds keyed on Cargo.lock and the
+# toolchain. Only trusted main pushes write the cache; pull requests and
+# dispatches restore it read-only. Workspace crates are always rebuilt and
+# every Cargo command stays --locked. The release workflow is uncached.
+
 jobs:
-  test:
-    name: Test workspace
+  lint:
+    name: Lint, docs, and policy checks
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -32,26 +44,20 @@ jobs:
       - name: Install protobuf compiler
         run: sudo apt-get update && sudo apt-get install --yes protobuf-compiler
 
+      - name: Restore Rust dependency cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          cache-bin: false
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
-      - name: Test Gongbu Hubu v4 client recovery
-        run: cargo test --workspace --locked 'hubu::tests::'
-
-      - name: Run all workspace tests
-        run: cargo test --workspace --all-targets --locked
-
-      - name: Build all production binaries with locked dependencies
-        if: github.event_name == 'push'
-        run: >-
-          cargo build --release --locked
-          --bin hubu
-          --bin hubu-server
-          --bin hubu-unified-mcp
-          --bin gongbu-server
+      - name: Build docs
+        run: cargo doc --workspace --no-deps --locked
 
       - name: Test unified release packaging
         run: ./scripts/test-release-packaging.sh
@@ -61,9 +67,6 @@ jobs:
 
       - name: Check immutable release workflow
         run: python3 scripts/check-release-workflow.py
-
-      - name: Check default credentials cannot be committed
-        run: ./scripts/check-default-credential-ignore.sh
 
       - name: Check public Cargo metadata
         run: python3 scripts/check-cargo-metadata.py
@@ -86,6 +89,32 @@ jobs:
       - name: Test lockfile publication and branch ownership
         run: bash scripts/test-security-advisories-push.sh
 
+  test:
+    name: Workspace tests and integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install protobuf compiler
+        run: sudo apt-get update && sudo apt-get install --yes protobuf-compiler
+
+      - name: Restore Rust dependency cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          cache-bin: false
+
+      - name: Test Gongbu Hubu v4 client recovery
+        run: cargo test --workspace --locked 'hubu::tests::'
+
+      - name: Run all workspace tests
+        run: cargo test --workspace --all-targets --locked
+
+      - name: Check default credentials cannot be committed
+        run: ./scripts/check-default-credential-ignore.sh
+
       - name: Run core integration flow
         run: ./scripts/integration-core-flow.sh
 
@@ -104,8 +133,67 @@ jobs:
       - name: Qualify governance history and agent read queries
         run: ./scripts/integration-governance-observability.sh
 
-      - name: Build docs
-        run: cargo doc --workspace --no-deps --locked
+  release-build:
+    name: Build production binaries
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install protobuf compiler
+        run: sudo apt-get update && sudo apt-get install --yes protobuf-compiler
+
+      - name: Restore Rust dependency cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          cache-bin: false
+
+      - name: Build all production binaries with locked dependencies
+        run: >-
+          cargo build --release --locked
+          --bin hubu
+          --bin hubu-server
+          --bin hubu-unified-mcp
+          --bin gongbu-server
+
+  # Required status check. It keeps the historical "Test workspace" name so the
+  # main ruleset is unchanged, and passes only when every split job succeeded
+  # (the push-only release build may be skipped on other events).
+  test-workspace:
+    name: Test workspace
+    if: always()
+    needs: [lint, test, release-build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Require every workspace job to pass
+        env:
+          LINT_RESULT: ${{ needs.lint.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+          RELEASE_BUILD_RESULT: ${{ needs.release-build.result }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          status=0
+          for pair in "lint=${LINT_RESULT}" "test=${TEST_RESULT}"; do
+            if [[ "${pair#*=}" != "success" ]]; then
+              echo "::error::${pair%%=*} job result is ${pair#*=}"
+              status=1
+            fi
+          done
+          if [[ "${EVENT_NAME}" == "push" ]]; then
+            expected_release=success
+          else
+            expected_release=skipped
+          fi
+          if [[ "${RELEASE_BUILD_RESULT}" != "${expected_release}" ]]; then
+            echo "::error::release-build job result is ${RELEASE_BUILD_RESULT}, expected ${expected_release}"
+            status=1
+          fi
+          exit "${status}"
 
   msrv:
     name: Check MSRV (Rust 1.88.0)
@@ -120,6 +208,14 @@ jobs:
 
       - name: Install MSRV toolchain
         run: rustup toolchain install 1.88.0 --profile minimal
+
+      - name: Restore Rust dependency cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        env:
+          RUSTUP_TOOLCHAIN: 1.88.0
+        with:
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          cache-bin: false
 
       - name: Check workspace with MSRV
         run: cargo +1.88.0 check --workspace --all-targets --all-features --locked
