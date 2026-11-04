@@ -256,9 +256,106 @@ them uses the same BFL key as FLUX.2 [pro]; each binds as
 
 Not in these contracts: input images and editing, BFL's preview endpoints,
 prompt upsampling controls, WebP, safety tolerance above 5, more than one
-image per call, and arbitrary sizes. Reference-image pricing (from the same
-rate sheet) will apply once editing contracts ship. No live call has been
+image per call, and arbitrary sizes. Each model edits through its own
+contract; see [FLUX image editing](#flux-image-editing). No live call has been
 made for these models yet.
+
+## FLUX image editing
+
+Every FLUX model Hubu ships for generation also edits, each through its own
+`image_edit` contract and verified pack, with scope capability
+`capability:image:edit`. Each is its own target beside the model's
+text-to-image target, on the same BFL endpoint, credential alias and options.
+Each binds as `[[contract_bindings]]` with its contract ID and the same BFL
+key.
+
+| Model | Contract | Pack | Inputs sent as |
+| --- | --- | --- | --- |
+| FLUX.2 [pro] | `hubu.flux-2-pro.image-edit/v1` | `bfl-flux-2-edit.toml` | Numbered fields |
+| FLUX.2 [max] | `hubu.flux-2-max.image-edit/v1` | `bfl-flux-2-max-edit.toml` | Numbered fields |
+| FLUX.2 [flex] | `hubu.flux-2-flex.image-edit/v1` | `bfl-flux-2-flex-edit.toml` | Numbered fields |
+| FLUX.2 [klein] 9B | `hubu.flux-2-klein-9b.image-edit/v1` | `bfl-flux-2-klein-9b-edit.toml` | Numbered fields |
+| FLUX.2 [klein] 4B | `hubu.flux-2-klein-4b.image-edit/v1` | `bfl-flux-2-klein-4b-edit.toml` | Numbered fields |
+| FLUX 3 Image | `hubu.flux-3-image.image-edit/v1` | `bfl-flux-3-image-edit.toml` | `images` array |
+| FLUX 3 Image Klein | `hubu.flux-3-image-klein.image-edit/v1` | `bfl-flux-3-image-klein-edit.toml` | `images` array |
+
+BFL edits on each model's own endpoint when the request carries input images,
+with the same polling, delivery and recovery as text-to-image. The agent
+names input images by artifact ID, as for
+[any edit](../gongbu-execution.md#editing-an-image). The engine loads each
+one's verified bytes and sends them base64-encoded. FLUX.2 takes them in
+numbered fields: `input_image`, `input_image_2`, `input_image_3` and
+`input_image_4`. FLUX 3 takes them in order in an `images` array, the first
+being the image edited. Every contract takes 1 to 4 input images. BFL takes
+up to 8 for FLUX.2 [pro], [max] and [flex], 4 for [klein], and 10 for FLUX 3;
+the cap keeps the request body bounded.
+
+`aspect_ratio` is required in every edit contract. Without it BFL follows the
+input image's shape, which no preset can certify. The FLUX.2 edits keep the
+[contract v2](#contract-v2-aspect-ratios-and-per-megapixel-pricing) 18
+certified sizes; `options.seed`, `options.safety_tolerance` (0 to 5) and
+`options.output_format` work as in v2, and [flex] also takes `options.steps`
+and `options.guidance`. The FLUX 3 edits keep their text-to-image tiers
+(`768sq`, `1k`, `1.5k`, `2k`) and 15 aspect ratios, with no 4k and no
+`match_input`. Their contracts advertise one preset per tier and ratio, such
+as `1k-16:9`, priced by the tier. FLUX 3 Image keeps web-search grounding off;
+Klein's request carries no `grounding` field.
+
+### Edit prices
+
+Prices come from [bfl.ai/pricing](https://bfl.ai/pricing), reviewed on
+2026-11-02 for FLUX.2 [pro] and 2026-11-03 for the rest. FLUX.2 lists them
+under each model's "Reference image(s)" and its notes. The output is priced
+as the model's text-to-image is; each FLUX.2 input megapixel is priced at the
+model's reference rate:
+
+| Model | Output, first megapixel | Output, each additional megapixel | Input megapixel |
+| --- | --- | --- | --- |
+| FLUX.2 [pro] | 3¢ | 1.5¢ | 1.5¢ |
+| FLUX.2 [max] | 7¢ | 3¢ | 3¢ |
+| FLUX.2 [flex] | 5¢ | 5¢ | 5¢ |
+| FLUX.2 [klein] 9B | 1.5¢ | 0.2¢ | 0.2¢ |
+| FLUX.2 [klein] 4B | 1.4¢ | 0.1¢ | 0.1¢ |
+
+BFL counts one input image as its megapixels, rounded up, at most 4, and each
+of several input images as 1 megapixel. The size of a single input image isn't
+known until the engine loads it. The estimate therefore freezes BFL's
+4-megapixel ceiling for one input image, so the hold is an upper bound. BFL's
+reported credits settle the exact charge, and a smaller input image is never
+overcharged. A `Ready` result without `cost` is never settled from the
+ceiling: it fails as `pack_response_cost_missing` and goes to
+reconciliation. For example:
+
+| Model and output | Input images | Hold, cents | Settled when BFL bills, cents |
+| --- | --- | --- | --- |
+| [pro] `1k` `1:1` (1 MP) | One 1 MP draft | 3 + 4 × 1.5 = 9 | 3 + 1.5 = 4.5 |
+| [pro] `1k` `1:1` (1 MP) | Two | 3 + 2 × 1.5 = 6 | 6 |
+| [pro] `2k` `16:9` (2 MP) | Three | 4.5 + 3 × 1.5 = 9 | 9 |
+| [max] `1k` `1:1` (1 MP) | One 1 MP draft | 7 + 4 × 3 = 19 | 7 + 3 = 10 |
+| [flex] `4k` `4:5` (4 MP) | Two | 20 + 2 × 5 = 30 | 30 |
+| [klein] 4B `1k` `1:1` (1 MP) | One | 1.4 + 4 × 0.1 = 1.8 | 1.5 for a 1 MP input |
+
+Discovery publishes the counting rule as `input_megapixels`
+(`single_image_ceiling = 4`, `per_image_when_several = 1`), so an agent can
+compute the same hold.
+
+FLUX 3 includes reference images at no extra charge, at any number up to the
+documented maximum. A FLUX 3 edit therefore costs what text-to-image costs at
+the same tier, at any aspect ratio, and its contract has no input component
+and no `input_megapixels` rule:
+
+| Model | `768sq` | `1k` | `1.5k` | `2k` |
+| --- | --- | --- | --- | --- |
+| FLUX 3 Image | 4.1¢ | 4.8¢ | 7¢ | 10¢ |
+| FLUX 3 Image Klein | 0.8¢ | 0.9¢ | 1.1¢ | 1.4¢ |
+
+BFL's reported credits settle FLUX 3 edits as they do text-to-image.
+
+Not in these contracts: image URLs as inputs, more than 4 input images,
+masks, `match_input` and BFL's preview endpoints. No live edit call has been
+made yet. BFL documents that input images take a URL or base64 string; the
+first live call per model should confirm that raw base64 PNG and JPEG are
+accepted.
 
 ## Certified output dimensions
 

@@ -175,7 +175,10 @@ sizes by parameter combination, such as aspect ratio, also lists
 rule, so the caller can compute the exact estimate. An image-edit target
 (`workload_type: "image_edit"`, scope capability `capability:image:edit`) lists
 `input_images`: the input parameter that takes artifact IDs and how many it
-accepts. It never returns adapter
+accepts. An edit target that prices its input images by size also lists
+`input_megapixels`: the megapixels one input image freezes
+(`single_image_ceiling`) and each of several freezes
+(`per_image_when_several`). It never returns adapter
 settings, credential references, endpoints, headers, configuration revisions,
 or configuration digests.
 
@@ -288,9 +291,51 @@ engine reads the verified bytes, checks their recorded digest, and sends them
 in the provider's declared shape. An image that can't be loaded releases the
 claim before anything is transmitted.
 
+### Reference images
+
+An edit can also send the operator's own images, such as a mascot, without
+generating them first. The operator names one folder of them in the server
+configuration (`reference_images.root`, or
+[`gongbu.reference_images_root`](configuration/local-stack/v1/stack-toml.md#gongbureference_images_root)
+in a managed stack). Gongbu only reads that folder. It never copies a reference
+image into the artifact store, which holds only governed outputs, and an
+import has no receipt, charge, or execution of its own.
+
+`GET /v1/reference-images` (MCP `gongbu_list_reference_images`) lists the valid
+PNG and JPEG images in the folder, up to four levels deep and 500 images. Each
+entry has its relative `name`, `sha256`, `media_type`, `size_bytes`, `width`,
+`height` and the `reference` token an edit sends:
+
+```json
+{
+  "prompt": "Put the mascot in the draft's corner",
+  "image_size": "1k",
+  "input_images": [
+    "reference:hubu mascot.png@sha256:4a5b…99",
+    "0f5c2a64-3f0e-4c9b-9a51-2b7d1c4e8a10"
+  ]
+}
+```
+
+The token pins the file's digest, and the digest is part of the approved,
+hashed input. Admission reads the file and checks the digest, the image type,
+size, dimensions and content; preflight checks them again before the claim,
+and the engine reads and checks the file once more before sending. A file that
+changed, moved, or left the folder (including through a link) is refused with
+`input_artifact_unavailable` on `input.input_images`, and nothing is sent. Hidden
+names, absolute paths and `..` are never accepted, and a reference's local path
+is never sent to a provider or put in a receipt.
+
+Reference images count toward the target's input-image limit and price like any
+other input image. The folder is the operator's: every account on the
+installation can use it. Gongbu must run on the machine that holds the folder.
+
 The edit is its own governed operation with its own approval and ledger entry,
 priced from its own contract: the output image plus each input image where the
-provider charges for reading it. Its Hubu scope capability is
+provider charges for reading it. A provider that bills input images by size,
+such as [FLUX.2](operations/flux-provider-contract.md#flux-image-editing),
+holds its ceiling for a single input image and settles the provider's reported
+cost. Its Hubu scope capability is
 `capability:image:edit`, so a policy can allow generation without allowing
 edits.
 

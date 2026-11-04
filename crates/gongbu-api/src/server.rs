@@ -15,6 +15,7 @@ use crate::{
         targets::{ProviderTargetConfig, TargetKey},
     },
     redaction::Redactor,
+    reference::ReferenceLibrary,
     secrets::{
         MacOsKeychain, ManagedStackSecrets, SandboxFixtureSecrets, SecretProvider, SecretReference,
         MANAGED_CREDENTIAL_DIR_ENV,
@@ -57,6 +58,16 @@ pub struct ServerConfig {
     pub execution: ExecutionConfig,
     pub logging: LoggingConfig,
     pub shutdown: ShutdownConfig,
+    /// The operator's folder of reference images edits may send by pinned
+    /// token. Absent, edits take only governed artifact IDs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_images: Option<ReferenceImagesConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReferenceImagesConfig {
+    pub root: PathBuf,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -315,6 +326,17 @@ impl ServerConfig {
         }
         validate_state_path(&self.state.database_path, "database_path")?;
         validate_state_path(&self.state.artifact_root, "artifact_root")?;
+        if let Some(references) = &self.reference_images {
+            validate_state_path(&references.root, "reference_images.root")?;
+            // Governed outputs and operator files stay apart.
+            if references.root.starts_with(&self.state.artifact_root)
+                || self.state.artifact_root.starts_with(&references.root)
+            {
+                return Err(invalid(
+                    "reference_images.root must not overlap artifact_root",
+                ));
+            }
+        }
         self.providers.validate()?;
         if self.hubu.expected_product_version.trim().is_empty()
             || self.hubu.expected_executor_contract != gongbu_build_info::HUBU_EXECUTOR_CONTRACT
@@ -621,9 +643,15 @@ pub async fn serve_config(mut config: ServerConfig) -> Result<(), BoxError> {
     let artifacts = ArtifactService::new(
         repository.clone(),
         LocalFsStorage::new(&config.state.artifact_root),
-        limits,
+        limits.clone(),
     );
     artifacts.preflight()?;
+    let reference_images = config
+        .reference_images
+        .as_ref()
+        .map(|references| ReferenceLibrary::open(&references.root, limits))
+        .transpose()
+        .map_err(|_| invalid("reference_images.root must be an existing directory"))?;
     refuse_orphaned_executions(&repository, providers.targets())?;
 
     let hubu_client =
@@ -702,6 +730,7 @@ pub async fn serve_config(mut config: ServerConfig) -> Result<(), BoxError> {
         worker_drain_timeout: Duration::from_millis(config.shutdown.worker_drain_timeout_ms),
         authenticator,
         now,
+        reference_images,
     };
     startup.mark_started();
     let result = application::serve(listener, dependencies, shutdown_signal()).await;
@@ -788,6 +817,10 @@ fn normalize_paths(config: &mut ServerConfig) -> Result<(), ServerError> {
         .join(name)
     };
     config.state.artifact_root = fs::canonicalize(&config.state.artifact_root)?;
+    if let Some(references) = &mut config.reference_images {
+        references.root = fs::canonicalize(&references.root)
+            .map_err(|_| invalid("reference_images.root must be an existing directory"))?;
+    }
     if let Some(path) = &mut config.providers.target_catalog_path {
         *path = fs::canonicalize(&*path)?;
     }
@@ -1247,7 +1280,42 @@ mod tests {
             shutdown: ShutdownConfig {
                 worker_drain_timeout_ms: 30_000,
             },
+            reference_images: None,
         }
+    }
+
+    #[test]
+    fn reference_images_root_is_optional_absolute_and_apart_from_artifacts() {
+        let root = tempdir().unwrap();
+        let mut current = config(root.path());
+        current.validate().unwrap();
+        for (path, ok) in [
+            (root.path().join("references"), true),
+            (PathBuf::from("relative-references"), false),
+            (current.state.artifact_root.join("references"), false),
+            (
+                current.state.artifact_root.parent().unwrap().to_path_buf(),
+                false,
+            ),
+        ] {
+            current.reference_images = Some(ReferenceImagesConfig { root: path.clone() });
+            assert_eq!(current.validate().is_ok(), ok, "{}", path.display());
+        }
+        // The setting round-trips and older configurations without it parse.
+        current.reference_images = Some(ReferenceImagesConfig {
+            root: root.path().join("references"),
+        });
+        let value = serde_json::to_value(&current).unwrap();
+        assert_eq!(
+            value["reference_images"]["root"],
+            root.path().join("references").display().to_string()
+        );
+        let mut without = value;
+        without.as_object_mut().unwrap().remove("reference_images");
+        assert!(serde_json::from_value::<ServerConfig>(without)
+            .unwrap()
+            .reference_images
+            .is_none());
     }
 
     #[test]
@@ -1481,8 +1549,8 @@ mod tests {
 
         let validated = validate_runtime_inputs(&path).unwrap();
         let catalog = validated_provider_catalog(&validated).unwrap();
-        assert_eq!(catalog.provider_contracts().len(), 15);
-        assert_eq!(catalog.targets().revisions().count(), 15);
+        assert_eq!(catalog.provider_contracts().len(), 22);
+        assert_eq!(catalog.targets().revisions().count(), 22);
         assert!(
             !catalog.provider_contracts()[0]
                 .readiness
