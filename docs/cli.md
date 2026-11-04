@@ -11,6 +11,9 @@ selected, running stack profile, these commands automatically use that
 profile's authenticated client handoff. Run `hubu <command> --help` for the
 exact syntax supported by your installed release.
 
+To do the same administration in a browser, run `hubu ui` and see the
+[admin web UI guide](admin-ui.md).
+
 ## Register the owner and agents
 
 Register the human owner once, then register each agent separately. The agent
