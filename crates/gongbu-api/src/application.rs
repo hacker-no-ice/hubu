@@ -21,6 +21,7 @@ use crate::{
         flux_contract,
         registry::ValidatedProviderCatalog,
     },
+    reference::{EditInputImages, ReferenceLibrary},
     secrets::{MacOsKeychain, SecretProvider},
     temporal::{
         start_worker_with_config, temporal_is_reachable, worker_is_polling, DurableExecutionRunner,
@@ -68,6 +69,8 @@ pub struct GenericProviderActivities {
     /// Where edit requests load their input images; without it, a request
     /// that references one is released before anything is sent.
     input_artifacts: Option<ArtifactService>,
+    /// The operator's reference folder, when one is configured.
+    reference_images: Option<ReferenceLibrary>,
 }
 
 impl GenericProviderActivities {
@@ -85,6 +88,7 @@ impl GenericProviderActivities {
             providers,
             secrets,
             input_artifacts: None,
+            reference_images: None,
         }
     }
 
@@ -95,6 +99,12 @@ impl GenericProviderActivities {
         self
     }
 
+    /// Also load edit requests' pinned reference images from `references`.
+    pub fn with_reference_images(mut self, references: Option<ReferenceLibrary>) -> Self {
+        self.reference_images = references;
+        self
+    }
+
     /// Send `f` the input images `execution`'s account may reference.
     fn with_input_images<R>(
         &self,
@@ -102,7 +112,10 @@ impl GenericProviderActivities {
         f: impl FnOnce(&dyn InputImageSource) -> R,
     ) -> R {
         match &self.input_artifacts {
-            Some(artifacts) => f(&artifacts.input_images(&execution.account_id)),
+            Some(artifacts) => f(&EditInputImages {
+                artifacts: artifacts.input_images(&execution.account_id),
+                references: self.reference_images.as_ref(),
+            }),
             None => f(&NoInputImages),
         }
     }
@@ -589,6 +602,8 @@ pub struct ApplicationDependencies {
     pub worker_drain_timeout: Duration,
     pub authenticator: Arc<dyn Authenticator>,
     pub now: Arc<dyn Fn() -> String + Send + Sync>,
+    /// The operator's reference folder, when one is configured.
+    pub reference_images: Option<ReferenceLibrary>,
 }
 
 #[derive(Clone)]
@@ -618,7 +633,8 @@ where
                 dependencies.providers.clone(),
                 dependencies.secrets.clone(),
             )
-            .with_input_artifacts(dependencies.artifacts.clone()),
+            .with_input_artifacts(dependencies.artifacts.clone())
+            .with_reference_images(dependencies.reference_images.clone()),
         )
     });
     let artifacts = dependencies.artifact_activities.unwrap_or_else(|| {
@@ -675,7 +691,8 @@ where
         dependencies.hubu_authorizations,
         move || (dependencies.now)(),
     )
-    .with_redaction_attestation_secrets(redaction_attestation_secrets);
+    .with_redaction_attestation_secrets(redaction_attestation_secrets)
+    .with_reference_images(dependencies.reference_images);
     let ready = Arc::new(AtomicBool::new(true));
     let state = ApplicationState {
         api,
@@ -1950,6 +1967,10 @@ mod tests {
             ArtifactLimits::default(),
         );
         let hubu = Arc::new(LedgerHubu::default());
+        // The operator's reference folder, holding the mascot.
+        let references = tempdir().unwrap();
+        let mascot = png([9, 9, 9, 255]);
+        std::fs::write(references.path().join("hubu mascot.png"), &mascot).unwrap();
         let mut registry = ProviderRegistry::new();
         for pack in &packs {
             registry.register_pack(pack.clone());
@@ -1974,7 +1995,14 @@ mod tests {
                     providers,
                     Arc::new(FixtureSecrets),
                 )
-                .with_input_artifacts(artifact_service.clone()),
+                .with_input_artifacts(artifact_service.clone())
+                .with_reference_images(Some(
+                    crate::reference::ReferenceLibrary::open(
+                        references.path(),
+                        ArtifactLimits::default(),
+                    )
+                    .unwrap(),
+                )),
             ),
             Arc::new(ArtifactServiceActivities::new(
                 artifact_service.clone(),
@@ -2032,6 +2060,31 @@ mod tests {
         );
         // 6.7¢ for the draft; 6.7¢ plus 0.056¢ for the one input image.
         assert_eq!(*hubu.settled.lock().unwrap(), [67_000, 67_560]);
+
+        // A reference image approved at one digest is never sent once its
+        // file changes: the edit releases before the provider is called.
+        let digest = format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(&mascot));
+        let changed = create(
+            "image_edit",
+            "account",
+            "changed-reference",
+            json!({
+                "prompt": "make it blue",
+                "image_size": "1k",
+                "input_images": [format!("reference:hubu mascot.png@sha256:{digest}")],
+            }),
+        );
+        std::fs::write(
+            references.path().join("hubu mascot.png"),
+            png([0, 0, 0, 255]),
+        )
+        .unwrap();
+        assert_eq!(
+            runner.run_execution(&changed.execution_id).unwrap(),
+            "failed"
+        );
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(hubu.claims.load(Ordering::SeqCst), 2);
         for (execution, units) in [(&draft, 67_000), (&edit, 67_560)] {
             assert_eq!(
                 repository

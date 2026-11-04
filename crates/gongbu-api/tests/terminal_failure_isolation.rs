@@ -114,6 +114,7 @@ async fn run() {
             worker_drain_timeout: Duration::from_secs(15),
             authenticator: Arc::new(TestAuthenticator),
             now: Arc::new(|| "2026-08-17T00:00:00Z".into()),
+            reference_images: None,
         },
         async move {
             let _ = shutdown_rx.await;
@@ -297,6 +298,7 @@ async fn run() {
             worker_drain_timeout: Duration::from_secs(15),
             authenticator: Arc::new(TestAuthenticator),
             now: Arc::new(|| "2026-08-17T00:00:00Z".into()),
+            reference_images: None,
         },
         async move {
             let _ = shutdown_rx.await;

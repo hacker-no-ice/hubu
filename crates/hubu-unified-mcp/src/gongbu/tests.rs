@@ -529,3 +529,63 @@ fn flux_edit_targets_publish_how_input_megapixels_are_counted() {
         assert_eq!(result["isError"], true, "{result}");
     }
 }
+
+#[test]
+fn reference_images_list_only_pinned_tokens_an_edit_can_send() {
+    const DIGEST: &str = "4a5b6c7d8e9f00112233445566778899aabbccddeeff00112233445566778899";
+    let listing = |images: &str| -> String {
+        format!(r#"{{"schema_version":1,"configured":true,"images":[{images}]}}"#)
+    };
+    let image = |name: &str, reference: &str| -> String {
+        format!(
+            r#"{{"name":"{name}","reference":"{reference}","sha256":"{DIGEST}","media_type":"image/png","size_bytes":1200,"width":512,"height":512}}"#
+        )
+    };
+    let call = |body: String| {
+        let body: &'static str = Box::leak(body.into_boxed_str());
+        let (endpoint, requests) = mock_server(vec![("200 OK", "application/json", body)]);
+        let result = call_tool(
+            &client(&endpoint, "secret"),
+            "gongbu_list_reference_images",
+            json!({}),
+            None,
+        )
+        .result;
+        (result, requests)
+    };
+    let mascot = image(
+        "hubu mascot.png",
+        &format!("reference:hubu mascot.png@sha256:{DIGEST}"),
+    );
+    let (result, requests) = call(listing(&mascot));
+    assert_eq!(result["isError"], false, "{result}");
+    assert_eq!(
+        result["structuredContent"]["images"][0]["reference"],
+        format!("reference:hubu mascot.png@sha256:{DIGEST}")
+    );
+    assert!(requests.lock().unwrap()[0].starts_with("GET /v1/reference-images "));
+
+    for broken in [
+        // A token that doesn't pin this image's name and digest.
+        listing(&image(
+            "hubu mascot.png",
+            &format!("reference:other.png@sha256:{DIGEST}"),
+        )),
+        // Paths that leave the folder, or hidden entries.
+        listing(&image(
+            "../x.png",
+            &format!("reference:../x.png@sha256:{DIGEST}"),
+        )),
+        listing(&image(
+            ".x.png",
+            &format!("reference:.x.png@sha256:{DIGEST}"),
+        )),
+        // An unconfigured folder lists nothing.
+        listing(&mascot).replace(r#""configured":true"#, r#""configured":false"#),
+        // A name listed twice.
+        listing(&format!("{mascot},{mascot}")),
+    ] {
+        let (result, _) = call(broken);
+        assert_eq!(result["isError"], true, "{result}");
+    }
+}
