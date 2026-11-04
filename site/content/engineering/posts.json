@@ -4,7 +4,7 @@
     "title": "From Rust adapters to provider packs",
     "description": "Why Hubu replaced hand-written Rust provider adapters with TOML provider packs run by reviewed engines, how the migration went, and how it sets up adding providers from a web UI.",
     "publishedOn": "2026-11-03",
-    "releaseStatus": "Hubu v0.2.5 · In development",
+    "releaseStatus": "Hubu v0.2.5 · Releasing soon",
     "cover": {
       "src": "/blogs/from-rust-adapters-to-provider-packs/01-cover.png",
       "width": 1672,
