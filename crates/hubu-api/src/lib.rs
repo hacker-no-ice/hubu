@@ -11514,6 +11514,79 @@ lease_profiles:
     }
 
     #[test]
+    fn flux_edit_scope_reaches_quality_policy() {
+        let path = std::env::temp_dir().join(format!("hubu-flux-edit-{}.sqlite", UserId::new()));
+        let state = ServerState::new_with_db_path(&path).unwrap();
+        init(
+            json!({"display_name":"Alice","email":"alice@example.com"}).to_string(),
+            &state,
+        )
+        .unwrap();
+        let agent = register_agent(
+            json!({"name":"flux-editor","version":"v1"}).to_string(),
+            &state,
+        )
+        .unwrap();
+        add_policy(
+            json!({"agent_id":agent.agent_id,"policy_yaml":r#"
+id: flux_edit_quality
+version: 2026-11-04.1
+default_effect: needs_approval
+rules:
+  - id: ceiling
+    effect: deny
+    reason: fifty cent ceiling
+    when:
+      op: gt
+      field: amount
+      value:
+        money: "0.50"
+  - id: drafts
+    effect: allow
+    reason: one k drafts
+    when:
+      op: eq
+      field: image_size
+      value:
+        string: "1k"
+"#})
+            .to_string(),
+            &state,
+        )
+        .unwrap();
+        create_test_agent_budget(&state, &agent.agent_id, 500);
+        for (key, size, amount, expected) in [
+            ("flux-edit-draft", "1k", "0.016", "allow"),
+            ("flux-edit-review", "2k", "0.02", "needs_approval"),
+            ("flux-edit-ceiling", "1k", "0.51", "deny"),
+        ] {
+            let response = route(
+                authenticated_json_request(
+                    "/spend/authorize",
+                    json!({
+                        "operation_key":key,"account_id":agent.account_id,"amount":amount,
+                        "reason":"FLUX edit qualification",
+                        "execution_scope":{
+                            "schema_version":2,"provider":"provider:black-forest-labs:flux",
+                            "executor":"executor:gongbu:image","capability":"capability:image:edit",
+                            "billing_merchant":"merchant:black-forest-labs",
+                            "model":"flux-2-klein-4b","image_size":size
+                        }
+                    }),
+                ),
+                &state,
+            );
+            assert_eq!(response.status, 200, "{key}: {:?}", response.body);
+            assert_eq!(response.body["decision"], expected);
+            assert_eq!(
+                response.body["auth_token_id"].is_string(),
+                expected == "allow"
+            );
+        }
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
     fn gemini_pro_caps_need_approval_or_are_denied_before_any_token_exists() {
         let path =
             std::env::temp_dir().join(format!("hubu-api-gemini-pro-caps-{}.sqlite", UserId::new()));
