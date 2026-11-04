@@ -82,7 +82,7 @@ function details(summary, value) {
 const STATUS_TONE = {
   active: "ok", allow: "ok", allowed: "ok", authorized: "ok", settled: "ok", approved: "ok",
   policy_allow: "ok", granted: "ok", admitted: "ok", true: "ok",
-  exceeded: "warn", exhausted: "warn", scheduled: "info", enabled: "ok", disabled: "", inactive: "",
+  live: "ok", current: "info", exceeded: "warn", exhausted: "warn", scheduled: "info", enabled: "ok", disabled: "", inactive: "",
   needs_approval: "warn", pending: "warn", escalated: "warn", claimed: "info",
   policy_needs_approval: "warn", reconciliation_required: "warn", unknown: "warn",
   deny: "bad", denied: "bad", revoked: "bad", policy_deny: "bad", released: "", expired: "",
@@ -514,16 +514,18 @@ async function renderAgents(view) {
   const draw = async () => {
     const data = await hubu("/agents", showAll.checked ? { all: "true" } : {});
     if (!showAll.checked) state.agents = data.agents || state.agents;
+    const mine = (a) => !state.me || a.owner_user_id === state.me.user_id;
     clear(listBody).append(table([
-      { label: "Name", render: (a) => a.display_name },
+      { label: "Name", render: (a) => h("div", { class: "name-cell" },
+        h("strong", {}, a.display_name),
+        mine(a) ? h("button", { class: "icon-button", type: "button", title: `Rename ${a.display_name}`,
+          "aria-label": `Rename ${a.display_name}`, onclick: () => renameAgent(a, draw) }, "✎ Rename") : null) },
       { label: "Agent ID", render: (a) => short(a.agent_id, 20) },
       { label: "Account", render: (a) => short(a.account_id, 20) },
       { label: "Owner", render: (a) => a.owner_username },
       { label: "Status", render: (a) => badge(a.status) },
       { label: "Registered", render: (a) => when(a.created_at) },
-      { label: "", render: (a) => h("div", { class: "row-actions" },
-        h("button", { class: "ghost small", type: "button", onclick: () => showAgentHistory(a) }, "History"),
-        h("button", { class: "ghost small", type: "button", onclick: () => renameAgent(a, draw) }, "Rename")) },
+      { label: "", render: (a) => h("button", { class: "ghost small", type: "button", onclick: () => showAgentHistory(a) }, "Name history") },
     ], data.agents, "No agents registered yet."));
   };
   showAll.addEventListener("change", draw);
@@ -593,31 +595,39 @@ function showAgentHistory(agent) {
   });
 }
 
+/** Owner-only relabel. Sends the human approval capability, so the request
+ * carries the confirmation header; submitting this dialog is the confirmation. */
 function renameAgent(agent, done) {
+  const status = h("div", {});
+  const nameInput = h("input", { name: "name", required: true, maxlength: 128, value: agent.display_name });
   const form = h("form", { class: "grid" },
-    h("label", {}, "New name", h("input", { name: "name", required: true, value: agent.display_name })),
-    h("label", { class: "wide" }, "Reason", h("input", { name: "reason", required: true, placeholder: "Why the label changes" })));
+    h("label", { class: "wide" }, "New name", nameInput),
+    h("label", { class: "wide" }, "Reason for the change", h("input", { name: "reason", required: true, maxlength: 512, placeholder: "e.g. clarify the agent's role" })));
+  const save = h("button", { type: "button", onclick: () => form.requestSubmit() }, "Save name");
   const { close } = openDialog(`Rename ${agent.display_name}`, [
-    h("p", { class: "hint" }, "Renaming changes only the label. The agent ID stays the same and the previous fingerprint still resolves to this agent."),
+    kv([["Agent ID", h("span", { class: "mono" }, agent.agent_id)], ["Current name", agent.display_name]]),
     form,
-  ], (closeFn) => [
-    h("button", { type: "button", class: "ghost", onclick: closeFn }, "Cancel"),
-    h("button", { type: "button", onclick: () => form.requestSubmit() }, "Continue…"),
-  ]);
-  form.addEventListener("submit", (event) => {
+    h("p", { class: "hint" }, "Only the name changes. The agent ID, account, budgets and policies stay the same, and the old name stays reserved for this agent. Renaming uses the human approval capability."),
+    status,
+  ], (closeFn) => [h("button", { type: "button", class: "ghost", onclick: closeFn }, "Cancel"), save]);
+  setTimeout(() => { nameInput.focus(); nameInput.select(); }, 0);
+  form.addEventListener("submit", async (event) => {
     event.preventDefault();
     const values = formValues(form);
-    close();
-    confirmCapability({
-      title: "Confirm rename",
-      summary: kv([["Agent", agent.agent_id], ["Name", `${agent.display_name} → ${values.name}`], ["Reason", values.reason]]),
-      confirmLabel: "Rename",
-      onConfirm: async () => {
-        await hubuPost("/agents/rename", { agent_id: agent.agent_id, name: values.name, reason: values.reason }, { confirmed: true });
-        toast("Agent renamed.");
-        done();
-      },
-    });
+    if (values.name === agent.display_name) {
+      clear(status).append(h("div", { class: "notice warn" }, "Enter a different name."));
+      return;
+    }
+    save.disabled = true;
+    try {
+      await hubuPost("/agents/rename", { agent_id: agent.agent_id, name: values.name, reason: values.reason }, { confirmed: true });
+      toast(`Renamed to ${values.name}.`);
+      close();
+      done();
+    } catch (error) {
+      save.disabled = false;
+      clear(status).append(h("div", { class: "notice bad" }, error.message));
+    }
   });
 }
 
@@ -694,93 +704,305 @@ async function renderUsers(view) {
 
 // Policies
 
+const POLICY_TEMPLATE = `id: my_policy
+version: v1
+default_effect: needs_approval
+rules:
+  - id: allow_small_spend
+    effect: allow
+    reason: small spends are approved automatically
+    when:
+      op: lte
+      field: amount
+      value:
+        money: "25.00"
+`;
+
+/** Export YAML carries the internal owner id; the server always sets it. */
+function stripOwner(yaml) {
+  return String(yaml || "").replace(/^owner_user_id: .*\n/m, "");
+}
+
+/** Line diff (LCS) for small documents such as policy YAML. */
+function lineDiff(before, after) {
+  const a = before.split("\n");
+  const b = after.split("\n");
+  const dp = Array.from({ length: a.length + 1 }, () => new Array(b.length + 1).fill(0));
+  for (let i = a.length - 1; i >= 0; i--) {
+    for (let j = b.length - 1; j >= 0; j--) {
+      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+  const out = [];
+  let i = 0;
+  let j = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) { out.push([" ", a[i]]); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) out.push(["-", a[i++]]);
+    else out.push(["+", b[j++]]);
+  }
+  while (i < a.length) out.push(["-", a[i++]]);
+  while (j < b.length) out.push(["+", b[j++]]);
+  return out;
+}
+
+function diffView(before, after) {
+  const lines = lineDiff(before, after);
+  if (!lines.some(([kind]) => kind !== " ")) return h("p", { class: "hint" }, "No differences.");
+  return h("pre", { class: "code diff" }, lines.map(([kind, text]) =>
+    h("span", { class: kind === "+" ? "diff-add" : kind === "-" ? "diff-del" : null }, `${kind} ${text}\n`)));
+}
+
+function rulesTable(rules) {
+  return table([
+    { label: "#", num: true, render: (r) => r.index },
+    { label: "Rule", render: (r) => h("span", { class: "mono" }, r.id) },
+    { label: "Decision", render: (r) => badge(r.effect) },
+    { label: "Applies when", render: (r) => r.condition },
+    { label: "Reason", render: (r) => r.reason },
+  ], (rules || []).map((r, i) => ({ index: i + 1, ...r })), "This policy has no rules; every request gets the default decision.");
+}
+
+function segmented(options, active, onChange) {
+  return h("div", { class: "segmented", role: "tablist" }, options.map(([value, label]) =>
+    h("button", { type: "button", role: "tab", "aria-selected": value === active ? "true" : "false",
+      class: value === active ? "active" : null, onclick: () => value !== active && onChange(value) }, label)));
+}
+
+const renderPolicyRevision = (policy) => api("POST", "/api/policies/render", { policy });
+
 async function renderPolicies(view) {
   await loadAgents();
   const data = await hubu("/policies");
-  const form = h("form", { class: "grid" },
-    h("label", {}, "Attach to", h("select", { name: "agent_id" }, h("option", { value: "" }, "Owner default (all agents)"),
-      state.agents.map((a) => h("option", { value: a.agent_id }, a.display_name)))),
-    h("label", {}, "Display name (optional)", h("input", { name: "display_name" })),
-    h("label", {}, "Declarative key (optional)", h("input", { name: "declarative_key" })),
-    h("label", {}, "Expected revision (optional)", h("input", { name: "expected_revision", inputmode: "numeric" })),
-    h("label", { class: "wide" }, "Policy YAML", h("textarea", { name: "policy_yaml", required: true, spellcheck: "false", placeholder: "id: my_policy\nversion: v1\ndefault_effect: needs_approval\nrules: []" })),
-    h("div", { class: "form-actions" }, h("button", { type: "submit" }, "Apply policy")));
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const v = formValues(form);
-    const body = { policy_yaml: form.elements.policy_yaml.value, source: "web_ui" };
-    for (const key of ["agent_id", "display_name", "declarative_key"]) if (v[key]) body[key] = v[key];
-    if (v.expected_revision) body.expected_revision = Number(v.expected_revision);
-    try {
-      const result = await hubuPost("/policies", body);
-      toast(result.changed === false ? "Policy unchanged (same content)." : `Policy applied (revision ${result.revision ?? "?"}).`);
-      route();
-    } catch (error) { toast(error.message, "bad"); }
-  });
+  const policies = data.policies || [];
+  const workspace = h("div", { class: "stack" });
+  const known = policies.some((p) => p.policy_id === state.selectedPolicy);
+  let selected = known ? state.selectedPolicy : policies[0]?.policy_id;
 
+  const listBody = h("div", {});
+  const drawList = () => clear(listBody).append(table([
+    { label: "Name", render: (p) => h("button", { type: "button", class: `link-button${p.policy_id === selected ? " selected" : ""}`,
+      onclick: () => open(p.policy_id) }, p.display_name) },
+    { label: "Applies to", render: (p) => (p.agent_id ? agentName(p.agent_id) : "All agents (owner default)") },
+    { label: "Version", render: (p) => p.policy_version },
+    { label: "Default", render: (p) => badge(p.default_decision) },
+    { label: "Rules", num: true, render: (p) => p.rules },
+    { label: "Revision", num: true, render: (p) => p.revision },
+    { label: "Updated", render: (p) => when(p.updated_at) },
+  ], policies, "No policies yet. The server's built-in default applies until you add one."));
+  const open = (policyId, options) => {
+    selected = policyId;
+    state.selectedPolicy = policyId;
+    drawList();
+    openPolicy(workspace, policies.find((p) => p.policy_id === policyId), options);
+  };
+  drawList();
   append(view, [
-    card("Policies", table([
-      { label: "Name", render: (p) => p.display_name },
-      { label: "Scope", render: (p) => (p.agent_id ? agentName(p.agent_id) : badge("user_default")) },
-      { label: "Version", render: (p) => p.policy_version },
-      { label: "Default", render: (p) => badge(p.default_decision) },
-      { label: "Rules", num: true, render: (p) => p.rules },
-      { label: "Revision", num: true, render: (p) => p.revision },
-      { label: "Updated", render: (p) => when(p.updated_at) },
-      { label: "", render: (p) => h("div", { class: "row-actions" },
-        h("button", { class: "ghost small", type: "button", onclick: () => showJsonDialog(`${p.display_name} YAML`, async () => {
-          const exported = await hubu("/policies/export", { policy_id: p.policy_id });
-          return h("div", {}, h("pre", { class: "json" }, exported.policy_yaml || ""),
-            h("div", { class: "form-actions" }, h("button", { type: "button", class: "ghost small", onclick: () => {
-              // Load every scope field from this policy so a previous
-              // selection can never retarget the revision to another agent.
-              form.elements.policy_yaml.value = exported.policy_yaml || "";
-              form.elements.agent_id.value = p.agent_id || "";
-              form.elements.display_name.value = p.display_name || "";
-              form.elements.declarative_key.value = p.declarative_key || "";
-              form.elements.expected_revision.value = String(p.revision);
-              document.querySelector("dialog")?.close();
-              form.scrollIntoView({ behavior: "smooth" });
-            } }, "Edit as new revision")));
-        }) }, "YAML"),
-        h("button", { class: "ghost small", type: "button", onclick: () => showPolicyHistory(p) }, "History")) },
-    ], data.policies, "No policies yet. The server default applies until you add one."), null, true),
-    card("Apply a policy", [h("p", { class: "hint" }, "Policies are validated by the server. Applying identical content is a no-op; set an expected revision to guard against concurrent edits."), h("br"), form]),
+    card("Policies", listBody, [h("button", { type: "button", class: "small", onclick: () => {
+      selected = null;
+      drawList();
+      newPolicyEditor(workspace);
+    } }, "New policy")], true),
+    workspace,
   ]);
+  if (selected) await openPolicy(workspace, policies.find((p) => p.policy_id === selected));
 }
 
-function showPolicyHistory(policy) {
-  showJsonDialog(`History: ${policy.display_name}`, async () => {
-    const data = await hubu("/policies/history", { policy_id: policy.policy_id });
-    const revisions = data.revisions || [];
-    const diffBox = h("div", {});
-    const from = h("input", { inputmode: "numeric", value: String(Math.max(1, policy.revision - 1)), size: 4 });
-    const to = h("input", { inputmode: "numeric", value: String(policy.revision), size: 4 });
-    const diff = h("button", { class: "ghost small", type: "button", onclick: async () => {
-      try {
-        const d = await hubu("/policies/diff", { policy_id: policy.policy_id, from_revision: from.value, to_revision: to.value });
-        clear(diffBox).append(h("p", { class: "hint" }, `Changed paths: ${(d.changed_paths || []).join(", ") || "none"}`), details("Full diff", d));
-      } catch (e) { clear(diffBox).append(h("div", { class: "notice bad" }, e.message)); }
-    } }, "Diff");
-    return h("div", {},
-      table([
-        { label: "Revision", render: (r) => r.revision },
-        { label: "Hash", render: (r) => short(r.payload_hash, 22) },
-        { label: "Actor", render: (r) => short(r.actor, 18) },
-        { label: "Created", render: (r) => when(r.created_at) },
-      ], revisions.map((r, i) => ({ revision: i + 1, ...r })), "No revisions."),
-      h("br"),
-      h("div", { class: "filters" }, h("label", {}, "From revision", from), h("label", {}, "To revision", to), diff),
-      diffBox,
-      h("br"),
-      h("h4", {}, "Audit trail"),
-      table([
+/** Read-only and edit views of one policy, at any revision. */
+async function openPolicy(container, policy, options = {}) {
+  clear(container).append(h("p", { class: "hint" }, "Loading policy…"));
+  let history;
+  let exported;
+  try {
+    [history, exported] = await Promise.all([
+      hubu("/policies/history", { policy_id: policy.policy_id }),
+      hubu("/policies/export", { policy_id: policy.policy_id }),
+    ]);
+  } catch (error) {
+    clear(container).append(h("div", { class: "notice bad" }, error.message));
+    return;
+  }
+  const revisions = [...(history.revisions || [])].sort((a, b) => b.revision - a.revision);
+  const current = exported.revision ?? policy.revision;
+  const view = { mode: options.mode || "read", revision: options.revision || current, draft: options.draft };
+  const rendered = new Map();
+  const renderedAt = async (number) => {
+    if (!rendered.has(number)) {
+      const revision = revisions.find((r) => r.revision === number);
+      rendered.set(number, revision ? await renderPolicyRevision(revision.policy) : null);
+    }
+    return rendered.get(number);
+  };
+  const scope = policy.agent_id ? ["Agent override", agentName(policy.agent_id)] : ["Owner default", "All agents without their own policy"];
+
+  const draw = async () => {
+    const body = h("div", { class: "body stack" });
+    const header = h("header", {},
+      h("div", {}, h("h2", {}, policy.display_name),
+        h("div", { class: "hint" }, `${scope[0]} · ${policy.declarative_key || policy.policy_id}`)),
+      segmented([["read", "Read-only"], ["edit", "Edit"]], view.mode, (mode) => {
+        view.mode = mode;
+        if (mode === "edit" && view.draft === undefined) view.draft = stripOwner(exported.policy_yaml);
+        draw();
+      }));
+    clear(container).append(h("div", { class: "card" }, header, body));
+    try {
+      if (view.mode === "read") await drawRead(body);
+      else drawEdit(body);
+    } catch (error) {
+      clear(body).append(h("div", { class: "notice bad" }, error.message));
+    }
+  };
+
+  const drawRead = async (body) => {
+    const revision = revisions.find((r) => r.revision === view.revision) || revisions[0];
+    const info = await renderedAt(revision.revision);
+    const isCurrent = revision.revision === current;
+    const picker = h("select", { "aria-label": "Revision", onchange: (e) => { view.revision = Number(e.target.value); draw(); } },
+      revisions.map((r) => h("option", { value: r.revision, selected: r.revision === revision.revision },
+        `Revision ${r.revision}${r.revision === current ? " (current)" : ""} · ${new Date(r.created_at).toLocaleString()}`)));
+    const compareBox = h("div", {});
+    append(body, [
+      h("div", { class: "toolbar" }, h("label", { class: "inline" }, "Showing", picker),
+        isCurrent ? badge("current") : null),
+      isCurrent ? null : h("div", { class: "notice warn" },
+        `You are viewing revision ${revision.revision}. Revision ${current} is the one in effect.`,
+        h("div", { class: "row-actions spaced" },
+          h("button", { type: "button", class: "ghost small", onclick: async () => {
+            const now = await renderedAt(current);
+            clear(compareBox).append(h("h3", {}, `Changes from revision ${revision.revision} to revision ${current}`),
+              diffView(stripOwner(info.policy_yaml), stripOwner(now.policy_yaml)));
+          } }, "Compare with current"),
+          h("button", { type: "button", class: "ghost small", onclick: () => {
+            view.mode = "edit";
+            view.draft = stripOwner(info.policy_yaml);
+            draw();
+          } }, "Restore as a new revision…"))),
+      compareBox,
+      kv([
+        ["Applies to", [h("strong", {}, scope[0]), " · ", scope[1]]],
+        ["Policy", h("span", { class: "mono" }, `${info.id} @ ${info.version}`)],
+        ["Default decision", [badge(info.default_effect), h("span", { class: "hint" }, "  used when no rule decides the request")]],
+        ["Saved", [when(revision.created_at), ` via ${revision.source || "unknown"}`]],
+        ["Content hash", short(revision.payload_hash, 24)],
+      ]),
+      h("h3", {}, `Rules (${(info.rules || []).length})`),
+      h("div", { class: "flush-table" }, rulesTable(info.rules)),
+      (info.warnings || []).length ? h("div", { class: "notice warn" }, info.warnings.join(" ")) : null,
+      h("details", {}, h("summary", {}, "YAML source"), h("pre", { class: "code" }, stripOwner(info.policy_yaml))),
+      h("details", {}, h("summary", {}, `Change log (${(history.audit || []).length})`), table([
+        { label: "When", render: (a) => when(a.occurred_at) },
         { label: "Action", render: (a) => badge(a.action) },
         { label: "Source", render: (a) => a.source },
         { label: "Assignments", render: (a) => (a.affected_assignments || []).join(", ") },
-        { label: "When", render: (a) => when(a.occurred_at) },
-      ], data.audit || [], "No audit entries."));
+      ], history.audit || [], "No changes recorded.")),
+    ]);
+  };
+
+  const drawEdit = (body) => {
+    policyEditor(body, {
+      yaml: view.draft ?? stripOwner(exported.policy_yaml),
+      intro: `Saving creates revision ${current + 1}. Earlier revisions stay in the history, and the change is rejected if someone else saves first.`,
+      submitLabel: `Save as revision ${current + 1}`,
+      onDraft: (text) => { view.draft = text; },
+      onCancel: () => { view.mode = "read"; view.draft = undefined; draw(); },
+      submit: async (policyYaml) => {
+        const request = { policy_yaml: policyYaml, source: "web_ui", expected_revision: current,
+          display_name: policy.display_name, declarative_key: policy.declarative_key };
+        if (policy.agent_id) request.agent_id = policy.agent_id;
+        const result = await hubuPost("/policies", request);
+        toast(result.changed === false ? "No changes: the content matches the current revision." : `Saved revision ${result.revision ?? current + 1}.`);
+        route();
+      },
+    });
+  };
+
+  await draw();
+}
+
+/** YAML editor with server-equivalent validation before saving. */
+function policyEditor(container, { yaml, intro, submitLabel, onDraft, onCancel, submit, extraFields }) {
+  const textarea = h("textarea", { class: "code-editor", spellcheck: "false", "aria-label": "Policy YAML" });
+  textarea.value = yaml;
+  const result = h("div", {});
+  const save = h("button", { type: "button", disabled: true }, submitLabel);
+  const stale = h("span", { class: "hint" }, "Validate to enable saving.");
+  let validatedText = null;
+  const validate = async () => {
+    try {
+      const outcome = await api("POST", "/api/policies/validate", { policy_yaml: textarea.value });
+      if (!outcome.valid) {
+        validatedText = null;
+        save.disabled = true;
+        stale.textContent = "Fix the error, then validate again.";
+        clear(result).append(h("div", { class: "notice bad" }, h("strong", {}, "Not valid. "), outcome.error));
+        return;
+      }
+      validatedText = textarea.value;
+      save.disabled = false;
+      stale.textContent = "Valid. Saving sends exactly this text.";
+      clear(result).append(
+        h("div", { class: "notice ok" }, h("strong", {}, "Valid. "),
+          `${outcome.id} @ ${outcome.version}: ${outcome.rules.length} rule(s), default decision `, badge(outcome.default_effect), "."),
+        (outcome.warnings || []).length ? h("div", { class: "notice warn" }, outcome.warnings.join(" ")) : null,
+        h("div", { class: "flush-table" }, rulesTable(outcome.rules)));
+    } catch (error) {
+      clear(result).append(h("div", { class: "notice bad" }, error.message));
+    }
+  };
+  textarea.addEventListener("input", () => {
+    onDraft?.(textarea.value);
+    if (validatedText !== null && textarea.value !== validatedText) {
+      save.disabled = true;
+      stale.textContent = "Changed since the last validation. Validate again to save.";
+    }
   });
+  save.addEventListener("click", async () => {
+    if (textarea.value !== validatedText) return;
+    save.disabled = true;
+    try { await submit(textarea.value); } catch (error) {
+      save.disabled = false;
+      clear(result).append(h("div", { class: "notice bad" }, error.message));
+    }
+  });
+  append(container, [
+    h("p", { class: "hint" }, intro),
+    extraFields || null,
+    textarea,
+    h("div", { class: "form-actions" },
+      h("button", { type: "button", class: "ghost", onclick: validate }, "Validate"),
+      save,
+      onCancel ? h("button", { type: "button", class: "ghost", onclick: onCancel }, "Discard changes") : null,
+      stale),
+    result,
+  ]);
+}
+
+function newPolicyEditor(container) {
+  const fields = h("form", { class: "grid" },
+    h("label", {}, "Applies to", h("select", { name: "agent_id" }, h("option", { value: "" }, "All agents (owner default)"),
+      state.agents.map((a) => h("option", { value: a.agent_id }, a.display_name)))),
+    h("label", {}, "Display name (optional)", h("input", { name: "display_name" })),
+    h("label", {}, "Policy key (optional)", h("input", { name: "declarative_key", placeholder: "defaults to the YAML id" })));
+  const body = h("div", { class: "body stack" });
+  clear(container).append(h("div", { class: "card" }, h("header", {}, h("h2", {}, "New policy")), body));
+  policyEditor(body, {
+    yaml: POLICY_TEMPLATE,
+    intro: "Write the policy in YAML, validate it, then save. Saving a policy for a scope that already has one replaces that assignment.",
+    submitLabel: "Create policy",
+    extraFields: fields,
+    onCancel: () => route(),
+    submit: async (policyYaml) => {
+      const v = formValues(fields);
+      const request = { policy_yaml: policyYaml, source: "web_ui" };
+      for (const key of ["agent_id", "display_name", "declarative_key"]) if (v[key]) request[key] = v[key];
+      const result = await hubuPost("/policies", request);
+      state.selectedPolicy = result.policy_id || state.selectedPolicy;
+      toast("Policy created.");
+      route();
+    },
+  });
+  container.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 // Budgets
@@ -899,59 +1121,120 @@ async function revokeBudget(budget, refresh) {
 
 // Providers and secret references
 
+// Friendly names for the platforms Hubu ships packs for; others show their id.
+const PLATFORM_NAMES = { google: "Google Gemini", flux: "Black Forest Labs (FLUX)" };
+const WORKLOAD_NAMES = { image_generation: "Text to image", image_edit: "Image edit" };
+
+function platformName(provider) {
+  return PLATFORM_NAMES[provider] || String(provider || "unknown").replace(/[-_]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function workloadName(workload) {
+  return WORKLOAD_NAMES[workload] || String(workload || "").replaceAll("_", " ");
+}
+
+/** Group configured revisions and live Gongbu targets by platform, then by model + workload. */
+function groupProviders(configs, liveTargets) {
+  const platforms = new Map();
+  const platform = (id) => {
+    if (!platforms.has(id)) platforms.set(id, { id, offerings: new Map(), secrets: new Map(), live: 0 });
+    return platforms.get(id);
+  };
+  const offering = (p, model, workload) => {
+    const key = `${model}\u0000${workload}`;
+    if (!p.offerings.has(key)) p.offerings.set(key, { model, workload, revisions: [], live: false });
+    return p.offerings.get(key);
+  };
+  for (const c of configs) {
+    const p = platform(c.provider);
+    offering(p, c.model, c.workload_type).revisions.push(c);
+    const ref = c.secret_reference || {};
+    const refKey = `${ref.service}\u0000${ref.account}`;
+    if (!p.secrets.has(refKey)) p.secrets.set(refKey, { ...ref, models: new Set() });
+    p.secrets.get(refKey).models.add(c.model);
+  }
+  for (const t of liveTargets) {
+    const p = platform(t.provider);
+    p.live += 1;
+    offering(p, t.model, t.workload_type).live = true;
+  }
+  return [...platforms.values()].sort((a, b) => platformName(a.id).localeCompare(platformName(b.id)));
+}
+
 async function renderProviders(view) {
   const data = await api("GET", "/api/providers");
   const stack = data.stack;
+  const g = data.gongbu || {};
+  const liveTargets = g.configured && !g.error && Array.isArray(g.targets) ? g.targets : [];
+  const configs = stack ? stack.provider_configs || [] : [];
+  const platforms = groupProviders(configs, liveTargets);
+
   view.append(h("div", { class: "notice" },
-    "Provider revisions and secret references are Gongbu configuration, owned by your stack profile (providers.toml and credentials.toml). This view is read-only and never shows secret values. Change them with `hubu stack` and render a new generation."));
+    "Providers and secret references are Gongbu configuration owned by your stack profile (providers.toml and credentials.toml). This view is read-only and never shows secret values; change providers with `hubu stack` and render a new generation."));
   if (data.stack_error) view.append(h("div", { class: "notice bad" }, `Stack profile unavailable: ${data.stack_error}`));
-  if (stack) {
-    const configs = stack.provider_configs || [];
-    view.append(card(`Configured provider revisions — ${stack.provider_mode} mode`, [
-      h("div", { class: "body" }, kv([["Profile", h("span", { class: "mono" }, stack.profile)], ["Generation", short(stack.generation_id, 16)]])),
+  if (!stack && !data.stack_error) view.append(h("div", { class: "notice warn" }, "No active stack profile was found. Run `hubu stack init` and `hubu stack start` to configure providers."));
+
+  const offerings = platforms.reduce((n, p) => n + p.offerings.size, 0);
+  view.append(h("div", { class: "stats" }, [
+    stat("Platforms", platforms.length, stack ? `${stack.provider_mode} mode` : "no stack profile"),
+    stat("Model offerings", offerings, `${configs.length} configured revisions`),
+    stat("Live in Gongbu", liveTargets.length, !g.configured ? "Gongbu not configured" : g.error ? "Gongbu unreachable" : "selectable targets"),
+    stat("Secret references", platforms.reduce((n, p) => n + p.secrets.size, 0), "names only, never values"),
+  ]));
+  if (g.configured && g.error) view.append(h("div", { class: "notice bad" }, `Gongbu at ${g.endpoint}: ${g.error}`));
+
+  for (const p of platforms) {
+    const rows = [...p.offerings.values()].sort((a, b) => a.model.localeCompare(b.model) || a.workload.localeCompare(b.workload));
+    const secrets = [...p.secrets.values()];
+    view.append(h("div", { class: "card platform" },
+      h("header", {},
+        h("div", { class: "platform-title" }, h("h2", {}, platformName(p.id)), h("span", { class: "mono hint" }, p.id)),
+        h("div", { class: "row-actions" },
+          badge(`${new Set(rows.map((r) => r.model)).size} models`),
+          p.live ? h("span", { class: "badge ok" }, `${p.live} live`) : h("span", { class: "badge" }, "not live"))),
+      h("div", { class: "body" }, kv([
+        ["Secret reference", secrets.length ? secrets.map((s) => h("div", {},
+          h("span", { class: "mono" }, `${s.service} / ${s.account}`),
+          h("span", { class: "hint" }, `  used by ${s.models.size} model${s.models.size === 1 ? "" : "s"}`))) : "none configured in this generation"],
+      ])),
+      h("div", { class: "body flush" }, table([
+        { label: "Model", render: (o) => h("span", { class: "mono" }, o.model) },
+        { label: "Workload", render: (o) => workloadName(o.workload) },
+        { label: "Config version", render: (o) => {
+          const sorted = [...o.revisions].sort((a, b) => Number(b.active) - Number(a.active));
+          const top = sorted[0];
+          if (!top) return h("span", { class: "hint" }, "not in this generation");
+          const older = sorted.slice(1);
+          return h("div", {}, h("span", { class: "mono" }, top.provider_config_version),
+            older.length ? h("details", {}, h("summary", { class: "hint" }, `${older.length} other revision${older.length === 1 ? "" : "s"}`),
+              older.map((r) => h("div", { class: "mono hint" }, `${r.provider_config_version}${r.active ? "" : " (inactive)"}`))) : null);
+        } },
+        { label: "Status", render: (o) => {
+          const active = o.revisions.find((r) => r.active);
+          if (!o.revisions.length) return null;
+          if (!active) return badge("inactive");
+          return active.execution_enabled ? badge("enabled") : h("span", { class: "badge warn" }, "execution off");
+        } },
+        { label: "Live", render: (o) => (o.live ? badge("live") : h("span", { class: "hint" }, "—")) },
+        { label: "Pack", render: (o) => {
+          const pack = o.revisions.find((r) => r.active)?.pack || o.revisions[0]?.pack;
+          return pack ? h("span", { class: "mono hint", title: pack.pack_digest }, `${pack.pack_id}@${pack.pack_version} · ${pack.archetype}`) : null;
+        } },
+      ], rows))));
+  }
+  if (!platforms.length && (stack || liveTargets.length === 0)) {
+    view.append(card("Platforms", h("div", { class: "empty" }, "No providers are configured in this generation."), null, true));
+  }
+  if (stack && (stack.contract_bindings || []).length) {
+    view.append(h("details", { class: "card details-card" }, h("summary", {}, `Bound provider contracts (${stack.contract_bindings.length})`),
       table([
-        { label: "Provider", render: (c) => c.provider },
-        { label: "Model", render: (c) => c.model },
-        { label: "Workload", render: (c) => c.workload_type },
-        { label: "Config version", render: (c) => h("span", { class: "mono" }, c.provider_config_version) },
-        { label: "Selectable", render: (c) => badge(c.active ? "active" : "inactive") },
-        { label: "Execution", render: (c) => badge(c.execution_enabled ? "enabled" : "disabled") },
-        { label: "Pack", render: (c) => (c.pack ? `${c.pack.pack_id}@${c.pack.pack_version}` : c.settings_type) },
-      ], configs, "No provider revisions in this generation."),
-    ], null, true));
-    const refs = new Map();
-    for (const c of configs) {
-      const key = `${c.secret_reference.service}\u0000${c.secret_reference.account}`;
-      if (!refs.has(key)) refs.set(key, { ...c.secret_reference, used_by: [] });
-      refs.get(key).used_by.push(`${c.provider}/${c.model}`);
-    }
-    view.append(card("Secret references", table([
-      { label: "Service", render: (r) => h("span", { class: "mono" }, r.service) },
-      { label: "Account", render: (r) => h("span", { class: "mono" }, r.account) },
-      { label: "Used by", render: (r) => r.used_by.join(", ") },
-    ], [...refs.values()], "No secret references."), null, true));
-    if ((stack.contract_bindings || []).length) {
-      view.append(card("Bound provider contracts", table([
         { label: "Contract", render: (b) => h("span", { class: "mono" }, b.contract) },
         { label: "Pricing version", render: (b) => b.pricing_version },
-      ], stack.contract_bindings), null, true));
-    }
-  } else if (!data.stack_error) {
-    view.append(h("div", { class: "notice warn" }, "No active stack profile was found. Run `hubu stack init` and `hubu stack start` to manage providers."));
+      ], stack.contract_bindings)));
   }
-  const g = data.gongbu || {};
-  let gongbuBody;
-  if (!g.configured) gongbuBody = h("p", { class: "hint" }, "Gongbu is not configured for this connection. Pass --gongbu-endpoint and --gongbu-token-file to `hubu ui`, or use a stack profile with Gongbu.");
-  else if (g.error) gongbuBody = h("div", { class: "notice bad" }, `Gongbu at ${g.endpoint}: ${g.error}`);
-  else gongbuBody = table([
-    { label: "Target ID", render: (t) => short(t.target_id, 26) },
-    { label: "Provider", render: (t) => t.provider },
-    { label: "Model", render: (t) => t.model },
-    { label: "Workload", render: (t) => t.workload_type },
-    { label: "Merchant", render: (t) => t.execution_scope?.billing_merchant },
-    { label: "", render: (t) => h("button", { class: "ghost small", type: "button", onclick: () => openDialog("Execution target", jsonBlock(t)) }, "Details") },
-  ], Array.isArray(g.targets) ? g.targets : [], "Gongbu reports no execution targets.");
-  view.append(card("Live Gongbu execution targets", gongbuBody, null, !!(g.configured && !g.error)));
+  if (stack) {
+    view.append(h("p", { class: "hint" }, "Profile ", h("span", { class: "mono" }, stack.profile), " · generation ", short(stack.generation_id, 16)));
+  }
 }
 
 // ---------- shell ----------
@@ -1029,6 +1312,7 @@ async function boot() {
   }
   document.getElementById("endpoint").textContent = state.session.hubu_endpoint || "local";
   hubu("/user").then((me) => {
+    state.me = me;
     document.getElementById("whoami").textContent = `Owner: ${me.display_name}`;
   }).catch(() => {});
   document.getElementById("refresh").addEventListener("click", () => { route(); refreshApprovalCount(); });

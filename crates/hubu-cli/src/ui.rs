@@ -45,6 +45,8 @@ const CONFIRM_HEADER: &str = "x-hubu-ui-confirmed";
 const INDEX_HTML: &str = include_str!("ui/assets/index.html");
 const APP_JS: &str = include_str!("ui/assets/app.js");
 const APP_CSS: &str = include_str!("ui/assets/app.css");
+/// The same wordmark hubustack.dev serves, so the admin UI stays on-brand.
+const WORDMARK_SVG: &str = include_str!("../../../site/public/brand/hubu-wordmark.svg");
 
 const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
 
@@ -568,6 +570,7 @@ fn handle<B: Backend>(request: &Request, state: &UiState<B>) -> Response {
         ("GET", "/" | "/index.html") => asset("text/html; charset=utf-8", INDEX_HTML),
         ("GET", "/app.js") => asset("text/javascript; charset=utf-8", APP_JS),
         ("GET", "/app.css") => asset("text/css; charset=utf-8", APP_CSS),
+        ("GET", "/hubu-wordmark.svg") => asset("image/svg+xml", WORDMARK_SVG),
         ("GET", "/login") => login(request, state),
         (_, path) if path == "/api" || path.starts_with("/api/") => {
             if let Err(response) = guard_api(request, state) {
@@ -676,6 +679,8 @@ fn api<B: Backend>(request: &Request, state: &UiState<B>) -> Response {
         ),
         ("GET", "/api/providers") => json_response(200, &state.backend.providers()),
         ("POST", "/api/agents/registration") => register_agent(request, state),
+        ("POST", "/api/policies/validate") => policy_tool(request, PolicyTool::Validate),
+        ("POST", "/api/policies/render") => policy_tool(request, PolicyTool::Render),
         (_, path) if path.starts_with("/api/hubu/") => proxy(request, state),
         _ => error_response(404, "unknown admin UI API route"),
     }
@@ -713,6 +718,74 @@ fn register_agent<B: Backend>(request: &Request, state: &UiState<B>) -> Response
         Ok((status, body)) => json_response(status, &body),
         Err(error) => error_response(502, &format!("agent registration failed: {error:#}")),
     }
+}
+
+#[derive(Clone, Copy)]
+enum PolicyTool {
+    /// Parse and validate author YAML with the same loader the server uses.
+    Validate,
+    /// Render a stored revision (policy JSON from history) as export YAML.
+    Render,
+}
+
+/// Local policy tooling. Nothing here reaches Hubu or uses a credential: it
+/// runs `hubu_core`'s loader, validator and describer on the request body.
+fn policy_tool(request: &Request, tool: PolicyTool) -> Response {
+    use hubu_core::policy::Policy;
+    let Ok(body) = serde_json::from_slice::<Value>(&request.body) else {
+        return error_response(400, "request body must be a JSON object");
+    };
+    let policy = match tool {
+        PolicyTool::Validate => {
+            let Some(yaml) = body.get("policy_yaml").and_then(Value::as_str) else {
+                return error_response(400, "`policy_yaml` must be a string");
+            };
+            match Policy::from_yaml_str(yaml) {
+                Ok(policy) => policy,
+                Err(error) => {
+                    return json_response(
+                        200,
+                        &json!({ "valid": false, "error": error.to_string() }),
+                    )
+                }
+            }
+        }
+        PolicyTool::Render => {
+            let Some(policy) = body.get("policy").cloned() else {
+                return error_response(400, "`policy` is required");
+            };
+            match serde_json::from_value::<Policy>(policy) {
+                Ok(policy) => policy,
+                Err(error) => {
+                    return error_response(
+                        400,
+                        &format!("policy revision is not readable: {error}"),
+                    )
+                }
+            }
+        }
+    };
+    let policy_yaml = match policy.to_yaml_string() {
+        Ok(yaml) => yaml,
+        Err(error) => return error_response(500, &format!("render policy YAML: {error}")),
+    };
+    json_response(
+        200,
+        &json!({
+            "valid": true,
+            "id": policy.id,
+            "version": policy.version,
+            "default_effect": policy.default_effect,
+            "rules": policy.rules.iter().map(|rule| json!({
+                "id": rule.id,
+                "effect": rule.effect,
+                "reason": rule.reason,
+                "condition": rule.when.describe(),
+            })).collect::<Vec<_>>(),
+            "warnings": policy.amount_warnings(),
+            "policy_yaml": policy_yaml,
+        }),
+    )
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1159,6 +1232,48 @@ mod tests {
             12,
             "update the UI list when GovernanceCategory changes"
         );
+    }
+
+    #[test]
+    fn policy_tools_validate_and_render_without_calling_hubu() {
+        let (state, _) = state();
+        let yaml = "id: p\nversion: v1\ndefault_effect: needs_approval\nrules:\n  - id: small\n    effect: allow\n    reason: small spend\n    when:\n      op: lte\n      field: amount\n      value:\n        money: \"5.00\"\n";
+        let mut valid = signed_in(&state, "POST", "/api/policies/validate");
+        valid.body = serde_json::to_vec(&json!({ "policy_yaml": yaml })).unwrap();
+        let response = handle(&valid, &state);
+        assert_eq!(response.status, 200);
+        let body: Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(body["valid"], true);
+        assert_eq!(body["default_effect"], "needs_approval");
+        assert_eq!(body["rules"][0]["id"], "small");
+        assert!(body["rules"][0]["condition"]
+            .as_str()
+            .unwrap()
+            .contains("amount"));
+
+        let mut invalid = signed_in(&state, "POST", "/api/policies/validate");
+        invalid.body = br#"{"policy_yaml":"id: p\nrules: nope"}"#.to_vec();
+        let body: Value = serde_json::from_slice(&handle(&invalid, &state).body).unwrap();
+        assert_eq!(body["valid"], false);
+        assert!(body["error"].as_str().is_some());
+
+        // A stored revision renders back to YAML that validates again.
+        let stored = hubu_core::policy::Policy::from_yaml_str(yaml).unwrap();
+        let mut render = signed_in(&state, "POST", "/api/policies/render");
+        render.body = serde_json::to_vec(&json!({ "policy": stored })).unwrap();
+        let body: Value = serde_json::from_slice(&handle(&render, &state).body).unwrap();
+        let rendered = body["policy_yaml"].as_str().unwrap();
+        assert!(hubu_core::policy::Policy::from_yaml_str(rendered).is_ok());
+        assert!(state.backend.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn serves_the_site_wordmark() {
+        let (state, _) = state();
+        let response = handle(&request("GET", "/hubu-wordmark.svg"), &state);
+        assert_eq!(response.status, 200);
+        assert_eq!(response.content_type, "image/svg+xml");
+        assert!(String::from_utf8_lossy(&response.body).contains("<svg"));
     }
 
     #[test]

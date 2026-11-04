@@ -29,16 +29,22 @@ browser, stop `hubu ui` and start it again.
 | Approvals | Review pending spend requests, then approve or deny them. |
 | Spend history | Authorization records filtered by agent and status, with details. Ledger transactions with their entries. |
 | Decisions | Governance records filtered by agent, category and time, with the summary for the same filter. |
-| Agents | Register an agent from a name and a version label, list agents, view identity history, rename. |
+| Agents | Register an agent from a name and a version label, list agents, rename an agent from the pencil next to its name, view its name history. |
 | Users & targets | List human users, register a human user, set or revoke advisory spending targets. |
-| Policies | List policies, view and export YAML, view revision history and diffs, apply a new policy or revision. |
+| Policies | Read any revision of a policy (rules in plain language and the YAML source), compare a past revision with the current one, then switch to Edit to change the YAML, validate it and save it as a new revision. |
 | Budgets | Create budgets, change a limit, revoke, view version history. |
-| Providers & secrets | Read-only view of provider revisions, secret reference names and live Gongbu execution targets. |
+| Providers & secrets | Read-only view grouped by platform: each platform's models, config versions, secret reference name and which targets Gongbu currently offers. |
 
 Agent registration follows the [registration protocol](agent-registration.md).
 You enter the agent name and version label. The UI fills owner and runtime
 fields from the active Hubu session, computes the fingerprints, and shows the
 review before you submit. The server recomputes the fingerprints.
+
+In the policy editor, **Validate** checks the YAML locally with the same
+loader and validator the Hubu server uses, then lists the rules as they will
+be read. Saving is enabled only for the exact text that passed validation, and
+it is pinned to the revision you started from, so a concurrent change is
+rejected instead of overwritten.
 
 Changing a budget limit is pinned to the revision you saw. If someone else
 changed the budget first, the server rejects the change.
