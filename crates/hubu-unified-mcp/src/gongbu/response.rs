@@ -304,6 +304,48 @@ pub(super) fn execution_target_catalog_result(
     })
 }
 
+/// The operator's reference images: each must carry exactly the pinned token
+/// an edit sends for it, so an agent can copy it into `input_images`.
+pub(super) fn reference_images_result(
+    response: ReferenceImagesResponse,
+) -> Result<ToolResult, ToolError> {
+    let hex = |value: &str| {
+        value.len() == 64
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    };
+    let mut names = BTreeSet::new();
+    let valid = response.schema_version == 1
+        && (response.configured || response.images.is_empty())
+        && response.images.iter().all(|image| {
+            !image.name.is_empty()
+                && !image.name.starts_with('/')
+                && !image
+                    .name
+                    .split('/')
+                    .any(|part| part.is_empty() || part.starts_with('.'))
+                && names.insert(image.name.clone())
+                && hex(&image.sha256)
+                && image.reference == format!("reference:{}@sha256:{}", image.name, image.sha256)
+                && matches!(image.media_type.as_str(), "image/png" | "image/jpeg")
+                && image.size_bytes > 0
+                && image.width > 0
+                && image.height > 0
+        });
+    if !valid {
+        return Err(ToolError::invalid_response());
+    }
+    let structured = serde_json::to_value(&response).map_err(|_| ToolError::invalid_response())?;
+    Ok(ToolResult {
+        content: vec![Content::Text {
+            text: serde_json::to_string(&response).map_err(|_| ToolError::invalid_response())?,
+        }],
+        is_error: false,
+        structured_content: Some(structured),
+    })
+}
+
 fn valid_target_id(value: &str) -> bool {
     value
         .strip_prefix("gongbu:target:v1:")
@@ -781,6 +823,26 @@ pub(super) struct ArtifactListResponse {
     schema_version: u32,
     execution_id: String,
     artifacts: Vec<ArtifactResponse>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ReferenceImagesResponse {
+    schema_version: u32,
+    configured: bool,
+    images: Vec<ReferenceImageResponse>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ReferenceImageResponse {
+    name: String,
+    reference: String,
+    sha256: String,
+    media_type: String,
+    size_bytes: u64,
+    width: u32,
+    height: u32,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

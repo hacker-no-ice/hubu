@@ -5,6 +5,7 @@ use super::response::ToolError;
 
 pub(super) enum PreparedCall {
     ListExecutionTargets,
+    ListReferenceImages,
     Create(CreateExecutionRequest),
     GetExecution(String),
     ListArtifacts(String),
@@ -17,6 +18,10 @@ pub(super) fn prepare(name: &str, arguments: Value) -> Result<PreparedCall, Tool
             let input: EmptyInput = parse(arguments)?;
             let _ = input;
             Ok(PreparedCall::ListExecutionTargets)
+        }
+        "gongbu_list_reference_images" => {
+            let _: EmptyInput = parse(arguments)?;
+            Ok(PreparedCall::ListReferenceImages)
         }
         "gongbu_create_execution" => {
             reject_protected_overrides(&arguments)?;

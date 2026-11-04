@@ -137,7 +137,13 @@ mod tests {
             ("flux", "flux2_api"),
             ("mock", "deterministic"),
         ] {
-            assert!(catalog.contains(&for_target(provider, adapter).unwrap()));
+            for workload in ["image_generation", "image_edit"] {
+                let scope = for_workload_target(workload, provider, adapter).unwrap();
+                assert!(
+                    catalog.contains(&scope),
+                    "missing {provider}/{adapter}/{workload}"
+                );
+            }
         }
     }
 
