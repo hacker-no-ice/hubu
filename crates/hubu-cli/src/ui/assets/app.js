@@ -82,7 +82,7 @@ function details(summary, value) {
 const STATUS_TONE = {
   active: "ok", allow: "ok", allowed: "ok", authorized: "ok", settled: "ok", approved: "ok",
   policy_allow: "ok", granted: "ok", admitted: "ok", true: "ok",
-  exceeded: "warn", enabled: "ok", disabled: "", inactive: "",
+  exceeded: "warn", exhausted: "warn", scheduled: "info", enabled: "ok", disabled: "", inactive: "",
   needs_approval: "warn", pending: "warn", escalated: "warn", claimed: "info",
   policy_needs_approval: "warn", reconciliation_required: "warn", unknown: "warn",
   deny: "bad", denied: "bad", revoked: "bad", policy_deny: "bad", released: "", expired: "",
@@ -185,7 +185,9 @@ function hubuPost(path, body, options) {
 }
 
 async function loadAgents() {
-  const data = await hubu("/agents", { all: "true" });
+  // Owner-scoped: these feed forms and filters whose APIs only accept the
+  // signed-in owner's agents (`all=true` would include other users' agents).
+  const data = await hubu("/agents");
   state.agents = data.agents || [];
   return state.agents;
 }
@@ -511,7 +513,7 @@ async function renderAgents(view) {
   const listBody = h("div", {});
   const draw = async () => {
     const data = await hubu("/agents", showAll.checked ? { all: "true" } : {});
-    state.agents = data.agents || state.agents;
+    if (!showAll.checked) state.agents = data.agents || state.agents;
     clear(listBody).append(table([
       { label: "Name", render: (a) => a.display_name },
       { label: "Agent ID", render: (a) => short(a.agent_id, 20) },
@@ -565,7 +567,7 @@ async function renderAgents(view) {
 
   append(view, [
     card("Register an agent", [h("p", { class: "hint" }, "Agents usually register themselves through the Hubu MCP or CLI. Use this to pre-register an agent by name and version label."), h("br"), form]),
-    card("Registered agents", listBody, [h("label", { class: "check" }, showAll, "Include inactive")], true),
+    card("Registered agents", listBody, [h("label", { class: "check" }, showAll, "Include other users' agents")], true),
   ]);
   await draw();
 }
@@ -820,6 +822,10 @@ async function renderBudgets(view) {
   await draw();
 }
 
+// Mirrors BudgetAvailability::allows_limit_update in hubu-core: scheduled and
+// exhausted budgets can still be raised (or revoked) by the owner.
+const EDITABLE_BUDGET_STATES = new Set(["scheduled", "active", "exhausted"]);
+
 function budgetTable(budgets, manage, refresh) {
   return table([
     { label: "Agent", render: (b) => agentName(b.agent_id) },
@@ -836,8 +842,8 @@ function budgetTable(budgets, manage, refresh) {
     { label: "Period", render: (b) => [when(b.starting_at), " → ", b.ending_before ? when(b.ending_before) : "open-ended"] },
     manage ? { label: "", render: (b) => h("div", { class: "row-actions" },
       h("button", { class: "ghost small", type: "button", onclick: () => showBudgetHistory(b) }, "History"),
-      b.status === "active" ? h("button", { class: "ghost small", type: "button", onclick: () => updateBudget(b, refresh) }, "Change limit") : null,
-      b.status === "active" ? h("button", { class: "ghost small", type: "button", onclick: () => revokeBudget(b, refresh) }, "Revoke") : null) } : null,
+      EDITABLE_BUDGET_STATES.has(b.status) ? h("button", { class: "ghost small", type: "button", onclick: () => updateBudget(b, refresh) }, "Change limit") : null,
+      EDITABLE_BUDGET_STATES.has(b.status) ? h("button", { class: "ghost small", type: "button", onclick: () => revokeBudget(b, refresh) }, "Revoke") : null) } : null,
   ].filter(Boolean), budgets, "No budgets.");
 }
 
