@@ -62,17 +62,18 @@ pub(crate) fn command(client: &CliContext, hubu_home: &Path, mut args: Vec<Strin
     let gongbu = resolve_gongbu(hubu_home, gongbu_endpoint, gongbu_token_file)?;
     let listener =
         TcpListener::bind(listen).with_context(|| format!("bind admin UI listener {listen}"))?;
-    let port = listener.local_addr()?.port();
+    // Advertise and guard the address actually bound (port 0 picks one).
+    let bound = listener.local_addr()?;
     let backend = LiveBackend {
         client,
         hubu_home: hubu_home.to_path_buf(),
         gongbu,
     };
-    let (state, login_code) = UiState::new(port, backend);
+    let (state, login_code) = UiState::new(bound, backend);
 
     let style = super::terminal::stdout();
     println!("{}", style.success("Hubu admin UI is running"));
-    println!("  listening: http://{listen}");
+    println!("  listening: http://{}", host_for(bound));
     println!(
         "  hubu: {}",
         client
@@ -81,7 +82,7 @@ pub(crate) fn command(client: &CliContext, hubu_home: &Path, mut args: Vec<Strin
             .unwrap_or_else(|error| format!("unavailable ({error:#})"))
     );
     println!("  open this one-time login link in your browser:");
-    println!("    http://{}/login?code={login_code}", host_for(listen));
+    println!("    http://{}/login?code={login_code}", host_for(bound));
     println!("  the link works once; restart `hubu ui` to get a new one. Press Ctrl-C to stop.");
 
     serve(listener, &state)
@@ -299,7 +300,7 @@ fn gongbu_execution_targets(target: &GongbuTarget) -> Result<Value> {
 }
 
 struct UiState<B: Backend> {
-    port: u16,
+    bound: SocketAddr,
     backend: B,
     login_code_digest: Mutex<Option<[u8; 32]>>,
     session_token: String,
@@ -309,27 +310,30 @@ struct UiState<B: Backend> {
 }
 
 impl<B: Backend> UiState<B> {
-    fn new(port: u16, backend: B) -> (Self, String) {
+    fn new(bound: SocketAddr, backend: B) -> (Self, String) {
         let login_code = random_token();
         let session_token = random_token();
         let state = Self {
-            port,
+            bound,
             backend,
             login_code_digest: Mutex::new(Some(sha256(&login_code))),
             session_digest: sha256(&session_token),
             session_token,
-            cookie_name: format!("hubu_ui_session_{port}"),
+            cookie_name: format!("hubu_ui_session_{}", bound.port()),
             connections: AtomicUsize::new(0),
         };
         (state, login_code)
     }
 
-    fn allowed_hosts(&self) -> [String; 3] {
-        [
-            format!("127.0.0.1:{}", self.port),
-            format!("localhost:{}", self.port),
-            format!("[::1]:{}", self.port),
-        ]
+    /// The exact authority of the bound loopback address, plus `localhost`
+    /// when the listener is on the address `localhost` resolves to.
+    fn allowed_hosts(&self) -> Vec<String> {
+        let mut hosts = vec![host_for(self.bound)];
+        let ip = self.bound.ip();
+        if ip == std::net::Ipv4Addr::LOCALHOST || ip == std::net::Ipv6Addr::LOCALHOST {
+            hosts.push(format!("localhost:{}", self.bound.port()));
+        }
+        hosts
     }
 }
 
@@ -887,7 +891,7 @@ mod tests {
     }
 
     fn state() -> (UiState<FakeBackend>, String) {
-        UiState::new(8790, FakeBackend::default())
+        UiState::new("127.0.0.1:8790".parse().unwrap(), FakeBackend::default())
     }
 
     fn request(method: &str, target: &str) -> Request {
@@ -942,6 +946,26 @@ mod tests {
             .headers
             .insert("host".into(), "127.0.0.1:9999".into());
         assert_eq!(handle(&other_port, &state).status, 403);
+    }
+
+    #[test]
+    fn host_guard_follows_the_bound_loopback_address() {
+        let (state, _) = UiState::new("127.0.0.2:41001".parse().unwrap(), FakeBackend::default());
+        assert_eq!(state.allowed_hosts(), vec!["127.0.0.2:41001".to_string()]);
+        let mut ok = request("GET", "/");
+        ok.headers.insert("host".into(), "127.0.0.2:41001".into());
+        assert_eq!(handle(&ok, &state).status, 200);
+        let mut other = request("GET", "/");
+        other
+            .headers
+            .insert("host".into(), "127.0.0.1:41001".into());
+        assert_eq!(handle(&other, &state).status, 403);
+
+        let (v6, _) = UiState::new("[::1]:41002".parse().unwrap(), FakeBackend::default());
+        assert_eq!(
+            v6.allowed_hosts(),
+            vec!["[::1]:41002".to_string(), "localhost:41002".to_string()]
+        );
     }
 
     #[test]
