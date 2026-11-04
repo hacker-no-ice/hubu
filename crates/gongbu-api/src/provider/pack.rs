@@ -58,6 +58,9 @@ const USAGE_QUANTITIES: &[(&str, &str)] = &[
 
 /// The request quantity only an `images` parameter sets.
 const INPUT_IMAGES_QUANTITY: &str = "input_images";
+/// The request quantity an `input_megapixels` rule derives from the input
+/// images.
+const INPUT_MEGAPIXELS_QUANTITY: &str = "input_megapixels";
 /// Placeholders an `images` parameter's `item` template may use.
 const IMAGE_MEDIA_TYPE_PLACEHOLDER: &str = "image.media_type";
 const IMAGE_DATA_PLACEHOLDER: &str = "image.data";
@@ -195,6 +198,32 @@ struct PackDocument {
     /// `megapixel` or `additional_megapixel` unit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     megapixels: Option<MegapixelRule>,
+    /// How the input images an edit sends become billed megapixels when a
+    /// pricing rule prices the `input_megapixel` unit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    input_megapixels: Option<InputMegapixelRule>,
+}
+
+/// How the input images of an edit become billed megapixels, for a provider
+/// that bills them by size. One image bills its own rounded megapixels, at
+/// most `single_image_ceiling`; the frozen estimate takes that ceiling and the
+/// provider's reported cost settles the exact charge. Each of several images
+/// bills `per_image_when_several`.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct InputMegapixelRule {
+    pub single_image_ceiling: u32,
+    pub per_image_when_several: u32,
+}
+
+impl InputMegapixelRule {
+    /// Billed input megapixels frozen for `images` input images.
+    pub fn frozen(&self, images: i64) -> i64 {
+        match images {
+            1 => i64::from(self.single_image_ceiling),
+            images => images.saturating_mul(i64::from(self.per_image_when_several)),
+        }
+    }
 }
 
 /// One certified output size: the image the provider returns when every
@@ -428,9 +457,15 @@ pub struct Parameter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub equals: Option<Derived>,
     /// `images` only: the provider's shape for one input image, using
-    /// `{{image.media_type}}` and `{{image.data}}` (base64 bytes).
+    /// `{{image.media_type}}` and `{{image.data}}` (base64 bytes). An object,
+    /// or a bare placeholder string when the provider takes the data alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub item: Option<Map<String, Value>>,
+    pub item: Option<Value>,
+    /// `images` only: top-level body fields that receive the images in order,
+    /// one each, for a provider that takes numbered fields rather than an
+    /// array. Fields past the last image are left out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<String>,
 }
 
 /// A value derived from another parameter rather than chosen freely.
@@ -806,6 +841,7 @@ impl Pack {
             .with_workload(&self.document.workload_type);
         let mut values = BTreeMap::from([(MODEL_PLACEHOLDER.to_owned(), json!(model.model))]);
         let mut spliced = BTreeSet::new();
+        let mut keyed = Vec::new();
         let mut unrendered = false;
         if let Some(dimensions) = &dimensions {
             values.insert(OUTPUT_WIDTH_PLACEHOLDER.to_owned(), json!(dimensions.width));
@@ -844,6 +880,12 @@ impl Pack {
                 if let Some(quantity) = &parameter.quantity {
                     request.set_quantity(quantity, Some(ids.len() as i64));
                 }
+                if let Some(rule) = &self.document.input_megapixels {
+                    request.set_quantity(
+                        INPUT_MEGAPIXELS_QUANTITY,
+                        Some(rule.frozen(ids.len() as i64)),
+                    );
+                }
                 let Some(images) = images else {
                     unrendered = true;
                     continue;
@@ -863,12 +905,15 @@ impl Pack {
                         ),
                     ]);
                     items.push(
-                        render_template(&Value::Object(item.clone()), &fields, &BTreeSet::new())
-                            .ok_or_else(indeterminable)?,
+                        render_value(item, &fields, &BTreeSet::new()).ok_or_else(indeterminable)?,
                     );
                 }
-                spliced.insert(parameter.name.clone());
-                values.insert(parameter.name.clone(), Value::Array(items));
+                if parameter.fields.is_empty() {
+                    spliced.insert(parameter.name.clone());
+                    values.insert(parameter.name.clone(), Value::Array(items));
+                } else {
+                    keyed.extend(parameter.fields.iter().cloned().zip(items));
+                }
                 continue;
             }
             if let Some(quantity) = &parameter.quantity {
@@ -900,12 +945,15 @@ impl Pack {
         }
         request.output_dimensions = dimensions;
         request.validate()?;
-        let body = match self.document.request.as_ref().and_then(|r| r.body.as_ref()) {
+        let mut body = match self.document.request.as_ref().and_then(|r| r.body.as_ref()) {
             Some(_) if unrendered => Value::Null,
             Some(template) => render_template(&Value::Object(template.clone()), &values, &spliced)
                 .ok_or_else(indeterminable)?,
             None => Value::Object(flat),
         };
+        if let Some(body) = body.as_object_mut() {
+            body.extend(keyed);
+        }
         Ok(PreparedRequest { request, body })
     }
 
@@ -1001,6 +1049,11 @@ impl Pack {
         self.document.megapixels.as_ref()
     }
 
+    /// How input images become billed megapixels, for discovery.
+    pub fn input_megapixel_rule(&self) -> Option<&InputMegapixelRule> {
+        self.document.input_megapixels.as_ref()
+    }
+
     /// The provider request URL: the endpoint plus the declared request path.
     pub fn request_url(&self) -> Url {
         let mut url = Url::parse(&self.document.transport.endpoint).expect("validated endpoint");
@@ -1087,6 +1140,9 @@ impl Pack {
                 *slot = request.quantity(quantity);
             }
         }
+        // The frozen input megapixels are a ceiling; the provider's reported
+        // cost, which such a pack must map, settles the exact charge.
+        usage.input_megapixels = request.quantity(INPUT_MEGAPIXELS_QUANTITY);
         // Fixed-price settlement uses frozen prices and delivered usage;
         // a provider-controlled amount must never override that calculation.
         let actual_vendor_cost = if self.archetype() == Archetype::SyncFixed {
@@ -1104,6 +1160,12 @@ impl Pack {
                 ),
             }
         };
+        // Frozen input megapixels are only a ceiling, so settling them from
+        // usage could overcharge: without the provider's reported cost the
+        // charge is unknown and goes to reconciliation.
+        if usage.input_megapixels.is_some() && actual_vendor_cost.is_none() {
+            return Err(ambiguous("pack_response_cost_missing"));
+        }
         let items = match select_path(body, &mapping.artifact_items).as_slice() {
             [Value::Array(items)] => items.iter().collect::<Vec<_>>(),
             items => items.to_vec(),
@@ -1381,6 +1443,9 @@ impl Parameter {
         if self.item.is_some() {
             only(images, "item")?;
         }
+        if !self.fields.is_empty() {
+            only(images, "fields")?;
+        }
         if images {
             self.validate_images(field)?;
         } else if self.quantity.as_deref() == Some(INPUT_IMAGES_QUANTITY) {
@@ -1530,8 +1595,18 @@ impl Parameter {
                 "an images parameter declares the provider's shape for one image",
             )
         })?;
+        if !(item.is_object()
+            || item
+                .as_str()
+                .is_some_and(|text| placeholder(text).is_some()))
+        {
+            return Err(invalid(
+                format!("{field}.item"),
+                "must be a table or a single placeholder",
+            ));
+        }
         let mut referenced = BTreeSet::new();
-        collect_placeholders(&Value::Object(item.clone()), &mut referenced)
+        collect_placeholders(item, &mut referenced)
             .map_err(|reason| invalid(format!("{field}.item"), reason))?;
         if referenced.iter().any(|(name, transform)| {
             transform.is_some()
@@ -1547,6 +1622,22 @@ impl Parameter {
                 format!("{field}.item"),
                 "must send {{image.data}} and may use only {{image.media_type}} besides",
             ));
+        }
+        if !self.fields.is_empty() {
+            let distinct: BTreeSet<_> = self.fields.iter().collect();
+            if Some(self.fields.len() as i64) != self.max
+                || distinct.len() != self.fields.len()
+                || !self.fields.iter().all(|name| valid_field_name(name))
+                || self
+                    .fields
+                    .iter()
+                    .any(|name| ENGINE_OWNED_FIELDS.iter().any(|(owned, _)| owned == name))
+            {
+                return Err(invalid(
+                    format!("{field}.fields"),
+                    "must name max distinct body fields, one per image",
+                ));
+            }
         }
         Ok(())
     }
@@ -1652,17 +1743,21 @@ impl PackDocument {
         }
         self.validate_megapixels()?;
         quantities.extend(self.derived_quantities());
+        self.validate_input_megapixels()?;
+        if self.input_megapixels.is_some() {
+            quantities.insert(INPUT_MEGAPIXELS_QUANTITY);
+        }
         if let Some(parameter) = self
             .parameters
             .iter()
             .find(|p| p.kind == ParameterKind::Images)
         {
-            // Only the sync_fixed engine loads input images today.
-            if self.archetype != Archetype::SyncFixed {
+            // The sync_fixed and async_poll engines load input images.
+            if !matches!(self.archetype, Archetype::SyncFixed | Archetype::AsyncPoll) {
                 return Err(invalid(
                     "archetype",
                     format!(
-                        "images parameter {} needs the sync_fixed engine",
+                        "images parameter {} needs the sync_fixed or async_poll engine",
                         parameter.name
                     ),
                 ));
@@ -2024,6 +2119,21 @@ impl PackDocument {
                 "an images placeholder must be a whole element of an array",
             ));
         }
+        // Images sent in numbered fields are written beside the template,
+        // never through it.
+        for (index, parameter) in self.parameters.iter().enumerate() {
+            if parameter.fields.is_empty() {
+                continue;
+            }
+            if referenced.iter().any(|(name, _)| name == &parameter.name)
+                || parameter.fields.iter().any(|name| body.contains_key(name))
+            {
+                return Err(invalid(
+                    format!("parameters[{index}].fields"),
+                    "images sent in fields must not appear in request.body",
+                ));
+            }
+        }
         for (name, transform) in &referenced {
             let parameter = self.parameters.iter().find(|p| &p.name == name);
             let derived = matches!(
@@ -2072,7 +2182,8 @@ impl PackDocument {
                 }
                 _ => false,
             };
-            if !constant && !referenced.iter().any(|(name, _)| name == &parameter.name) {
+            let keyed = !parameter.fields.is_empty();
+            if !constant && !keyed && !referenced.iter().any(|(name, _)| name == &parameter.name) {
                 return Err(invalid(
                     format!("parameters[{index}].name"),
                     "is never sent; reference it in request.body or make it a constant",
@@ -2203,6 +2314,57 @@ impl PackDocument {
                     ),
                 ));
             }
+        }
+        Ok(())
+    }
+
+    /// A pack that prices input megapixels declares how to count them, takes
+    /// input images, and settles from the provider's reported cost, since the
+    /// frozen quantity for one image is only a ceiling.
+    fn validate_input_megapixels(&self) -> Result<(), PackError> {
+        let priced = self
+            .models
+            .iter()
+            .flat_map(|model| &model.pricing_rules)
+            .flat_map(|rule| &rule.components)
+            .any(|c| c.unit == PricingUnit::InputMegapixel);
+        let Some(rule) = &self.input_megapixels else {
+            return if priced {
+                Err(invalid(
+                    "input_megapixels",
+                    "a pack that prices input_megapixel must declare how they are counted",
+                ))
+            } else {
+                Ok(())
+            };
+        };
+        if !priced {
+            return Err(invalid(
+                "input_megapixels",
+                "no pricing rule prices input_megapixel",
+            ));
+        }
+        if rule.single_image_ceiling == 0 || rule.per_image_when_several == 0 {
+            return Err(invalid(
+                "input_megapixels",
+                "single_image_ceiling and per_image_when_several must be positive",
+            ));
+        }
+        if !self
+            .parameters
+            .iter()
+            .any(|p| p.kind == ParameterKind::Images)
+        {
+            return Err(invalid(
+                "input_megapixels",
+                "input megapixels need an images parameter",
+            ));
+        }
+        if self.archetype == Archetype::SyncFixed || self.response.reported_cost.is_none() {
+            return Err(invalid(
+                "input_megapixels",
+                "input megapixels settle from response.reported_cost, which sync_fixed ignores",
+            ));
         }
         Ok(())
     }
@@ -2705,48 +2867,52 @@ fn render_template(
     values: &BTreeMap<String, Value>,
     spliced: &BTreeSet<String>,
 ) -> Option<Value> {
-    fn render(
-        template: &Value,
-        values: &BTreeMap<String, Value>,
-        spliced: &BTreeSet<String>,
-    ) -> Option<Value> {
-        match template {
-            Value::String(text) => match placeholder(text) {
-                Some((name, transform)) => {
-                    let value = values.get(name)?;
-                    Some(match (transform, value.as_str()) {
-                        (Some("upper"), Some(text)) => json!(text.to_ascii_uppercase()),
-                        (Some("lower"), Some(text)) => json!(text.to_ascii_lowercase()),
-                        _ => value.clone(),
-                    })
-                }
-                None => Some(template.clone()),
-            },
-            Value::Object(map) => Some(Value::Object(
-                map.iter()
-                    .filter_map(|(key, value)| Some((key.clone(), render(value, values, spliced)?)))
-                    .collect(),
-            )),
-            Value::Array(items) => {
-                let mut rendered = Vec::with_capacity(items.len());
-                for item in items {
-                    let splice = item
-                        .as_str()
-                        .and_then(placeholder)
-                        .filter(|(name, _)| spliced.contains(*name));
-                    match splice {
-                        Some((name, _)) => {
-                            rendered.extend(values.get(name)?.as_array()?.iter().cloned())
-                        }
-                        None => rendered.extend(render(item, values, spliced)),
-                    }
-                }
-                Some(Value::Array(rendered))
+    render_value(template, values, spliced).filter(Value::is_object)
+}
+
+/// Render one validated template value, which may be a bare placeholder.
+fn render_value(
+    template: &Value,
+    values: &BTreeMap<String, Value>,
+    spliced: &BTreeSet<String>,
+) -> Option<Value> {
+    match template {
+        Value::String(text) => match placeholder(text) {
+            Some((name, transform)) => {
+                let value = values.get(name)?;
+                Some(match (transform, value.as_str()) {
+                    (Some("upper"), Some(text)) => json!(text.to_ascii_uppercase()),
+                    (Some("lower"), Some(text)) => json!(text.to_ascii_lowercase()),
+                    _ => value.clone(),
+                })
             }
-            other => Some(other.clone()),
+            None => Some(template.clone()),
+        },
+        Value::Object(map) => Some(Value::Object(
+            map.iter()
+                .filter_map(|(key, value)| {
+                    Some((key.clone(), render_value(value, values, spliced)?))
+                })
+                .collect(),
+        )),
+        Value::Array(items) => {
+            let mut rendered = Vec::with_capacity(items.len());
+            for item in items {
+                let splice = item
+                    .as_str()
+                    .and_then(placeholder)
+                    .filter(|(name, _)| spliced.contains(*name));
+                match splice {
+                    Some((name, _)) => {
+                        rendered.extend(values.get(name)?.as_array()?.iter().cloned())
+                    }
+                    None => rendered.extend(render_value(item, values, spliced)),
+                }
+            }
+            Some(Value::Array(rendered))
         }
+        other => Some(other.clone()),
     }
-    render(template, values, spliced).filter(Value::is_object)
 }
 
 /// A provider-reported decimal amount in USD, shifted right by `scale`
@@ -4715,5 +4881,98 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("input_images"), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod numbered_input_tests {
+    use super::*;
+
+    const FLUX_EDIT: &str = include_str!("../../../../packs/verified/bfl-flux-2-edit.toml");
+
+    fn flux_edit(from: &str, to: &str) -> Result<Pack, PackError> {
+        assert!(FLUX_EDIT.contains(from), "{from}");
+        Pack::from_toml_str(&FLUX_EDIT.replacen(from, to, 1))
+    }
+
+    #[test]
+    fn numbered_input_fields_and_input_megapixels_are_validated() {
+        Pack::from_toml_str(FLUX_EDIT).unwrap();
+        let fields =
+            r#"fields = ["input_image", "input_image_2", "input_image_3", "input_image_4"]"#;
+        for (from, to, field) in [
+            // One field per image the parameter can take.
+            (fields, r#"fields = ["input_image", "input_image_2", "input_image_3"]"#, "parameters[1].fields"),
+            (fields, r#"fields = ["input_image", "input_image", "input_image_3", "input_image_4"]"#, "parameters[1].fields"),
+            (fields, r#"fields = ["input_image", "Input-2", "input_image_3", "input_image_4"]"#, "parameters[1].fields"),
+            (fields, r#"fields = ["input_image", "retries", "input_image_3", "input_image_4"]"#, "parameters[1].fields"),
+            // A numbered field never overwrites a templated one.
+            (fields, r#"fields = ["input_image", "prompt", "input_image_3", "input_image_4"]"#, "parameters[1].fields"),
+            // Images go through fields or the template, not both.
+            (r#"prompt = "{{prompt}}""#, "prompt = \"{{prompt}}\"\nimages = [\"{{input_images}}\"]", "parameters[1].fields"),
+            (r#"item = "{{image.data}}""#, r#"item = "data:{{image.data}}""#, "parameters[1].item"),
+            (r#"item = "{{image.data}}""#, r#"item = "{{prompt}}""#, "parameters[1].item"),
+            (
+                "max_length = 32000\n",
+                "max_length = 32000\nfields = [\"text\"]\n",
+                "parameters[0].fields",
+            ),
+            // Priced input megapixels need their rule, positive counts, and
+            // a provider-reported cost to settle the exact charge.
+            ("[input_megapixels]\nsingle_image_ceiling = 4\nper_image_when_several = 1\n", "", "input_megapixels"),
+            ("single_image_ceiling = 4", "single_image_ceiling = 0", "input_megapixels"),
+            ("reported_cost = \"/cost\"\n", "", "input_megapixels"),
+            (
+                "  { unit = \"input_megapixel\", rate_numerator_minor = 3, rate_denominator = 2 },\n",
+                "",
+                "input_megapixels",
+            ),
+        ] {
+            let error = flux_edit(from, to).unwrap_err();
+            assert!(
+                matches!(&error, PackError::Invalid { field: f, .. } if f == field),
+                "{from} -> {to}: {error}"
+            );
+        }
+        // No input parameter may claim the derived quantity.
+        let error = flux_edit(
+            "min = 1\nmax = 1\ndefault = 1\nquantity = \"image_count\"",
+            "min = 1\nmax = 1\ndefault = 1\nquantity = \"input_megapixels\"",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("quantity"), "{error}");
+    }
+
+    #[test]
+    fn numbered_input_fields_leave_out_fields_past_the_last_image() {
+        struct Two;
+        impl InputImageSource for Two {
+            fn load(
+                &self,
+                id: &str,
+            ) -> Result<crate::provider::contract::InputImage, ContractError> {
+                Ok(crate::provider::contract::InputImage {
+                    media_type: "image/png".into(),
+                    bytes: id.as_bytes()[..2].to_vec(),
+                })
+            }
+        }
+        let pack = Pack::from_toml_str(FLUX_EDIT).unwrap();
+        let a = "0f5c2a64-3f0e-4c9b-9a51-2b7d1c4e8a10";
+        let b = "1a6d3b75-4f1f-4dad-8b62-3c8e2d5f9b21";
+        let input = json!({"prompt": "x", "image_size": "1k", "aspect_ratio": "1:1",
+                           "input_images": [a, b]});
+        // Pricing never needs the bytes: the body stays unrendered.
+        let priced = pack.prepare("flux-2-pro", &input).unwrap();
+        assert_eq!(priced.body, Value::Null);
+        assert_eq!(priced.request.quantity("input_megapixels"), Some(2));
+        let sent = pack
+            .prepare_with_images("flux-2-pro", &input, &Two)
+            .unwrap();
+        assert_eq!(sent.request, priced.request);
+        let body = sent.body.as_object().unwrap();
+        assert_eq!(body["input_image"], json!("MGY="));
+        assert_eq!(body["input_image_2"], json!("MWE="));
+        assert!(!body.contains_key("input_image_3") && !body.contains_key("input_images"));
     }
 }

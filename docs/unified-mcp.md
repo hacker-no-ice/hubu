@@ -402,7 +402,9 @@ workload type, provider/model labels, authorization scope, supported
 target also returns `input_images`, naming the input parameter that takes the
 artifact IDs of earlier governed executions' images, or the pinned tokens
 `gongbu_list_reference_images` returns for the operator's
-[reference images](gongbu-execution.md#reference-images); see
+[reference images](gongbu-execution.md#reference-images), and, when it prices
+them by size, `input_megapixels`, the rule that counts their billed
+megapixels; see
 [editing an image](gongbu-execution.md#editing-an-image). It omits adapter
 settings, endpoints, headers, credentials, and provider configuration
 revisions. Execution tools accept only the discovered `target_id`; provider,

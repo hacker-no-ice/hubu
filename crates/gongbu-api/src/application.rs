@@ -2097,6 +2097,325 @@ mod tests {
     }
 
     #[test]
+    fn a_flux_draft_is_edited_by_artifact_id_and_both_settle_bfl_credits() {
+        use crate::{
+            artifact::{ArtifactLimits, LocalFsStorage},
+            execution::{CreateExecutionParams, HubuTokenReference},
+            provider::{
+                http_kernel::{ArtifactDownloadPolicy, InvocationDeadline},
+                pack::{Archetype, ArtifactFetchError, Pack},
+                pack_async::AsyncPollEngine,
+                pack_sync::{SyncTransport, TransportFailure, TransportResponse},
+                verified_packs::verified_packs,
+            },
+            secrets::{ProviderSecret, SecretError, SecretReference},
+        };
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        use image::{DynamicImage, ImageOutputFormat, RgbaImage};
+        use serde_json::json;
+        use std::{
+            collections::BTreeMap,
+            io::Cursor,
+            sync::{
+                atomic::{AtomicUsize, Ordering},
+                Mutex,
+            },
+            time::Duration,
+        };
+        use tempfile::tempdir;
+
+        fn png(width: u32, height: u32, rgba: [u8; 4]) -> Vec<u8> {
+            let mut png = Vec::new();
+            DynamicImage::ImageRgba8(RgbaImage::from_pixel(width, height, image::Rgba(rgba)))
+                .write_to(&mut Cursor::new(&mut png), ImageOutputFormat::Png)
+                .unwrap();
+            png
+        }
+        struct FixtureSecrets;
+        impl SecretProvider for FixtureSecrets {
+            fn resolve(&self, _: &SecretReference) -> Result<ProviderSecret, SecretError> {
+                Ok(crate::secrets::secret_for_test("fixture-secret"))
+            }
+        }
+        /// Accepts each submission as its own job. The draft is a prompt
+        /// alone; the edit must carry the draft's bytes as input_image. Each
+        /// job reports BFL's credits for what it billed.
+        struct FixtureTransport {
+            bodies: Mutex<Vec<serde_json::Value>>,
+            polls: AtomicUsize,
+            draft: Vec<u8>,
+            edited: Vec<u8>,
+        }
+        impl SyncTransport for FixtureTransport {
+            fn post_json(
+                &self,
+                url: &reqwest::Url,
+                _: (&str, &str),
+                _: &BTreeMap<String, String>,
+                body: &serde_json::Value,
+                _: Duration,
+            ) -> Result<TransportResponse, TransportFailure> {
+                assert_eq!(url.as_str(), "https://api.bfl.ai/v1/flux-2-pro");
+                let mut bodies = self.bodies.lock().unwrap();
+                bodies.push(body.clone());
+                let job = format!("job-{}", bodies.len());
+                Ok(TransportResponse {
+                    status: 200,
+                    headers: BTreeMap::from([("x-request-id".into(), format!("req-{job}"))]),
+                    body: json!({"id": job,
+                        "polling_url": format!("https://api.us1.bfl.ai/v1/get_result?id={job}")}),
+                })
+            }
+            fn get_json(
+                &self,
+                url: &reqwest::Url,
+                _: (&str, &str),
+                _: &BTreeMap<String, String>,
+                _: Duration,
+            ) -> Result<TransportResponse, TransportFailure> {
+                self.polls.fetch_add(1, Ordering::SeqCst);
+                let edit = url.as_str().ends_with("job-2");
+                Ok(TransportResponse {
+                    status: 200,
+                    headers: BTreeMap::new(),
+                    body: json!({"id": if edit { "job-2" } else { "job-1" }, "status": "Ready",
+                    // 3 credits for the 1 MP output, plus 1.5 for the
+                    // edit's 1 MP input image.
+                    "cost": if edit { 4.5 } else { 3.0 },
+                    "result": {"sample": if edit {
+                        "https://delivery.us1.bfl.ai/edit.png"
+                    } else {
+                        "https://delivery.us1.bfl.ai/draft.png"
+                    }}}),
+                })
+            }
+            fn download(
+                &self,
+                url: &reqwest::Url,
+                policy: &ArtifactDownloadPolicy,
+                _: InvocationDeadline,
+            ) -> Result<Vec<u8>, ArtifactFetchError> {
+                policy
+                    .validate_url(url)
+                    .map_err(|_| ArtifactFetchError::Failed)?;
+                Ok(if url.path() == "/edit.png" {
+                    self.edited.clone()
+                } else {
+                    self.draft.clone()
+                })
+            }
+        }
+        #[derive(Default)]
+        struct LedgerHubu {
+            claims: AtomicUsize,
+            settled: Mutex<Vec<i64>>,
+        }
+        impl HubuActivities for LedgerHubu {
+            fn preflight(&self, _: &Execution) -> Result<(), WorkflowActivityError> {
+                Ok(())
+            }
+            fn claim(&self, _: &Execution) -> Result<String, WorkflowActivityError> {
+                self.claims.fetch_add(1, Ordering::SeqCst);
+                Ok("claim".into())
+            }
+            fn validate_claim(&self, _: &Execution) -> Result<(), WorkflowActivityError> {
+                Ok(())
+            }
+            fn settle(
+                &self,
+                _: &Execution,
+                _: &str,
+                units: i64,
+            ) -> Result<String, WorkflowActivityError> {
+                let mut settled = self.settled.lock().unwrap();
+                settled.push(units);
+                Ok(format!("settlement-{}", settled.len()))
+            }
+            fn release(&self, _: &Execution) -> Result<(), WorkflowActivityError> {
+                Ok(())
+            }
+        }
+
+        let transport = Arc::new(FixtureTransport {
+            bodies: Mutex::default(),
+            polls: AtomicUsize::new(0),
+            draft: png(1024, 1024, [1, 2, 3, 255]),
+            edited: png(1024, 1024, [0, 0, 255, 255]),
+        });
+        // FLUX.2 [pro] v2 text-to-image and its edit target.
+        let packs: Vec<Pack> = verified_packs()
+            .into_iter()
+            .filter(|pack| {
+                (pack.pack_id() == "bfl-flux-2" && pack.has_size_presets())
+                    || pack.pack_id() == "bfl-flux-2-edit"
+            })
+            .collect();
+        assert_eq!(packs.len(), 2);
+        let secret = SecretReference::new("gongbu.flux", "fixture").unwrap();
+        let targets: ProviderTargetConfig = serde_json::from_value(json!({
+            "schema_version": 2,
+            "provider_configs": packs
+                .iter()
+                .flat_map(|pack| pack.provider_configs(&secret))
+                .collect::<Vec<_>>(),
+        }))
+        .unwrap();
+        let pricing = PricingCatalog::from_json(
+            &serde_json::to_vec(&json!({
+                "schema_version": 2,
+                "catalog_version": "flux-edit-test",
+                "rules": packs.iter().flat_map(Pack::pricing_rules).collect::<Vec<_>>(),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let repository = Repository::in_memory().unwrap();
+        let create = |workload: &str, account: &str, key: &str, input: serde_json::Value| {
+            let pack = packs
+                .iter()
+                .find(|pack| pack.workload_type() == workload)
+                .unwrap();
+            let model = pack.model("flux-2-pro").unwrap();
+            let target = targets.resolve_active(&pack.target_key(model)).unwrap();
+            let request = pack.prepare(&model.model, &input).unwrap().request;
+            let snapshot = pricing
+                .snapshot_for_target(&target.target_key(), &request)
+                .unwrap();
+            repository
+                .create_execution(&CreateExecutionParams {
+                    account_id: account.into(),
+                    operation_key: key.into(),
+                    hubu_authorization_id: key.into(),
+                    hubu_claim_id: None,
+                    hubu_token_reference: HubuTokenReference::new(key).unwrap(),
+                    authorized_units: snapshot.estimated_units,
+                    authorization_currency: "USD".into(),
+                    normalized_input: input,
+                    input_hash: "hash".into(),
+                    input_schema_version: 1,
+                    target: target.target_key().canonical_name(),
+                    config_version: target.provider_config_version.clone(),
+                    workload_type: target.workload_type.clone(),
+                    provider: target.provider.clone(),
+                    adapter: target.adapter.clone(),
+                    model: target.model.clone(),
+                    provider_config_version: target.provider_config_version.clone(),
+                    provider_config_digest: target.digest().to_owned(),
+                    pricing_snapshot: serde_json::to_value(&snapshot).unwrap(),
+                    pricing_schema_version: i64::from(snapshot.schema_version),
+                    execution_scope: None,
+                    created_at: "now".into(),
+                })
+                .unwrap()
+        };
+        let root = tempdir().unwrap();
+        let artifact_service = ArtifactService::new(
+            repository.clone(),
+            LocalFsStorage::new(root.path()),
+            ArtifactLimits::default(),
+        );
+        let hubu = Arc::new(LedgerHubu::default());
+        let mut registry = ProviderRegistry::new();
+        for pack in &packs {
+            registry.register_pack(pack.clone());
+        }
+        let engine_transport = transport.clone();
+        registry.register_pack_engine(Archetype::AsyncPoll, move |target, pack| {
+            Ok(Arc::new(
+                AsyncPollEngine::new(
+                    pack.clone(),
+                    &target.model,
+                    engine_transport.clone(),
+                    ArtifactLimits::default().max_encoded_bytes,
+                )?
+                .with_poll_interval_for_tests(Duration::from_millis(1)),
+            ))
+        });
+        let providers =
+            ValidatedProviderCatalog::bind(targets.clone(), pricing.clone(), &registry).unwrap();
+        let runner = provider_execution_runner(
+            repository.clone(),
+            hubu.clone(),
+            artifact_service.clone(),
+            providers,
+            Arc::new(FixtureSecrets),
+            || "now".into(),
+        );
+
+        let draft = create(
+            "image_generation",
+            "account",
+            "draft",
+            json!({"prompt": "draw a cat", "image_size": "1k", "aspect_ratio": "1:1"}),
+        );
+        assert_eq!(
+            runner.run_execution(&draft.execution_id, None).unwrap(),
+            "succeeded"
+        );
+        let draft_artifact = artifact_service
+            .list_for_account(&draft.execution_id, "account")
+            .unwrap()
+            .remove(0);
+
+        let edit_input = json!({
+            "prompt": "make it blue",
+            "image_size": "1k",
+            "aspect_ratio": "1:1",
+            "input_images": [draft_artifact.artifact_id],
+        });
+        // Another account can't name this account's draft.
+        let foreign = create("image_edit", "intruder", "foreign-edit", edit_input.clone());
+        assert_eq!(
+            runner.run_execution(&foreign.execution_id, None).unwrap(),
+            "failed"
+        );
+        assert_eq!(transport.bodies.lock().unwrap().len(), 1);
+        assert_eq!(hubu.claims.load(Ordering::SeqCst), 1);
+
+        let edit = create("image_edit", "account", "edit", edit_input);
+        for _ in 0..2 {
+            assert_eq!(
+                runner.run_execution(&edit.execution_id, None).unwrap(),
+                "succeeded"
+            );
+        }
+        // One submission each, however often the edit is replayed; the edit
+        // sends the draft's verified bytes as BFL's input_image.
+        let bodies = transport.bodies.lock().unwrap().clone();
+        assert_eq!(bodies.len(), 2);
+        assert!(bodies[0].get("input_image").is_none());
+        assert_eq!(
+            bodies[1]["input_image"],
+            json!(STANDARD.encode(&transport.draft))
+        );
+        assert_eq!(transport.polls.load(Ordering::SeqCst), 2);
+        let edited = artifact_service
+            .list_for_account(&edit.execution_id, "account")
+            .unwrap();
+        assert_eq!(
+            artifact_service
+                .retrieve_for_account(&edited[0].artifact_id, "account")
+                .unwrap()
+                .bytes,
+            transport.edited
+        );
+        // The edit held 3¢ + 4 × 1.5¢ and settled BFL's 4.5 credits.
+        let hold: crate::provider::contract::PricingSnapshot =
+            serde_json::from_value(edit.pricing_snapshot.clone()).unwrap();
+        assert_eq!(hold.estimated_units, 90_000);
+        assert_eq!(*hubu.settled.lock().unwrap(), [30_000, 45_000]);
+        for (execution, units) in [(&draft, 30_000), (&edit, 45_000)] {
+            assert_eq!(
+                repository
+                    .get_receipt_for_execution(&execution.execution_id)
+                    .unwrap()
+                    .settlement_units,
+                units
+            );
+        }
+    }
+
+    #[test]
     fn flux_tampered_dimension_evidence_fails_before_claim_attempt_or_transport() {
         use crate::{
             artifact::{ArtifactLimits, LocalFsStorage},

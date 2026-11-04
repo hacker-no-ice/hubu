@@ -1,0 +1,158 @@
+# Verified provider pack: Black Forest Labs FLUX 3 Image image editing, v1
+# contract (HUB-254).
+#
+# Same endpoint, credential, resolution tiers, polling and delivery rules as
+# bfl-flux-3-image-v2.toml: BFL edits on /v1/flux-3-image when the request
+# carries reference images. Each input image is the verified bytes of an
+# artifact this account's earlier governed executions delivered, sent
+# base64-encoded in BFL's `images` array; the first is the image edited.
+# Request reviewed 2026-11-03 against BFL's API reference ("Generate an
+# image with FLUX 3",
+# https://docs.bfl.ml/api-reference/utility/generate-an-image-with-flux-3.md):
+# BFL takes 1 to 10 reference images; this pack sends at most 4 to keep the
+# request body bounded. The aspect ratio is required: under BFL's `auto`
+# default the output follows the reference image's framing, which no
+# certified tier and ratio covers. Web-search grounding stays off.
+#
+# BFL prices FLUX 3 Image by resolution tier, and reference images are
+# included at no extra charge: an edit costs what text-to-image costs at
+# the same tier, at any aspect ratio and with any number of reference
+# images. Pricing reviewed 2026-11-03 against https://bfl.ai/pricing (the
+# FLUX 3 note on reference images and the FLUX 3 Image tier rates). BFL
+# doesn't publish the exact pixel size of each tier and ratio, so this pack
+# certifies the tier and ratio it sends, not a size.
+# contracts/provider-contracts-v1.json carries this pack's checked-in
+# projection, and Gongbu's tests fail if the two ever disagree.
+schema_version = 1
+pack_id = "bfl-flux-3-image-edit"
+pack_version = "2026-11-03.1"
+provider = "flux"
+display_name = "Black Forest Labs FLUX 3 Image"
+billing_merchant = "merchant:black-forest-labs"
+capability = "capability:image:edit"
+workload_type = "image_edit"
+archetype = "async_poll"
+adapter = "flux2_api"
+pricing_trust = "verified"
+
+[transport]
+endpoint = "https://api.bfl.ai"
+api_version = "v1"
+# Regional API hosts receive the credential when BFL returns them for polling.
+allowed_hosts = ["api.bfl.ai", "api.*.bfl.ai"]
+auth_header = "x-key"
+credential = "bfl_flux3_image"
+timeout_ms = 270000
+
+[request]
+path = "/v1/flux-3-image"
+
+[request.body]
+prompt = "{{prompt}}"
+images = ["{{input_images}}"]
+resolution = "{{image_size}}"
+aspect_ratio = "{{aspect_ratio}}"
+safety_tolerance = "{{options.safety_tolerance}}"
+grounding = false
+
+[[parameters]]
+name = "prompt"
+type = "string"
+required = true
+max_length = 32000
+
+# Artifact IDs of images this account's earlier governed executions delivered.
+[[parameters]]
+name = "input_images"
+type = "images"
+required = true
+min = 1
+max = 4
+item = "{{image.data}}"
+
+[[parameters]]
+name = "image_count"
+type = "integer"
+min = 1
+max = 1
+default = 1
+quantity = "image_count"
+
+# No 4k: BFL caps an output with reference images at 4,194,304 pixels, the
+# 2k tier.
+[[parameters]]
+name = "image_size"
+type = "enum"
+values = ["768sq", "1k", "1.5k", "2k"]
+required = true
+selector = "image_size"
+
+[[parameters]]
+name = "aspect_ratio"
+type = "enum"
+values = ["21:9", "2:1", "16:9", "3:2", "7:5", "4:3", "5:4", "1:1", "4:5", "3:4", "5:7", "2:3", "9:16", "1:2", "9:21"]
+required = true
+
+[[parameters]]
+name = "options.safety_tolerance"
+type = "integer"
+min = 0
+max = 5
+
+[poll]
+job_id = "/id"
+path = "/v1/get_result"
+query = { id = "{{job_id}}" }
+url = "/polling_url"
+hosts = ["api.bfl.ai", "api.*.bfl.ai"]
+interval_ms = 500
+status = "/status"
+pending = ["pending", "reasoning", "generating"]
+ready = ["ready", "succeeded", "completed"]
+rejected = { "request moderated" = "provider_request_moderated", "content moderated" = "provider_content_moderated", "error" = "provider_error", "failed" = "provider_error", "rejected" = "provider_rejected" }
+ambiguous = { "task not found" = "provider_task_not_found" }
+
+[response]
+request_id_headers = ["x-request-id", "x-bfl-request-id"]
+provider_request_id = "/request_id"
+# BFL reports settled cost in credits; one credit is exactly USD 0.01.
+reported_cost = "/cost"
+reported_cost_scale = 2
+artifact_items = "/result"
+artifact_url = "/sample"
+
+[artifacts]
+media_types = ["image/png", "image/jpeg"]
+hosts = ["delivery.*.bfl.ai"]
+
+[[models]]
+model = "flux-3-image"
+provider_config_version = "hubu-flux-3-image-edit-2026-11-03-v1"
+pricing_version = "bfl-flux-3-image-edit-usd-2026-11-03-v1"
+pricing_reviewed_on = "2026-11-03"
+
+# USD 0.041 per 768sq image, USD 0.048 per 1k, USD 0.07 per 1.5k and USD 0.10
+# per 2k image, at any aspect ratio and with any number of reference images.
+[[models.pricing_rules]]
+rule_id = "bfl-flux-3-image-edit-768sq-2026-11-03-v1"
+currency = "USD"
+selector = { image_size = "768sq" }
+components = [{ unit = "image", rate_numerator_minor = 41, rate_denominator = 10 }]
+
+[[models.pricing_rules]]
+rule_id = "bfl-flux-3-image-edit-1k-2026-11-03-v1"
+currency = "USD"
+selector = { image_size = "1k" }
+components = [{ unit = "image", rate_numerator_minor = 48, rate_denominator = 10 }]
+
+[[models.pricing_rules]]
+rule_id = "bfl-flux-3-image-edit-1.5k-2026-11-03-v1"
+currency = "USD"
+selector = { image_size = "1.5k" }
+components = [{ unit = "image", rate_numerator_minor = 7, rate_denominator = 1 }]
+
+[[models.pricing_rules]]
+rule_id = "bfl-flux-3-image-edit-2k-2026-11-03-v1"
+currency = "USD"
+selector = { image_size = "2k" }
+components = [{ unit = "image", rate_numerator_minor = 10, rate_denominator = 1 }]
