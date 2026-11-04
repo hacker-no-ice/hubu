@@ -446,8 +446,10 @@ function pagedLoader(container, fetchPage, pick, renderRows) {
 
 // Decisions
 
+// Mirrors GovernanceCategory in crates/hubu-core/src/spend/governance_query.rs.
 const CATEGORIES = ["initial_policy", "automated_admission", "admission_failure", "human_escalation",
-  "human_resolution", "authorization", "authorization_release", "financial_outcome", "reconciliation"];
+  "human_resolution", "authorization", "authorization_release", "execution_start", "execution_failure",
+  "execution_finalization", "reconciliation_entry", "reconciliation_resolution"];
 
 async function renderDecisions(view) {
   await loadAgents();
@@ -728,9 +730,12 @@ async function renderPolicies(view) {
           const exported = await hubu("/policies/export", { policy_id: p.policy_id });
           return h("div", {}, h("pre", { class: "json" }, exported.policy_yaml || ""),
             h("div", { class: "form-actions" }, h("button", { type: "button", class: "ghost small", onclick: () => {
+              // Load every scope field from this policy so a previous
+              // selection can never retarget the revision to another agent.
               form.elements.policy_yaml.value = exported.policy_yaml || "";
-              if (p.agent_id) form.elements.agent_id.value = p.agent_id;
-              if (p.declarative_key) form.elements.declarative_key.value = p.declarative_key;
+              form.elements.agent_id.value = p.agent_id || "";
+              form.elements.display_name.value = p.display_name || "";
+              form.elements.declarative_key.value = p.declarative_key || "";
               form.elements.expected_revision.value = String(p.revision);
               document.querySelector("dialog")?.close();
               form.scrollIntoView({ behavior: "smooth" });

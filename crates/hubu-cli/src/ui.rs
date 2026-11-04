@@ -1133,6 +1133,35 @@ mod tests {
     }
 
     #[test]
+    fn decision_category_filter_matches_governance_categories() {
+        use hubu_core::spend::governance_query::GovernanceCategory;
+        let start = APP_JS
+            .find("const CATEGORIES = [")
+            .expect("CATEGORIES list");
+        let list = &APP_JS[start..];
+        let list = &list[list.find('[').unwrap() + 1..list.find("];").unwrap()];
+        let ui: Vec<&str> = list
+            .split(',')
+            .map(|item| item.trim().trim_matches('"'))
+            .filter(|item| !item.is_empty())
+            .collect();
+        for category in &ui {
+            serde_json::from_value::<GovernanceCategory>(json!(category))
+                .unwrap_or_else(|_| panic!("UI category `{category}` is not a GovernanceCategory"));
+        }
+        // Every server category is offered exactly once.
+        let mut unique = ui.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), ui.len());
+        assert_eq!(
+            ui.len(),
+            12,
+            "update the UI list when GovernanceCategory changes"
+        );
+    }
+
+    #[test]
     fn request_head_parser_rejects_ambiguous_framing() {
         assert!(parse_head(b"GET / HTTP/1.1\r\nTransfer-Encoding: chunked").is_err());
         assert!(parse_head(b"GET / HTTP/1.1\r\nHost: a\r\nHost: b").is_err());
