@@ -429,9 +429,37 @@ test("publishes the call ID idempotency article with its cover, flow figure, and
   assert.match(figure, /<figcaption[^>]*>[\s\S]*?\S[\s\S]*?<\/figcaption>/);
 });
 
+test("publishes the provider packs article with its cover, four figures, and tables", async () => {
+  const index = await (await render("/blogs")).text();
+  assert.match(index, /href="\/blogs\/from-rust-adapters-to-provider-packs"/);
+  assert.ok(
+    index.indexOf("/blogs/from-rust-adapters-to-provider-packs") < index.indexOf("/blogs/why-agents-need-a-call-id"),
+    "the newer post is listed first",
+  );
+
+  const response = await render("/blogs/from-rust-adapters-to-provider-packs");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /<h1[^>]*>From Rust adapters to provider packs<\/h1>/);
+  assert.equal(html.match(/<h1\b/g)?.length, 1);
+  assert.match(html, /<time dateTime="2026-11-03">November 3, 2026<\/time>/i);
+  assert.match(html, /<link rel="canonical" href="https:\/\/hubustack.dev\/blogs\/from-rust-adapters-to-provider-packs"/);
+  assert.match(html, /<a href="\/docs\/provider-packs">provider pack schema<\/a>/);
+  assert.match(html, /<a href="\/docs\/operations\/catalog-check">catalog check<\/a>/);
+  assert.equal(html.match(/<table\b/g)?.length, 2, "ownership and archetype tables render");
+
+  const images = [...html.matchAll(/<img\b[^>]*src="(\/blogs\/from-rust-adapters-to-provider-packs\/[^"]+\.png)"[^>]*>/g)];
+  assert.equal(images.length, 5, "article includes its cover and four figures");
+  for (const [image, src] of images) {
+    assert.match(image, /alt="[^"]+"/, `${src} has descriptive alt text`);
+    await access(new URL(`../dist/client${src}`, import.meta.url));
+  }
+  assert.equal(html.match(/<figcaption\b/g)?.length, 4, "each figure has a caption");
+});
+
 test("includes Engineering Blogs and its published article in the sitemap", async () => {
   const sitemap = await readFile(new URL("../dist/client/sitemap.xml", import.meta.url), "utf8");
-  for (const pathname of ["/blogs", "/blogs/budgets-that-keep-up-with-agents", "/blogs/why-agents-need-a-call-id"]) {
+  for (const pathname of ["/blogs", "/blogs/budgets-that-keep-up-with-agents", "/blogs/why-agents-need-a-call-id", "/blogs/from-rust-adapters-to-provider-packs"]) {
     assert.ok(sitemap.includes(`<loc>https://hubustack.dev${pathname}</loc>`), pathname);
   }
 });
