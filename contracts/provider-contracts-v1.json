@@ -4506,6 +4506,2008 @@
           ]
         }
       ]
+    },
+    {
+      "contract": "hubu.flux-2-max.image-edit/v1",
+      "pricing_version": "bfl-flux-2-max-edit-usd-2026-11-03-v1",
+      "pricing_reviewed_on": "2026-11-03",
+      "target": {
+        "provider_config_version": "hubu-flux-2-max-edit-2026-11-03-v1",
+        "workload_type": "image_edit",
+        "provider": "flux",
+        "adapter": "flux2_api",
+        "model": "flux-2-max",
+        "active": true,
+        "execution_enabled": true,
+        "settings": {
+          "type": "pack",
+          "config": {
+            "pack_id": "bfl-flux-2-max-edit",
+            "pack_version": "2026-11-03.1",
+            "pack_digest": "sha256:9d828295f1f7176cfd8d04adde2238431d0442736c751f9d306a2f8c43e360a7",
+            "archetype": "async_poll"
+          }
+        }
+      },
+      "capability": {
+        "image_count": 1,
+        "output_formats": [
+          "png",
+          "jpeg"
+        ],
+        "presets": [
+          {
+            "name": "1k-1:1",
+            "width": 1024,
+            "height": 1024,
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-16:9",
+            "width": 1344,
+            "height": 768,
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-9:16",
+            "width": 768,
+            "height": 1344,
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-3:2",
+            "width": 1248,
+            "height": 832,
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-2:3",
+            "width": 832,
+            "height": 1248,
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-4:5",
+            "width": 896,
+            "height": 1120,
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "2k-1:1",
+            "width": 1440,
+            "height": 1440,
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-16:9",
+            "width": 1920,
+            "height": 1088,
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-9:16",
+            "width": 1088,
+            "height": 1920,
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-3:2",
+            "width": 1728,
+            "height": 1152,
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-2:3",
+            "width": 1152,
+            "height": 1728,
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-4:5",
+            "width": 1280,
+            "height": 1600,
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "4k-1:1",
+            "width": 2048,
+            "height": 2048,
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-16:9",
+            "width": 2688,
+            "height": 1536,
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-9:16",
+            "width": 1536,
+            "height": 2688,
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-3:2",
+            "width": 2496,
+            "height": 1664,
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-2:3",
+            "width": 1664,
+            "height": 2496,
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-4:5",
+            "width": 1792,
+            "height": 2240,
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "4k"
+            }
+          }
+        ],
+        "megapixels": {
+          "rounding": "ceil",
+          "pixels_per_megapixel": 1048576,
+          "minimum": 1
+        },
+        "input_megapixels": {
+          "single_image_ceiling": 4,
+          "per_image_when_several": 1
+        }
+      },
+      "policies": {
+        "generation_retries": 0,
+        "fallback": false,
+        "poll": "bfl-async-status-poll-500ms-v1",
+        "artifact_delivery": "bfl-delivery-single-region-label-v1",
+        "recovery": "hubu-durable-async-resume-v1"
+      },
+      "pricing_rules": [
+        {
+          "rule_id": "bfl-flux-2-max-edit-mp-2026-11-03-v1",
+          "provider": "flux",
+          "model": "flux-2-max",
+          "workload_type": "image_edit",
+          "currency": "USD",
+          "components": [
+            {
+              "unit": "image",
+              "rate_numerator_minor": 7,
+              "rate_denominator": 1
+            },
+            {
+              "unit": "additional_megapixel",
+              "rate_numerator_minor": 3,
+              "rate_denominator": 1
+            },
+            {
+              "unit": "input_megapixel",
+              "rate_numerator_minor": 3,
+              "rate_denominator": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "contract": "hubu.flux-2-flex.image-edit/v1",
+      "pricing_version": "bfl-flux-2-flex-edit-usd-2026-11-03-v1",
+      "pricing_reviewed_on": "2026-11-03",
+      "target": {
+        "provider_config_version": "hubu-flux-2-flex-edit-2026-11-03-v1",
+        "workload_type": "image_edit",
+        "provider": "flux",
+        "adapter": "flux2_api",
+        "model": "flux-2-flex",
+        "active": true,
+        "execution_enabled": true,
+        "settings": {
+          "type": "pack",
+          "config": {
+            "pack_id": "bfl-flux-2-flex-edit",
+            "pack_version": "2026-11-03.1",
+            "pack_digest": "sha256:59d0b5dd5d4e233d330876fb781657747ddff2c75b35f16644d00f381f1301b3",
+            "archetype": "async_poll"
+          }
+        }
+      },
+      "capability": {
+        "image_count": 1,
+        "output_formats": [
+          "png",
+          "jpeg"
+        ],
+        "presets": [
+          {
+            "name": "1k-1:1",
+            "width": 1024,
+            "height": 1024,
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-16:9",
+            "width": 1344,
+            "height": 768,
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-9:16",
+            "width": 768,
+            "height": 1344,
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-3:2",
+            "width": 1248,
+            "height": 832,
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-2:3",
+            "width": 832,
+            "height": 1248,
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-4:5",
+            "width": 896,
+            "height": 1120,
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "2k-1:1",
+            "width": 1440,
+            "height": 1440,
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-16:9",
+            "width": 1920,
+            "height": 1088,
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-9:16",
+            "width": 1088,
+            "height": 1920,
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-3:2",
+            "width": 1728,
+            "height": 1152,
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-2:3",
+            "width": 1152,
+            "height": 1728,
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-4:5",
+            "width": 1280,
+            "height": 1600,
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "4k-1:1",
+            "width": 2048,
+            "height": 2048,
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-16:9",
+            "width": 2688,
+            "height": 1536,
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-9:16",
+            "width": 1536,
+            "height": 2688,
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-3:2",
+            "width": 2496,
+            "height": 1664,
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-2:3",
+            "width": 1664,
+            "height": 2496,
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-4:5",
+            "width": 1792,
+            "height": 2240,
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "4k"
+            }
+          }
+        ],
+        "megapixels": {
+          "rounding": "ceil",
+          "pixels_per_megapixel": 1048576,
+          "minimum": 1
+        },
+        "input_megapixels": {
+          "single_image_ceiling": 4,
+          "per_image_when_several": 1
+        }
+      },
+      "policies": {
+        "generation_retries": 0,
+        "fallback": false,
+        "poll": "bfl-async-status-poll-500ms-v1",
+        "artifact_delivery": "bfl-delivery-single-region-label-v1",
+        "recovery": "hubu-durable-async-resume-v1"
+      },
+      "pricing_rules": [
+        {
+          "rule_id": "bfl-flux-2-flex-edit-mp-2026-11-03-v1",
+          "provider": "flux",
+          "model": "flux-2-flex",
+          "workload_type": "image_edit",
+          "currency": "USD",
+          "components": [
+            {
+              "unit": "image",
+              "rate_numerator_minor": 5,
+              "rate_denominator": 1
+            },
+            {
+              "unit": "additional_megapixel",
+              "rate_numerator_minor": 5,
+              "rate_denominator": 1
+            },
+            {
+              "unit": "input_megapixel",
+              "rate_numerator_minor": 5,
+              "rate_denominator": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "contract": "hubu.flux-2-klein-9b.image-edit/v1",
+      "pricing_version": "bfl-flux-2-klein-9b-edit-usd-2026-11-03-v1",
+      "pricing_reviewed_on": "2026-11-03",
+      "target": {
+        "provider_config_version": "hubu-flux-2-klein-9b-edit-2026-11-03-v1",
+        "workload_type": "image_edit",
+        "provider": "flux",
+        "adapter": "flux2_api",
+        "model": "flux-2-klein-9b",
+        "active": true,
+        "execution_enabled": true,
+        "settings": {
+          "type": "pack",
+          "config": {
+            "pack_id": "bfl-flux-2-klein-9b-edit",
+            "pack_version": "2026-11-03.1",
+            "pack_digest": "sha256:cd2af0b1e3df6261640e34ee2874bbd95783becd74bee8aefa85123bb21a8476",
+            "archetype": "async_poll"
+          }
+        }
+      },
+      "capability": {
+        "image_count": 1,
+        "output_formats": [
+          "png",
+          "jpeg"
+        ],
+        "presets": [
+          {
+            "name": "1k-1:1",
+            "width": 1024,
+            "height": 1024,
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-16:9",
+            "width": 1344,
+            "height": 768,
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-9:16",
+            "width": 768,
+            "height": 1344,
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-3:2",
+            "width": 1248,
+            "height": 832,
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-2:3",
+            "width": 832,
+            "height": 1248,
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-4:5",
+            "width": 896,
+            "height": 1120,
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "2k-1:1",
+            "width": 1440,
+            "height": 1440,
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-16:9",
+            "width": 1920,
+            "height": 1088,
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-9:16",
+            "width": 1088,
+            "height": 1920,
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-3:2",
+            "width": 1728,
+            "height": 1152,
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-2:3",
+            "width": 1152,
+            "height": 1728,
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-4:5",
+            "width": 1280,
+            "height": 1600,
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "4k-1:1",
+            "width": 2048,
+            "height": 2048,
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-16:9",
+            "width": 2688,
+            "height": 1536,
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-9:16",
+            "width": 1536,
+            "height": 2688,
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-3:2",
+            "width": 2496,
+            "height": 1664,
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-2:3",
+            "width": 1664,
+            "height": 2496,
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-4:5",
+            "width": 1792,
+            "height": 2240,
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "4k"
+            }
+          }
+        ],
+        "megapixels": {
+          "rounding": "ceil",
+          "pixels_per_megapixel": 1048576,
+          "minimum": 1
+        },
+        "input_megapixels": {
+          "single_image_ceiling": 4,
+          "per_image_when_several": 1
+        }
+      },
+      "policies": {
+        "generation_retries": 0,
+        "fallback": false,
+        "poll": "bfl-async-status-poll-500ms-v1",
+        "artifact_delivery": "bfl-delivery-single-region-label-v1",
+        "recovery": "hubu-durable-async-resume-v1"
+      },
+      "pricing_rules": [
+        {
+          "rule_id": "bfl-flux-2-klein-9b-edit-mp-2026-11-03-v1",
+          "provider": "flux",
+          "model": "flux-2-klein-9b",
+          "workload_type": "image_edit",
+          "currency": "USD",
+          "components": [
+            {
+              "unit": "image",
+              "rate_numerator_minor": 15,
+              "rate_denominator": 10
+            },
+            {
+              "unit": "additional_megapixel",
+              "rate_numerator_minor": 2,
+              "rate_denominator": 10
+            },
+            {
+              "unit": "input_megapixel",
+              "rate_numerator_minor": 2,
+              "rate_denominator": 10
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "contract": "hubu.flux-2-klein-4b.image-edit/v1",
+      "pricing_version": "bfl-flux-2-klein-4b-edit-usd-2026-11-03-v1",
+      "pricing_reviewed_on": "2026-11-03",
+      "target": {
+        "provider_config_version": "hubu-flux-2-klein-4b-edit-2026-11-03-v1",
+        "workload_type": "image_edit",
+        "provider": "flux",
+        "adapter": "flux2_api",
+        "model": "flux-2-klein-4b",
+        "active": true,
+        "execution_enabled": true,
+        "settings": {
+          "type": "pack",
+          "config": {
+            "pack_id": "bfl-flux-2-klein-4b-edit",
+            "pack_version": "2026-11-03.1",
+            "pack_digest": "sha256:8d6ab0884d58bbc59a2dc12c0da0b3818b977c9bacdfe6a3c63278a038c09afc",
+            "archetype": "async_poll"
+          }
+        }
+      },
+      "capability": {
+        "image_count": 1,
+        "output_formats": [
+          "png",
+          "jpeg"
+        ],
+        "presets": [
+          {
+            "name": "1k-1:1",
+            "width": 1024,
+            "height": 1024,
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-16:9",
+            "width": 1344,
+            "height": 768,
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-9:16",
+            "width": 768,
+            "height": 1344,
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-3:2",
+            "width": 1248,
+            "height": 832,
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-2:3",
+            "width": 832,
+            "height": 1248,
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-4:5",
+            "width": 896,
+            "height": 1120,
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "2k-1:1",
+            "width": 1440,
+            "height": 1440,
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-16:9",
+            "width": 1920,
+            "height": 1088,
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-9:16",
+            "width": 1088,
+            "height": 1920,
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-3:2",
+            "width": 1728,
+            "height": 1152,
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-2:3",
+            "width": 1152,
+            "height": 1728,
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-4:5",
+            "width": 1280,
+            "height": 1600,
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "4k-1:1",
+            "width": 2048,
+            "height": 2048,
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-16:9",
+            "width": 2688,
+            "height": 1536,
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-9:16",
+            "width": 1536,
+            "height": 2688,
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-3:2",
+            "width": 2496,
+            "height": 1664,
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-2:3",
+            "width": 1664,
+            "height": 2496,
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "4k"
+            }
+          },
+          {
+            "name": "4k-4:5",
+            "width": 1792,
+            "height": 2240,
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "4k"
+            }
+          }
+        ],
+        "megapixels": {
+          "rounding": "ceil",
+          "pixels_per_megapixel": 1048576,
+          "minimum": 1
+        },
+        "input_megapixels": {
+          "single_image_ceiling": 4,
+          "per_image_when_several": 1
+        }
+      },
+      "policies": {
+        "generation_retries": 0,
+        "fallback": false,
+        "poll": "bfl-async-status-poll-500ms-v1",
+        "artifact_delivery": "bfl-delivery-single-region-label-v1",
+        "recovery": "hubu-durable-async-resume-v1"
+      },
+      "pricing_rules": [
+        {
+          "rule_id": "bfl-flux-2-klein-4b-edit-mp-2026-11-03-v1",
+          "provider": "flux",
+          "model": "flux-2-klein-4b",
+          "workload_type": "image_edit",
+          "currency": "USD",
+          "components": [
+            {
+              "unit": "image",
+              "rate_numerator_minor": 14,
+              "rate_denominator": 10
+            },
+            {
+              "unit": "additional_megapixel",
+              "rate_numerator_minor": 1,
+              "rate_denominator": 10
+            },
+            {
+              "unit": "input_megapixel",
+              "rate_numerator_minor": 1,
+              "rate_denominator": 10
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "contract": "hubu.flux-3-image.image-edit/v1",
+      "pricing_version": "bfl-flux-3-image-edit-usd-2026-11-03-v1",
+      "pricing_reviewed_on": "2026-11-03",
+      "target": {
+        "provider_config_version": "hubu-flux-3-image-edit-2026-11-03-v1",
+        "workload_type": "image_edit",
+        "provider": "flux",
+        "adapter": "flux2_api",
+        "model": "flux-3-image",
+        "active": true,
+        "execution_enabled": true,
+        "settings": {
+          "type": "pack",
+          "config": {
+            "pack_id": "bfl-flux-3-image-edit",
+            "pack_version": "2026-11-03.1",
+            "pack_digest": "sha256:bc19bac7af029d1d816aca9841237a07c0c702259d53de3d022afb39b0b33972",
+            "archetype": "async_poll"
+          }
+        }
+      },
+      "capability": {
+        "image_count": 1,
+        "output_formats": [
+          "png",
+          "jpeg"
+        ],
+        "presets": [
+          {
+            "name": "768sq-21:9",
+            "when": {
+              "aspect_ratio": "21:9",
+              "image_size": "768sq"
+            }
+          },
+          {
+            "name": "768sq-2:1",
+            "when": {
+              "aspect_ratio": "2:1",
+              "image_size": "768sq"
+            }
+          },
+          {
+            "name": "768sq-16:9",
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "768sq"
+            }
+          },
+          {
+            "name": "768sq-3:2",
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "768sq"
+            }
+          },
+          {
+            "name": "768sq-7:5",
+            "when": {
+              "aspect_ratio": "7:5",
+              "image_size": "768sq"
+            }
+          },
+          {
+            "name": "768sq-4:3",
+            "when": {
+              "aspect_ratio": "4:3",
+              "image_size": "768sq"
+            }
+          },
+          {
+            "name": "768sq-5:4",
+            "when": {
+              "aspect_ratio": "5:4",
+              "image_size": "768sq"
+            }
+          },
+          {
+            "name": "768sq-1:1",
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "768sq"
+            }
+          },
+          {
+            "name": "768sq-4:5",
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "768sq"
+            }
+          },
+          {
+            "name": "768sq-3:4",
+            "when": {
+              "aspect_ratio": "3:4",
+              "image_size": "768sq"
+            }
+          },
+          {
+            "name": "768sq-5:7",
+            "when": {
+              "aspect_ratio": "5:7",
+              "image_size": "768sq"
+            }
+          },
+          {
+            "name": "768sq-2:3",
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "768sq"
+            }
+          },
+          {
+            "name": "768sq-9:16",
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "768sq"
+            }
+          },
+          {
+            "name": "768sq-1:2",
+            "when": {
+              "aspect_ratio": "1:2",
+              "image_size": "768sq"
+            }
+          },
+          {
+            "name": "768sq-9:21",
+            "when": {
+              "aspect_ratio": "9:21",
+              "image_size": "768sq"
+            }
+          },
+          {
+            "name": "1k-21:9",
+            "when": {
+              "aspect_ratio": "21:9",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-2:1",
+            "when": {
+              "aspect_ratio": "2:1",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-16:9",
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-3:2",
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-7:5",
+            "when": {
+              "aspect_ratio": "7:5",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-4:3",
+            "when": {
+              "aspect_ratio": "4:3",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-5:4",
+            "when": {
+              "aspect_ratio": "5:4",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-1:1",
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-4:5",
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-3:4",
+            "when": {
+              "aspect_ratio": "3:4",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-5:7",
+            "when": {
+              "aspect_ratio": "5:7",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-2:3",
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-9:16",
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-1:2",
+            "when": {
+              "aspect_ratio": "1:2",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-9:21",
+            "when": {
+              "aspect_ratio": "9:21",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1.5k-21:9",
+            "when": {
+              "aspect_ratio": "21:9",
+              "image_size": "1.5k"
+            }
+          },
+          {
+            "name": "1.5k-2:1",
+            "when": {
+              "aspect_ratio": "2:1",
+              "image_size": "1.5k"
+            }
+          },
+          {
+            "name": "1.5k-16:9",
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "1.5k"
+            }
+          },
+          {
+            "name": "1.5k-3:2",
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "1.5k"
+            }
+          },
+          {
+            "name": "1.5k-7:5",
+            "when": {
+              "aspect_ratio": "7:5",
+              "image_size": "1.5k"
+            }
+          },
+          {
+            "name": "1.5k-4:3",
+            "when": {
+              "aspect_ratio": "4:3",
+              "image_size": "1.5k"
+            }
+          },
+          {
+            "name": "1.5k-5:4",
+            "when": {
+              "aspect_ratio": "5:4",
+              "image_size": "1.5k"
+            }
+          },
+          {
+            "name": "1.5k-1:1",
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "1.5k"
+            }
+          },
+          {
+            "name": "1.5k-4:5",
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "1.5k"
+            }
+          },
+          {
+            "name": "1.5k-3:4",
+            "when": {
+              "aspect_ratio": "3:4",
+              "image_size": "1.5k"
+            }
+          },
+          {
+            "name": "1.5k-5:7",
+            "when": {
+              "aspect_ratio": "5:7",
+              "image_size": "1.5k"
+            }
+          },
+          {
+            "name": "1.5k-2:3",
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "1.5k"
+            }
+          },
+          {
+            "name": "1.5k-9:16",
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "1.5k"
+            }
+          },
+          {
+            "name": "1.5k-1:2",
+            "when": {
+              "aspect_ratio": "1:2",
+              "image_size": "1.5k"
+            }
+          },
+          {
+            "name": "1.5k-9:21",
+            "when": {
+              "aspect_ratio": "9:21",
+              "image_size": "1.5k"
+            }
+          },
+          {
+            "name": "2k-21:9",
+            "when": {
+              "aspect_ratio": "21:9",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-2:1",
+            "when": {
+              "aspect_ratio": "2:1",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-16:9",
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-3:2",
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-7:5",
+            "when": {
+              "aspect_ratio": "7:5",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-4:3",
+            "when": {
+              "aspect_ratio": "4:3",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-5:4",
+            "when": {
+              "aspect_ratio": "5:4",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-1:1",
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-4:5",
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-3:4",
+            "when": {
+              "aspect_ratio": "3:4",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-5:7",
+            "when": {
+              "aspect_ratio": "5:7",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-2:3",
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-9:16",
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-1:2",
+            "when": {
+              "aspect_ratio": "1:2",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-9:21",
+            "when": {
+              "aspect_ratio": "9:21",
+              "image_size": "2k"
+            }
+          }
+        ]
+      },
+      "policies": {
+        "generation_retries": 0,
+        "fallback": false,
+        "poll": "bfl-async-status-poll-500ms-v1",
+        "artifact_delivery": "bfl-delivery-single-region-label-v1",
+        "recovery": "hubu-durable-async-resume-v1"
+      },
+      "pricing_rules": [
+        {
+          "rule_id": "bfl-flux-3-image-edit-768sq-2026-11-03-v1",
+          "provider": "flux",
+          "model": "flux-3-image",
+          "workload_type": "image_edit",
+          "currency": "USD",
+          "selector": {
+            "image_size": "768sq"
+          },
+          "components": [
+            {
+              "unit": "image",
+              "rate_numerator_minor": 41,
+              "rate_denominator": 10
+            }
+          ]
+        },
+        {
+          "rule_id": "bfl-flux-3-image-edit-1k-2026-11-03-v1",
+          "provider": "flux",
+          "model": "flux-3-image",
+          "workload_type": "image_edit",
+          "currency": "USD",
+          "selector": {
+            "image_size": "1k"
+          },
+          "components": [
+            {
+              "unit": "image",
+              "rate_numerator_minor": 48,
+              "rate_denominator": 10
+            }
+          ]
+        },
+        {
+          "rule_id": "bfl-flux-3-image-edit-1.5k-2026-11-03-v1",
+          "provider": "flux",
+          "model": "flux-3-image",
+          "workload_type": "image_edit",
+          "currency": "USD",
+          "selector": {
+            "image_size": "1.5k"
+          },
+          "components": [
+            {
+              "unit": "image",
+              "rate_numerator_minor": 7,
+              "rate_denominator": 1
+            }
+          ]
+        },
+        {
+          "rule_id": "bfl-flux-3-image-edit-2k-2026-11-03-v1",
+          "provider": "flux",
+          "model": "flux-3-image",
+          "workload_type": "image_edit",
+          "currency": "USD",
+          "selector": {
+            "image_size": "2k"
+          },
+          "components": [
+            {
+              "unit": "image",
+              "rate_numerator_minor": 10,
+              "rate_denominator": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "contract": "hubu.flux-3-image-klein.image-edit/v1",
+      "pricing_version": "bfl-flux-3-image-klein-edit-usd-2026-11-03-v1",
+      "pricing_reviewed_on": "2026-11-03",
+      "target": {
+        "provider_config_version": "hubu-flux-3-image-klein-edit-2026-11-03-v1",
+        "workload_type": "image_edit",
+        "provider": "flux",
+        "adapter": "flux2_api",
+        "model": "flux-3-image-klein",
+        "active": true,
+        "execution_enabled": true,
+        "settings": {
+          "type": "pack",
+          "config": {
+            "pack_id": "bfl-flux-3-image-klein-edit",
+            "pack_version": "2026-11-03.1",
+            "pack_digest": "sha256:842a800b6742f37899e80f9f9e91da177994baea503817b25876852ac4d32666",
+            "archetype": "async_poll"
+          }
+        }
+      },
+      "capability": {
+        "image_count": 1,
+        "output_formats": [
+          "png",
+          "jpeg"
+        ],
+        "presets": [
+          {
+            "name": "768sq-21:9",
+            "when": {
+              "aspect_ratio": "21:9",
+              "image_size": "768sq"
+            }
+          },
+          {
+            "name": "768sq-2:1",
+            "when": {
+              "aspect_ratio": "2:1",
+              "image_size": "768sq"
+            }
+          },
+          {
+            "name": "768sq-16:9",
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "768sq"
+            }
+          },
+          {
+            "name": "768sq-3:2",
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "768sq"
+            }
+          },
+          {
+            "name": "768sq-7:5",
+            "when": {
+              "aspect_ratio": "7:5",
+              "image_size": "768sq"
+            }
+          },
+          {
+            "name": "768sq-4:3",
+            "when": {
+              "aspect_ratio": "4:3",
+              "image_size": "768sq"
+            }
+          },
+          {
+            "name": "768sq-5:4",
+            "when": {
+              "aspect_ratio": "5:4",
+              "image_size": "768sq"
+            }
+          },
+          {
+            "name": "768sq-1:1",
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "768sq"
+            }
+          },
+          {
+            "name": "768sq-4:5",
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "768sq"
+            }
+          },
+          {
+            "name": "768sq-3:4",
+            "when": {
+              "aspect_ratio": "3:4",
+              "image_size": "768sq"
+            }
+          },
+          {
+            "name": "768sq-5:7",
+            "when": {
+              "aspect_ratio": "5:7",
+              "image_size": "768sq"
+            }
+          },
+          {
+            "name": "768sq-2:3",
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "768sq"
+            }
+          },
+          {
+            "name": "768sq-9:16",
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "768sq"
+            }
+          },
+          {
+            "name": "768sq-1:2",
+            "when": {
+              "aspect_ratio": "1:2",
+              "image_size": "768sq"
+            }
+          },
+          {
+            "name": "768sq-9:21",
+            "when": {
+              "aspect_ratio": "9:21",
+              "image_size": "768sq"
+            }
+          },
+          {
+            "name": "1k-21:9",
+            "when": {
+              "aspect_ratio": "21:9",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-2:1",
+            "when": {
+              "aspect_ratio": "2:1",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-16:9",
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-3:2",
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-7:5",
+            "when": {
+              "aspect_ratio": "7:5",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-4:3",
+            "when": {
+              "aspect_ratio": "4:3",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-5:4",
+            "when": {
+              "aspect_ratio": "5:4",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-1:1",
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-4:5",
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-3:4",
+            "when": {
+              "aspect_ratio": "3:4",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-5:7",
+            "when": {
+              "aspect_ratio": "5:7",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-2:3",
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-9:16",
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-1:2",
+            "when": {
+              "aspect_ratio": "1:2",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1k-9:21",
+            "when": {
+              "aspect_ratio": "9:21",
+              "image_size": "1k"
+            }
+          },
+          {
+            "name": "1.5k-21:9",
+            "when": {
+              "aspect_ratio": "21:9",
+              "image_size": "1.5k"
+            }
+          },
+          {
+            "name": "1.5k-2:1",
+            "when": {
+              "aspect_ratio": "2:1",
+              "image_size": "1.5k"
+            }
+          },
+          {
+            "name": "1.5k-16:9",
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "1.5k"
+            }
+          },
+          {
+            "name": "1.5k-3:2",
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "1.5k"
+            }
+          },
+          {
+            "name": "1.5k-7:5",
+            "when": {
+              "aspect_ratio": "7:5",
+              "image_size": "1.5k"
+            }
+          },
+          {
+            "name": "1.5k-4:3",
+            "when": {
+              "aspect_ratio": "4:3",
+              "image_size": "1.5k"
+            }
+          },
+          {
+            "name": "1.5k-5:4",
+            "when": {
+              "aspect_ratio": "5:4",
+              "image_size": "1.5k"
+            }
+          },
+          {
+            "name": "1.5k-1:1",
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "1.5k"
+            }
+          },
+          {
+            "name": "1.5k-4:5",
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "1.5k"
+            }
+          },
+          {
+            "name": "1.5k-3:4",
+            "when": {
+              "aspect_ratio": "3:4",
+              "image_size": "1.5k"
+            }
+          },
+          {
+            "name": "1.5k-5:7",
+            "when": {
+              "aspect_ratio": "5:7",
+              "image_size": "1.5k"
+            }
+          },
+          {
+            "name": "1.5k-2:3",
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "1.5k"
+            }
+          },
+          {
+            "name": "1.5k-9:16",
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "1.5k"
+            }
+          },
+          {
+            "name": "1.5k-1:2",
+            "when": {
+              "aspect_ratio": "1:2",
+              "image_size": "1.5k"
+            }
+          },
+          {
+            "name": "1.5k-9:21",
+            "when": {
+              "aspect_ratio": "9:21",
+              "image_size": "1.5k"
+            }
+          },
+          {
+            "name": "2k-21:9",
+            "when": {
+              "aspect_ratio": "21:9",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-2:1",
+            "when": {
+              "aspect_ratio": "2:1",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-16:9",
+            "when": {
+              "aspect_ratio": "16:9",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-3:2",
+            "when": {
+              "aspect_ratio": "3:2",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-7:5",
+            "when": {
+              "aspect_ratio": "7:5",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-4:3",
+            "when": {
+              "aspect_ratio": "4:3",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-5:4",
+            "when": {
+              "aspect_ratio": "5:4",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-1:1",
+            "when": {
+              "aspect_ratio": "1:1",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-4:5",
+            "when": {
+              "aspect_ratio": "4:5",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-3:4",
+            "when": {
+              "aspect_ratio": "3:4",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-5:7",
+            "when": {
+              "aspect_ratio": "5:7",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-2:3",
+            "when": {
+              "aspect_ratio": "2:3",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-9:16",
+            "when": {
+              "aspect_ratio": "9:16",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-1:2",
+            "when": {
+              "aspect_ratio": "1:2",
+              "image_size": "2k"
+            }
+          },
+          {
+            "name": "2k-9:21",
+            "when": {
+              "aspect_ratio": "9:21",
+              "image_size": "2k"
+            }
+          }
+        ]
+      },
+      "policies": {
+        "generation_retries": 0,
+        "fallback": false,
+        "poll": "bfl-async-status-poll-500ms-v1",
+        "artifact_delivery": "bfl-delivery-single-region-label-v1",
+        "recovery": "hubu-durable-async-resume-v1"
+      },
+      "pricing_rules": [
+        {
+          "rule_id": "bfl-flux-3-image-klein-edit-768sq-2026-11-03-v1",
+          "provider": "flux",
+          "model": "flux-3-image-klein",
+          "workload_type": "image_edit",
+          "currency": "USD",
+          "selector": {
+            "image_size": "768sq"
+          },
+          "components": [
+            {
+              "unit": "image",
+              "rate_numerator_minor": 8,
+              "rate_denominator": 10
+            }
+          ]
+        },
+        {
+          "rule_id": "bfl-flux-3-image-klein-edit-1k-2026-11-03-v1",
+          "provider": "flux",
+          "model": "flux-3-image-klein",
+          "workload_type": "image_edit",
+          "currency": "USD",
+          "selector": {
+            "image_size": "1k"
+          },
+          "components": [
+            {
+              "unit": "image",
+              "rate_numerator_minor": 9,
+              "rate_denominator": 10
+            }
+          ]
+        },
+        {
+          "rule_id": "bfl-flux-3-image-klein-edit-1.5k-2026-11-03-v1",
+          "provider": "flux",
+          "model": "flux-3-image-klein",
+          "workload_type": "image_edit",
+          "currency": "USD",
+          "selector": {
+            "image_size": "1.5k"
+          },
+          "components": [
+            {
+              "unit": "image",
+              "rate_numerator_minor": 11,
+              "rate_denominator": 10
+            }
+          ]
+        },
+        {
+          "rule_id": "bfl-flux-3-image-klein-edit-2k-2026-11-03-v1",
+          "provider": "flux",
+          "model": "flux-3-image-klein",
+          "workload_type": "image_edit",
+          "currency": "USD",
+          "selector": {
+            "image_size": "2k"
+          },
+          "components": [
+            {
+              "unit": "image",
+              "rate_numerator_minor": 14,
+              "rate_denominator": 10
+            }
+          ]
+        }
+      ]
     }
   ]
 }

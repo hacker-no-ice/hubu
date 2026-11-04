@@ -28,6 +28,18 @@ const BFL_FLUX_3_IMAGE_V2: &str =
     include_str!("../../../../packs/verified/bfl-flux-3-image-v2.toml");
 const BFL_FLUX_3_IMAGE_KLEIN: &str =
     include_str!("../../../../packs/verified/bfl-flux-3-image-klein.toml");
+const BFL_FLUX_2_MAX_EDIT: &str =
+    include_str!("../../../../packs/verified/bfl-flux-2-max-edit.toml");
+const BFL_FLUX_2_FLEX_EDIT: &str =
+    include_str!("../../../../packs/verified/bfl-flux-2-flex-edit.toml");
+const BFL_FLUX_2_KLEIN_4B_EDIT: &str =
+    include_str!("../../../../packs/verified/bfl-flux-2-klein-4b-edit.toml");
+const BFL_FLUX_2_KLEIN_9B_EDIT: &str =
+    include_str!("../../../../packs/verified/bfl-flux-2-klein-9b-edit.toml");
+const BFL_FLUX_3_IMAGE_EDIT: &str =
+    include_str!("../../../../packs/verified/bfl-flux-3-image-edit.toml");
+const BFL_FLUX_3_IMAGE_KLEIN_EDIT: &str =
+    include_str!("../../../../packs/verified/bfl-flux-3-image-klein-edit.toml");
 
 /// Every verified pack, validated.
 pub fn verified_packs() -> Vec<Pack> {
@@ -46,6 +58,12 @@ pub fn verified_packs() -> Vec<Pack> {
         BFL_FLUX_3_IMAGE,
         BFL_FLUX_3_IMAGE_V2,
         BFL_FLUX_3_IMAGE_KLEIN,
+        BFL_FLUX_2_MAX_EDIT,
+        BFL_FLUX_2_FLEX_EDIT,
+        BFL_FLUX_2_KLEIN_4B_EDIT,
+        BFL_FLUX_2_KLEIN_9B_EDIT,
+        BFL_FLUX_3_IMAGE_EDIT,
+        BFL_FLUX_3_IMAGE_KLEIN_EDIT,
     ]
     .into_iter()
     .map(|source| Pack::from_toml_str(source).expect("verified packs are valid"))
@@ -178,7 +196,7 @@ mod tests {
             projected += 1;
         }
         assert_eq!(
-            projected, 22,
+            projected, 28,
             "every shipped contract comes from a verified pack"
         );
     }
@@ -748,6 +766,8 @@ mod tests {
     const DRAFT: &str = "0f5c2a64-3f0e-4c9b-9a51-2b7d1c4e8a10";
     const SKETCH: &str = "1a6d3b75-4f1f-4dad-8b62-3c8e2d5f9b21";
     const PHOTO: &str = "2b7e4c86-5a2a-4ebe-9c73-4d9f3e6a0c32";
+    const CANVAS: &str = "3c8f5d97-6b3b-4fcf-8d84-5e0a4f7b1d43";
+    const POSTER: &str = "4d906ea8-7c4c-4a0d-9e95-6f1b5a8c2e54";
 
     /// FLUX.2 [pro] edits price the output as text-to-image does and each
     /// input megapixel at 1.5¢: one input image freezes BFL's 4 megapixel
@@ -1008,6 +1028,347 @@ mod tests {
         let failure = engine.invoke(&request, &input, &secret, None).unwrap_err();
         assert_eq!(failure.code, code);
         assert_eq!(*posts.lock().unwrap(), 0);
+    }
+
+    /// Loads the edit tests' input images: DRAFT and SKETCH exist, any other
+    /// artifact is unavailable to the account.
+    struct EditInputs;
+    impl crate::provider::contract::InputImageSource for EditInputs {
+        fn load(
+            &self,
+            id: &str,
+        ) -> crate::provider::contract::Result<crate::provider::contract::InputImage> {
+            let bytes = match id {
+                DRAFT => PNG.to_vec(),
+                SKETCH => png(2, 2),
+                _ => {
+                    return Err(crate::provider::contract::ContractError::Provider {
+                        code: crate::provider::contract::INPUT_ARTIFACT_UNAVAILABLE.into(),
+                    })
+                }
+            };
+            Ok(crate::provider::contract::InputImage {
+                media_type: "image/png".into(),
+                bytes,
+            })
+        }
+    }
+
+    /// Submits an edit with `inputs`, polls a ready response reporting `cost`
+    /// credits, and returns the request body BFL received and the settled
+    /// budget units.
+    fn run_flux_edit(
+        edit: &Arc<Pack>,
+        model: &str,
+        input: &Value,
+        cost: Value,
+    ) -> (String, Value, i64) {
+        let request = edit.prepare(model, input).unwrap().request;
+        let frozen = snapshot_for(edit, model, input);
+        let transport = FluxTransport {
+            submit: Ok(accepted()),
+            polls: Arc::new(std::sync::Mutex::new(vec![bfl(
+                200,
+                json!({"id": "job-1", "status": "Ready", "cost": cost,
+                       "result": {"sample": "https://delivery.us7.bfl.ai/out.png"}}),
+            )])),
+            posts: Arc::default(),
+            sent: Arc::default(),
+            artifact: png(1024, 1024),
+        };
+        let sent = transport.sent.clone();
+        let engine = AsyncPollEngine::new(edit.clone(), model, transport, 1 << 20)
+            .unwrap()
+            .with_poll_interval_for_tests(Duration::from_millis(1));
+        let secret = secret_for_test("secret-canary");
+        let observer = crate::provider::contract::NoopProviderTransportObserver;
+        let crate::provider::contract::AdapterSubmission::Pending(operation) = engine
+            .submit_with_inputs(&request, input, &EditInputs, &secret, None, &observer)
+            .unwrap()
+        else {
+            panic!("BFL accepts the job asynchronously");
+        };
+        let outcome = engine.poll(&request, input, &secret, &operation).unwrap();
+        let settled = frozen
+            .settle_precise(
+                outcome.usage.as_ref().unwrap(),
+                outcome.actual_vendor_cost.as_ref(),
+                frozen.estimated_units,
+            )
+            .unwrap();
+        let (url, body) = sent.lock().unwrap()[0].clone();
+        (url, body, settled.budget_units)
+    }
+
+    /// Every FLUX.2 model edits as FLUX.2 [pro] does, at its own BFL rates:
+    /// the output priced as text-to-image, each input megapixel at the
+    /// model's reference rate, one input image held at BFL's 4 megapixel
+    /// ceiling and each of several at 1 megapixel.
+    #[test]
+    fn flux_2_edits_price_every_model_at_its_bfl_reference_rates() {
+        // 10,000 units are one cent.
+        for (model, credential, tier, ratio, inputs, units) in [
+            // [max]: 7¢ output + 4 × 3¢.
+            (
+                "flux-2-max",
+                "bfl_flux2_max",
+                "1k",
+                "1:1",
+                vec![DRAFT],
+                190_000,
+            ),
+            // 7¢ + 3¢ for a 2 megapixel output + 2 × 3¢.
+            (
+                "flux-2-max",
+                "bfl_flux2_max",
+                "2k",
+                "16:9",
+                vec![DRAFT, SKETCH],
+                160_000,
+            ),
+            // [flex]: 5¢ output + 4 × 5¢.
+            (
+                "flux-2-flex",
+                "bfl_flux2_flex",
+                "1k",
+                "1:1",
+                vec![DRAFT],
+                250_000,
+            ),
+            // 4 × 5¢ for a 4 megapixel output + 2 × 5¢.
+            (
+                "flux-2-flex",
+                "bfl_flux2_flex",
+                "4k",
+                "4:5",
+                vec![DRAFT, SKETCH],
+                300_000,
+            ),
+            // [klein] 9B: 1.5¢ output + 4 × 0.2¢.
+            (
+                "flux-2-klein-9b",
+                "bfl_flux2_klein_9b",
+                "1k",
+                "1:1",
+                vec![DRAFT],
+                23_000,
+            ),
+            // 1.5¢ + 0.2¢ for a 2 megapixel output + 4 × 0.2¢.
+            (
+                "flux-2-klein-9b",
+                "bfl_flux2_klein_9b",
+                "2k",
+                "16:9",
+                vec![DRAFT, SKETCH, PHOTO, CANVAS],
+                25_000,
+            ),
+            // [klein] 4B: 1.4¢ output + 4 × 0.1¢.
+            (
+                "flux-2-klein-4b",
+                "bfl_flux2_klein_4b",
+                "1k",
+                "1:1",
+                vec![DRAFT],
+                18_000,
+            ),
+            // 1.4¢ + 3 × 0.1¢ for a 4 megapixel output + 3 × 0.1¢.
+            (
+                "flux-2-klein-4b",
+                "bfl_flux2_klein_4b",
+                "4k",
+                "4:5",
+                vec![DRAFT, SKETCH, PHOTO],
+                20_000,
+            ),
+        ] {
+            let edit = pack(&format!("bfl-{model}-edit"));
+            assert_eq!(edit.workload_type(), "image_edit");
+            assert_eq!(edit.transport().credential, credential);
+            assert_eq!(
+                edit.request_url().as_str(),
+                format!("https://api.bfl.ai/v1/{model}")
+            );
+            assert_eq!(
+                edit.input_megapixel_rule()
+                    .map(|rule| (rule.single_image_ceiling, rule.per_image_when_several)),
+                Some((4, 1))
+            );
+            let input = json!({"prompt": "x", "image_size": tier, "aspect_ratio": ratio,
+                               "input_images": inputs});
+            let request = edit.prepare(model, &input).unwrap().request;
+            assert_eq!(request.workload(), "image_edit");
+            assert_eq!(
+                request.quantity("input_megapixels"),
+                Some(if inputs.len() == 1 {
+                    4
+                } else {
+                    inputs.len() as i64
+                })
+            );
+            let frozen = snapshot_for(&edit, model, &input);
+            assert_eq!(
+                frozen.estimated_units, units,
+                "{model} {tier} {ratio} {inputs:?}"
+            );
+            // The agent names the output shape, and sends 1 to 4 images.
+            for input in [
+                json!({"prompt": "x", "image_size": tier, "input_images": [DRAFT]}),
+                json!({"prompt": "x", "image_size": tier, "aspect_ratio": ratio,
+                       "input_images": []}),
+                json!({"prompt": "x", "image_size": tier, "aspect_ratio": ratio}),
+                json!({"prompt": "x", "image_size": tier, "aspect_ratio": ratio,
+                       "input_images": [DRAFT, SKETCH, PHOTO, CANVAS, POSTER]}),
+                json!({"prompt": "x", "image_size": tier, "aspect_ratio": ratio,
+                       "input_images": [DRAFT], "input_megapixels": 1}),
+            ] {
+                assert!(edit.prepare(model, &input).is_err(), "{model} {input}");
+            }
+        }
+    }
+
+    #[test]
+    fn flux_2_edits_send_numbered_inputs_to_each_model_and_settle_bfl_credits() {
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        // Two inputs at 1k: the output's first megapixel plus 2 input
+        // megapixels, as BFL reports them in credits.
+        for (model, cost, units) in [
+            ("flux-2-max", json!(13), 130_000),
+            ("flux-2-flex", json!(15), 150_000),
+            ("flux-2-klein-9b", json!(1.9), 19_000),
+            ("flux-2-klein-4b", json!(1.6), 16_000),
+        ] {
+            let edit = Arc::new(pack(&format!("bfl-{model}-edit")));
+            let input = json!({"prompt": "blend them", "image_size": "1k", "aspect_ratio": "1:1",
+                               "input_images": [DRAFT, SKETCH], "options": {"seed": 7}});
+            assert_eq!(snapshot_for(&edit, model, &input).estimated_units, units);
+            let (url, body, settled) = run_flux_edit(&edit, model, &input, cost);
+            assert_eq!(url, format!("https://api.bfl.ai/v1/{model}"));
+            assert_eq!(
+                body,
+                json!({"prompt": "blend them", "width": 1024, "height": 1024, "seed": 7,
+                       "input_image": encode(PNG), "input_image_2": encode(&png(2, 2))}),
+                "{model}"
+            );
+            assert_eq!(settled, units, "{model}");
+        }
+        // One small input image is held at the 4 megapixel ceiling; BFL's
+        // reported cost for its 1 megapixel settles below the hold. [flex]
+        // also takes its step and guidance controls when editing.
+        let flex = Arc::new(pack("bfl-flux-2-flex-edit"));
+        let single = json!({"prompt": "make it dusk", "image_size": "1k", "aspect_ratio": "1:1",
+                            "input_images": [DRAFT],
+                            "options": {"steps": 30, "guidance": 4.5}});
+        assert_eq!(
+            snapshot_for(&flex, "flux-2-flex", &single).estimated_units,
+            250_000
+        );
+        let (_, body, settled) = run_flux_edit(&flex, "flux-2-flex", &single, json!(10));
+        assert_eq!(
+            body,
+            json!({"prompt": "make it dusk", "width": 1024, "height": 1024, "steps": 30,
+                   "guidance": 4.5, "input_image": encode(PNG)})
+        );
+        assert_eq!(settled, 100_000);
+    }
+
+    /// FLUX 3 edits cost what FLUX 3 text-to-image does at the same tier:
+    /// BFL includes reference images at no extra charge.
+    #[test]
+    fn flux_3_edits_send_an_images_array_and_price_by_tier_alone() {
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        for (model, credential, prices) in [
+            (
+                "flux-3-image",
+                "bfl_flux3_image",
+                [
+                    ("768sq", 41_000),
+                    ("1k", 48_000),
+                    ("1.5k", 70_000),
+                    ("2k", 100_000),
+                ],
+            ),
+            (
+                "flux-3-image-klein",
+                "bfl_flux3_image_klein",
+                [
+                    ("768sq", 8_000),
+                    ("1k", 9_000),
+                    ("1.5k", 11_000),
+                    ("2k", 14_000),
+                ],
+            ),
+        ] {
+            let edit = Arc::new(pack(&format!("bfl-{model}-edit")));
+            assert_eq!(edit.workload_type(), "image_edit");
+            assert_eq!(edit.transport().credential, credential);
+            assert!(edit.input_megapixel_rule().is_none());
+            for (tier, units) in prices {
+                for inputs in [vec![DRAFT], vec![DRAFT, SKETCH, PHOTO, CANVAS]] {
+                    for ratio in ["21:9", "1:1", "9:21"] {
+                        let input = json!({"prompt": "x", "image_size": tier,
+                                           "aspect_ratio": ratio, "input_images": inputs});
+                        let frozen = snapshot_for(&edit, model, &input);
+                        assert_eq!(frozen.estimated_units, units, "{model} {tier} {ratio}");
+                    }
+                }
+            }
+            // The aspect ratio is required: under BFL's `auto` the output
+            // would follow the reference image. 1 to 4 images; no 4k.
+            for input in [
+                json!({"prompt": "x", "image_size": "1k", "input_images": [DRAFT]}),
+                json!({"prompt": "x", "image_size": "1k", "aspect_ratio": "auto",
+                       "input_images": [DRAFT]}),
+                json!({"prompt": "x", "image_size": "match_input", "aspect_ratio": "1:1",
+                       "input_images": [DRAFT]}),
+                json!({"prompt": "x", "image_size": "4k", "aspect_ratio": "1:1",
+                       "input_images": [DRAFT]}),
+                json!({"prompt": "x", "image_size": "1k", "aspect_ratio": "1:1"}),
+                json!({"prompt": "x", "image_size": "1k", "aspect_ratio": "1:1",
+                       "input_images": []}),
+                json!({"prompt": "x", "image_size": "1k", "aspect_ratio": "1:1",
+                       "input_images": [DRAFT, SKETCH, PHOTO, CANVAS, POSTER]}),
+            ] {
+                assert!(edit.prepare(model, &input).is_err(), "{model} {input}");
+            }
+            // The images go in BFL's `images` array, in order; FLUX 3 Image
+            // keeps web search off and Klein, which refuses unknown fields,
+            // gets no grounding field.
+            let input = json!({"prompt": "turn 1 into the style of 2", "image_size": "1k",
+                               "aspect_ratio": "16:9", "input_images": [DRAFT, SKETCH]});
+            let (url, body, settled) =
+                run_flux_edit(&edit, model, &input, json!(prices[1].1 as f64 / 10_000.0));
+            assert_eq!(url, format!("https://api.bfl.ai/v1/{model}"));
+            let mut expected = json!({"prompt": "turn 1 into the style of 2",
+                                      "images": [encode(PNG), encode(&png(2, 2))],
+                                      "resolution": "1k", "aspect_ratio": "16:9"});
+            if model == "flux-3-image" {
+                expected["grounding"] = json!(false);
+            }
+            assert_eq!(body, expected, "{model}");
+            assert_eq!(settled, prices[1].1, "{model}");
+        }
+    }
+
+    /// Every model Hubu ships for image generation also offers an image-edit
+    /// contract, Gemini and FLUX alike.
+    #[test]
+    fn every_image_generation_model_offers_an_image_edit_contract() {
+        let document: Value = serde_json::from_str(include_str!(
+            "../../../../contracts/provider-contracts-v1.json"
+        ))
+        .unwrap();
+        let models = |workload: &str| {
+            document["contracts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|contract| contract["target"]["workload_type"] == workload)
+                .map(|contract| contract["target"]["model"].as_str().unwrap().to_owned())
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        let generation = models("image_generation");
+        assert_eq!(generation.len(), 11);
+        assert_eq!(models("image_edit"), generation);
     }
 
     #[test]

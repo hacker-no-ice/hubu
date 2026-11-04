@@ -294,7 +294,7 @@ claim before anything is transmitted.
 The edit is its own governed operation with its own approval and ledger entry,
 priced from its own contract: the output image plus each input image where the
 provider charges for reading it. A provider that bills input images by size,
-such as [FLUX.2 [pro]](operations/flux-provider-contract.md#flux2-pro-image-editing),
+such as [FLUX.2](operations/flux-provider-contract.md#flux-image-editing),
 holds its ceiling for a single input image and settles the provider's reported
 cost. Its Hubu scope capability is
 `capability:image:edit`, so a policy can allow generation without allowing

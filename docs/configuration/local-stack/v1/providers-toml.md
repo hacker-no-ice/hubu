@@ -119,7 +119,10 @@ are alternatives: bind one of them. Gemini Nano Banana 2.1 and Gemini 3 Pro
 Image are separate models with their own contracts
 (`hubu.gemini-nano-banana-2.1.text-to-image/v1`,
 `hubu.gemini-3-pro-image.text-to-image/v1` and their `image-edit/v1`
-contracts); each is available only when bound.
+contracts); each is available only when bound. Every FLUX model also has its
+own [`image-edit/v1` contract](../../../operations/flux-provider-contract.md#flux-image-editing),
+such as `hubu.flux-2-max.image-edit/v1`, bound beside or instead of its
+text-to-image contract.
 
 ```toml
 [[contract_bindings]]

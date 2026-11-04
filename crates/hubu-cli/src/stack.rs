@@ -32,7 +32,7 @@ const MANAGED_GONGBU_CALLER_ACCOUNT: &str = "gongbu-caller";
 const PROVIDER_CONTRACTS_DOCUMENT: &str =
     include_str!("../../../contracts/provider-contracts-v1.json");
 const PROVIDER_CONTRACTS_DOCUMENT_SHA256: &str =
-    "2af17d9561f370b688d9d5ec923339d96c68e49f24cba5f8d0ecdee97945dff0";
+    "2ed1523bc1dcfa99e856ddd8326d37563bcf10d26bd1bbbfb44665d45624b91d";
 const MANAGED_CREDENTIAL_IGNORE: &[u8] =
     b"# Hubu-managed credentials. Do not edit or remove.\n*\n!.gitignore\n";
 
@@ -5544,6 +5544,12 @@ live_spend_acknowledgement = "{LIVE_SPEND_ACKNOWLEDGEMENT}"
             "hubu.flux-3-image.text-to-image/v2",
             "hubu.flux-3-image-klein.text-to-image/v1",
             "hubu.flux-2-pro.image-edit/v1",
+            "hubu.flux-2-max.image-edit/v1",
+            "hubu.flux-2-flex.image-edit/v1",
+            "hubu.flux-2-klein-9b.image-edit/v1",
+            "hubu.flux-2-klein-4b.image-edit/v1",
+            "hubu.flux-3-image.image-edit/v1",
+            "hubu.flux-3-image-klein.image-edit/v1",
         ];
         let providers = source(&all);
         validate_provider_source(&providers).unwrap();
@@ -5581,6 +5587,29 @@ live_spend_acknowledgement = "{LIVE_SPEND_ACKNOWLEDGEMENT}"
         // FLUX.2 [pro] editing binds beside text-to-image; a preset's price
         // is its output image, with input megapixels priced per request.
         assert_eq!(price("hubu.flux-2-pro.image-edit/v1", "2k-16:9"), (9, 2));
+        // Every FLUX model edits beside its text-to-image target, each
+        // binding its own edit contract: 7¢ + 3¢ for a 2 MP [max] output,
+        // 5¢ per megapixel for [flex], and the [klein] rates.
+        assert_eq!(price("hubu.flux-2-max.image-edit/v1", "2k-16:9"), (10, 1));
+        assert_eq!(price("hubu.flux-2-flex.image-edit/v1", "2k-16:9"), (10, 1));
+        assert_eq!(
+            price("hubu.flux-2-klein-9b.image-edit/v1", "1k-1:1"),
+            (3, 2)
+        );
+        assert_eq!(
+            price("hubu.flux-2-klein-4b.image-edit/v1", "4k-4:5"),
+            (17, 10)
+        );
+        // FLUX 3 edits cost what text-to-image does at the same tier, at any
+        // aspect ratio; reference images are included.
+        assert_eq!(
+            price("hubu.flux-3-image.image-edit/v1", "1.5k-21:9"),
+            (7, 1)
+        );
+        assert_eq!(
+            price("hubu.flux-3-image-klein.image-edit/v1", "2k-9:16"),
+            (14, 10)
+        );
         let mut composite = providers.clone();
         composite.catalog_version = Some("operator-flux-2026-10-28-v1".into());
         let pricing = render_pricing_catalog(&composite).unwrap();

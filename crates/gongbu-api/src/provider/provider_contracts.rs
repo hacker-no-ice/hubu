@@ -12,7 +12,7 @@ use thiserror::Error;
 
 const CONTRACT_DOCUMENT: &str = include_str!("../../../../contracts/provider-contracts-v1.json");
 const CONTRACT_DOCUMENT_SHA256: &str =
-    "2af17d9561f370b688d9d5ec923339d96c68e49f24cba5f8d0ecdee97945dff0";
+    "2ed1523bc1dcfa99e856ddd8326d37563bcf10d26bd1bbbfb44665d45624b91d";
 
 #[derive(Debug, Error)]
 pub(crate) enum Error {
@@ -836,7 +836,7 @@ mod tests {
     fn mixed_contracts_are_order_independent_and_credentials_are_isolated() {
         let (targets, pricing) = mixed_contract_inputs(false);
         let projected = validate_and_project(&targets, &pricing).unwrap();
-        assert_eq!(projected.len(), 16);
+        assert_eq!(projected.len(), 22);
         // Nano Banana 2.1 is its own target beside Flash: 3.36¢, 5.04¢ and
         // 11.3¢ per image at 1k, 2k and 4k.
         let nano = projected

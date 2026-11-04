@@ -25,7 +25,11 @@ its own contract revision: `bfl-flux-2.toml` backs FLUX.2 [pro] v1 and
 `bfl-flux-3-image-klein.toml` backs FLUX 3 Image Klein. FLUX.2 [klein] 4B and
 9B, [flex] and [max] each have their own pack (`bfl-flux-2-klein-4b.toml`,
 `bfl-flux-2-klein-9b.toml`, `bfl-flux-2-flex.toml`, `bfl-flux-2-max.toml`),
-because BFL serves each model at its own endpoint.
+because BFL serves each model at its own endpoint. Each FLUX model's edit
+contract has its own pack too: `bfl-flux-2-edit.toml` for FLUX.2 [pro], and
+`bfl-flux-2-max-edit.toml`, `bfl-flux-2-flex-edit.toml`,
+`bfl-flux-2-klein-9b-edit.toml`, `bfl-flux-2-klein-4b-edit.toml`,
+`bfl-flux-3-image-edit.toml` and `bfl-flux-3-image-klein-edit.toml`.
 `google-gemini-developer-image.toml` and `google-gemini-developer-image-edit.toml`
 back the Gemini v1 contracts; their `-v2.toml` successors back the Flash and
 Lite `/v2` contracts, which add aspect ratios, and Gemini Nano Banana 2.1 and
@@ -328,7 +332,8 @@ quantity = "input_images"
 item = { type = "image", mime_type = "{{image.media_type}}", data = "{{image.data}}" }
 ```
 
-The verified FLUX.2 [pro] edit pack sends each image in its own field:
+The verified FLUX.2 edit packs send each image in its own field (the FLUX 3
+edit packs splice an `images = ["{{input_images}}"]` array instead):
 
 ```toml
 [[parameters]]

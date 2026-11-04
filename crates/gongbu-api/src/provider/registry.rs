@@ -809,11 +809,14 @@ mod tests {
             ("flux", "flux2_api", "flux-2-max"),
             ("flux", "flux2_api", "flux-3-image-klein"),
         ] {
-            let key = TargetKey::new("image_generation", provider, adapter, model).unwrap();
-            assert_eq!(catalog.resolve_active(&key).unwrap().adapter, adapter);
+            // Every image model edits too, through its own edit target.
+            for workload in ["image_generation", "image_edit"] {
+                let key = TargetKey::new(workload, provider, adapter, model).unwrap();
+                assert_eq!(catalog.resolve_active(&key).unwrap().adapter, adapter);
+            }
         }
         let execution_targets = catalog.execution_targets();
-        assert_eq!(execution_targets.len(), 16);
+        assert_eq!(execution_targets.len(), 22);
         // Pro is its own target, discovered by model beside Flash and Lite,
         // with an aspect-ratio certified size at every tier.
         let pro = execution_targets
@@ -834,7 +837,7 @@ mod tests {
         ] {
             let target = execution_targets
                 .iter()
-                .find(|target| target.model == model)
+                .find(|target| target.model == model && target.workload_type == "image_generation")
                 .unwrap();
             assert_eq!(target.output_sizes.len(), 18, "{model}");
             assert!(target.megapixels.is_some(), "{model}");
@@ -846,14 +849,18 @@ mod tests {
         }
         let flux_3 = execution_targets
             .iter()
-            .find(|target| target.model == "flux-3-image")
+            .find(|target| {
+                target.model == "flux-3-image" && target.workload_type == "image_generation"
+            })
             .unwrap();
         assert_eq!(flux_3.image_sizes, ["1k", "2k"]);
         // Klein is discovered by its own model, at FLUX 3's four tiers and
         // its own tier prices.
         let klein = execution_targets
             .iter()
-            .find(|target| target.model == "flux-3-image-klein")
+            .find(|target| {
+                target.model == "flux-3-image-klein" && target.workload_type == "image_generation"
+            })
             .unwrap();
         assert_eq!(klein.image_sizes, ["1.5k", "1k", "2k", "768sq"]);
         assert_eq!(klein.pricing.len(), 4);
@@ -919,6 +926,44 @@ mod tests {
             PricingUnit::InputMegapixel
         );
         assert!(flux.input_megapixels.is_none());
+        // Every other FLUX.2 model edits the same way, on its own target and
+        // endpoint: 1 to 4 input images, priced by input megapixel.
+        for model in [
+            "flux-2-max",
+            "flux-2-flex",
+            "flux-2-klein-9b",
+            "flux-2-klein-4b",
+        ] {
+            let edit = execution_targets
+                .iter()
+                .find(|target| target.model == model && target.workload_type == "image_edit")
+                .unwrap();
+            assert_eq!(edit.output_sizes.len(), 18, "{model}");
+            assert!(edit.input_megapixels.is_some(), "{model}");
+            let images = edit.input_images.as_ref().unwrap();
+            assert_eq!((images.min, images.max), (1, 4), "{model}");
+            assert_eq!(
+                edit.pricing[0].components[2].unit,
+                PricingUnit::InputMegapixel
+            );
+        }
+        // FLUX 3 edits are tier-priced like text-to-image: reference images
+        // are included, so nothing prices them.
+        for model in ["flux-3-image", "flux-3-image-klein"] {
+            let edit = execution_targets
+                .iter()
+                .find(|target| target.model == model && target.workload_type == "image_edit")
+                .unwrap();
+            assert_eq!(edit.image_sizes, ["1.5k", "1k", "2k", "768sq"], "{model}");
+            assert!(edit.input_megapixels.is_none(), "{model}");
+            assert!(edit.megapixels.is_none(), "{model}");
+            assert_eq!(edit.input_images.as_ref().unwrap().max, 4, "{model}");
+            assert!(edit
+                .pricing
+                .iter()
+                .all(|rule| rule.components.len() == 1
+                    && rule.components[0].unit == PricingUnit::Image));
+        }
         assert_eq!(flux.image_sizes, ["1k", "2k", "4k"]);
         assert_eq!(
             flux.execution_scope.billing_merchant,
