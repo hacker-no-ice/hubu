@@ -356,8 +356,10 @@ provider bills for one image, because its size isn't known until the engine
 loads it. Each of several freezes `per_image_when_several`. Both must be
 positive. The rule needs an `images` parameter, the `async_poll` archetype and
 `response.reported_cost`: the frozen count is a ceiling, and the provider's
-reported cost settles the exact charge. A rule without an `input_megapixel`
-price, or that price without the rule, is rejected.
+reported cost settles the exact charge. A completed response without that
+cost is never settled from the ceiling: it fails as `pack_response_cost_missing`
+and goes to reconciliation. A rule without an `input_megapixel` price, or that
+price without the rule, is rejected.
 
 ### `[[size_presets]]`
 

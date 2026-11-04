@@ -914,6 +914,65 @@ mod tests {
         assert_eq!(settled.budget_units, 45_000);
     }
 
+    /// The frozen input megapixels are only a ceiling, so a ready edit whose
+    /// response lacks BFL's reported cost is never settled from them.
+    #[test]
+    fn flux_2_pro_edit_without_reported_cost_reconciles_instead_of_settling_the_ceiling() {
+        let edit = Arc::new(pack("bfl-flux-2-edit"));
+        let input = json!({"prompt": "make it dusk", "image_size": "1k", "aspect_ratio": "1:1",
+                           "input_images": [DRAFT]});
+        let request = edit.prepare("flux-2-pro", &input).unwrap().request;
+        let secret = secret_for_test("secret-canary");
+        struct Draft;
+        impl crate::provider::contract::InputImageSource for Draft {
+            fn load(
+                &self,
+                _: &str,
+            ) -> crate::provider::contract::Result<crate::provider::contract::InputImage>
+            {
+                Ok(crate::provider::contract::InputImage {
+                    media_type: "image/png".into(),
+                    bytes: PNG.to_vec(),
+                })
+            }
+        }
+        for ready in [
+            json!({"id": "job-1", "status": "Ready",
+                   "result": {"sample": "https://delivery.us7.bfl.ai/out.png"}}),
+            json!({"id": "job-1", "status": "Ready", "cost": null,
+                   "result": {"sample": "https://delivery.us7.bfl.ai/out.png"}}),
+        ] {
+            let transport = FluxTransport {
+                submit: Ok(accepted()),
+                polls: Arc::new(std::sync::Mutex::new(vec![bfl(200, ready.clone())])),
+                posts: Arc::default(),
+                sent: Arc::default(),
+                artifact: png(1024, 1024),
+            };
+            let engine = AsyncPollEngine::new(edit.clone(), "flux-2-pro", transport, 1 << 20)
+                .unwrap()
+                .with_poll_interval_for_tests(Duration::from_millis(1));
+            let crate::provider::contract::AdapterSubmission::Pending(operation) = engine
+                .submit_with_inputs(
+                    &request,
+                    &input,
+                    &Draft,
+                    &secret,
+                    None,
+                    &crate::provider::contract::NoopProviderTransportObserver,
+                )
+                .unwrap()
+            else {
+                panic!("BFL accepts the job asynchronously");
+            };
+            let failure = engine
+                .poll(&request, &input, &secret, &operation)
+                .unwrap_err();
+            assert_eq!(failure.code, "pack_response_cost_missing", "{ready}");
+            assert_eq!(failure.spend_disposition, SpendDisposition::Reconcile);
+        }
+    }
+
     #[test]
     fn flux_2_pro_edit_never_sends_without_its_input_images() {
         let edit = Arc::new(pack("bfl-flux-2-edit"));

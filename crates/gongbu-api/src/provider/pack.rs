@@ -1159,6 +1159,12 @@ impl Pack {
                 ),
             }
         };
+        // Frozen input megapixels are only a ceiling, so settling them from
+        // usage could overcharge: without the provider's reported cost the
+        // charge is unknown and goes to reconciliation.
+        if usage.input_megapixels.is_some() && actual_vendor_cost.is_none() {
+            return Err(ambiguous("pack_response_cost_missing"));
+        }
         let items = match select_path(body, &mapping.artifact_items).as_slice() {
             [Value::Array(items)] => items.iter().collect::<Vec<_>>(),
             items => items.to_vec(),

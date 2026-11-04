@@ -294,7 +294,9 @@ notes:
 The size of a single input image isn't known until the engine loads it. The
 estimate therefore freezes BFL's 4-megapixel ceiling for one input image, so
 the hold is an upper bound. BFL's reported credits settle the exact charge,
-and a smaller input image is never overcharged. For example:
+and a smaller input image is never overcharged. A `Ready` result without
+`cost` is never settled from the ceiling: it fails as
+`pack_response_cost_missing` and goes to reconciliation. For example:
 
 | Output | Input images | Hold, cents | Settled when BFL bills, cents |
 | --- | --- | --- | --- |
