@@ -192,6 +192,8 @@ explains each one. Inspect what Hubu recorded with
   configuration changes, and rollback.
 - [Live provider operations](docs/operations/live-providers.md): move to real,
   billable providers in a separate profile.
+- [Admin web UI](docs/admin-ui.md): manage agents, policies, budgets and
+  approvals, and review spend and decisions, in a local browser UI.
 - [Policy engine](docs/policy-engine.md): write your own spending rules.
 - [Unified MCP surface](docs/unified-mcp.md): every agent-facing tool.
 - [Full documentation](https://hubustack.dev/): concepts, architecture,

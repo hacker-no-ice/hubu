@@ -510,6 +510,9 @@ fn authorization_record(
         .map(|t| t.id.to_string())
         .collect();
     let receipt = receipt.map(|r| {
+        let settlement_amount = json!({"amount":r.receipt.actual_vendor_cost.amount.to_string(), "scale":r.receipt.actual_vendor_cost.scale, "currency":r.receipt.actual_vendor_cost.currency.to_string()});
+        let provider_actual_cost = (r.receipt.cost_basis == hubu_core::spend::SettlementCostBasis::ProviderReported)
+            .then_some(settlement_amount.clone());
         json!({"settlement_id":r.settlement_id,
         "created_at":r.created_at.to_rfc3339(),
         "authorized_max":money(r.authorized_max,r.currency),
@@ -517,6 +520,9 @@ fn authorization_record(
         "released_amount":money(r.released_amount,r.currency),
         "overrun_amount":money(r.overrun_amount,r.currency),
         "authorized_max_cents":r.authorized_max.legacy_cents_ceil(),
+        "cost_basis":r.receipt.cost_basis,
+        "settlement_amount":settlement_amount,
+        "provider_actual_cost":provider_actual_cost,
         "actual_vendor_cost":{"amount":r.receipt.actual_vendor_cost.amount.to_string(),
         "scale":r.receipt.actual_vendor_cost.scale,
         "currency":r.receipt.actual_vendor_cost.currency.to_string()},
@@ -899,7 +905,9 @@ pub(super) fn watch(request: &HttpRequest, state: &ServerState) -> Result<Value>
             "budget_charge":record["receipt"]["budget_charge"],
             "reserved_cents":record["budget_hold"]["amount_cents"],
             "requested_cents":d.request.amount.legacy_cents_ceil(),
-            "settled_cost":record["receipt"]["actual_vendor_cost"],
+            "settled_cost":record["receipt"]["settlement_amount"],
+            "cost_basis":record["receipt"]["cost_basis"],
+            "provider_actual_cost":record["receipt"]["provider_actual_cost"],
             "budget_charge_cents":record["receipt"]["budget_charge_cents"]}));
     }
     sort_watch_events(&mut recent_events);

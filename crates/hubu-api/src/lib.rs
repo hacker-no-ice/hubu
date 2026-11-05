@@ -1706,7 +1706,11 @@ struct ExecutorSpendSettlementReceiptHttpResponse {
     released_amount: MoneyHttpResponse,
     overrun_amount: MoneyHttpResponse,
     authorized_max_cents: i64,
+    /// Compatibility settlement amount; consult cost_basis.
     actual_vendor_cost: SpendExecutorVendorCost,
+    settlement_amount: SpendExecutorVendorCost,
+    cost_basis: hubu_core::spend::SettlementCostBasis,
+    provider_actual_cost: Option<SpendExecutorVendorCost>,
     /// v4.3 compatibility projection of the conservative budget charge.
     actual_vendor_cost_cents: i64,
     budget_charge_cents: i64,
@@ -1984,7 +1988,12 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
     let budget_versions_public_id = budget_versions_public_id(&request.path).map(str::to_string);
     let result = match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/health") => Ok(json!({ "status": "ok" })),
-        ("GET", "/version") => serde_json::to_value(build_info()).map_err(Into::into),
+        ("GET", "/version") => serde_json::to_value(build_info())
+            .map(|mut version| {
+                version["executor_receipt_cost_basis_v1"] = json!(true);
+                version
+            })
+            .map_err(Into::into),
         ("GET", "/registration/guidance")
         | ("GET", "/.well-known/hubu-agent-registration.json") => Ok(registration_guidance()),
         ("GET", "/user") => current_user(state).map(to_json),
@@ -2615,8 +2624,10 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
                 "receipt.price_model_snapshot",
                 "receipt.artifact_reference"
             ],
+            "optional": ["receipt.cost_basis (provider_reported, catalog_usage, frozen_quote, or legacy_unspecified)"],
+            "settlement_provenance": "actual_vendor_cost is the compatibility settlement amount; response settlement_amount and cost_basis distinguish it from nullable provider_actual_cost",
             "legacy_v4_3_input": "receipt.actual_vendor_cost_cents maps exactly to amount with scale 2 and usd; price_model_snapshot remains the complete immutable JSON snapshot",
-            "legacy_v4_3_response": "receipt.actual_vendor_cost_cents remains available as the conservative budget_charge_cents projection; actual_vendor_cost preserves the exact provider decimal"
+            "legacy_v4_3_response": "receipt.actual_vendor_cost_cents remains available as the conservative budget_charge_cents projection; actual_vendor_cost preserves the exact settlement decimal; cost_basis identifies its provenance"
         },
         "release_request": {
             "identity": "claim_id",
@@ -5155,6 +5166,11 @@ fn settle_executor_spend_request(
             overrun_amount: MoneyHttpResponse::new(receipt.overrun_amount, receipt.currency),
             authorized_max_cents: receipt.authorized_max.legacy_cents_ceil(),
             actual_vendor_cost: receipt.receipt.actual_vendor_cost.clone(),
+            settlement_amount: receipt.receipt.actual_vendor_cost.clone(),
+            cost_basis: receipt.receipt.cost_basis,
+            provider_actual_cost: (receipt.receipt.cost_basis
+                == hubu_core::spend::SettlementCostBasis::ProviderReported)
+                .then(|| receipt.receipt.actual_vendor_cost.clone()),
             actual_vendor_cost_cents: receipt.budget_charge.legacy_cents_ceil(),
             budget_charge_cents: receipt.budget_charge.legacy_cents_ceil(),
             released_amount_cents: receipt.released_amount.legacy_cents_floor(),
@@ -7697,6 +7713,7 @@ lease_profiles:
         let response = route(public_request("GET", "/version"), &state);
 
         assert_eq!(response.status, 200);
+        assert_eq!(response.body["executor_receipt_cost_basis_v1"], true);
         assert_eq!(
             response.body["product_version"],
             build_info().product_version
@@ -11510,6 +11527,79 @@ lease_profiles:
             claimed.spend.execution_scope.unwrap().image_size.as_deref(),
             Some("1k")
         );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn flux_edit_scope_reaches_quality_policy() {
+        let path = std::env::temp_dir().join(format!("hubu-flux-edit-{}.sqlite", UserId::new()));
+        let state = ServerState::new_with_db_path(&path).unwrap();
+        init(
+            json!({"display_name":"Alice","email":"alice@example.com"}).to_string(),
+            &state,
+        )
+        .unwrap();
+        let agent = register_agent(
+            json!({"name":"flux-editor","version":"v1"}).to_string(),
+            &state,
+        )
+        .unwrap();
+        add_policy(
+            json!({"agent_id":agent.agent_id,"policy_yaml":r#"
+id: flux_edit_quality
+version: 2026-11-04.1
+default_effect: needs_approval
+rules:
+  - id: ceiling
+    effect: deny
+    reason: fifty cent ceiling
+    when:
+      op: gt
+      field: amount
+      value:
+        money: "0.50"
+  - id: drafts
+    effect: allow
+    reason: one k drafts
+    when:
+      op: eq
+      field: image_size
+      value:
+        string: "1k"
+"#})
+            .to_string(),
+            &state,
+        )
+        .unwrap();
+        create_test_agent_budget(&state, &agent.agent_id, 500);
+        for (key, size, amount, expected) in [
+            ("flux-edit-draft", "1k", "0.016", "allow"),
+            ("flux-edit-review", "2k", "0.02", "needs_approval"),
+            ("flux-edit-ceiling", "1k", "0.51", "deny"),
+        ] {
+            let response = route(
+                authenticated_json_request(
+                    "/spend/authorize",
+                    json!({
+                        "operation_key":key,"account_id":agent.account_id,"amount":amount,
+                        "reason":"FLUX edit qualification",
+                        "execution_scope":{
+                            "schema_version":2,"provider":"provider:black-forest-labs:flux",
+                            "executor":"executor:gongbu:image","capability":"capability:image:edit",
+                            "billing_merchant":"merchant:black-forest-labs",
+                            "model":"flux-2-klein-4b","image_size":size
+                        }
+                    }),
+                ),
+                &state,
+            );
+            assert_eq!(response.status, 200, "{key}: {:?}", response.body);
+            assert_eq!(response.body["decision"], expected);
+            assert_eq!(
+                response.body["auth_token_id"].is_string(),
+                expected == "allow"
+            );
+        }
         std::fs::remove_file(path).ok();
     }
 

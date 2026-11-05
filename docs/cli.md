@@ -11,6 +11,9 @@ selected, running stack profile, these commands automatically use that
 profile's authenticated client handoff. Run `hubu <command> --help` for the
 exact syntax supported by your installed release.
 
+To do the same administration in a browser, run `hubu ui` and see the
+[admin web UI guide](admin-ui.md).
+
 ## Register the owner and agents
 
 Register the human owner once, then register each agent separately. The agent
@@ -228,7 +231,11 @@ hubu artifact save \
 ```
 
 This writes `logo-final.png` and `logo-final.png.receipt.json`, which records
-the artifact ID, SHA-256 digest and exact settled operation cost. An existing
+the artifact ID, SHA-256 digest, settlement amount and cost basis. Artifacts
+awaiting billing reconciliation can also be saved; their receipt records null
+cost and `billing_status: pending_reconciliation`. Re-save after reconciliation
+to refresh the receipt. A quote-based settlement uses `cost_basis: frozen_quote`
+and leaves `provider_actual_cost` null. An existing
 file with different content is never overwritten. `--artifact-id` may be
 omitted when the operation produced one artifact. Remove a folder with
 `hubu folders remove brand`. See the

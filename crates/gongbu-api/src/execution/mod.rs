@@ -156,7 +156,8 @@ pub struct ExecutionSnapshot<'a> {
     pub pricing_snapshot: &'a Value,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum LifecycleOutcome {
     Succeeded,
     Failed,
@@ -303,6 +304,7 @@ pub struct CreateReceiptParams {
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct Receipt {
+    pub cost_basis: crate::provider_contract::SettlementCostBasis,
     pub receipt_id: String,
     pub execution_id: String,
     pub provider_attempt_id: String,
@@ -1000,6 +1002,12 @@ impl Repository {
         }
         safe_usage_json(&r.usage)?;
         if r.outcome != "succeeded"
+            || r.failure_code.as_deref().is_some_and(|code| {
+                !matches!(
+                    code,
+                    "pack_response_cost_missing" | "pack_response_cost_invalid"
+                ) || r.actual_vendor_cost.is_some()
+            })
             || r.usage_schema_version < 1
             || r.actual_vendor_cost
                 .as_ref()
@@ -1025,6 +1033,7 @@ impl Repository {
         self.reject_registered_json([&r.usage])?;
         self.reject_registered_secrets([
             r.outcome.as_str(),
+            r.failure_code.as_deref().unwrap_or(""),
             r.completed_at.as_str(),
             usage.as_str(),
             r.actual_vendor_cost
@@ -1047,8 +1056,8 @@ impl Repository {
             .transpose()
             .map_err(|_| Error::Invalid("attempt result"))?;
         let changed = transaction.execute(
-            "UPDATE provider_attempts SET outcome=?1,completed_at=?2,usage_json=?3,usage_schema_version=?4,provider_amount_minor=?5,provider_currency=?6,actual_vendor_cost_amount=?7,actual_vendor_cost_scale=?8,actual_vendor_cost_currency=?9,failure_code=NULL,failure_message_redacted=NULL,provider_request_id=?10,provider_operation_id=?11 WHERE provider_attempt_id=?12 AND completed_at IS NULL AND transmission_started_at IS NOT NULL",
-            params![r.outcome,r.completed_at,usage,r.usage_schema_version,compatibility_minor,r.actual_vendor_cost.as_ref().map(|cost| &cost.currency),r.actual_vendor_cost.as_ref().map(|cost| cost.amount),r.actual_vendor_cost.as_ref().map(|cost| cost.scale),r.actual_vendor_cost.as_ref().map(|cost| &cost.currency),r.provider_request_id,r.provider_operation_id,id],
+            "UPDATE provider_attempts SET outcome=?1,completed_at=?2,usage_json=?3,usage_schema_version=?4,provider_amount_minor=?5,provider_currency=?6,actual_vendor_cost_amount=?7,actual_vendor_cost_scale=?8,actual_vendor_cost_currency=?9,failure_code=?13,failure_message_redacted=NULL,provider_request_id=?10,provider_operation_id=?11 WHERE provider_attempt_id=?12 AND completed_at IS NULL AND transmission_started_at IS NOT NULL",
+            params![r.outcome,r.completed_at,usage,r.usage_schema_version,compatibility_minor,r.actual_vendor_cost.as_ref().map(|cost| &cost.currency),r.actual_vendor_cost.as_ref().map(|cost| cost.amount),r.actual_vendor_cost.as_ref().map(|cost| cost.scale),r.actual_vendor_cost.as_ref().map(|cost| &cost.currency),r.provider_request_id,r.provider_operation_id,id,r.failure_code],
         )?;
         if changed != 1 {
             return Err(Error::NotFound);
@@ -1366,14 +1375,15 @@ impl Repository {
                 .ok_or(Error::Invalid("receipt requires provider usage"))?,
         )
         .map_err(|_| Error::Invalid("provider usage"))?;
-        let expected = snapshot
-            .settle_precise(&usage, attempt.actual_vendor_cost.as_ref(), auth.0)
-            .map_err(|error| match error {
-                crate::provider_contract::ContractError::SettlementOverage => {
-                    Error::OverAuthorization
-                }
-                _ => Error::Invalid("precise settlement"),
-            })?;
+        let calculated = match attempt.failure_code.as_deref() {
+            Some("pack_response_cost_missing") => snapshot.settle_from_quote(&usage, auth.0),
+            Some(_) => return Err(Error::Invalid("receipt has unresolved billing evidence")),
+            None => snapshot.settle_precise(&usage, attempt.actual_vendor_cost.as_ref(), auth.0),
+        };
+        let expected = calculated.map_err(|error| match error {
+            crate::provider_contract::ContractError::SettlementOverage => Error::OverAuthorization,
+            _ => Error::Invalid("precise settlement"),
+        })?;
         if expected.budget_units != n.settlement_units
             || expected.actual_vendor_cost != n.actual_vendor_cost
             || !n.currency.eq_ignore_ascii_case(&auth.1)
@@ -1387,8 +1397,12 @@ impl Repository {
             .or(attempt.provider_operation_id.clone())
             .ok_or(Error::Invalid("receipt requires provider evidence"))?;
         let pricing_snapshot_json = auth.2;
+        let cost_basis = crate::provider_contract::SettlementCostBasis::for_provider_outcome(
+            attempt.actual_vendor_cost.as_ref(),
+            attempt.failure_code.as_deref(),
+        );
         c.execute(
-            "INSERT INTO receipts(receipt_id,execution_id,provider_attempt_id,settlement_minor,currency,pricing_catalog_version,actual_vendor_cost_amount,actual_vendor_cost_scale,actual_vendor_cost_currency,provider_request_id,pricing_snapshot_json,created_at,settled_at,hubu_settlement_id,settlement_units,units_scale) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,6)",
+            "INSERT INTO receipts(receipt_id,execution_id,provider_attempt_id,settlement_minor,currency,pricing_catalog_version,actual_vendor_cost_amount,actual_vendor_cost_scale,actual_vendor_cost_currency,provider_request_id,pricing_snapshot_json,created_at,settled_at,hubu_settlement_id,settlement_units,units_scale,cost_basis) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,6,?16)",
             params![
                 n.receipt_id,
                 n.execution_id,
@@ -1404,10 +1418,12 @@ impl Repository {
                 n.created_at,
                 n.settled_at,
                 n.hubu_settlement_id,
-                n.settlement_units
+                n.settlement_units,
+                serde_json::to_value(cost_basis).unwrap().as_str().unwrap()
             ],
         )?;
         Ok(Receipt {
+            cost_basis,
             receipt_id: n.receipt_id.clone(),
             execution_id: n.execution_id.clone(),
             provider_attempt_id: n.provider_attempt_id.clone(),
@@ -1424,10 +1440,12 @@ impl Repository {
         })
     }
     pub fn get_receipt_for_execution(&self, execution_id: &str) -> Result<Receipt> {
-        self.0.lock().unwrap().query_row("SELECT receipt_id,execution_id,provider_attempt_id,settlement_units,currency,pricing_catalog_version,actual_vendor_cost_amount,actual_vendor_cost_scale,actual_vendor_cost_currency,provider_request_id,pricing_snapshot_json,created_at,transmission_started_at,settled_at,hubu_settlement_id FROM receipts WHERE execution_id=?1",[execution_id],|r| {
+        self.0.lock().unwrap().query_row("SELECT receipt_id,execution_id,provider_attempt_id,settlement_units,currency,pricing_catalog_version,actual_vendor_cost_amount,actual_vendor_cost_scale,actual_vendor_cost_currency,provider_request_id,pricing_snapshot_json,created_at,transmission_started_at,settled_at,hubu_settlement_id,cost_basis FROM receipts WHERE execution_id=?1",[execution_id],|r| {
             let pricing_snapshot_json:String=r.get(10)?;
             let price_model_snapshot=serde_json::from_str(&pricing_snapshot_json).map_err(|error| rusqlite::Error::FromSqlConversionFailure(pricing_snapshot_json.len(),rusqlite::types::Type::Text,Box::new(error)))?;
-            Ok(Receipt { receipt_id:r.get(0)?,execution_id:r.get(1)?,provider_attempt_id:r.get(2)?,settlement_units:r.get(3)?,currency:r.get(4)?,pricing_catalog_version:r.get(5)?,actual_vendor_cost:actual_vendor_cost_from_row(r,6,7,8)?.ok_or_else(|| rusqlite::Error::InvalidColumnType(6,"actual_vendor_cost_amount".into(),rusqlite::types::Type::Null))?,provider_request_id:r.get(9)?,price_model_snapshot,created_at:r.get(11)?,transmission_started_at:r.get(12)?,settled_at:r.get(13)?,hubu_settlement_id:r.get(14)? })
+            let cost_basis = serde_json::from_value(serde_json::Value::String(r.get(15)?))
+                .map_err(|error| rusqlite::Error::FromSqlConversionFailure(15, rusqlite::types::Type::Text, Box::new(error)))?;
+            Ok(Receipt { cost_basis, receipt_id:r.get(0)?,execution_id:r.get(1)?,provider_attempt_id:r.get(2)?,settlement_units:r.get(3)?,currency:r.get(4)?,pricing_catalog_version:r.get(5)?,actual_vendor_cost:actual_vendor_cost_from_row(r,6,7,8)?.ok_or_else(|| rusqlite::Error::InvalidColumnType(6,"actual_vendor_cost_amount".into(),rusqlite::types::Type::Null))?,provider_request_id:r.get(9)?,price_model_snapshot,created_at:r.get(11)?,transmission_started_at:r.get(12)?,settled_at:r.get(13)?,hubu_settlement_id:r.get(14)? })
         }).optional()?.ok_or(Error::NotFound)
     }
     pub fn begin_settlement_transmission(&self, receipt_id: &str, at: &str) -> Result<()> {
@@ -1729,6 +1747,7 @@ fn migrate_precise_vendor_cost_columns(c: &Connection) -> rusqlite::Result<()> {
         ("actual_vendor_cost_currency", "TEXT"),
         ("provider_request_id", "TEXT"),
         ("pricing_snapshot_json", "TEXT"),
+        ("cost_basis", "TEXT NOT NULL DEFAULT 'legacy_unspecified'"),
     ] {
         if !receipt_columns.contains(name) {
             c.execute(

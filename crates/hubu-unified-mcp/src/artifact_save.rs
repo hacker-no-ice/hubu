@@ -9,8 +9,8 @@
 use crate::{
     error_response,
     gallery::{
-        artifact_bytes, atomic_write, history_record, ledger_rows, reject_symlink, safe_id, string,
-        validate_accounting,
+        artifact_bytes, artifact_history_record, atomic_write, ledger_rows, reject_symlink,
+        safe_id, string, validate_accounting,
     },
     operation_registry, success_response, tool_availability, BackendClients, BackendOwner,
     CapabilitySnapshot, Config, Server, ToolCall,
@@ -213,8 +213,8 @@ pub fn run_artifact_from_env(arguments: Vec<String>) -> Result<Value> {
         .operation_state_path
         .as_ref()
         .ok_or_else(|| anyhow!("artifact save requires configured unified operation state"))?;
-    let context = operation_registry::gallery_context(state, &request.handle)
-        .map_err(|_| anyhow!("operation context unavailable or not succeeded"))?;
+    let context = operation_registry::artifact_context(state, &request.handle)
+        .map_err(|_| anyhow!("operation context unavailable or not a bound governed execution"))?;
     let clients = BackendClients::new(config)?; // Clients only: no server, probes or workers.
     save(&clients, context, &folder, &request)
 }
@@ -241,9 +241,28 @@ fn save(
         .gongbu
         .as_ref()
         .ok_or_else(|| anyhow!("artifact save requires the Gongbu backend"))?;
-    let record = history_record(hubu, &authorization_id)?;
+    let record = artifact_history_record(hubu, &authorization_id)?;
     let provider = string(&record["provider"], "id")?.to_owned();
-    let rows = ledger_rows(hubu, &record)?;
+    let settled = record["status"] == "settled";
+    if !settled {
+        validate_pending_billing(&record)?;
+        let state = crate::gallery::read_json(gongbu, &format!("v1/executions/{execution}"), &[])?;
+        ensure!(
+            state["schema_version"] == 1
+                && state["execution_id"] == execution
+                && state["artifact_outcome"] == "succeeded"
+                && matches!(
+                    state["status"].as_str(),
+                    Some("settling" | "reconciliation_required" | "failed")
+                ),
+            "operation has no durable artifact awaiting billing reconciliation"
+        );
+    }
+    let rows = if settled {
+        ledger_rows(hubu, &record)?
+    } else {
+        Vec::new()
+    };
     let listing =
         crate::gallery::read_json(gongbu, &format!("v1/executions/{execution}/artifacts"), &[])?;
     ensure!(
@@ -283,9 +302,57 @@ fn save(
     let (bytes, extension) = artifact_bytes(gongbu, artifact, &execution)?;
     // The final authorization read follows the byte fetch so slow delivery is
     // covered by the correction race check. Nothing is written on refusal.
-    let fresh = history_record(hubu, &authorization_id)?;
-    let (cost, transaction, settlement, budget_charge) =
-        validate_accounting(&record, &fresh, &rows, &authorization_id)?;
+    let fresh = artifact_history_record(hubu, &authorization_id)?;
+    let (cost, transaction, settlement, budget_charge) = if settled {
+        let (cost, transaction, settlement, charge) =
+            validate_accounting(&record, &fresh, &rows, &authorization_id)?;
+        (cost, json!(transaction), json!(settlement), json!(charge))
+    } else {
+        validate_pending_billing(&fresh)?;
+        for field in [
+            "authorization_id",
+            "provider",
+            "account_id",
+            "agent_id",
+            "claim",
+            "receipt",
+            "ledger_transaction_ids",
+        ] {
+            ensure!(
+                record[field] == fresh[field],
+                "authorization accounting changed during export; refresh evidence"
+            );
+        }
+        (Value::Null, Value::Null, Value::Null, Value::Null)
+    };
+    let cost_basis = if settled {
+        record["receipt"]["cost_basis"]
+            .as_str()
+            .unwrap_or("legacy_unspecified")
+    } else {
+        "unknown"
+    };
+    ensure!(
+        matches!(
+            cost_basis,
+            "legacy_unspecified"
+                | "provider_reported"
+                | "catalog_usage"
+                | "frozen_quote"
+                | "unknown"
+        ),
+        "unsupported settlement cost basis"
+    );
+    let provider_actual_cost = if cost_basis == "provider_reported" {
+        cost.clone()
+    } else {
+        Value::Null
+    };
+    let billing_status = if settled {
+        "settled"
+    } else {
+        "pending_reconciliation"
+    };
     let sha256 = string(artifact, "sha256")?.to_owned();
     let filename = file_name(request.name.as_deref().unwrap_or(&artifact_id), &extension);
     let receipt = json!({
@@ -305,6 +372,10 @@ fn save(
         "ledger_transaction_id": transaction,
         "provider": provider,
         "settled_cost": cost,
+        "settlement_amount": cost,
+        "cost_basis": cost_basis,
+        "provider_actual_cost": provider_actual_cost,
+        "billing_status": billing_status,
         "cost_semantics": COST_SEMANTICS,
         "operation_artifact_count": artifacts.len(),
         "budget_charge_cents": budget_charge,
@@ -319,8 +390,30 @@ fn save(
         "artifact_id": artifact_id,
         "sha256": sha256,
         "settled_cost": cost,
+        "settlement_amount": cost,
+        "cost_basis": cost_basis,
+        "provider_actual_cost": provider_actual_cost,
+        "billing_status": billing_status,
         "cost_semantics": COST_SEMANTICS,
     }))
+}
+
+/// Pending billing must have a live, unreleased claim and no settlement evidence.
+/// Missing or malformed accounting is never silently treated as a zero charge.
+fn validate_pending_billing(record: &Value) -> Result<()> {
+    ensure!(
+        matches!(
+            record["status"].as_str(),
+            Some("claimed" | "reconciliation_required")
+        ) && record["claim"]["status"] == "claimed"
+            && record["claim"]["id"].as_str().is_some_and(safe_id)
+            && record.get("receipt").is_some_and(Value::is_null)
+            && record["ledger_transaction_ids"]
+                .as_array()
+                .is_some_and(Vec::is_empty),
+        "authorization does not have a pending unreconciled claim"
+    );
+    Ok(())
 }
 
 /// Appends the verified media extension, dropping a duplicate one the agent
@@ -474,7 +567,7 @@ pub(crate) fn tool_definition(folders: &[SaveFolder]) -> Value {
     let names: Vec<_> = folders.iter().map(|folder| folder.name.clone()).collect();
     json!({
         "name": TOOL_NAME,
-        "description": "Save one artifact of a succeeded governed operation into a folder the human allowlisted, with a `<file>.receipt.json` sidecar holding the artifact ID, SHA-256 digest and Hubu-settled cost. Pass an allowlisted folder name, never a path. Omit artifact_id only when the operation produced exactly one artifact. Never overwrites a different file; re-saving the same bytes is idempotent.",
+        "description": "Save one durable artifact of a governed operation into a folder the human allowlisted, including while billing requires reconciliation. The `<file>.receipt.json` sidecar holds artifact identity, digest and either Hubu-settled cost or null cost with billing_status=pending_reconciliation. Re-save after reconciliation to refresh the receipt. Pass an allowlisted folder name, never a path. Omit artifact_id only when the operation produced exactly one artifact. Never overwrites a different file; re-saving the same bytes is idempotent.",
         "inputSchema": {
             "type": "object",
             "additionalProperties": false,
@@ -544,12 +637,7 @@ pub(crate) fn call_tool(server: &Server, id: Value, call: ToolCall) -> Value {
     }
     let context = match server.saved_artifact_context(&request.handle) {
         Ok(context) => context,
-        Err(_) => {
-            return tool_error(
-                id,
-                "operation is unknown, not yet succeeded, or not a governed execution",
-            )
-        }
+        Err(_) => return tool_error(id, "operation is unknown or not a bound governed execution"),
     };
     match save(&server.backends, context, folder, &request) {
         Ok(result) => success_response(

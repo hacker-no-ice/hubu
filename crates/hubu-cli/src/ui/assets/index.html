@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Hubu Admin</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <a class="brand-link" href="#/overview" aria-label="Hubu admin home">
+          <img class="brand-wordmark" src="/hubu-wordmark.svg" width="1168" height="376" alt="Hubu">
+          <span class="brand-suffix">/ admin</span>
+        </a>
+        <div class="brand-sub" id="endpoint">local</div>
+      </div>
+      <nav id="nav" aria-label="Sections"></nav>
+      <div class="sidebar-foot" id="whoami"></div>
+    </aside>
+    <main>
+      <header class="topbar">
+        <h1 id="title">Overview</h1>
+        <div class="topbar-actions">
+          <button type="button" class="ghost" id="refresh" title="Reload this view">Refresh</button>
+        </div>
+      </header>
+      <section id="view" aria-live="polite"></section>
+    </main>
+  </div>
+  <div id="toasts" aria-live="assertive"></div>
+  <script src="/app.js"></script>
+</body>
+</html>
