@@ -262,6 +262,7 @@ pub(super) fn execution_target_catalog_result(
                                     | "megapixel"
                                     | "additional_megapixel"
                                     | "input_image"
+                                    | "input_megapixel"
                             ) && component.rate_numerator_minor >= 0
                                 && component.rate_denominator > 0
                         })
@@ -284,6 +285,53 @@ pub(super) fn execution_target_catalog_result(
                 && target.input_images.as_ref().is_none_or(|images| {
                     !images.parameter.is_empty() && 1 <= images.min && images.min <= images.max
                 })
+                && target.input_megapixels.as_ref().is_none_or(|rule| {
+                    rule.single_image_ceiling > 0
+                        && rule.per_image_when_several > 0
+                        && target.input_images.is_some()
+                })
+        });
+    if !valid {
+        return Err(ToolError::invalid_response());
+    }
+    let structured = serde_json::to_value(&response).map_err(|_| ToolError::invalid_response())?;
+    Ok(ToolResult {
+        content: vec![Content::Text {
+            text: serde_json::to_string(&response).map_err(|_| ToolError::invalid_response())?,
+        }],
+        is_error: false,
+        structured_content: Some(structured),
+    })
+}
+
+/// The operator's reference images: each must carry exactly the pinned token
+/// an edit sends for it, so an agent can copy it into `input_images`.
+pub(super) fn reference_images_result(
+    response: ReferenceImagesResponse,
+) -> Result<ToolResult, ToolError> {
+    let hex = |value: &str| {
+        value.len() == 64
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    };
+    let mut names = BTreeSet::new();
+    let valid = response.schema_version == 1
+        && (response.configured || response.images.is_empty())
+        && response.images.iter().all(|image| {
+            !image.name.is_empty()
+                && !image.name.starts_with('/')
+                && !image
+                    .name
+                    .split('/')
+                    .any(|part| part.is_empty() || part.starts_with('.'))
+                && names.insert(image.name.clone())
+                && hex(&image.sha256)
+                && image.reference == format!("reference:{}@sha256:{}", image.name, image.sha256)
+                && matches!(image.media_type.as_str(), "image/png" | "image/jpeg")
+                && image.size_bytes > 0
+                && image.width > 0
+                && image.height > 0
         });
     if !valid {
         return Err(ToolError::invalid_response());
@@ -352,6 +400,8 @@ pub(super) fn execution_result(
         execution_id: response.execution_id,
         operation_handle: expected.map(|expected| expected.operation_handle.clone()),
         status: response.status,
+        artifact_outcome: response.artifact_outcome,
+        settlement_outcome: response.settlement_outcome,
         outcome: response.outcome,
         failure: response.failure,
         authorization: response.authorization,
@@ -656,11 +706,24 @@ struct RecoveryGuidance {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum LifecycleOutcome {
+    Succeeded,
+    Failed,
+    Ambiguous,
+    Released,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 pub(super) struct ExecutionResponse {
     schema_version: u32,
     execution_id: String,
     spend_auth_token_id: String,
     status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    artifact_outcome: Option<LifecycleOutcome>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    settlement_outcome: Option<LifecycleOutcome>,
     outcome: Option<String>,
     failure: Option<FailureResponse>,
     authorization: Money,
@@ -716,6 +779,10 @@ struct PublicExecutionResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     operation_handle: Option<String>,
     status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    artifact_outcome: Option<LifecycleOutcome>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    settlement_outcome: Option<LifecycleOutcome>,
     outcome: Option<String>,
     failure: Option<FailureResponse>,
     authorization: Money,
@@ -779,6 +846,26 @@ pub(super) struct ArtifactListResponse {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+pub(super) struct ReferenceImagesResponse {
+    schema_version: u32,
+    configured: bool,
+    images: Vec<ReferenceImageResponse>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ReferenceImageResponse {
+    name: String,
+    reference: String,
+    sha256: String,
+    media_type: String,
+    size_bytes: u64,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct ExecutionTargetCatalogResponse {
     schema_version: u32,
     targets: Vec<ExecutionTargetResponse>,
@@ -800,6 +887,16 @@ struct ExecutionTargetResponse {
     megapixels: Option<ExecutionTargetMegapixels>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     input_images: Option<ExecutionTargetInputImages>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    input_megapixels: Option<ExecutionTargetInputMegapixels>,
+}
+
+/// How an image-edit target counts the billed megapixels of its input images.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ExecutionTargetInputMegapixels {
+    single_image_ceiling: u32,
+    per_image_when_several: u32,
 }
 
 /// The input parameter an image-edit target takes artifact IDs in.
@@ -919,6 +1016,8 @@ mod tests {
 
     fn execution() -> ExecutionResponse {
         ExecutionResponse {
+            artifact_outcome: None,
+            settlement_outcome: None,
             schema_version: EXECUTION_V2_SCHEMA_VERSION,
             execution_id: "exec-1".into(),
             spend_auth_token_id: "token-1".into(),

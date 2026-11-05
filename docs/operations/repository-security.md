@@ -16,6 +16,13 @@ Every third-party `uses:` reference in GitHub Actions is pinned to a full
 comment. Before accepting an update, verify the commit against the publisher's
 release and review its changes.
 
+Ordinary CI restores a Rust dependency cache keyed on `Cargo.lock` and the
+toolchain to avoid cold compiles. Only trusted `main` pushes save that cache;
+pull requests and dispatches restore it read-only, workspace crates are always
+rebuilt, and every Cargo command stays `--locked`. The release workflow and the
+advisory monitor remain uncached. Superseded pull request runs are cancelled;
+`main` pushes and remediation dispatches always run to completion.
+
 ## Proactive advisory remediation
 
 The `Security advisory maintenance` workflow checks the default branch every
@@ -133,7 +140,9 @@ The default branch must use an enforced ruleset with:
 
 - pull requests required;
 - strict, up-to-date required checks;
-- `Test workspace`, exact Rust 1.88 MSRV, and `Security policy` required;
+- `Test workspace`, exact Rust 1.88 MSRV, and `Security policy` required
+  (`Test workspace` aggregates the parallel lint, test, and push-only
+  release-build jobs and fails unless each one succeeded);
 - deletion and non-fast-forward updates prohibited; and
 - no unreviewed bypass actor.
 

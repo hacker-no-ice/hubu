@@ -1292,3 +1292,44 @@ fn watch_overrun_limit_is_version_limit_not_balance_sum() {
     );
     std::fs::remove_file(path).ok();
 }
+
+#[test]
+fn quote_settlement_preserves_provenance_and_never_claims_provider_actual_cost() {
+    let (path, state, agent, auth) = setup_executor_authorization("history-quote");
+    let claim = claim_executor_spend(json!({"spend_auth_token_id":auth.auth_token_id,"account_id":agent.account_id,"amount_cents":auth.budget_hold.as_ref().unwrap().amount_cents,"merchant":"gongbu.image"}).to_string(), &state).unwrap();
+    let mut receipt = precise_settlement_receipt_json(160, 4);
+    receipt["cost_basis"] = json!("frozen_quote");
+    let request = json!({"claim_id":claim.claim_id,"receipt":receipt}).to_string();
+    let settled = finalize_executor_spend(request.clone(), &state, true, None).unwrap();
+    assert_eq!(settled["receipt"]["cost_basis"], "frozen_quote");
+    assert_eq!(settled["receipt"]["settlement_amount"]["amount"], 160);
+    assert!(settled["receipt"]["provider_actual_cost"].is_null());
+    assert_eq!(
+        finalize_executor_spend(request, &state, true, None).unwrap(),
+        settled
+    );
+    let shown = read(
+        &state,
+        &format!(
+            "/spend/authorizations/show?authorization_id={}",
+            auth.decision_id
+        ),
+    );
+    let saved = &shown["authorization_record"]["receipt"];
+    assert_eq!(saved["cost_basis"], "frozen_quote");
+    assert_eq!(
+        saved["settlement_amount"],
+        json!({"amount":"160","scale":4,"currency":"usd"})
+    );
+    assert!(saved["provider_actual_cost"].is_null());
+    // The cost basis participates in receipt identity: changing it is not a replay.
+    receipt["cost_basis"] = json!("provider_reported");
+    assert!(finalize_executor_spend(
+        json!({"claim_id":claim.claim_id,"receipt":receipt}).to_string(),
+        &state,
+        true,
+        None
+    )
+    .is_err());
+    std::fs::remove_file(path).ok();
+}

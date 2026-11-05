@@ -32,7 +32,7 @@ const MANAGED_GONGBU_CALLER_ACCOUNT: &str = "gongbu-caller";
 const PROVIDER_CONTRACTS_DOCUMENT: &str =
     include_str!("../../../contracts/provider-contracts-v1.json");
 const PROVIDER_CONTRACTS_DOCUMENT_SHA256: &str =
-    "3daa9847abf05a2bd085ed6092931f411c3fe8c209a61331585239c1a25c889c";
+    "2ed1523bc1dcfa99e856ddd8326d37563bcf10d26bd1bbbfb44665d45624b91d";
 const MANAGED_CREDENTIAL_IGNORE: &[u8] =
     b"# Hubu-managed credentials. Do not edit or remove.\n*\n!.gitignore\n";
 
@@ -160,6 +160,9 @@ struct GongbuSource {
     database_path: Option<PathBuf>,
     artifact_root: Option<PathBuf>,
     log_file: Option<PathBuf>,
+    /// The operator's folder of reference images edits may send. It is the
+    /// operator's own folder: the stack never creates, resets or removes it.
+    reference_images_root: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -470,6 +473,16 @@ struct ProviderContractCapability {
     /// Set when the contract prices each image by its billed megapixels.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     megapixels: Option<ProviderContractMegapixels>,
+    /// Set when an edit contract prices its input images by megapixel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    input_megapixels: Option<ProviderContractInputMegapixels>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderContractInputMegapixels {
+    single_image_ceiling: u32,
+    per_image_when_several: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -739,6 +752,9 @@ fn megapixel_preset_price(
             "image" => 1,
             "megapixel" => billed,
             "additional_megapixel" => billed - 1,
+            // A preset's price is its output image; input images are priced
+            // per request.
+            "input_image" | "input_megapixel" => continue,
             _ => return None,
         };
         let rate_denominator = i128::from(component.get("rate_denominator")?.as_i64()?);
@@ -867,14 +883,10 @@ pub(crate) fn codex_handoff(profile: &Path, hubu_home: &Path) -> Result<CodexHan
 }
 
 pub(crate) fn active_client_handoff(hubu_home: &Path) -> Result<Option<CodexHandoff>> {
-    let registry = read_profile_registry(hubu_home)?;
-    if let Some(selected) = registry.selected {
-        let profile = initialized_profile_path(&selected, "selected profile").with_context(|| {
-            format!(
-                "selected stack profile `{}` is unavailable; select an initialized profile with `hubu stack select --profile ABSOLUTE_DIR` or pass an explicit `--url` for manual mode",
-                selected.display()
-            )
-        })?;
+    let Some((profile, selected)) = active_profile(hubu_home)? else {
+        return Ok(None);
+    };
+    if selected {
         return codex_handoff(&profile, hubu_home)
             .with_context(|| {
                 format!(
@@ -884,6 +896,27 @@ pub(crate) fn active_client_handoff(hubu_home: &Path) -> Result<Option<CodexHand
             })
             .map(Some);
     }
+    codex_handoff(&profile, hubu_home)
+        .context(
+            "the default stack profile has no usable active client handoff; run `hubu stack start` for that profile or pass an explicit `--url` for manual mode",
+        )
+        .map(Some)
+}
+
+/// Resolve the stack profile the client uses: the selected profile when one is
+/// registered, otherwise the default profile once it has an active generation.
+/// The boolean is true for an explicitly selected profile.
+fn active_profile(hubu_home: &Path) -> Result<Option<(PathBuf, bool)>> {
+    let registry = read_profile_registry(hubu_home)?;
+    if let Some(selected) = registry.selected {
+        let profile = initialized_profile_path(&selected, "selected profile").with_context(|| {
+            format!(
+                "selected stack profile `{}` is unavailable; select an initialized profile with `hubu stack select --profile ABSOLUTE_DIR` or pass an explicit `--url` for manual mode",
+                selected.display()
+            )
+        })?;
+        return Ok(Some((profile, true)));
+    }
 
     let profile = default_stack_home(hubu_home)
         .join("stacks")
@@ -892,11 +925,105 @@ pub(crate) fn active_client_handoff(hubu_home: &Path) -> Result<Option<CodexHand
         return Ok(None);
     }
     let profile = initialized_profile_path(&profile, "default profile")?;
-    codex_handoff(&profile, hubu_home)
-        .context(
-            "the default stack profile has no usable active client handoff; run `hubu stack start` for that profile or pass an explicit `--url` for manual mode",
-        )
-        .map(Some)
+    Ok(Some((profile, false)))
+}
+
+/// Read-only provider inventory for the admin UI: the active generation's
+/// provider target revisions and the opaque secret references they name.
+/// Secret values are never read; only the operator-chosen service/account
+/// reference names leave this function.
+pub(crate) fn active_provider_inventory(hubu_home: &Path) -> Result<Option<Value>> {
+    let Some((profile, _)) = active_profile(hubu_home)? else {
+        return Ok(None);
+    };
+    provider_inventory(&profile).map(Some)
+}
+
+fn provider_inventory(profile: &Path) -> Result<Value> {
+    let manifest: ActiveManifest = read_json(&profile.join("generated/active-manifest.json"))?;
+    let generation = active_generation_path(&profile.join("generated"), &manifest)?;
+    let mut inventory = json!({
+        "profile": profile,
+        "generation_id": manifest.generation_id,
+        "provider_mode": "disabled",
+        "provider_configs": [],
+        "contract_bindings": [],
+    });
+    if !manifest
+        .generated_file_digests
+        .contains_key("provider-targets.json")
+    {
+        return Ok(inventory);
+    }
+    verify_generated_file(&generation, &manifest, "provider-targets.json")?;
+    let targets: Value = read_json(&generation.join("provider-targets.json"))?;
+    if manifest
+        .generated_file_digests
+        .contains_key("gongbu-server.json")
+    {
+        verify_generated_file(&generation, &manifest, "gongbu-server.json")?;
+        let config: Value = read_json(&generation.join("gongbu-server.json"))?;
+        inventory["provider_mode"] = config["providers"]["mode"]
+            .as_str()
+            .map(|mode| json!(mode))
+            .unwrap_or_else(|| json!("configured"));
+    } else {
+        inventory["provider_mode"] = json!("configured");
+    }
+    inventory["provider_configs"] = Value::Array(
+        targets["provider_configs"]
+            .as_array()
+            .map(|configs| configs.iter().map(sanitized_provider_config).collect())
+            .unwrap_or_default(),
+    );
+    inventory["contract_bindings"] = Value::Array(
+        targets["contract_bindings"]
+            .as_array()
+            .map(|bindings| {
+                bindings
+                    .iter()
+                    .map(|binding| {
+                        json!({
+                            "contract": binding["contract"],
+                            "pricing_version": binding["pricing_version"],
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+    );
+    Ok(inventory)
+}
+
+/// Keep only reviewable identity, lifecycle and reference fields. Adapter
+/// settings are reduced to their pack identity so transport details stay out.
+fn sanitized_provider_config(config: &Value) -> Value {
+    let settings = &config["settings"];
+    let pack = &settings["config"];
+    json!({
+        "provider_config_version": config["provider_config_version"],
+        "workload_type": config["workload_type"],
+        "provider": config["provider"],
+        "adapter": config["adapter"],
+        "model": config["model"],
+        "active": config["active"],
+        "execution_enabled": config["execution_enabled"],
+        "secret_reference": {
+            "service": config["secret_service"],
+            "account": config["secret_account"],
+        },
+        "settings_type": settings["type"],
+        "pack": if settings["type"] == "pack" {
+            json!({
+                "pack_id": pack["pack_id"],
+                "pack_version": pack["pack_version"],
+                "pack_digest": pack["pack_digest"],
+                "archetype": pack["archetype"],
+            })
+        } else {
+            Value::Null
+        },
+    })
 }
 
 fn active_credential_paths(
@@ -1835,7 +1962,7 @@ fn render_generation(
         let gongbu_schema_version = negotiate_principal_neutral_gongbu_schema(gongbu_version)?;
         let provider_json =
             render_provider_config(providers, gongbu_schema_version, runtime_generation)?;
-        let config = json!({
+        let mut config = json!({
             "schema_version": gongbu_schema_version,
             "http": {"listen": gongbu.listen.expect("checked")},
             "state": {
@@ -1871,6 +1998,9 @@ fn render_generation(
             "logging": {"level": stack.runtime.log_level, "format": stack.runtime.log_format},
             "shutdown": {"worker_drain_timeout_ms": stack.runtime.worker_drain_timeout_ms},
         });
+        if let Some(root) = &gongbu.reference_images_root {
+            config["reference_images"] = json!({"root": root});
+        }
         write_generated_json(
             generation,
             "gongbu-server.json",
@@ -5530,6 +5660,13 @@ live_spend_acknowledgement = "{LIVE_SPEND_ACKNOWLEDGEMENT}"
             "hubu.flux-2-max.text-to-image/v1",
             "hubu.flux-3-image.text-to-image/v2",
             "hubu.flux-3-image-klein.text-to-image/v1",
+            "hubu.flux-2-pro.image-edit/v1",
+            "hubu.flux-2-max.image-edit/v1",
+            "hubu.flux-2-flex.image-edit/v1",
+            "hubu.flux-2-klein-9b.image-edit/v1",
+            "hubu.flux-2-klein-4b.image-edit/v1",
+            "hubu.flux-3-image.image-edit/v1",
+            "hubu.flux-3-image-klein.image-edit/v1",
         ];
         let providers = source(&all);
         validate_provider_source(&providers).unwrap();
@@ -5563,6 +5700,32 @@ live_spend_acknowledgement = "{LIVE_SPEND_ACKNOWLEDGEMENT}"
         assert_eq!(
             price("hubu.flux-3-image-klein.text-to-image/v1", "1k"),
             (9, 10)
+        );
+        // FLUX.2 [pro] editing binds beside text-to-image; a preset's price
+        // is its output image, with input megapixels priced per request.
+        assert_eq!(price("hubu.flux-2-pro.image-edit/v1", "2k-16:9"), (9, 2));
+        // Every FLUX model edits beside its text-to-image target, each
+        // binding its own edit contract: 7¢ + 3¢ for a 2 MP [max] output,
+        // 5¢ per megapixel for [flex], and the [klein] rates.
+        assert_eq!(price("hubu.flux-2-max.image-edit/v1", "2k-16:9"), (10, 1));
+        assert_eq!(price("hubu.flux-2-flex.image-edit/v1", "2k-16:9"), (10, 1));
+        assert_eq!(
+            price("hubu.flux-2-klein-9b.image-edit/v1", "1k-1:1"),
+            (3, 2)
+        );
+        assert_eq!(
+            price("hubu.flux-2-klein-4b.image-edit/v1", "4k-4:5"),
+            (17, 10)
+        );
+        // FLUX 3 edits cost what text-to-image does at the same tier, at any
+        // aspect ratio; reference images are included.
+        assert_eq!(
+            price("hubu.flux-3-image.image-edit/v1", "1.5k-21:9"),
+            (7, 1)
+        );
+        assert_eq!(
+            price("hubu.flux-3-image-klein.image-edit/v1", "2k-9:16"),
+            (14, 10)
         );
         let mut composite = providers.clone();
         composite.catalog_version = Some("operator-flux-2026-10-28-v1".into());
@@ -5847,6 +6010,22 @@ task_queue = "gongbu-local-executions"
         let gongbu: Value = read_json(&generation.join("gongbu-server.json")).unwrap();
         assert_eq!(gongbu["providers"]["mode"], "sandbox");
         assert_eq!(gongbu["providers"]["maximum_spend_minor"], 1_000_000);
+
+        // The admin UI inventory exposes reviewable identity and the opaque
+        // secret reference names, never adapter transport settings.
+        let inventory = provider_inventory(&profile).unwrap();
+        assert_eq!(inventory["provider_mode"], "sandbox");
+        assert_eq!(inventory["generation_id"], json!(manifest.generation_id));
+        let config = &inventory["provider_configs"][0];
+        assert_eq!(config["provider_config_version"], "hubu-sandbox-fixture-v1");
+        assert_eq!(config["settings_type"], "fixture");
+        assert_eq!(config["pack"], Value::Null);
+        assert_eq!(
+            config["secret_reference"],
+            json!({"service": "hubu.sandbox.fixture", "account": "deterministic-provider"})
+        );
+        assert!(config.get("settings").is_none());
+        assert!(config.get("secret_service").is_none());
         assert!(gongbu["providers"]
             .get("live_spend_acknowledgement")
             .is_none());
@@ -6169,5 +6348,33 @@ account = "gongbu-caller"
             .join("client-handoff.json");
         fs::write(&handoff_path, b"{}\n").unwrap();
         assert!(codex_handoff(&profile, root.path()).is_err());
+    }
+
+    #[test]
+    fn provider_inventory_reduces_pack_settings_to_pack_identity() {
+        let config = json!({
+            "provider_config_version": "flux-v1",
+            "workload_type": "image_generation",
+            "provider": "bfl",
+            "adapter": "pack",
+            "model": "flux-2-pro",
+            "secret_service": "hubu.operator",
+            "secret_account": "bfl-api-key",
+            "active": true,
+            "execution_enabled": false,
+            "settings": {"type": "pack", "config": {
+                "pack_id": "bfl-flux-2", "pack_version": "1", "pack_digest": "sha256:abc",
+                "archetype": "async_poll", "endpoint": "https://api.example", "headers": {"x": "y"}
+            }},
+        });
+        let sanitized = sanitized_provider_config(&config);
+        assert_eq!(sanitized["pack"]["pack_id"], "bfl-flux-2");
+        assert_eq!(sanitized["pack"]["archetype"], "async_poll");
+        assert_eq!(sanitized["execution_enabled"], false);
+        assert_eq!(sanitized["secret_reference"]["account"], "bfl-api-key");
+        let serialized = sanitized.to_string();
+        for private in ["endpoint", "headers", "api.example"] {
+            assert!(!serialized.contains(private), "leaked {private}");
+        }
     }
 }

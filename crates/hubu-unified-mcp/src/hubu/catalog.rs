@@ -277,6 +277,7 @@ fn all_tool_definitions() -> Vec<Value> {
                     "type": "object",
                     "additionalProperties": false,
                     "properties": {
+                        "cost_basis": { "type": "string", "enum": ["provider_reported", "catalog_usage", "frozen_quote", "legacy_unspecified"], "description": "Provenance of the settlement amount; omitted legacy receipts do not establish provider confirmation." },
                         "actual_vendor_cost": {
                             "type": "object",
                             "additionalProperties": false,

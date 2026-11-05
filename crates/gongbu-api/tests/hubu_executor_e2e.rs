@@ -765,6 +765,7 @@ impl ProviderActivities for DeterministicProvider {
         .write_to(&mut Cursor::new(&mut png), image::ImageOutputFormat::Png)
         .expect("encode deterministic PNG fixture");
         Ok(ProviderSuccess {
+            billing_failure: None,
             request_id: Some(format!("mock-request:{}", execution.operation_key)),
             operation_id: Some(format!("mock-operation:{}", execution.operation_key)),
             usage: NormalizedUsage {
