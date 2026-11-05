@@ -488,7 +488,7 @@ function pagedLoader(container, fetchPage, pick, renderRows) {
       cursor = data.next_cursor || null;
       draw();
     } catch (error) {
-      container.append(h("div", { class: "notice bad" }, error.message));
+      container.append(h("div", { class: "notice bad load-error" }, error.message));
     }
   };
   return async () => {
@@ -885,7 +885,7 @@ async function openPolicy(container, policy, options = {}) {
       hubu("/policies/export", { policy_id: policy.policy_id }),
     ]);
   } catch (error) {
-    clear(container).append(h("div", { class: "notice bad" }, error.message));
+    clear(container).append(h("div", { class: "notice bad load-error" }, error.message));
     return;
   }
   const revisions = [...(history.revisions || [])].sort((a, b) => b.revision - a.revision);
@@ -916,7 +916,7 @@ async function openPolicy(container, policy, options = {}) {
       if (view.mode === "read") await drawRead(body);
       else drawEdit(body);
     } catch (error) {
-      clear(body).append(h("div", { class: "notice bad" }, error.message));
+      clear(body).append(h("div", { class: "notice bad load-error" }, error.message));
     }
   };
 
@@ -1354,6 +1354,10 @@ async function route({ silent = false } = {}) {
     if (token !== routeToken) return;
     // The user may have started interacting while a silent reload was running.
     if (silent && (autoRefresh.touched || document.querySelector("dialog[open]"))) return;
+    // Sub-loaders (paged tables, the policy panel) report fetch failures inline
+    // as .load-error; a background reload keeps the last good content instead.
+    const loadError = silent && container.querySelector(".load-error");
+    if (loadError) { setRefreshStatus(`Auto-refresh failed: ${loadError.textContent}`, true); return; }
     const scrollY = window.scrollY;
     clear(view).append(container);
     if (silent) window.scrollTo(0, scrollY);
@@ -1372,7 +1376,9 @@ async function route({ silent = false } = {}) {
 
 const AUTO_REFRESH_MS = 15000;
 const AUTO_REFRESH_KEY = "hubu-admin.auto-refresh";
-const autoRefresh = { enabled: true, touched: false, inFlight: false, lastAt: 0 };
+// lastAt: last successful render (shown); lastAttemptAt: paces retries so a
+// failing backend is polled no faster than a healthy one.
+const autoRefresh = { enabled: true, touched: false, inFlight: false, lastAt: 0, lastAttemptAt: 0 };
 
 function setRefreshStatus(text, paused) {
   const node = document.getElementById("refresh-status");
@@ -1415,11 +1421,12 @@ function autoRefreshDue() {
     && document.visibilityState === "visible"
     && !document.querySelector("dialog[open]")
     && document.querySelector(".shell").style.display !== "none"
-    && Date.now() - autoRefresh.lastAt >= AUTO_REFRESH_MS;
+    && Date.now() - Math.max(autoRefresh.lastAt, autoRefresh.lastAttemptAt) >= AUTO_REFRESH_MS;
 }
 
 function autoRefreshTick() {
   if (!autoRefreshDue()) return;
+  autoRefresh.lastAttemptAt = Date.now();
   route({ silent: true });
   refreshApprovalCount();
 }
