@@ -2528,7 +2528,7 @@ fn save_artifact_tool_is_listed_only_for_human_allowlisted_folders() {
         ),
         (
             json!({"operation_handle":handle,"folder":"brand"}),
-            "not yet succeeded",
+            "not a bound governed execution",
         ),
     ] {
         let response = tool_call(&server, artifact_save::TOOL_NAME, arguments, None);

@@ -14,8 +14,8 @@ setup, boundaries and the implemented behavior behind those tools.
 
 ## Save artifacts into a project folder
 
-`hubu_save_artifact` saves one artifact of a succeeded governed operation into
-a folder the human allowlisted. The agent passes the public operation handle,
+`hubu_save_artifact` saves one durable artifact of a governed operation into
+a folder the human allowlisted, including while billing requires reconciliation. The agent passes the public operation handle,
 an allowlisted folder **name**, and optionally the chosen `artifact_id` and a
 file name stem. It never passes a filesystem path, and the tool's input schema
 lists only the allowlisted names. The human manages the allowlist:
@@ -38,7 +38,13 @@ signature, and re-reads the Hubu authorization after the fetch so a settlement
 correction refuses the save. It then writes `NAME.png` (or `.jpg`) and a
 `NAME.png.receipt.json` sidecar with the artifact ID, digest, media type,
 dimensions, operation handle, execution, authorization, settlement and ledger
-identities, provider and exact settled cost. The cost is the operation total
+identities, provider and exact settlement amount. `cost_basis` distinguishes
+`provider_reported`, `catalog_usage`, `frozen_quote` and `legacy_unspecified`.
+`provider_actual_cost` is populated only for provider-reported billing. The
+compatibility `settled_cost` field equals `settlement_amount` and does not imply
+provider confirmation. For an unresolved claim, `billing_status` is
+`pending_reconciliation`, `cost_basis` is `unknown`, and all cost/settlement
+fields are null; re-save after reconciliation to refresh them. The cost is the operation total
 (`cost_semantics: operation_total_not_per_artifact`). Neither the response nor
 the receipt contains Gongbu endpoints or storage paths, and image bytes never
 pass through the model.

@@ -281,6 +281,7 @@ impl ProviderAdapter for DeterministicFixtureAdapter {
             })?;
         let actual_cost_minor = local_fixture_cost_minor(request.image_size())?;
         Ok(AdapterOutcome {
+            billing_failure: None,
             usage: Some(crate::provider_contract::NormalizedUsage {
                 images: Some(1),
                 ..Default::default()

@@ -281,6 +281,7 @@ impl HubuActivities for ProductionHubuActivities {
             .settle(&ExecutorSpendFinalizationRequest {
                 claim_id: self.finalization_claim_id(execution)?,
                 receipt: Some(ProviderReceipt {
+                    cost_basis: receipt.cost_basis,
                     actual_vendor_cost: receipt.actual_vendor_cost,
                     provider_request_id: receipt.provider_request_id,
                     price_model_snapshot: receipt.price_model_snapshot,
@@ -527,6 +528,11 @@ pub struct ExecutorSpendFinalizationRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProviderReceipt {
+    #[serde(
+        default,
+        skip_serializing_if = "crate::provider_contract::SettlementCostBasis::is_legacy"
+    )]
+    pub cost_basis: crate::provider_contract::SettlementCostBasis,
     pub actual_vendor_cost: crate::provider_contract::ActualVendorCost,
     pub provider_request_id: String,
     pub price_model_snapshot: serde_json::Value,
@@ -626,6 +632,7 @@ mod tests {
         let request = ExecutorSpendFinalizationRequest {
             claim_id: "claim-1".into(),
             receipt: Some(ProviderReceipt {
+                cost_basis: Default::default(),
                 actual_vendor_cost: crate::provider_contract::ActualVendorCost::new(1, 4, "USD")
                     .unwrap(),
                 provider_request_id: "provider-request-1".into(),
@@ -749,6 +756,7 @@ mod tests {
             .settle(&ExecutorSpendFinalizationRequest {
                 claim_id: "claim-1".to_string(),
                 receipt: Some(ProviderReceipt {
+                    cost_basis: Default::default(),
                     actual_vendor_cost:
                         crate::provider_contract::ActualVendorCost::new(500, 2, "USD").unwrap(),
                     provider_request_id: "provider-1".to_string(),

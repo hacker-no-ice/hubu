@@ -56,6 +56,7 @@ fn reserve(
 
 fn usdc_receipt(atomic_units: i64) -> SpendExecutorSettlementReceipt {
     SpendExecutorSettlementReceipt {
+        cost_basis: Default::default(),
         actual_vendor_cost: SpendExecutorVendorCost {
             amount: atomic_units,
             scale: 6,

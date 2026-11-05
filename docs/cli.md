@@ -231,7 +231,11 @@ hubu artifact save \
 ```
 
 This writes `logo-final.png` and `logo-final.png.receipt.json`, which records
-the artifact ID, SHA-256 digest and exact settled operation cost. An existing
+the artifact ID, SHA-256 digest, settlement amount and cost basis. Artifacts
+awaiting billing reconciliation can also be saved; their receipt records null
+cost and `billing_status: pending_reconciliation`. Re-save after reconciliation
+to refresh the receipt. A quote-based settlement uses `cost_basis: frozen_quote`
+and leaves `provider_actual_cost` null. An existing
 file with different content is never overwritten. `--artifact-id` may be
 omitted when the operation produced one artifact. Remove a folder with
 `hubu folders remove brand`. See the
