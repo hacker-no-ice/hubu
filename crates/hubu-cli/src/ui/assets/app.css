@@ -261,3 +261,25 @@ a.stat-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2p
 .section-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
 .section-head h2 { font-size: 13px; margin: 0; text-transform: uppercase; letter-spacing: .07em; color: var(--accent); }
 .section-head .hint { margin: 0; }
+
+/* Spend summary charts: CSS bars only (no inline styles beyond CSSOM sizes) */
+.spend-splits { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px 28px; }
+.bar-list { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.bar-currency { color: var(--muted); font-size: 11px; letter-spacing: .06em; font-weight: 600; margin-top: 4px; }
+.bar-row { display: grid; grid-template-columns: minmax(90px, 160px) 1fr max-content; gap: 10px; align-items: center; font-size: 13px; }
+.bar-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bar-track { height: 10px; background: var(--panel-2); border-radius: 4px; overflow: hidden; }
+.bar-track > span { display: block; height: 100%; background: var(--accent); border-radius: 0 4px 4px 0; }
+.bar-row:hover .bar-track > span { background: var(--accent-2); }
+.bar-value { font-variant-numeric: tabular-nums; color: var(--text); }
+.spend-chart { margin-top: 8px; }
+.chart-max { font-size: 11.5px; margin-bottom: 4px; }
+.spend-columns {
+  display: flex; align-items: flex-end; gap: 2px; height: 140px; padding-top: 2px;
+  border-bottom: 1px solid var(--border);
+}
+.spend-columns .column { flex: 1 1 0; min-width: 0; height: 100%; display: flex; align-items: flex-end; border-radius: 4px 4px 0 0; }
+.spend-columns .column:hover { background: var(--panel-2); }
+.spend-columns .column > span { display: block; width: 100%; background: var(--accent); border-radius: 4px 4px 0 0; }
+.spend-columns .column:hover > span { background: var(--accent-2); }
+.chart-axis { display: flex; justify-content: space-between; font-size: 11.5px; margin-top: 4px; }
