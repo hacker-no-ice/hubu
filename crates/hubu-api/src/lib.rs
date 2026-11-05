@@ -1706,7 +1706,11 @@ struct ExecutorSpendSettlementReceiptHttpResponse {
     released_amount: MoneyHttpResponse,
     overrun_amount: MoneyHttpResponse,
     authorized_max_cents: i64,
+    /// Compatibility settlement amount; consult cost_basis.
     actual_vendor_cost: SpendExecutorVendorCost,
+    settlement_amount: SpendExecutorVendorCost,
+    cost_basis: hubu_core::spend::SettlementCostBasis,
+    provider_actual_cost: Option<SpendExecutorVendorCost>,
     /// v4.3 compatibility projection of the conservative budget charge.
     actual_vendor_cost_cents: i64,
     budget_charge_cents: i64,
@@ -1984,7 +1988,12 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
     let budget_versions_public_id = budget_versions_public_id(&request.path).map(str::to_string);
     let result = match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/health") => Ok(json!({ "status": "ok" })),
-        ("GET", "/version") => serde_json::to_value(build_info()).map_err(Into::into),
+        ("GET", "/version") => serde_json::to_value(build_info())
+            .map(|mut version| {
+                version["executor_receipt_cost_basis_v1"] = json!(true);
+                version
+            })
+            .map_err(Into::into),
         ("GET", "/registration/guidance")
         | ("GET", "/.well-known/hubu-agent-registration.json") => Ok(registration_guidance()),
         ("GET", "/user") => current_user(state).map(to_json),
@@ -2615,8 +2624,10 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
                 "receipt.price_model_snapshot",
                 "receipt.artifact_reference"
             ],
+            "optional": ["receipt.cost_basis (provider_reported, catalog_usage, frozen_quote, or legacy_unspecified)"],
+            "settlement_provenance": "actual_vendor_cost is the compatibility settlement amount; response settlement_amount and cost_basis distinguish it from nullable provider_actual_cost",
             "legacy_v4_3_input": "receipt.actual_vendor_cost_cents maps exactly to amount with scale 2 and usd; price_model_snapshot remains the complete immutable JSON snapshot",
-            "legacy_v4_3_response": "receipt.actual_vendor_cost_cents remains available as the conservative budget_charge_cents projection; actual_vendor_cost preserves the exact provider decimal"
+            "legacy_v4_3_response": "receipt.actual_vendor_cost_cents remains available as the conservative budget_charge_cents projection; actual_vendor_cost preserves the exact settlement decimal; cost_basis identifies its provenance"
         },
         "release_request": {
             "identity": "claim_id",
@@ -5155,6 +5166,11 @@ fn settle_executor_spend_request(
             overrun_amount: MoneyHttpResponse::new(receipt.overrun_amount, receipt.currency),
             authorized_max_cents: receipt.authorized_max.legacy_cents_ceil(),
             actual_vendor_cost: receipt.receipt.actual_vendor_cost.clone(),
+            settlement_amount: receipt.receipt.actual_vendor_cost.clone(),
+            cost_basis: receipt.receipt.cost_basis,
+            provider_actual_cost: (receipt.receipt.cost_basis
+                == hubu_core::spend::SettlementCostBasis::ProviderReported)
+                .then(|| receipt.receipt.actual_vendor_cost.clone()),
             actual_vendor_cost_cents: receipt.budget_charge.legacy_cents_ceil(),
             budget_charge_cents: receipt.budget_charge.legacy_cents_ceil(),
             released_amount_cents: receipt.released_amount.legacy_cents_floor(),
@@ -7697,6 +7713,7 @@ lease_profiles:
         let response = route(public_request("GET", "/version"), &state);
 
         assert_eq!(response.status, 200);
+        assert_eq!(response.body["executor_receipt_cost_basis_v1"], true);
         assert_eq!(
             response.body["product_version"],
             build_info().product_version

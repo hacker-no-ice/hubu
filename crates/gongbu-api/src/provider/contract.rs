@@ -1316,6 +1316,20 @@ impl PricingSnapshot {
         })
     }
 
+    /// Settle the immutable exact quote, never the possibly larger authorization.
+    /// This does not assert that the provider reported or billed this amount.
+    pub fn settle_from_quote(
+        &self,
+        usage: &NormalizedUsage,
+        authorized_units: i64,
+    ) -> Result<PreciseSettlement> {
+        self.validate_integrity()?;
+        let quote = self
+            .exact_estimate()?
+            .to_actual_vendor_cost(&self.currency)?;
+        self.settle_precise(usage, Some(&quote), authorized_units)
+    }
+
     /// The budget charge in micro-units for `usage`.
     pub fn settle(&self, usage: &NormalizedUsage, authorized_units: i64) -> Result<i64> {
         Ok(self
@@ -1398,8 +1412,40 @@ impl NormalizedUsage {
     }
 }
 
+/// Provenance of the amount used for settlement, independent of image delivery.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SettlementCostBasis {
+    #[default]
+    LegacyUnspecified,
+    ProviderReported,
+    CatalogUsage,
+    FrozenQuote,
+}
+
+impl SettlementCostBasis {
+    pub fn is_legacy(&self) -> bool {
+        *self == Self::LegacyUnspecified
+    }
+    pub fn for_provider_outcome(
+        cost: Option<&ActualVendorCost>,
+        billing_failure: Option<&str>,
+    ) -> Self {
+        if billing_failure == Some("pack_response_cost_missing") {
+            Self::FrozenQuote
+        } else if cost.is_some() {
+            Self::ProviderReported
+        } else {
+            Self::CatalogUsage
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct AdapterOutcome {
+    /// Missing billing evidence settles the frozen quote; invalid evidence reconciles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub billing_failure: Option<String>,
     pub usage: Option<NormalizedUsage>,
     pub actual_vendor_cost: Option<ActualVendorCost>,
     pub provider_request_id: Option<String>,
@@ -1569,6 +1615,14 @@ pub struct NormalizedArtifact {
 }
 impl AdapterOutcome {
     pub fn validate(&self) -> Result<()> {
+        if self.billing_failure.as_deref().is_some_and(|code| {
+            !matches!(
+                code,
+                "pack_response_cost_missing" | "pack_response_cost_invalid"
+            ) || self.actual_vendor_cost.is_some()
+        }) {
+            return Err(ContractError::IndeterminableCost);
+        }
         if self
             .actual_vendor_cost
             .as_ref()
@@ -1910,6 +1964,39 @@ mod tests {
             Err(ContractError::SettlementOverage)
         );
     }
+    #[test]
+    fn exact_quote_fallback_is_bounded_and_does_not_use_the_authorization_cap() {
+        let snapshot = PricingCatalog::from_json(CATALOG.as_bytes())
+            .unwrap()
+            .snapshot(&request())
+            .unwrap();
+        let usage = NormalizedUsage {
+            images: Some(1),
+            ..Default::default()
+        };
+        let settled = snapshot.settle_from_quote(&usage, 10_000_000).unwrap();
+        assert_eq!(settled.budget_units, 2_500_000);
+        assert_eq!(
+            settled.actual_vendor_cost,
+            ActualVendorCost::new(25, 1, "USD").unwrap()
+        );
+        assert_eq!(
+            snapshot.settle_from_quote(&usage, 2_499_999),
+            Err(ContractError::SettlementOverage)
+        );
+        let too_many = NormalizedUsage {
+            images: Some(3),
+            ..Default::default()
+        };
+        assert_eq!(
+            snapshot.settle_from_quote(&too_many, 10_000_000),
+            Err(ContractError::SettlementOverage)
+        );
+        let mut corrupt = snapshot.clone();
+        corrupt.exact_estimate_numerator = "1".into();
+        assert!(corrupt.settle_from_quote(&usage, 10_000_000).is_err());
+    }
+
     #[test]
     fn canonical_digest_is_format_independent_and_catalog_is_frozen() {
         let a = PricingCatalog::from_json(CATALOG.as_bytes()).unwrap();
@@ -2274,6 +2361,7 @@ mod tests {
                 assert_eq!(secret.expose(), b"selected-canary");
                 self.0.fetch_add(1, Ordering::SeqCst);
                 Ok(AdapterOutcome {
+                    billing_failure: None,
                     usage: None,
                     actual_vendor_cost: None,
                     provider_request_id: None,

@@ -22,6 +22,8 @@ pub struct ProviderArtifact {
 }
 #[derive(Clone, Debug)]
 pub struct ProviderSuccess {
+    /// Missing billing evidence settles the frozen quote; invalid evidence reconciles.
+    pub billing_failure: Option<String>,
     pub request_id: Option<String>,
     pub operation_id: Option<String>,
     pub usage: NormalizedUsage,
@@ -774,11 +776,33 @@ impl ExecutionWorkflow<'_> {
                 .ok_or(PersistenceError::Invalid("attempt usage"))?,
         )
         .map_err(|_| PersistenceError::Invalid("attempt usage"))?;
-        let settlement = match snapshot.settle_precise(
-            &usage,
-            attempt.actual_vendor_cost.as_ref(),
-            execution.authorized_units,
-        ) {
+        // Artifacts are already durable. An empty provider cost settles the
+        // frozen quote by policy; malformed billing evidence still reconciles.
+        if let Some(code) = attempt
+            .failure_code
+            .as_deref()
+            .filter(|code| *code != "pack_response_cost_missing")
+        {
+            return self.transition(
+                &execution,
+                "reconciliation_required",
+                Some(code),
+                now,
+                None,
+                None,
+                Some("ambiguous"),
+            );
+        }
+        let calculated = if attempt.failure_code.as_deref() == Some("pack_response_cost_missing") {
+            snapshot.settle_from_quote(&usage, execution.authorized_units)
+        } else {
+            snapshot.settle_precise(
+                &usage,
+                attempt.actual_vendor_cost.as_ref(),
+                execution.authorized_units,
+            )
+        };
+        let settlement = match calculated {
             Ok(settlement) => settlement,
             Err(error) => {
                 let failure_code = if error == ContractError::SettlementOverage {
@@ -1325,7 +1349,7 @@ fn successful_attempt(success: &ProviderSuccess, now: &str) -> AttemptResult {
         usage: usage_value(&success.usage),
         usage_schema_version: 1,
         actual_vendor_cost: success.actual_vendor_cost.clone(),
-        failure_code: None,
+        failure_code: success.billing_failure.clone(),
         failure_message_redacted: None,
         provider_request_id: success.request_id.clone(),
         provider_operation_id: success.operation_id.clone(),
@@ -1452,12 +1476,14 @@ mod tests {
         image_usage: Cell<i64>,
         artifact_count: Cell<usize>,
         actual_vendor_cost: RefCell<ActualVendorCost>,
+        billing_failure: RefCell<Option<String>>,
     }
     impl Default for Provider {
         fn default() -> Self {
             Self {
                 calls: Cell::new(0),
                 error: RefCell::new(None),
+                billing_failure: RefCell::new(None),
                 empty_artifacts: Cell::new(false),
                 image_usage: Cell::new(1),
                 artifact_count: Cell::new(1),
@@ -1479,13 +1505,18 @@ mod tests {
                 Err(e)
             } else {
                 Ok(ProviderSuccess {
+                    billing_failure: self.billing_failure.borrow().clone(),
                     request_id: Some(format!("provider-{attempt_id}")),
                     operation_id: None,
                     usage: NormalizedUsage {
                         images: Some(self.image_usage.get()),
                         ..Default::default()
                     },
-                    actual_vendor_cost: Some(self.actual_vendor_cost.borrow().clone()),
+                    actual_vendor_cost: self
+                        .billing_failure
+                        .borrow()
+                        .is_none()
+                        .then(|| self.actual_vendor_cost.borrow().clone()),
                     artifacts: if self.empty_artifacts.get() {
                         vec![]
                     } else {
@@ -1555,6 +1586,7 @@ mod tests {
                 return Err(error);
             }
             Ok(ProviderSuccess {
+                billing_failure: None,
                 request_id: operation.provider_request_id.clone(),
                 operation_id: Some(operation.provider_operation_id.clone()),
                 usage: NormalizedUsage {
@@ -2595,6 +2627,158 @@ mod tests {
         assert_eq!(h.releases.get(), 1);
     }
     #[test]
+    fn missing_cost_settles_frozen_quote_once_not_authorization_or_delivered_usage() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("quote.sqlite3");
+        let repo = Repository::open(&path, crate::redaction::Redactor::default()).unwrap();
+        // Quote is USD 2, cap is USD 5, delivered usage alone would cost USD 1.
+        let e = execution_with_quantity(&repo, "quote-fallback", 2);
+        let h = Hubu::default();
+        let p = Provider::default();
+        p.billing_failure
+            .replace(Some("pack_response_cost_missing".into()));
+        {
+            let a = Artifacts {
+                repo: &repo,
+                calls: Cell::new(0),
+            };
+            let w = ExecutionWorkflow {
+                repository: &repo,
+                hubu: &h,
+                provider: &p,
+                artifacts: &a,
+            };
+            assert_eq!(w.run(&e.execution_id, "now").unwrap().status, "succeeded");
+        }
+        let receipt = repo.get_receipt_for_execution(&e.execution_id).unwrap();
+        assert_eq!(receipt.settlement_units, 2_000_000);
+        assert_eq!(
+            receipt.cost_basis,
+            crate::provider_contract::SettlementCostBasis::FrozenQuote
+        );
+        assert!(repo
+            .get_provider_attempt_for_execution(&e.execution_id)
+            .unwrap()
+            .actual_vendor_cost
+            .is_none());
+        drop(repo);
+        let repo = Repository::open(&path, crate::redaction::Redactor::default()).unwrap();
+        assert_eq!(
+            repo.get_receipt_for_execution(&e.execution_id).unwrap(),
+            receipt
+        );
+        let a = Artifacts {
+            repo: &repo,
+            calls: Cell::new(0),
+        };
+        let w = ExecutionWorkflow {
+            repository: &repo,
+            hubu: &h,
+            provider: &p,
+            artifacts: &a,
+        };
+        assert_eq!(
+            w.run(&e.execution_id, "redelivered").unwrap().status,
+            "succeeded"
+        );
+        assert_eq!(p.calls.get(), 1);
+        assert_eq!(h.settles.get(), 1);
+        assert_eq!(&*h.settle_amounts.borrow(), &[2_000_000]);
+        assert_eq!(h.releases.get(), 0);
+        assert_eq!(a.calls.get(), 0);
+    }
+
+    #[test]
+    fn billing_failure_survives_staging_restart_without_settling_or_resubmitting() {
+        {
+            let code = "pack_response_cost_invalid";
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("gongbu.sqlite3");
+            let repo = Repository::open(&path, crate::redaction::Redactor::default()).unwrap();
+            let e = execution(&repo, code);
+            let h = Hubu::default();
+            let p = Provider::default();
+            p.billing_failure.replace(Some(code.into()));
+            {
+                let a = Artifacts {
+                    repo: &repo,
+                    calls: Cell::new(0),
+                };
+                let w = ExecutionWorkflow {
+                    repository: &repo,
+                    hubu: &h,
+                    provider: &p,
+                    artifacts: &a,
+                };
+                w.preflight_phase(&e.execution_id, "preflight").unwrap();
+                w.claim_phase(&e.execution_id, "claim").unwrap();
+                w.validate_claim_phase(&e.execution_id, "validate").unwrap();
+                assert_eq!(
+                    w.provider_phase(&e.execution_id, "provider").unwrap(),
+                    ProviderPhaseOutcome::PersistArtifacts
+                );
+            }
+            let attempt = repo
+                .get_provider_attempt_for_execution(&e.execution_id)
+                .unwrap();
+            assert_eq!(attempt.failure_code.as_deref(), Some(code));
+            assert!(attempt.actual_vendor_cost.is_none());
+            assert_eq!(
+                repo.get_staged_provider_artifacts(&attempt.provider_attempt_id)
+                    .unwrap()
+                    .len(),
+                1
+            );
+            drop(repo);
+            // A new worker resumes the durable staging checkpoint, never POSTing again.
+            let repo = Repository::open(&path, crate::redaction::Redactor::default()).unwrap();
+            let a = Artifacts {
+                repo: &repo,
+                calls: Cell::new(0),
+            };
+            let w = ExecutionWorkflow {
+                repository: &repo,
+                hubu: &h,
+                provider: &p,
+                artifacts: &a,
+            };
+            let done = w.run(&e.execution_id, "restart").unwrap();
+            assert_eq!(done.status, "reconciliation_required");
+            assert_eq!(done.failure_code.as_deref(), Some(code));
+            assert_eq!(done.provider_outcome, Some(LifecycleOutcome::Succeeded));
+            assert_eq!(done.artifact_outcome, Some(LifecycleOutcome::Succeeded));
+            assert_eq!(done.settlement_outcome, Some(LifecycleOutcome::Ambiguous));
+            assert_eq!(
+                repo.count_artifacts_for_attempt(&attempt.provider_attempt_id)
+                    .unwrap(),
+                1
+            );
+            assert!(repo.get_receipt_for_execution(&e.execution_id).is_err());
+            for action in [
+                ReconciliationAction::Reinspect,
+                ReconciliationAction::Settle,
+                ReconciliationAction::Release,
+            ] {
+                let request = OperatorReconciliationRequest {
+                    action_id: format!("{action:?}"),
+                    action,
+                    evidence: json!({"note":"no authoritative charge yet"}),
+                };
+                assert_eq!(
+                    w.recover(&e.execution_id, "recover", Some(&request))
+                        .unwrap()
+                        .status,
+                    "reconciliation_required"
+                );
+            }
+            assert_eq!(p.calls.get(), 1);
+            assert_eq!(a.calls.get(), 1);
+            assert_eq!(h.settles.get(), 0);
+            assert_eq!(h.releases.get(), 0);
+        }
+    }
+
+    #[test]
     fn empty_provider_artifacts_reconcile_without_settlement() {
         let repo = Repository::in_memory().unwrap();
         let e = execution(&repo, "empty-artifacts");
@@ -2948,6 +3132,7 @@ mod tests {
             deadline_unix_ms: 1_799_999_999_000,
         };
         let mismatched = ProviderSuccess {
+            billing_failure: None,
             request_id: Some("https://storage.invalid/raw?signature=secret".into()),
             operation_id: Some("different-operation".into()),
             usage: NormalizedUsage {

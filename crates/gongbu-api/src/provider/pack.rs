@@ -1145,6 +1145,7 @@ impl Pack {
         usage.input_megapixels = request.quantity(INPUT_MEGAPIXELS_QUANTITY);
         // Fixed-price settlement uses frozen prices and delivered usage;
         // a provider-controlled amount must never override that calculation.
+        let mut billing_failure = None;
         let actual_vendor_cost = if self.archetype() == Archetype::SyncFixed {
             None
         } else {
@@ -1154,18 +1155,26 @@ impl Pack {
                 .and_then(|path| select_path(body, path).first().copied())
             {
                 None | Some(Value::Null) => None,
-                Some(value) => Some(
-                    decimal_cost(value, mapping.reported_cost_scale)
-                        .ok_or_else(|| ambiguous("pack_response_cost_invalid"))?,
-                ),
+                Some(value) => match decimal_cost(value, mapping.reported_cost_scale) {
+                    Some(cost) => Some(cost),
+                    None => {
+                        billing_failure = Some("pack_response_cost_invalid".into());
+                        None
+                    }
+                },
             }
         };
-        // Frozen input megapixels are only a ceiling, so settling them from
-        // usage could overcharge: without the provider's reported cost the
-        // charge is unknown and goes to reconciliation.
-        if usage.input_megapixels.is_some() && actual_vendor_cost.is_none() {
-            return Err(ambiguous("pack_response_cost_missing"));
+        // A missing reported cost is supported by BFL's ResultResponse schema.
+        // Keep that provenance so settlement can use the exact frozen quote;
+        // malformed costs remain unresolved instead of silently using a quote.
+        if self.archetype() != Archetype::SyncFixed
+            && mapping.reported_cost.is_some()
+            && actual_vendor_cost.is_none()
+        {
+            billing_failure.get_or_insert_with(|| "pack_response_cost_missing".into());
         }
+        // Accounting uncertainty must not discard a delivered artifact or let
+        // a signed delivery URL expire while awaiting human reconciliation.
         let items = match select_path(body, &mapping.artifact_items).as_slice() {
             [Value::Array(items)] => items.iter().collect::<Vec<_>>(),
             items => items.to_vec(),
@@ -1252,6 +1261,7 @@ impl Pack {
             usage.additional_megapixels = Some(additional);
         }
         Ok(AdapterOutcome {
+            billing_failure,
             usage: Some(usage),
             actual_vendor_cost,
             provider_request_id: request_id,

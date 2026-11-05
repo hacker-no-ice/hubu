@@ -176,7 +176,7 @@ function spendTraces() {
         {
           nodes: ["workflow", "gongbuData"],
           edges: [["workflow", "gongbuData"]],
-          caption: "The exact provider cost, frozen pricing snapshot, and artifacts are checkpointed in Gongbu's own state.",
+          caption: "Artifacts are checkpointed before settlement. Missing reported cost uses the frozen quote with explicit provenance; malformed billing retains the image for reconciliation.",
         },
         {
           nodes: ["gongbu", "api", "app", "ledger"],
@@ -638,7 +638,7 @@ const components = {
       { id: "temporal", label: "Temporal state", sub: "execution ID + phase only", x: 690, y: 250, w: 250, h: 92, tone: "data", path: "crates/gongbu-api/src/temporal.rs" },
       { id: "submit", label: "Submit provider", sub: "submit_provider · POST once", x: 660, y: 420, w: 280, h: 88, tone: "executor", path: "crates/gongbu-api/src/temporal.rs" },
       { id: "poll", label: "Poll existing", sub: "poll_provider_operation · GET", x: 660, y: 550, w: 280, h: 88, tone: "executor", path: "crates/gongbu-api/src/temporal.rs" },
-      { id: "artifacts", label: "Artifact store", sub: "normalized bytes", x: 330, y: 570, w: 240, h: 96, tone: "data", path: "crates/gongbu-api/src/artifact/mod.rs" },
+      { id: "artifacts", label: "Artifact store", sub: "durable before settlement", x: 330, y: 570, w: 240, h: 96, tone: "data", path: "crates/gongbu-api/src/artifact/mod.rs" },
       { id: "credentials", label: "Keychain secrets", sub: "resolved inside activities", x: 660, y: 720, w: 280, h: 82, tone: "data", path: "crates/gongbu-api/src/config/secrets.rs" },
       { id: "validator", label: "Provider contract validator", sub: "exact target + price + policies", x: 330, y: 740, w: 240, h: 82, tone: "core", path: "crates/gongbu-api/src/provider/provider_contracts.rs" },
       { id: "vendor", label: "Provider", sub: "external model/API", x: 1060, y: 135, w: 200, h: 130, tone: "vendor" },
@@ -715,7 +715,7 @@ const components = {
       "The CLI is the human developer surface and local-stack launcher. For the Gemini Lite, Flash, Nano Banana 2.1 and Pro, and FLUX provider contracts it renders one explicitly versioned composite catalog, reports independent non-network readiness facts, and invokes Gongbu's production validator before activation. It stages updates for explicit activation, reconciles only launcher-owned services in dependency order, configures Codex MCP discovery, and preserves backend ownership boundaries.",
     responsibilities: [
       ["Local gallery", "`hubu gallery export` uses the selected profile to read the operation registry, Hubu settlement history, and Gongbu artifact bytes directly into local files. It does not start the MCP server or provider worker."],
-      ["Save folders", "`hubu folders allow` maps short names to project folders. Agents save artifacts only into these names; `hubu artifact save` is the CLI form of the same save."],
+      ["Save folders", "`hubu folders allow` maps short names to project folders. Agents save artifacts only into these names, including images with billing pending. Receipts distinguish quote settlement from provider-confirmed cost; `hubu artifact save` is the CLI form."],
       ["Stack lifecycle", "`init`, `doctor`, `render`, `activate`, `rollback`, `start`, `status`, `logs`, and `stop`, in dependency order."],
       ["Configuration safety", "Operator TOML is authoritative. Updates are staged and activated only while the stack is stopped."],
       ["Readiness facts", "Reports configured, credential present, validated, and live-qualified separately, without reading secrets or calling providers."],

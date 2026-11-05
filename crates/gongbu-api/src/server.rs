@@ -1042,7 +1042,9 @@ async fn wait_for_hubu_compatibility(
 fn hubu_is_compatible(client: &HubuClient, product_version: &str, contract: &str) -> bool {
     client.health().is_ok()
         && client.version().is_ok_and(|version| {
-            version.product_version == product_version && version.executor_contract == contract
+            version.product_version == product_version
+                && version.executor_contract == contract
+                && version.executor_receipt_cost_basis_v1
         })
         && client.check_credential().is_ok()
 }
@@ -1755,7 +1757,7 @@ mod tests {
                     "/health" => ("200 OK", r#"{"status":"ok"}"#),
                     "/version" => (
                         "200 OK",
-                        r#"{"product_version":"0.1.0","executor_contract":"hubu-executor.v1"}"#,
+                        r#"{"product_version":"0.1.0","executor_contract":"hubu-executor.v1","executor_receipt_cost_basis_v1":true}"#,
                     ),
                     "/agents?operational_probe=gongbu_credential_check" => {
                         assert!(request.contains("Authorization: Bearer wrong-credential\r\n"));
@@ -1775,6 +1777,45 @@ mod tests {
             .with_bearer_token(b"wrong-credential".to_vec());
 
         assert!(!hubu_is_compatible(&client, "0.1.0", "hubu-executor.v1"));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn hubu_without_receipt_provenance_support_is_incompatible_before_paid_work() {
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+            thread,
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = String::new();
+                stream.read_to_string(&mut request).unwrap();
+                let path = request
+                    .lines()
+                    .next()
+                    .unwrap()
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap();
+                let body = if path == "/health" {
+                    r#"{"status":"ok"}"#
+                } else {
+                    assert_eq!(path, "/version");
+                    r#"{"product_version":"0.2.4","executor_contract":"hubu-spend-executor-v4.5"}"#
+                };
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+            }
+        });
+        let client = HubuClient::new(format!("http://{address}"));
+        assert!(!hubu_is_compatible(
+            &client,
+            "0.2.4",
+            "hubu-spend-executor-v4.5"
+        ));
         server.join().unwrap();
     }
 

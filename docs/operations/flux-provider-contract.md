@@ -405,9 +405,14 @@ Black Forest Labs defines settled generation cost as the top-level numeric
 [Get Result response](https://docs.bfl.ai/api-reference/utility/get-result),
 not as `result.cost`. A missing or null top-level field means the response did
 not provide settled-cost evidence; an undocumented nested-only value is ignored.
-A malformed, negative, overflowing, or excessively precise top-level value
+The [BFL OpenAPI schema](https://api.bfl.ai/openapi.json) allows both a
+`SettledCostResultResponse` with cost and a `ResultResponse` without it.
+Gongbu preserves the returned artifact and settles an absent/null expected
+cost from the exact frozen quote with `cost_basis: frozen_quote`, leaving
+`provider_actual_cost` unknown. Submission-time cost is not promoted to
+confirmed settled cost. A malformed, negative, overflowing, or excessively precise top-level value
 fails closed into reconciliation with the provider request and operation
-identifiers preserved.
+identifiers and valid returned artifacts preserved.
 
 BFL reports this value in credits and defines
 [one credit as exactly USD 0.01](https://docs.bfl.ai/quick_start/pricing). The

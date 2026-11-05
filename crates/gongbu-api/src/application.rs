@@ -473,6 +473,7 @@ fn normalize_provider_success(
         ));
     }
     Ok(ProviderSuccess {
+        billing_failure: outcome.billing_failure,
         request_id: outcome.provider_request_id,
         operation_id: outcome.provider_operation_id,
         usage: outcome
@@ -3823,6 +3824,7 @@ mod tests {
                     ));
                 }
                 Ok(AdapterOutcome {
+                    billing_failure: None,
                     provider_request_id: Some(format!("{}-request", self.id)),
                     provider_operation_id: None,
                     usage: Some(NormalizedUsage {
@@ -4176,6 +4178,7 @@ mod tests {
         );
 
         let invalid_success = AdapterOutcome {
+            billing_failure: None,
             usage: Some(Default::default()),
             actual_vendor_cost: Some(crate::provider_contract::ActualVendorCost {
                 amount: 10,

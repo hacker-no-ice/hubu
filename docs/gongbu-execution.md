@@ -105,6 +105,22 @@ value, raw error, or unknown diagnostic into that event.
 
 ## Recovery and reconciliation
 
+Artifact availability and settlement are independent outcomes. Once a provider
+returns a valid image, Gongbu validates and stages its bytes durably before
+settlement. An expected reported cost that is absent or null uses the exact
+immutable quote from the execution's pricing snapshot, with
+`cost_basis: frozen_quote`; it never substitutes the authorization or budget
+cap. The amount is a quote-based settlement, not a provider-confirmed bill.
+Present but malformed cost data still requires reconciliation, while the image
+remains available. Neither case creates another generation request.
+
+Execution GET responses expose `artifact_outcome` and `settlement_outcome` when
+known. A durable artifact can be viewed or saved while its financial outcome is
+unresolved. The [save tool](unified-mcp.md#save-artifacts-into-a-project-folder)
+labels such a receipt `pending_reconciliation` with null cost. Re-saving after
+human reconciliation refreshes the same artifact's accounting metadata.
+
+
 Execution identity (Gongbu's `hubu-decision:<decision_id>` operation identity),
 its persisted account and agent snapshot,
 provider-attempt identity, Hubu claim, and Temporal workflow ID remain stable

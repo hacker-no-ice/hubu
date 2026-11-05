@@ -956,10 +956,15 @@ mod tests {
                 })
             }
         }
+        // BFL's public get_result schema also allows ResultResponse, which
+        // has no cost field (unlike SettledCostResultResponse). A ready image
+        // is usable independently of which response shape the provider sends.
         for ready in [
             json!({"id": "job-1", "status": "Ready",
                    "result": {"sample": "https://delivery.us7.bfl.ai/out.png"}}),
             json!({"id": "job-1", "status": "Ready", "cost": null,
+                   "result": {"sample": "https://delivery.us7.bfl.ai/out.png"}}),
+            json!({"id": "job-1", "status": "Ready", "cost": "not-a-number",
                    "result": {"sample": "https://delivery.us7.bfl.ai/out.png"}}),
         ] {
             let transport = FluxTransport {
@@ -985,11 +990,20 @@ mod tests {
             else {
                 panic!("BFL accepts the job asynchronously");
             };
-            let failure = engine
-                .poll(&request, &input, &secret, &operation)
-                .unwrap_err();
-            assert_eq!(failure.code, "pack_response_cost_missing", "{ready}");
-            assert_eq!(failure.spend_disposition, SpendDisposition::Reconcile);
+            let outcome = engine.poll(&request, &input, &secret, &operation).unwrap();
+            assert_eq!(
+                outcome.billing_failure.as_deref(),
+                Some(if ready["cost"].is_string() {
+                    "pack_response_cost_invalid"
+                } else {
+                    "pack_response_cost_missing"
+                }),
+                "{ready}"
+            );
+            assert!(outcome.actual_vendor_cost.is_none());
+            assert_eq!(outcome.artifacts.len(), 1);
+            assert_eq!(outcome.artifacts[0].bytes, png(1024, 1024));
+            outcome.validate().unwrap();
         }
     }
 

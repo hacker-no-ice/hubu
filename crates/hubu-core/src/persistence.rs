@@ -1538,6 +1538,7 @@ impl SqliteGovernanceRepository {
             ("actual_vendor_cost_amount", "INTEGER"),
             ("actual_vendor_cost_scale", "INTEGER"),
             ("actual_vendor_cost_currency", "TEXT"),
+            ("cost_basis", "TEXT NOT NULL DEFAULT 'legacy_unspecified'"),
             ("budget_charge_cents", "INTEGER"),
             ("overrun_amount_cents", "INTEGER"),
         ] {
@@ -4558,7 +4559,7 @@ fn load_executor_settlement_receipt_by_claim_id(
                 actual_vendor_cost_amount, actual_vendor_cost_scale,
                 actual_vendor_cost_currency, budget_charge,
                 released_amount, overrun_amount, currency,
-                provider_request_id, price_model_snapshot_json, artifact_reference, created_at
+                provider_request_id, price_model_snapshot_json, artifact_reference, created_at, cost_basis
          FROM spend_executor_settlement_receipts
          WHERE claim_id = ?1",
         params![claim_id.to_string()],
@@ -4588,9 +4589,9 @@ fn save_executor_settlement_receipt(
           budget_charge_cents, released_amount_cents, overrun_amount_cents, currency,
           provider_request_id, price_model_snapshot_json,
           artifact_reference, created_at, authorized_max, budget_charge,
-          released_amount, overrun_amount, amount_scale)
+          released_amount, overrun_amount, amount_scale, cost_basis)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                 ?16, ?17, ?18, ?19, 6)",
+                 ?16, ?17, ?18, ?19, 6, ?20)",
         params![
             record.claim_id.to_string(),
             record.settlement_id.to_string(),
@@ -4611,6 +4612,9 @@ fn save_executor_settlement_receipt(
             record.budget_charge.units(),
             record.released_amount.units(),
             record.overrun_amount.units(),
+            serde_json::to_value(record.receipt.cost_basis)?
+                .as_str()
+                .unwrap(),
         ],
     )?;
     Ok(())
@@ -4868,6 +4872,7 @@ fn executor_settlement_receipt_from_row(
         overrun_amount: accounting_units_from_row(row, 8)?,
         currency: parse_currency(&currency)?,
         receipt: SpendExecutorSettlementReceipt {
+            cost_basis: parse_json(&serde_json::to_string(&row.get::<_, String>(14)?).unwrap())?,
             actual_vendor_cost: crate::spend::SpendExecutorVendorCost {
                 amount: row.get(3)?,
                 scale: actual_vendor_cost_scale,
@@ -6425,6 +6430,7 @@ mod tests {
         scale: u32,
     ) -> SpendExecutorSettlementReceipt {
         SpendExecutorSettlementReceipt {
+            cost_basis: Default::default(),
             actual_vendor_cost: SpendExecutorVendorCost {
                 amount,
                 scale,

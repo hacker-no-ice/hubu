@@ -118,6 +118,10 @@ pub struct ExecutionResponse {
     /// unified MCP router verifies it against the continuation it bound.
     pub spend_auth_token_id: String,
     pub status: ExecutionStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_outcome: Option<crate::execution::LifecycleOutcome>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settlement_outcome: Option<crate::execution::LifecycleOutcome>,
     pub outcome: Option<String>,
     pub failure: Option<FailureResponse>,
     pub authorization: Money,
@@ -1312,6 +1316,8 @@ fn execution_response(
         execution_id: execution.execution_id,
         spend_auth_token_id: execution.hubu_token_reference.as_str().to_owned(),
         status,
+        artifact_outcome: execution.artifact_outcome,
+        settlement_outcome: execution.settlement_outcome,
         outcome: execution.outcome,
         failure,
         authorization: Money::from_units(

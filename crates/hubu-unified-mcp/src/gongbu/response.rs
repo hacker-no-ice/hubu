@@ -400,6 +400,8 @@ pub(super) fn execution_result(
         execution_id: response.execution_id,
         operation_handle: expected.map(|expected| expected.operation_handle.clone()),
         status: response.status,
+        artifact_outcome: response.artifact_outcome,
+        settlement_outcome: response.settlement_outcome,
         outcome: response.outcome,
         failure: response.failure,
         authorization: response.authorization,
@@ -704,11 +706,24 @@ struct RecoveryGuidance {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum LifecycleOutcome {
+    Succeeded,
+    Failed,
+    Ambiguous,
+    Released,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 pub(super) struct ExecutionResponse {
     schema_version: u32,
     execution_id: String,
     spend_auth_token_id: String,
     status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    artifact_outcome: Option<LifecycleOutcome>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    settlement_outcome: Option<LifecycleOutcome>,
     outcome: Option<String>,
     failure: Option<FailureResponse>,
     authorization: Money,
@@ -764,6 +779,10 @@ struct PublicExecutionResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     operation_handle: Option<String>,
     status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    artifact_outcome: Option<LifecycleOutcome>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    settlement_outcome: Option<LifecycleOutcome>,
     outcome: Option<String>,
     failure: Option<FailureResponse>,
     authorization: Money,
@@ -997,6 +1016,8 @@ mod tests {
 
     fn execution() -> ExecutionResponse {
         ExecutionResponse {
+            artifact_outcome: None,
+            settlement_outcome: None,
             schema_version: EXECUTION_V2_SCHEMA_VERSION,
             execution_id: "exec-1".into(),
             spend_auth_token_id: "token-1".into(),
