@@ -1328,28 +1328,115 @@ function drawNav(active) {
 
 let routeToken = 0;
 
-async function route() {
-  for (const open of document.querySelectorAll("dialog")) open.close();
+/** Draws the view named by the hash. A silent reload (auto-refresh) keeps the
+ * current content and scroll position until the new content is ready, and a
+ * failed silent reload leaves the last good content in place. */
+async function route({ silent = false } = {}) {
+  if (!silent) for (const open of document.querySelectorAll("dialog")) open.close();
   const [id, params] = (location.hash.replace(/^#\/?/, "") || "overview").split("?");
   state.routeParams = new URLSearchParams(params || "");
   const viewDef = VIEWS.find((v) => v.id === id) || VIEWS[1];
-  drawNav(viewDef.id);
-  document.getElementById("title").textContent = viewDef.label;
-  document.title = `${viewDef.label} · Hubu Admin`;
+  if (!silent) {
+    drawNav(viewDef.id);
+    document.getElementById("title").textContent = viewDef.label;
+    document.title = `${viewDef.label} · Hubu Admin`;
+  }
   const token = ++routeToken;
-  const view = clear(document.getElementById("view"));
-  const loading = h("p", { class: "hint" }, "Loading…");
-  view.append(loading);
+  autoRefresh.inFlight = true;
+  const view = document.getElementById("view");
+  if (!silent) {
+    autoRefresh.touched = false;
+    clear(view).append(h("p", { class: "hint" }, "Loading…"));
+  }
   const container = h("div", { style: { display: "contents" } });
   try {
     await viewDef.render(container);
     if (token !== routeToken) return;
+    // The user may have started interacting while a silent reload was running.
+    if (silent && (autoRefresh.touched || document.querySelector("dialog[open]"))) return;
+    const scrollY = window.scrollY;
     clear(view).append(container);
+    if (silent) window.scrollTo(0, scrollY);
+    markRefreshed();
   } catch (error) {
     if (token !== routeToken) return;
+    if (error.status === 401) { showSignIn(); return; }
+    if (silent) { setRefreshStatus(`Auto-refresh failed: ${error.message}`, true); return; }
     clear(view).append(h("div", { class: "notice bad" }, error.message));
-    if (error.status === 401) showSignIn();
+  } finally {
+    if (token === routeToken) autoRefresh.inFlight = false;
   }
+}
+
+// ---------- auto-refresh ----------
+
+const AUTO_REFRESH_MS = 15000;
+const AUTO_REFRESH_KEY = "hubu-admin.auto-refresh";
+const autoRefresh = { enabled: true, touched: false, inFlight: false, lastAt: 0 };
+
+function setRefreshStatus(text, paused) {
+  const node = document.getElementById("refresh-status");
+  node.textContent = text;
+  node.classList.toggle("paused", Boolean(paused));
+}
+
+function markRefreshed() {
+  autoRefresh.lastAt = Date.now();
+  updateRefreshStatus();
+}
+
+function updateRefreshStatus() {
+  if (autoRefresh.enabled && autoRefresh.touched) {
+    setRefreshStatus("Auto-refresh paused while you work on this view", true);
+  } else if (autoRefresh.lastAt) {
+    setRefreshStatus(`Updated ${new Date(autoRefresh.lastAt).toLocaleTimeString()}`);
+  }
+}
+
+/** Interactions that hold state a reload would discard (filters, typed text,
+ * "Load more" pages, edit-mode toggles, expanded sections) pause auto-refresh
+ * for this view until it is reloaded by navigation or the Refresh button. */
+function watchViewInteractions() {
+  const view = document.getElementById("view");
+  const touch = () => {
+    if (autoRefresh.touched) return;
+    autoRefresh.touched = true;
+    updateRefreshStatus();
+  };
+  for (const type of ["input", "change", "submit"]) view.addEventListener(type, touch, true);
+  view.addEventListener("toggle", touch, true); // <details>; does not bubble
+  view.addEventListener("click", (event) => {
+    if (event.target.closest(".pager button, .segmented button")) touch();
+  }, true);
+}
+
+function autoRefreshDue() {
+  return autoRefresh.enabled && !autoRefresh.touched && !autoRefresh.inFlight
+    && document.visibilityState === "visible"
+    && !document.querySelector("dialog[open]")
+    && document.querySelector(".shell").style.display !== "none"
+    && Date.now() - autoRefresh.lastAt >= AUTO_REFRESH_MS;
+}
+
+function autoRefreshTick() {
+  if (!autoRefreshDue()) return;
+  route({ silent: true });
+  refreshApprovalCount();
+}
+
+function startAutoRefresh() {
+  const toggle = document.getElementById("auto-refresh");
+  try { autoRefresh.enabled = localStorage.getItem(AUTO_REFRESH_KEY) !== "off"; } catch (_) { /* default on */ }
+  toggle.checked = autoRefresh.enabled;
+  toggle.addEventListener("change", () => {
+    autoRefresh.enabled = toggle.checked;
+    try { localStorage.setItem(AUTO_REFRESH_KEY, toggle.checked ? "on" : "off"); } catch (_) { /* per-browser only */ }
+    updateRefreshStatus();
+  });
+  watchViewInteractions();
+  // Catch up as soon as a backgrounded tab is shown again.
+  document.addEventListener("visibilitychange", autoRefreshTick);
+  setInterval(autoRefreshTick, 1000);
 }
 
 function showSignIn() {
@@ -1383,9 +1470,10 @@ async function boot() {
     document.getElementById("whoami").textContent = `Owner: ${me.display_name}`;
   }).catch(() => {});
   document.getElementById("refresh").addEventListener("click", () => { route(); refreshApprovalCount(); });
-  window.addEventListener("hashchange", route);
+  window.addEventListener("hashchange", () => route());
   refreshApprovalCount();
   setInterval(refreshApprovalCount, 30000);
+  startAutoRefresh();
   route();
 }
 

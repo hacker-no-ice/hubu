@@ -35,6 +35,13 @@ browser, stop `hubu ui` and start it again.
 | Budgets | Create budgets, change a limit, revoke, view version history. |
 | Providers & secrets | Read-only view grouped by platform: each platform's models, config versions, secret reference name and which targets Gongbu currently offers. |
 
+The current view reloads itself every 15 seconds while the browser tab is
+visible, keeping your scroll position. Auto-refresh pauses while a dialog is
+open and, once you change a filter, type in a form, load more rows or switch
+modes on a view, until you reload that view with **Refresh** or navigate away,
+so it never discards work in progress. Turn it off with the **Auto-refresh**
+checkbox; the choice is remembered in that browser.
+
 Agent registration follows the [registration protocol](agent-registration.md).
 You enter the agent name and version label. The UI fills owner and runtime
 fields from the active Hubu session, computes the fingerprints, and shows the
