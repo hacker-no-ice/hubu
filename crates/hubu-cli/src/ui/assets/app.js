@@ -5,9 +5,9 @@
 
 const VIEWS = [
   { group: "Monitor" },
-  { id: "overview", label: "Overview", render: renderOverview },
+  { id: "overview", label: "Overview", render: renderOverview, autoRefresh: true },
   { id: "approvals", label: "Approvals", render: renderApprovals, badge: "approvals" },
-  { id: "spend", label: "Spend history", render: renderSpend },
+  { id: "spend", label: "Spend history", render: renderSpend, autoRefresh: true },
   { id: "decisions", label: "Decisions", render: renderDecisions },
   { group: "Manage" },
   { id: "agents", label: "Agents", render: renderAgents },
@@ -488,7 +488,7 @@ function pagedLoader(container, fetchPage, pick, renderRows) {
       cursor = data.next_cursor || null;
       draw();
     } catch (error) {
-      container.append(h("div", { class: "notice bad" }, error.message));
+      container.append(h("div", { class: "notice bad load-error" }, error.message));
     }
   };
   return async () => {
@@ -885,7 +885,7 @@ async function openPolicy(container, policy, options = {}) {
       hubu("/policies/export", { policy_id: policy.policy_id }),
     ]);
   } catch (error) {
-    clear(container).append(h("div", { class: "notice bad" }, error.message));
+    clear(container).append(h("div", { class: "notice bad load-error" }, error.message));
     return;
   }
   const revisions = [...(history.revisions || [])].sort((a, b) => b.revision - a.revision);
@@ -916,7 +916,7 @@ async function openPolicy(container, policy, options = {}) {
       if (view.mode === "read") await drawRead(body);
       else drawEdit(body);
     } catch (error) {
-      clear(body).append(h("div", { class: "notice bad" }, error.message));
+      clear(body).append(h("div", { class: "notice bad load-error" }, error.message));
     }
   };
 
@@ -1328,28 +1328,130 @@ function drawNav(active) {
 
 let routeToken = 0;
 
-async function route() {
-  for (const open of document.querySelectorAll("dialog")) open.close();
+/** Draws the view named by the hash. A silent reload (auto-refresh) keeps the
+ * current content and scroll position until the new content is ready, and a
+ * failed silent reload leaves the last good content in place. */
+async function route({ silent = false } = {}) {
+  if (!silent) for (const open of document.querySelectorAll("dialog")) open.close();
   const [id, params] = (location.hash.replace(/^#\/?/, "") || "overview").split("?");
   state.routeParams = new URLSearchParams(params || "");
   const viewDef = VIEWS.find((v) => v.id === id) || VIEWS[1];
-  drawNav(viewDef.id);
-  document.getElementById("title").textContent = viewDef.label;
-  document.title = `${viewDef.label} · Hubu Admin`;
+  if (!silent) {
+    drawNav(viewDef.id);
+    document.getElementById("title").textContent = viewDef.label;
+    document.title = `${viewDef.label} · Hubu Admin`;
+    // Only read-mostly views reload themselves; views with editors use Refresh.
+    autoRefresh.supported = Boolean(viewDef.autoRefresh);
+    document.getElementById("auto-refresh-controls").hidden = !autoRefresh.supported;
+  }
   const token = ++routeToken;
-  const view = clear(document.getElementById("view"));
-  const loading = h("p", { class: "hint" }, "Loading…");
-  view.append(loading);
+  const activityAtStart = autoRefresh.activity;
+  autoRefresh.inFlight = true;
+  const view = document.getElementById("view");
+  if (!silent) {
+    autoRefresh.touched = false;
+    clear(view).append(h("p", { class: "hint" }, "Loading…"));
+  }
   const container = h("div", { style: { display: "contents" } });
   try {
     await viewDef.render(container);
     if (token !== routeToken) return;
+    // The user may have started interacting while a silent reload was running.
+    // Any click or edit in the view during a silent reload (e.g. picking another
+    // policy) may have changed what is shown; discard this now-stale render.
+    if (silent && (autoRefresh.touched || autoRefresh.activity !== activityAtStart
+      || document.querySelector("dialog[open]"))) return;
+    // Sub-loaders (paged tables, the policy panel) report fetch failures inline
+    // as .load-error; a background reload keeps the last good content instead.
+    const loadError = silent && container.querySelector(".load-error");
+    if (loadError) { setRefreshStatus(`Auto-refresh failed: ${loadError.textContent}`, true); return; }
+    const scrollY = window.scrollY;
     clear(view).append(container);
+    if (silent) window.scrollTo(0, scrollY);
+    markRefreshed();
   } catch (error) {
     if (token !== routeToken) return;
+    if (error.status === 401) { showSignIn(); return; }
+    if (silent) { setRefreshStatus(`Auto-refresh failed: ${error.message}`, true); return; }
     clear(view).append(h("div", { class: "notice bad" }, error.message));
-    if (error.status === 401) showSignIn();
+  } finally {
+    if (token === routeToken) autoRefresh.inFlight = false;
   }
+}
+
+// ---------- auto-refresh ----------
+
+const AUTO_REFRESH_MS = 15000;
+const AUTO_REFRESH_KEY = "hubu-admin.auto-refresh";
+// lastAt: last successful render (shown); lastAttemptAt: paces retries so a
+// failing backend is polled no faster than a healthy one.
+const autoRefresh = { enabled: true, supported: false, touched: false, inFlight: false, lastAt: 0, lastAttemptAt: 0, activity: 0 };
+
+function setRefreshStatus(text, paused) {
+  const node = document.getElementById("refresh-status");
+  node.textContent = text;
+  node.classList.toggle("paused", Boolean(paused));
+}
+
+function markRefreshed() {
+  autoRefresh.lastAt = Date.now();
+  updateRefreshStatus();
+}
+
+function updateRefreshStatus() {
+  if (autoRefresh.enabled && autoRefresh.touched) {
+    setRefreshStatus("Auto-refresh paused while you work on this view", true);
+  } else if (autoRefresh.lastAt) {
+    setRefreshStatus(`Updated ${new Date(autoRefresh.lastAt).toLocaleTimeString()}`);
+  }
+}
+
+/** Interactions that hold state a reload would discard (filters, "Load more"
+ * pages, expanded sections) pause auto-refresh for this view until it is
+ * reloaded by navigation or the Refresh button. */
+function watchViewInteractions() {
+  const view = document.getElementById("view");
+  const touch = () => {
+    if (autoRefresh.touched) return;
+    autoRefresh.touched = true;
+    updateRefreshStatus();
+  };
+  for (const type of ["input", "change", "submit"]) view.addEventListener(type, touch, true);
+  view.addEventListener("toggle", touch, true); // <details>; does not bubble
+  for (const type of ["click", "input", "change"]) view.addEventListener(type, () => { autoRefresh.activity += 1; }, true);
+  view.addEventListener("click", (event) => {
+    if (event.target.closest(".pager button")) touch();
+  }, true);
+}
+
+function autoRefreshDue() {
+  return autoRefresh.enabled && autoRefresh.supported && !autoRefresh.touched && !autoRefresh.inFlight
+    && document.visibilityState === "visible"
+    && !document.querySelector("dialog[open]")
+    && document.querySelector(".shell").style.display !== "none"
+    && Date.now() - Math.max(autoRefresh.lastAt, autoRefresh.lastAttemptAt) >= AUTO_REFRESH_MS;
+}
+
+function autoRefreshTick() {
+  if (!autoRefreshDue()) return;
+  autoRefresh.lastAttemptAt = Date.now();
+  route({ silent: true });
+  refreshApprovalCount();
+}
+
+function startAutoRefresh() {
+  const toggle = document.getElementById("auto-refresh");
+  try { autoRefresh.enabled = localStorage.getItem(AUTO_REFRESH_KEY) !== "off"; } catch (_) { /* default on */ }
+  toggle.checked = autoRefresh.enabled;
+  toggle.addEventListener("change", () => {
+    autoRefresh.enabled = toggle.checked;
+    try { localStorage.setItem(AUTO_REFRESH_KEY, toggle.checked ? "on" : "off"); } catch (_) { /* per-browser only */ }
+    updateRefreshStatus();
+  });
+  watchViewInteractions();
+  // Catch up as soon as a backgrounded tab is shown again.
+  document.addEventListener("visibilitychange", autoRefreshTick);
+  setInterval(autoRefreshTick, 1000);
 }
 
 function showSignIn() {
@@ -1383,9 +1485,10 @@ async function boot() {
     document.getElementById("whoami").textContent = `Owner: ${me.display_name}`;
   }).catch(() => {});
   document.getElementById("refresh").addEventListener("click", () => { route(); refreshApprovalCount(); });
-  window.addEventListener("hashchange", route);
+  window.addEventListener("hashchange", () => route());
   refreshApprovalCount();
   setInterval(refreshApprovalCount, 30000);
+  startAutoRefresh();
   route();
 }
 

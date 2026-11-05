@@ -98,6 +98,9 @@ main { min-width: 0; }
   position: sticky; top: 0; z-index: 2;
 }
 .topbar h1 { font-size: 18px; margin: 0; }
+.topbar-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; justify-content: flex-end; }
+#refresh-status.paused { color: var(--warn); }
+#auto-refresh-controls[hidden] { display: none; }
 #view { padding: 24px 28px 64px; display: flex; flex-direction: column; gap: 20px; }
 
 .card {
