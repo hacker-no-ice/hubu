@@ -40,6 +40,14 @@ The spend summary comes from the read-only
 cover the whole ledger rather than the loaded table rows. Charts are plain CSS
 bars; hover a bar for its exact amount.
 
+**Overview** and **Spend history** reload themselves every 15 seconds while
+the browser tab is visible, keeping your scroll position. Auto-refresh pauses
+while a dialog is open and, once you change a filter, load more rows or expand
+a section, until you reload the view with **Refresh** or navigate away. Turn it
+off with the **Auto-refresh** checkbox; the choice is remembered in that
+browser. Views with editors (agents, users, policies, budgets) and the other
+views reload only when you click **Refresh**.
+
 Agent registration follows the [registration protocol](agent-registration.md).
 You enter the agent name and version label. The UI fills owner and runtime
 fields from the active Hubu session, computes the fingerprints, and shows the
