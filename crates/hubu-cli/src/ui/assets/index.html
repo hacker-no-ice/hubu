@@ -24,10 +24,12 @@
       <header class="topbar">
         <h1 id="title">Overview</h1>
         <div class="topbar-actions">
-          <span class="hint" id="refresh-status" aria-live="off"></span>
-          <label class="inline hint" title="Reload this view every 15 seconds while it is visible and untouched">
-            <input type="checkbox" id="auto-refresh"> Auto-refresh
-          </label>
+          <span class="topbar-actions" id="auto-refresh-controls" hidden>
+            <span class="hint" id="refresh-status" aria-live="off"></span>
+            <label class="inline hint" title="Reload this view every 15 seconds while it is visible and untouched">
+              <input type="checkbox" id="auto-refresh"> Auto-refresh
+            </label>
+          </span>
           <button type="button" class="ghost" id="refresh" title="Reload this view">Refresh</button>
         </div>
       </header>

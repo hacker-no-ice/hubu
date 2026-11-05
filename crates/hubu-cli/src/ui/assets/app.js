@@ -5,9 +5,9 @@
 
 const VIEWS = [
   { group: "Monitor" },
-  { id: "overview", label: "Overview", render: renderOverview },
+  { id: "overview", label: "Overview", render: renderOverview, autoRefresh: true },
   { id: "approvals", label: "Approvals", render: renderApprovals, badge: "approvals" },
-  { id: "spend", label: "Spend history", render: renderSpend },
+  { id: "spend", label: "Spend history", render: renderSpend, autoRefresh: true },
   { id: "decisions", label: "Decisions", render: renderDecisions },
   { group: "Manage" },
   { id: "agents", label: "Agents", render: renderAgents },
@@ -864,7 +864,7 @@ async function renderPolicies(view) {
   };
   drawList();
   append(view, [
-    card("Policies", listBody, [h("button", { type: "button", class: "small", "data-pause-refresh": true, onclick: () => {
+    card("Policies", listBody, [h("button", { type: "button", class: "small", onclick: () => {
       selected = null;
       drawList();
       newPolicyEditor(workspace);
@@ -934,12 +934,12 @@ async function openPolicy(container, policy, options = {}) {
       isCurrent ? null : h("div", { class: "notice warn" },
         `You are viewing revision ${revision.revision}. Revision ${current} is the one in effect.`,
         h("div", { class: "row-actions spaced" },
-          h("button", { type: "button", class: "ghost small", "data-pause-refresh": true, onclick: async () => {
+          h("button", { type: "button", class: "ghost small", onclick: async () => {
             const now = await renderedAt(current);
             clear(compareBox).append(h("h3", {}, `Changes from revision ${revision.revision} to revision ${current}`),
               diffView(stripOwner(info.policy_yaml), stripOwner(now.policy_yaml)));
           } }, "Compare with current"),
-          h("button", { type: "button", class: "ghost small", "data-pause-refresh": true, onclick: () => {
+          h("button", { type: "button", class: "ghost small", onclick: () => {
             view.mode = "edit";
             view.draft = stripOwner(info.policy_yaml);
             draw();
@@ -1036,7 +1036,7 @@ function policyEditor(container, { yaml, intro, submitLabel, onDraft, onCancel, 
     extraFields || null,
     textarea,
     h("div", { class: "form-actions" },
-      h("button", { type: "button", class: "ghost", "data-pause-refresh": true, onclick: validate }, "Validate"),
+      h("button", { type: "button", class: "ghost", onclick: validate }, "Validate"),
       save,
       onCancel ? h("button", { type: "button", class: "ghost", onclick: onCancel }, "Discard changes") : null,
       stale),
@@ -1340,6 +1340,9 @@ async function route({ silent = false } = {}) {
     drawNav(viewDef.id);
     document.getElementById("title").textContent = viewDef.label;
     document.title = `${viewDef.label} · Hubu Admin`;
+    // Only read-mostly views reload themselves; views with editors use Refresh.
+    autoRefresh.supported = Boolean(viewDef.autoRefresh);
+    document.getElementById("auto-refresh-controls").hidden = !autoRefresh.supported;
   }
   const token = ++routeToken;
   const activityAtStart = autoRefresh.activity;
@@ -1382,7 +1385,7 @@ const AUTO_REFRESH_MS = 15000;
 const AUTO_REFRESH_KEY = "hubu-admin.auto-refresh";
 // lastAt: last successful render (shown); lastAttemptAt: paces retries so a
 // failing backend is polled no faster than a healthy one.
-const autoRefresh = { enabled: true, touched: false, inFlight: false, lastAt: 0, lastAttemptAt: 0, activity: 0 };
+const autoRefresh = { enabled: true, supported: false, touched: false, inFlight: false, lastAt: 0, lastAttemptAt: 0, activity: 0 };
 
 function setRefreshStatus(text, paused) {
   const node = document.getElementById("refresh-status");
@@ -1403,9 +1406,9 @@ function updateRefreshStatus() {
   }
 }
 
-/** Interactions that hold state a reload would discard (filters, typed text,
- * "Load more" pages, edit-mode toggles, expanded sections) pause auto-refresh
- * for this view until it is reloaded by navigation or the Refresh button. */
+/** Interactions that hold state a reload would discard (filters, "Load more"
+ * pages, expanded sections) pause auto-refresh for this view until it is
+ * reloaded by navigation or the Refresh button. */
 function watchViewInteractions() {
   const view = document.getElementById("view");
   const touch = () => {
@@ -1417,14 +1420,12 @@ function watchViewInteractions() {
   view.addEventListener("toggle", touch, true); // <details>; does not bubble
   for (const type of ["click", "input", "change"]) view.addEventListener(type, () => { autoRefresh.activity += 1; }, true);
   view.addEventListener("click", (event) => {
-    // Buttons that swap in local UI state (editors, comparisons, validation
-    // results) without a form event carry data-pause-refresh.
-    if (event.target.closest(".pager button, .segmented button, [data-pause-refresh]")) touch();
+    if (event.target.closest(".pager button")) touch();
   }, true);
 }
 
 function autoRefreshDue() {
-  return autoRefresh.enabled && !autoRefresh.touched && !autoRefresh.inFlight
+  return autoRefresh.enabled && autoRefresh.supported && !autoRefresh.touched && !autoRefresh.inFlight
     && document.visibilityState === "visible"
     && !document.querySelector("dialog[open]")
     && document.querySelector(".shell").style.display !== "none"
