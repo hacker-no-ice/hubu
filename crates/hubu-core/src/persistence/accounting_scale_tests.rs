@@ -643,3 +643,45 @@ fn concurrent_first_opens_migrate_a_legacy_database_once() {
     // Openers that raced before the write lock may each have taken a backup.
     assert!(!backups(&path).is_empty());
 }
+
+#[test]
+fn concurrent_pre_migration_backups_never_share_an_output_file() {
+    // Openers back up outside the write lock, so racing openers must each
+    // claim a distinct output file: a shared `VACUUM INTO` target fails with
+    // "table … already exists" once another opener has written it.
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("hubu.sqlite3");
+    legacy_database(&path);
+    let openers = 8;
+    for _round in 0..10 {
+        for backup in backups(&path) {
+            std::fs::remove_file(backup).unwrap();
+        }
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(openers));
+        let handles: Vec<_> = (0..openers)
+            .map(|_| {
+                let barrier = std::sync::Arc::clone(&barrier);
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let conn = Connection::open(&path).unwrap();
+                    conn.busy_timeout(std::time::Duration::from_secs(5))
+                        .unwrap();
+                    barrier.wait();
+                    backup_before_accounting_scale(&conn)
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap().unwrap();
+        }
+        let taken = backups(&path);
+        assert_eq!(taken.len(), openers, "{taken:?}");
+        for backup in taken {
+            let copy = Connection::open(&backup).unwrap();
+            let integrity: String = copy
+                .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(integrity, "ok", "{}", backup.display());
+        }
+    }
+}
