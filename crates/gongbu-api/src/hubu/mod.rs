@@ -147,6 +147,8 @@ impl HubuClient {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct HubuVersion {
+    #[serde(default)]
+    pub executor_receipt_cost_basis_v1: bool,
     pub product_version: String,
     pub executor_contract: String,
     #[serde(default)]

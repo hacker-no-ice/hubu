@@ -368,6 +368,11 @@ the exact cost and authorization, and an identical retry must supply the same
 JSON value. A numerically equal cost encoded with a different amount or scale
 is changed receipt data and conflicts after settlement.
 
+Hubu advertises `executor_receipt_cost_basis_v1: true` on `/version`.
+Gongbu requires this capability during startup/readiness compatibility checks
+before accepting paid work, so an older Hubu cannot first accept a generation
+and then reject its provenance-bearing settlement receipt.
+
 Receipts also accept an additive `cost_basis`: `provider_reported`,
 `catalog_usage`, `frozen_quote`, or `legacy_unspecified` (the default for old
 receipts). This value is persisted and participates in idempotency checks.

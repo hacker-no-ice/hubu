@@ -1988,7 +1988,12 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
     let budget_versions_public_id = budget_versions_public_id(&request.path).map(str::to_string);
     let result = match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/health") => Ok(json!({ "status": "ok" })),
-        ("GET", "/version") => serde_json::to_value(build_info()).map_err(Into::into),
+        ("GET", "/version") => serde_json::to_value(build_info())
+            .map(|mut version| {
+                version["executor_receipt_cost_basis_v1"] = json!(true);
+                version
+            })
+            .map_err(Into::into),
         ("GET", "/registration/guidance")
         | ("GET", "/.well-known/hubu-agent-registration.json") => Ok(registration_guidance()),
         ("GET", "/user") => current_user(state).map(to_json),
@@ -7708,6 +7713,7 @@ lease_profiles:
         let response = route(public_request("GET", "/version"), &state);
 
         assert_eq!(response.status, 200);
+        assert_eq!(response.body["executor_receipt_cost_basis_v1"], true);
         assert_eq!(
             response.body["product_version"],
             build_info().product_version
