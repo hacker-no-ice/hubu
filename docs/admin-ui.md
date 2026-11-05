@@ -37,8 +37,8 @@ browser, stop `hubu ui` and start it again.
 
 The current view reloads itself every 15 seconds while the browser tab is
 visible, keeping your scroll position. Auto-refresh pauses while a dialog is
-open and, once you change a filter, type in a form, load more rows or switch
-modes on a view, until you reload that view with **Refresh** or navigate away,
+open and, once you change a filter, type in a form, load more rows, switch
+modes, or open the policy editor or a comparison on a view, until you reload that view with **Refresh** or navigate away,
 so it never discards work in progress. Turn it off with the **Auto-refresh**
 checkbox; the choice is remembered in that browser.
 

@@ -864,7 +864,7 @@ async function renderPolicies(view) {
   };
   drawList();
   append(view, [
-    card("Policies", listBody, [h("button", { type: "button", class: "small", onclick: () => {
+    card("Policies", listBody, [h("button", { type: "button", class: "small", "data-pause-refresh": true, onclick: () => {
       selected = null;
       drawList();
       newPolicyEditor(workspace);
@@ -934,12 +934,12 @@ async function openPolicy(container, policy, options = {}) {
       isCurrent ? null : h("div", { class: "notice warn" },
         `You are viewing revision ${revision.revision}. Revision ${current} is the one in effect.`,
         h("div", { class: "row-actions spaced" },
-          h("button", { type: "button", class: "ghost small", onclick: async () => {
+          h("button", { type: "button", class: "ghost small", "data-pause-refresh": true, onclick: async () => {
             const now = await renderedAt(current);
             clear(compareBox).append(h("h3", {}, `Changes from revision ${revision.revision} to revision ${current}`),
               diffView(stripOwner(info.policy_yaml), stripOwner(now.policy_yaml)));
           } }, "Compare with current"),
-          h("button", { type: "button", class: "ghost small", onclick: () => {
+          h("button", { type: "button", class: "ghost small", "data-pause-refresh": true, onclick: () => {
             view.mode = "edit";
             view.draft = stripOwner(info.policy_yaml);
             draw();
@@ -1036,7 +1036,7 @@ function policyEditor(container, { yaml, intro, submitLabel, onDraft, onCancel, 
     extraFields || null,
     textarea,
     h("div", { class: "form-actions" },
-      h("button", { type: "button", class: "ghost", onclick: validate }, "Validate"),
+      h("button", { type: "button", class: "ghost", "data-pause-refresh": true, onclick: validate }, "Validate"),
       save,
       onCancel ? h("button", { type: "button", class: "ghost", onclick: onCancel }, "Discard changes") : null,
       stale),
@@ -1412,7 +1412,9 @@ function watchViewInteractions() {
   for (const type of ["input", "change", "submit"]) view.addEventListener(type, touch, true);
   view.addEventListener("toggle", touch, true); // <details>; does not bubble
   view.addEventListener("click", (event) => {
-    if (event.target.closest(".pager button, .segmented button")) touch();
+    // Buttons that swap in local UI state (editors, comparisons, validation
+    // results) without a form event carry data-pause-refresh.
+    if (event.target.closest(".pager button, .segmented button, [data-pause-refresh]")) touch();
   }, true);
 }
 
