@@ -1342,6 +1342,7 @@ async function route({ silent = false } = {}) {
     document.title = `${viewDef.label} · Hubu Admin`;
   }
   const token = ++routeToken;
+  const activityAtStart = autoRefresh.activity;
   autoRefresh.inFlight = true;
   const view = document.getElementById("view");
   if (!silent) {
@@ -1353,7 +1354,10 @@ async function route({ silent = false } = {}) {
     await viewDef.render(container);
     if (token !== routeToken) return;
     // The user may have started interacting while a silent reload was running.
-    if (silent && (autoRefresh.touched || document.querySelector("dialog[open]"))) return;
+    // Any click or edit in the view during a silent reload (e.g. picking another
+    // policy) may have changed what is shown; discard this now-stale render.
+    if (silent && (autoRefresh.touched || autoRefresh.activity !== activityAtStart
+      || document.querySelector("dialog[open]"))) return;
     // Sub-loaders (paged tables, the policy panel) report fetch failures inline
     // as .load-error; a background reload keeps the last good content instead.
     const loadError = silent && container.querySelector(".load-error");
@@ -1378,7 +1382,7 @@ const AUTO_REFRESH_MS = 15000;
 const AUTO_REFRESH_KEY = "hubu-admin.auto-refresh";
 // lastAt: last successful render (shown); lastAttemptAt: paces retries so a
 // failing backend is polled no faster than a healthy one.
-const autoRefresh = { enabled: true, touched: false, inFlight: false, lastAt: 0, lastAttemptAt: 0 };
+const autoRefresh = { enabled: true, touched: false, inFlight: false, lastAt: 0, lastAttemptAt: 0, activity: 0 };
 
 function setRefreshStatus(text, paused) {
   const node = document.getElementById("refresh-status");
@@ -1411,6 +1415,7 @@ function watchViewInteractions() {
   };
   for (const type of ["input", "change", "submit"]) view.addEventListener(type, touch, true);
   view.addEventListener("toggle", touch, true); // <details>; does not bubble
+  for (const type of ["click", "input", "change"]) view.addEventListener(type, () => { autoRefresh.activity += 1; }, true);
   view.addEventListener("click", (event) => {
     // Buttons that swap in local UI state (editors, comparisons, validation
     // results) without a form event carry data-pause-refresh.
