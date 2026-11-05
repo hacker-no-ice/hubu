@@ -6,6 +6,8 @@ const sharedLinks = {
   budgetCoordinator: ["Private budget coordinator", "crates/hubu-core/src/budget/coordinator.rs"],
   cli: ["CLI", "crates/hubu-cli/src/main.rs"],
   watch: ["Read-only budget watch", "crates/hubu-cli/src/watch.rs"],
+  adminUi: ["Local admin web UI proxy", "crates/hubu-cli/src/ui.rs"],
+  adminUiDoc: ["Admin web UI guide", "docs/admin-ui.md"],
   gallery: ["Native gallery export", "crates/hubu-unified-mcp/src/gallery.rs"],
   galleryCli: ["Gallery CLI profile handoff", "crates/hubu-cli/src/gallery.rs"],
   artifactSave: ["Allowlisted artifact save", "crates/hubu-unified-mcp/src/artifact_save.rs"],
@@ -722,9 +724,10 @@ const components = {
       ["Credential handoff", "Starts Hubu first, hands credentials to Gongbu through a protected step, then starts Gongbu."],
       ["Agent setup", "Writes the Codex MCP configuration and builds registration envelopes from server guidance."],
       ["Acceptance canary", "One command verifies the full stack end to end without billable provider spend."],
+      ["Admin web UI", "`hubu ui` serves a loopback-only browser UI behind a one-time login link. It holds the Hubu bearer and approval credentials itself and relays only allow-listed admin routes; the Hubu server keeps refusing browser origins. Approval and rename need an explicit confirmation step. Provider revisions and secret reference names are read-only from the active generation, and live targets come from Gongbu's sanitized catalog."],
       ["Read-only watch", "Polls owner-scoped GET /watch every second for current-version budget bars and the combined current decision feed with trusted providers, rules, reservations and exact settlement; no runtime telemetry or execution."],
     ],
-    links: [sharedLinks.feedback, sharedLinks.cli, sharedLinks.watch, sharedLinks.saveFolders, sharedLinks.stackProviderContract, sharedLinks.stackProviderDoctor, sharedLinks.stackLifecycle, sharedLinks.managedCredentialHandoff, sharedLinks.gongbuProviderContracts, sharedLinks.liveProviders, sharedLinks.fluxProviderContract, sharedLinks.localStack, sharedLinks.localStackAcceptance, sharedLinks.api, sharedLinks.registrationProtocol],
+    links: [sharedLinks.feedback, sharedLinks.cli, sharedLinks.watch, sharedLinks.adminUi, sharedLinks.adminUiDoc, sharedLinks.saveFolders, sharedLinks.stackProviderContract, sharedLinks.stackProviderDoctor, sharedLinks.stackLifecycle, sharedLinks.managedCredentialHandoff, sharedLinks.gongbuProviderContracts, sharedLinks.liveProviders, sharedLinks.fluxProviderContract, sharedLinks.localStack, sharedLinks.localStackAcceptance, sharedLinks.api, sharedLinks.registrationProtocol],
     nodes: [
       { id: "commands", label: "Commands", sub: "init/admin/stack/watch/folders/feedback", x: 35, y: 95, w: 220, h: 92, tone: "human" },
       { id: "contract", label: "Provider contract source", sub: "FLUX contract + credential alias", x: 315, y: 70, w: 240, h: 92, tone: "data", path: "contracts/provider-contracts-v1.json" },
@@ -738,6 +741,7 @@ const components = {
       { id: "credentialHandoff", label: "Private credential state", sub: "Gongbu-owned handoff", x: 965, y: 220, w: 250, h: 92, tone: "data", path: "crates/gongbu-api/src/config/setup.rs" },
       { id: "managedGongbu", label: "Managed Gongbu", sub: "validated catalog + execution", x: 965, y: 370, w: 250, h: 92, tone: "executor", path: "crates/gongbu-api/src/server.rs" },
       { id: "handoff", label: "Client handoff", sub: "CLI + client-owned MCP", x: 625, y: 535, w: 240, h: 92, tone: "agent" },
+      { id: "adminUi", label: "Admin web UI", sub: "loopback allow-list proxy", x: 965, y: 535, w: 250, h: 92, tone: "human", path: "crates/hubu-cli/src/ui.rs" },
     ],
     edges: [
       ["commands", "watch", "watch budgets", { fromSide: "bottom", toSide: "top" }],
@@ -754,6 +758,9 @@ const components = {
       ["validator", "managedGongbu", "start only if valid"],
       ["contract", "handoff", "verified post-start refs", { fromSide: "left", toSide: "bottom", waypoints: [{ x: 290, y: 116 }, { x: 290, y: 680 }, { x: 745, y: 680 }], labelSegment: 2 }],
       ["handoff", "commands", "endpoint + capabilities", { fromSide: "bottom", toSide: "left", waypoints: [{ x: 745, y: 700 }, { x: 10, y: 700 }, { x: 10, y: 141 }], labelSegment: 1, labelDy: -12 }],
+      ["handoff", "adminUi", "hubu ui"],
+      ["adminUi", "managedGongbu", "read targets", { fromSide: "top", toSide: "bottom" }],
+      ["adminUi", "managedHubu", "admin routes", { fromSide: "right", toSide: "right", waypoints: [{ x: 1250, y: 581 }, { x: 1250, y: 116 }], labelSegment: 1, labelDx: -40 }],
     ],
   },
   mcp: {
