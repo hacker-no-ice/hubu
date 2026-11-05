@@ -469,12 +469,19 @@ async function renderSpend(view) {
       [["7", "Last 7 days"], ["30", "Last 30 days"], ["90", "Last 90 days"], ["365", "Last 365 days"]]
         .map(([value, label]) => h("option", { value, selected: value === "30" }, label)))),
     h("button", { type: "submit", class: "ghost" }, "Apply"));
+  // Only the latest request may draw, so quick repeated Applies never stack
+  // summaries for different selections.
+  let summaryRequest = 0;
   const loadSummary = async () => {
+    const request = ++summaryRequest;
+    let data;
     try {
-      drawSpendSummary(clear(summaryBody), await hubu("/ledger/summary", formValues(summaryFilters)));
+      data = await hubu("/ledger/summary", formValues(summaryFilters));
     } catch (error) {
-      clear(summaryBody).append(h("div", { class: "notice bad load-error" }, error.message));
+      if (request === summaryRequest) clear(summaryBody).append(h("div", { class: "notice bad load-error" }, error.message));
+      return;
     }
+    if (request === summaryRequest) drawSpendSummary(clear(summaryBody), data);
   };
 
   summaryFilters.addEventListener("submit", (e) => { e.preventDefault(); loadSummary(); });
