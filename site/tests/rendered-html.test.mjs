@@ -98,6 +98,22 @@ test("release notes lead from the landing page to one concise stable release and
   }
 });
 
+test("the mascot history links the governed variations before the evolution article", async () => {
+  const response = await render("/mascot");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /<h1>How the mascot evolved\.<\/h1>/);
+  for (const src of ["/demos/local-stack/concepts-builtin.png", "/brand/hubu-mascot.png", "/demos/local-stack/mascot-flux-ledger.jpg", "/demos/local-stack/mascot-gemini-blocked.jpg", "/brand/hubu-mascot-evolved.jpg"]) {
+    assert.ok(html.includes(`src="${src}"`), src);
+  }
+  const variations = html.indexOf('href="/demos/local-stack#mascot-gallery"');
+  const article = html.indexOf('href="https://x.com/hacker_no_ice/status/2118507555794374942"');
+  assert.ok(variations > 0 && article > variations);
+  assert.match(html, /href="https:\/\/hubustack.dev\/mascot"/);
+  const sitemap = await readFile(new URL("../dist/client/sitemap.xml", import.meta.url), "utf8");
+  assert.ok(sitemap.includes("https://hubustack.dev/mascot</loc>"));
+});
+
 test("v0.2.5 release notes keep the system card honest until the measured run is recorded", async () => {
   const response = await render("/releases/v0.2.5");
   assert.equal(response.status, 200);
@@ -173,8 +189,8 @@ test("home page walks through an illustrative governed image request", async () 
   assert.match(mascot, /src="\/brand\/hubu-mascot-evolved.jpg"/);
   assert.match(mascot, /loading="lazy"/);
   assert.match(mascot, /alt="Hubu&#x27;s cream-and-jade seal mascot on a cinnabar base, with violet and cyan glowing edges"/);
-  assert.match(mascot, /href="https:\/\/x.com\/hacker_no_ice\/status\/2118507555794374942"/);
-  assert.match(mascot, /href="\/demos\/local-stack"/);
+  assert.match(mascot, /href="\/mascot"/);
+  assert.doesNotMatch(mascot, /x\.com|href="\/demos\/local-stack"/);
 });
 
 test("links demos from home and publishes the sandbox video before its concise script", async () => {

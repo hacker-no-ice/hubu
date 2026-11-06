@@ -110,7 +110,7 @@ export default function Home() {
             <figure className="example-mascot">
               {/* eslint-disable-next-line @next/next/no-img-element -- Static artwork is served directly by the site worker. */}
               <img src="/brand/hubu-mascot-evolved.jpg" width="1254" height="975" alt="Hubu's cream-and-jade seal mascot on a cinnabar base, with violet and cyan glowing edges" loading="lazy" decoding="async" />
-              <figcaption>Hubu&apos;s mascot<a href="https://x.com/hacker_no_ice/status/2118507555794374942">How it evolved to match the wordmark ↗</a><a href="/demos/local-stack">Watch the agent create variations →</a></figcaption>
+              <figcaption>Hubu&apos;s mascot<a href="/mascot">See how the mascot evolved →</a></figcaption>
             </figure>
           </div>
         </section>
