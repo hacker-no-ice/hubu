@@ -817,6 +817,7 @@ fn allowed_route(method: &str, path: &str) -> Option<RouteAccess> {
         "/spend/authorizations",
         "/spend/authorizations/show",
         "/ledger/transactions",
+        "/ledger/summary",
         "/governance/summary",
         "/governance/records",
     ];
@@ -1118,6 +1119,7 @@ mod tests {
             ("GET", "/api/hubu/agents?all=true"),
             ("GET", "/api/hubu/budgets/bgt_abc123/versions"),
             ("GET", "/api/hubu/governance/records/gov_1"),
+            ("GET", "/api/hubu/ledger/summary?agent_id=agt_1&days=30"),
             (
                 "GET",
                 "/api/hubu/governance/records?categories=spend,approval&limit=50",
@@ -1132,6 +1134,7 @@ mod tests {
         for (method, target) in [
             ("POST", "/api/hubu/spend"),
             ("POST", "/api/hubu/spend/authorize"),
+            ("POST", "/api/hubu/ledger/summary"),
             ("POST", "/api/hubu/spend/executor/claim"),
             ("POST", "/api/hubu/agents/register"),
             ("GET", "/api/hubu/budgets/../versions"),
@@ -1142,7 +1145,7 @@ mod tests {
             assert_eq!(response.status, 404, "{method} {target}");
         }
         let calls = state.backend.calls.lock().unwrap();
-        assert_eq!(calls.len(), 7);
+        assert_eq!(calls.len(), 8);
         assert_eq!(calls[0].1, "/agents?all=true");
         assert!(calls.iter().all(|call| !call.3));
     }

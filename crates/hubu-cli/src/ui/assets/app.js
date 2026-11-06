@@ -5,9 +5,9 @@
 
 const VIEWS = [
   { group: "Monitor" },
-  { id: "overview", label: "Overview", render: renderOverview },
+  { id: "overview", label: "Overview", render: renderOverview, autoRefresh: true },
   { id: "approvals", label: "Approvals", render: renderApprovals, badge: "approvals" },
-  { id: "spend", label: "Spend history", render: renderSpend },
+  { id: "spend", label: "Spend history", render: renderSpend, autoRefresh: true },
   { id: "decisions", label: "Decisions", render: renderDecisions },
   { group: "Manage" },
   { id: "agents", label: "Agents", render: renderAgents },
@@ -462,13 +462,158 @@ async function renderSpend(view) {
     { label: "", render: (t) => h("button", { class: "ghost small", type: "button", onclick: () => openDialog("Ledger transaction", jsonBlock(t)) }, "Entries") },
   ], rows, "No ledger transactions yet."));
 
+  const summaryBody = h("div", { class: "stack" });
+  const summaryFilters = h("form", { class: "filters" },
+    h("label", {}, "Agent", agentSelect()),
+    h("label", {}, "Period", h("select", { name: "days" },
+      [["7", "Last 7 days"], ["30", "Last 30 days"], ["90", "Last 90 days"], ["365", "Last 365 days"]]
+        .map(([value, label]) => h("option", { value, selected: value === "30" }, label)))),
+    h("button", { type: "submit", class: "ghost" }, "Apply"));
+  // Only the latest request may draw, so quick repeated Applies never stack
+  // summaries for different selections.
+  let summaryRequest = 0;
+  const loadSummary = async () => {
+    const request = ++summaryRequest;
+    let data;
+    try {
+      data = await hubu("/ledger/summary", formValues(summaryFilters));
+    } catch (error) {
+      if (request === summaryRequest) clear(summaryBody).append(h("div", { class: "notice bad load-error" }, error.message));
+      return;
+    }
+    if (request === summaryRequest) drawSpendSummary(clear(summaryBody), data);
+  };
+
+  summaryFilters.addEventListener("submit", (e) => { e.preventDefault(); loadSummary(); });
   authFilters.addEventListener("submit", (e) => { e.preventDefault(); loadAuth(); });
   ledgerFilters.addEventListener("submit", (e) => { e.preventDefault(); loadLedger(); });
   append(view, [
+    card("Spend summary", h("div", { class: "stack" }, summaryFilters, summaryBody)),
     card("Spend authorizations", [h("div", { class: "body" }, authFilters), authBody], null, true),
     card("Ledger transactions", [h("div", { class: "body" }, ledgerFilters), ledgerBody], null, true),
   ]);
-  await Promise.all([loadAuth(), loadLedger()]);
+  await Promise.all([loadSummary(), loadAuth(), loadLedger()]);
+}
+
+// Exact money math for the summary: `{amount, scale}` as BigInt units at
+// scale 18, so sums and labels never round through floating point.
+const EXACT_SCALE = 18;
+function exactUnits(m) {
+  return BigInt(m.amount) * 10n ** BigInt(EXACT_SCALE - Number(m.scale));
+}
+function formatUnits(units, currency) {
+  let scale = EXACT_SCALE;
+  let value = units;
+  while (scale > 2 && value % 10n === 0n) { value /= 10n; scale -= 1; }
+  const negative = value < 0n;
+  const magnitude = negative ? -value : value;
+  const perMajor = 10n ** BigInt(scale);
+  const fraction = (magnitude % perMajor).toString().padStart(scale, "0");
+  return `${negative ? "-" : ""}${magnitude / perMajor}.${fraction} ${String(currency).toUpperCase()}`;
+}
+/** Share of `max` as a CSS percentage; non-zero values stay visible. */
+function barPercent(units, max) {
+  if (max <= 0n || units <= 0n) return "0%";
+  return `${Math.max(1.5, Number((units * 10000n) / max) / 100)}%`;
+}
+function byCurrency(rows) {
+  const groups = new Map();
+  for (const row of rows) {
+    const currency = row.amount.currency;
+    if (!groups.has(currency)) groups.set(currency, []);
+    groups.get(currency).push(row);
+  }
+  return groups;
+}
+
+/** Totals, platform and agent splits, and daily spend from `/ledger/summary`.
+ * Each currency is summed and charted on its own; USD and USDC never mix. */
+function drawSpendSummary(container, data) {
+  const totals = data.totals || [];
+  const currencies = totals.map((t) => t.amount.currency);
+  const daily = data.daily || {};
+  const days = Number(daily.days || 30);
+  const recent = new Map();
+  for (const bucket of daily.buckets || []) {
+    const currency = bucket.amount.currency;
+    recent.set(currency, (recent.get(currency) || 0n) + exactUnits(bucket.amount));
+  }
+  if (totals.length === 0) {
+    container.append(h("div", { class: "empty" }, "No settled spend yet for this selection."));
+    return;
+  }
+  container.append(h("div", { class: "stats" }, totals.flatMap((t) => [
+    stat(`Total spent · ${t.amount.currency.toUpperCase()}`, formatUnits(exactUnits(t.amount), t.amount.currency),
+      `${t.chain_count} charge${t.chain_count === 1 ? "" : "s"} · all time`),
+    stat(`Last ${days} days · ${t.amount.currency.toUpperCase()}`,
+      formatUnits(recent.get(t.amount.currency) || 0n, t.amount.currency), `${daily.from} to ${daily.through} (UTC)`),
+  ])));
+
+  const merchantLabel = (r) => r.billing_merchant
+    ? h("span", { title: r.billing_merchant_id }, r.billing_merchant) : h("span", { class: "hint" }, "Unattributed");
+  const agentLabel = (r) => (r.agent_id ? agentName(r.agent_id) : h("span", { class: "hint" }, "No agent"));
+  container.append(h("div", { class: "spend-splits" },
+    h("div", {}, h("h3", {}, "By platform (billing merchant)"), barList(data.by_billing_merchant || [], merchantLabel, currencies)),
+    h("div", {}, h("h3", {}, "By agent"), barList(data.by_agent || [], agentLabel, currencies))));
+
+  container.append(h("div", {}, h("h3", {}, `Spend per day · last ${days} days`),
+    currencies.map((currency) => dailyColumns(daily, currency, currencies.length > 1))));
+
+  const notes = ["Settled ledger cost. A corrected charge counts once, at its latest total, on the day it was first posted."];
+  if (Number(data.unpriced_chain_count) > 0) {
+    notes.push(`${data.unpriced_chain_count} posting${data.unpriced_chain_count === 1 ? " has" : "s have"} no recorded cost and ${data.unpriced_chain_count === 1 ? "is" : "are"} not counted.`);
+  }
+  container.append(h("p", { class: "hint" }, notes.join(" ")));
+}
+
+/** Horizontal bars, one list per currency, each bar scaled to its list's largest row. */
+function barList(rows, label, currencies) {
+  if (rows.length === 0) return h("div", { class: "empty" }, "Nothing to show.");
+  const groups = byCurrency(rows);
+  return currencies.filter((c) => groups.has(c)).map((currency) => {
+    const list = groups.get(currency);
+    const max = list.reduce((m, r) => (exactUnits(r.amount) > m ? exactUnits(r.amount) : m), 0n);
+    return h("div", { class: "bar-list" },
+      currencies.length > 1 ? h("div", { class: "bar-currency" }, currency.toUpperCase()) : null,
+      list.map((r) => {
+        const units = exactUnits(r.amount);
+        const amount = formatUnits(units, currency);
+        return h("div", { class: "bar-row", title: `${amount} · ${r.chain_count} charge${r.chain_count === 1 ? "" : "s"}` },
+          h("div", { class: "bar-label" }, label(r)),
+          h("div", { class: "bar-track" }, h("span", { style: { width: barPercent(units, max) } })),
+          h("div", { class: "bar-value" }, amount));
+      }));
+  });
+}
+
+/** A zero-filled UTC day-by-day column chart for one currency. */
+function dailyColumns(daily, currency, showCurrency) {
+  const values = new Map();
+  for (const bucket of daily.buckets || []) {
+    if (bucket.amount.currency === currency) values.set(bucket.date, exactUnits(bucket.amount));
+  }
+  const dates = [];
+  const start = new Date(`${daily.from}T00:00:00Z`);
+  const end = new Date(`${daily.through}T00:00:00Z`);
+  for (let d = start; d <= end && dates.length < 400; d = new Date(d.getTime() + 86400000)) {
+    dates.push(d.toISOString().slice(0, 10));
+  }
+  const max = [...values.values()].reduce((m, v) => (v > m ? v : m), 0n);
+  const spentDays = dates.filter((d) => (values.get(d) || 0n) > 0n);
+  return h("div", { class: "spend-chart" },
+    showCurrency ? h("div", { class: "bar-currency" }, currency.toUpperCase()) : null,
+    h("div", { class: "chart-max hint" }, `max ${formatUnits(max, currency)} / day`),
+    h("div", { class: "spend-columns", role: "img",
+      "aria-label": `Daily spend in ${currency.toUpperCase()}: ${spentDays.length} of ${dates.length} days with spend` },
+    dates.map((date) => {
+      const units = values.get(date) || 0n;
+      return h("div", { class: "column", title: `${date}: ${formatUnits(units, currency)}` },
+        h("span", { style: { height: barPercent(units, max) } }));
+    })),
+    h("div", { class: "chart-axis hint" }, h("span", {}, dates[0]), h("span", {}, dates[dates.length - 1])),
+    spentDays.length ? h("details", {}, h("summary", { class: "hint" }, "Show as table"),
+      table([{ label: "Day (UTC)", key: "date" }, { label: "Spent", num: true, key: "amount" }],
+        spentDays.reverse().map((date) => ({ date, amount: formatUnits(values.get(date), currency) })))) : null);
 }
 
 /** Cursor pagination: renders the first page, then appends on "Load more". */
@@ -488,7 +633,7 @@ function pagedLoader(container, fetchPage, pick, renderRows) {
       cursor = data.next_cursor || null;
       draw();
     } catch (error) {
-      container.append(h("div", { class: "notice bad" }, error.message));
+      container.append(h("div", { class: "notice bad load-error" }, error.message));
     }
   };
   return async () => {
@@ -885,7 +1030,7 @@ async function openPolicy(container, policy, options = {}) {
       hubu("/policies/export", { policy_id: policy.policy_id }),
     ]);
   } catch (error) {
-    clear(container).append(h("div", { class: "notice bad" }, error.message));
+    clear(container).append(h("div", { class: "notice bad load-error" }, error.message));
     return;
   }
   const revisions = [...(history.revisions || [])].sort((a, b) => b.revision - a.revision);
@@ -916,7 +1061,7 @@ async function openPolicy(container, policy, options = {}) {
       if (view.mode === "read") await drawRead(body);
       else drawEdit(body);
     } catch (error) {
-      clear(body).append(h("div", { class: "notice bad" }, error.message));
+      clear(body).append(h("div", { class: "notice bad load-error" }, error.message));
     }
   };
 
@@ -1328,28 +1473,130 @@ function drawNav(active) {
 
 let routeToken = 0;
 
-async function route() {
-  for (const open of document.querySelectorAll("dialog")) open.close();
+/** Draws the view named by the hash. A silent reload (auto-refresh) keeps the
+ * current content and scroll position until the new content is ready, and a
+ * failed silent reload leaves the last good content in place. */
+async function route({ silent = false } = {}) {
+  if (!silent) for (const open of document.querySelectorAll("dialog")) open.close();
   const [id, params] = (location.hash.replace(/^#\/?/, "") || "overview").split("?");
   state.routeParams = new URLSearchParams(params || "");
   const viewDef = VIEWS.find((v) => v.id === id) || VIEWS[1];
-  drawNav(viewDef.id);
-  document.getElementById("title").textContent = viewDef.label;
-  document.title = `${viewDef.label} · Hubu Admin`;
+  if (!silent) {
+    drawNav(viewDef.id);
+    document.getElementById("title").textContent = viewDef.label;
+    document.title = `${viewDef.label} · Hubu Admin`;
+    // Only read-mostly views reload themselves; views with editors use Refresh.
+    autoRefresh.supported = Boolean(viewDef.autoRefresh);
+    document.getElementById("auto-refresh-controls").hidden = !autoRefresh.supported;
+  }
   const token = ++routeToken;
-  const view = clear(document.getElementById("view"));
-  const loading = h("p", { class: "hint" }, "Loading…");
-  view.append(loading);
+  const activityAtStart = autoRefresh.activity;
+  autoRefresh.inFlight = true;
+  const view = document.getElementById("view");
+  if (!silent) {
+    autoRefresh.touched = false;
+    clear(view).append(h("p", { class: "hint" }, "Loading…"));
+  }
   const container = h("div", { style: { display: "contents" } });
   try {
     await viewDef.render(container);
     if (token !== routeToken) return;
+    // The user may have started interacting while a silent reload was running.
+    // Any click or edit in the view during a silent reload (e.g. picking another
+    // policy) may have changed what is shown; discard this now-stale render.
+    if (silent && (autoRefresh.touched || autoRefresh.activity !== activityAtStart
+      || document.querySelector("dialog[open]"))) return;
+    // Sub-loaders (paged tables, the policy panel) report fetch failures inline
+    // as .load-error; a background reload keeps the last good content instead.
+    const loadError = silent && container.querySelector(".load-error");
+    if (loadError) { setRefreshStatus(`Auto-refresh failed: ${loadError.textContent}`, true); return; }
+    const scrollY = window.scrollY;
     clear(view).append(container);
+    if (silent) window.scrollTo(0, scrollY);
+    markRefreshed();
   } catch (error) {
     if (token !== routeToken) return;
+    if (error.status === 401) { showSignIn(); return; }
+    if (silent) { setRefreshStatus(`Auto-refresh failed: ${error.message}`, true); return; }
     clear(view).append(h("div", { class: "notice bad" }, error.message));
-    if (error.status === 401) showSignIn();
+  } finally {
+    if (token === routeToken) autoRefresh.inFlight = false;
   }
+}
+
+// ---------- auto-refresh ----------
+
+const AUTO_REFRESH_MS = 15000;
+const AUTO_REFRESH_KEY = "hubu-admin.auto-refresh";
+// lastAt: last successful render (shown); lastAttemptAt: paces retries so a
+// failing backend is polled no faster than a healthy one.
+const autoRefresh = { enabled: true, supported: false, touched: false, inFlight: false, lastAt: 0, lastAttemptAt: 0, activity: 0 };
+
+function setRefreshStatus(text, paused) {
+  const node = document.getElementById("refresh-status");
+  node.textContent = text;
+  node.classList.toggle("paused", Boolean(paused));
+}
+
+function markRefreshed() {
+  autoRefresh.lastAt = Date.now();
+  updateRefreshStatus();
+}
+
+function updateRefreshStatus() {
+  if (autoRefresh.enabled && autoRefresh.touched) {
+    setRefreshStatus("Auto-refresh paused while you work on this view", true);
+  } else if (autoRefresh.lastAt) {
+    setRefreshStatus(`Updated ${new Date(autoRefresh.lastAt).toLocaleTimeString()}`);
+  }
+}
+
+/** Interactions that hold state a reload would discard (filters, "Load more"
+ * pages, expanded sections) pause auto-refresh for this view until it is
+ * reloaded by navigation or the Refresh button. */
+function watchViewInteractions() {
+  const view = document.getElementById("view");
+  const touch = () => {
+    if (autoRefresh.touched) return;
+    autoRefresh.touched = true;
+    updateRefreshStatus();
+  };
+  for (const type of ["input", "change", "submit"]) view.addEventListener(type, touch, true);
+  view.addEventListener("toggle", touch, true); // <details>; does not bubble
+  for (const type of ["click", "input", "change"]) view.addEventListener(type, () => { autoRefresh.activity += 1; }, true);
+  view.addEventListener("click", (event) => {
+    if (event.target.closest(".pager button")) touch();
+  }, true);
+}
+
+function autoRefreshDue() {
+  return autoRefresh.enabled && autoRefresh.supported && !autoRefresh.touched && !autoRefresh.inFlight
+    && document.visibilityState === "visible"
+    && !document.querySelector("dialog[open]")
+    && document.querySelector(".shell").style.display !== "none"
+    && Date.now() - Math.max(autoRefresh.lastAt, autoRefresh.lastAttemptAt) >= AUTO_REFRESH_MS;
+}
+
+function autoRefreshTick() {
+  if (!autoRefreshDue()) return;
+  autoRefresh.lastAttemptAt = Date.now();
+  route({ silent: true });
+  refreshApprovalCount();
+}
+
+function startAutoRefresh() {
+  const toggle = document.getElementById("auto-refresh");
+  try { autoRefresh.enabled = localStorage.getItem(AUTO_REFRESH_KEY) !== "off"; } catch (_) { /* default on */ }
+  toggle.checked = autoRefresh.enabled;
+  toggle.addEventListener("change", () => {
+    autoRefresh.enabled = toggle.checked;
+    try { localStorage.setItem(AUTO_REFRESH_KEY, toggle.checked ? "on" : "off"); } catch (_) { /* per-browser only */ }
+    updateRefreshStatus();
+  });
+  watchViewInteractions();
+  // Catch up as soon as a backgrounded tab is shown again.
+  document.addEventListener("visibilitychange", autoRefreshTick);
+  setInterval(autoRefreshTick, 1000);
 }
 
 function showSignIn() {
@@ -1383,9 +1630,10 @@ async function boot() {
     document.getElementById("whoami").textContent = `Owner: ${me.display_name}`;
   }).catch(() => {});
   document.getElementById("refresh").addEventListener("click", () => { route(); refreshApprovalCount(); });
-  window.addEventListener("hashchange", route);
+  window.addEventListener("hashchange", () => route());
   refreshApprovalCount();
   setInterval(refreshApprovalCount, 30000);
+  startAutoRefresh();
   route();
 }
 
