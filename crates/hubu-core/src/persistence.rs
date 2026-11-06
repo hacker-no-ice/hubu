@@ -3418,12 +3418,14 @@ fn reserve_backup_path(path: &str) -> Result<String, StorageError> {
             (1..).map(move |attempt| format!("{path}.pre-accounting-scale.{stamp}-{attempt}.bak")),
         ),
     );
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    // SQLite keeps a pre-created target's mode, so match the 0644 it would
+    // use for a file it created itself instead of inheriting a looser umask.
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o644);
     for candidate in candidates.take(64) {
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&candidate)
-        {
+        match options.open(&candidate) {
             Ok(_) => return Ok(candidate),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(error) => {

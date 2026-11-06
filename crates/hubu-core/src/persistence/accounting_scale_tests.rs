@@ -685,3 +685,14 @@ fn concurrent_pre_migration_backups_never_share_an_output_file() {
         }
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn reserved_backup_is_not_group_or_world_writable() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("hubu.sqlite3");
+    let backup = reserve_backup_path(path.to_str().unwrap()).unwrap();
+    let mode = std::fs::metadata(&backup).unwrap().permissions().mode();
+    assert_eq!(mode & 0o022, 0, "{mode:o}");
+}
