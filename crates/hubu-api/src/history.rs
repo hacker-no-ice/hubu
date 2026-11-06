@@ -431,6 +431,202 @@ pub(super) fn ledger(request: &HttpRequest, state: &ServerState) -> Result<Value
         "next_cursor":next_cursor}))
 }
 
+/// The trusted catalog entry a governed posting was authorized against.
+fn trusted_scope(
+    context: Option<&hubu_core::ledger::GovernedSpendContext>,
+    data: &HistorySnapshot,
+) -> Option<ExecutionScope> {
+    let id = &context?.spend_decision_id;
+    let decision = data.decisions.iter().find(|d| &d.id == id)?;
+    let scope = decision.request.execution_scope.as_ref()?;
+    trusted_execution_scope_catalog()
+        .into_iter()
+        .find(|s| s.same_catalog_entry(scope))
+}
+
+/// An exact sum of scale-18 units, trimmed to at least two fractional digits.
+fn exact_sum(units: i128, currency: &str) -> Value {
+    let (mut amount, mut scale) = (units, 18_u32);
+    while scale > 2 && amount % 10 == 0 {
+        amount /= 10;
+        scale -= 1;
+    }
+    let magnitude = amount.unsigned_abs();
+    let per_major = 10_u128.pow(scale);
+    let sign = if amount < 0 { "-" } else { "" };
+    let display = format!(
+        "{sign}{}.{:0width$}",
+        magnitude / per_major,
+        magnitude % per_major,
+        width = scale as usize
+    );
+    json!({"amount":amount.to_string(),"scale":scale,"currency":currency,"display":display})
+}
+
+#[derive(Default)]
+struct SpendTotal {
+    units: i128,
+    postings: u64,
+}
+impl SpendTotal {
+    fn add(&mut self, units: i128) -> Result<()> {
+        self.units = self
+            .units
+            .checked_add(units)
+            .ok_or_else(|| anyhow!("spend summary overflow"))?;
+        self.postings += 1;
+        Ok(())
+    }
+}
+
+/// Read-only spend totals over the owner's ledger. Each correction chain counts
+/// once, at its latest corrected total, and is attributed (agent, billing
+/// merchant, day) by its original posting. Sums stay exact and per currency.
+pub(super) fn spend_summary(request: &HttpRequest, state: &ServerState) -> Result<Value> {
+    let query = query(request, &["agent_id", "account_id", "days"])?;
+    let days = query
+        .get("days")
+        .map(|v| v.parse::<i64>())
+        .transpose()?
+        .unwrap_or(30);
+    if !(1..=366).contains(&days) {
+        return Err(anyhow!("spend summary days must be between 1 and 366"));
+    }
+    let user = authenticated_user_context(state)?;
+    let selected = selection(&query, &user, state)?;
+    let data = snapshot(state, &user.user_id)?;
+    let by_id: HashMap<_, _> = data.transactions.iter().map(|t| (&t.id, t)).collect();
+    let superseded: std::collections::HashSet<_> = data
+        .transactions
+        .iter()
+        .filter_map(|t| t.metadata.as_ref()?.previous_transaction_id.as_ref())
+        .collect();
+    let mut heads: HashMap<&hubu_common::ids::LedgerTransactionId, &TransactionRecord> =
+        HashMap::new();
+    for posting in &data.transactions {
+        if superseded.contains(&posting.id) {
+            continue;
+        }
+        let root = posting
+            .metadata
+            .as_ref()
+            .and_then(|m| m.original_transaction_id.as_ref())
+            .filter(|id| by_id.contains_key(id))
+            .unwrap_or(&posting.id);
+        let later = |a: &TransactionRecord, b: &TransactionRecord| {
+            (a.created_at, a.id.to_string()) > (b.created_at, b.id.to_string())
+        };
+        heads
+            .entry(root)
+            .and_modify(|head| {
+                if later(posting, head) {
+                    *head = posting;
+                }
+            })
+            .or_insert(posting);
+    }
+    let today = Utc::now().date_naive();
+    let first_day = today - chrono::Duration::days(days - 1);
+    let mut totals: BTreeMap<String, SpendTotal> = BTreeMap::new();
+    let mut merchants: BTreeMap<(String, Option<String>), (Option<String>, SpendTotal)> =
+        BTreeMap::new();
+    let mut agents: BTreeMap<(String, Option<String>), SpendTotal> = BTreeMap::new();
+    let mut daily: BTreeMap<(String, String), SpendTotal> = BTreeMap::new();
+    let mut public_agents: HashMap<AgentId, String> = HashMap::new();
+    let mut unpriced = 0_u64;
+    for (root_id, head) in heads {
+        let root = by_id[root_id];
+        let root_meta = owned_metadata(root, &data);
+        let agent = root_meta.and_then(|m| m.agent_id.as_ref());
+        let account = root_meta.and_then(|m| m.agent_account_id.as_ref());
+        if selected.agent.as_ref().is_some_and(|a| agent != Some(a))
+            || selected
+                .account
+                .as_ref()
+                .is_some_and(|a| account != Some(a))
+        {
+            continue;
+        }
+        let Some(cost) = owned_metadata(head, &data).map(|m| &m.effective_cost) else {
+            unpriced += 1;
+            continue;
+        };
+        let units = cost.scaled()?;
+        let currency = cost.currency.to_string();
+        totals.entry(currency.clone()).or_default().add(units)?;
+        let scope = trusted_scope(linked_context(root, &data), &data);
+        let merchant = merchants
+            .entry((
+                currency.clone(),
+                scope.as_ref().map(|s| s.billing_merchant.id.clone()),
+            ))
+            .or_insert_with(|| {
+                (
+                    scope
+                        .as_ref()
+                        .map(|s| s.billing_merchant.display_name.clone()),
+                    SpendTotal::default(),
+                )
+            });
+        merchant.1.add(units)?;
+        let public_agent = match (agent, account) {
+            (Some(agent), Some(account)) => Some(match public_agents.get(agent) {
+                Some(id) => id.clone(),
+                None => {
+                    let id = public_ids_for_agent_account(agent, account, state)?.1;
+                    public_agents.insert(agent.clone(), id.clone());
+                    id
+                }
+            }),
+            _ => None,
+        };
+        agents
+            .entry((currency.clone(), public_agent))
+            .or_default()
+            .add(units)?;
+        let day = root.created_at.date_naive();
+        if day >= first_day {
+            daily
+                .entry((day.to_string(), currency))
+                .or_default()
+                .add(units)?;
+        }
+    }
+    let by_amount = |a: &Value, b: &Value| {
+        let units = |v: &Value| {
+            v["amount"]["amount"]
+                .as_str()
+                .and_then(|s| s.parse::<i128>().ok())
+                .zip(v["amount"]["scale"].as_u64())
+                .map(|(n, s)| n * 10_i128.pow(18 - s as u32))
+                .unwrap_or_default()
+        };
+        a["amount"]["currency"]
+            .as_str()
+            .cmp(&b["amount"]["currency"].as_str())
+            .then(units(b).cmp(&units(a)))
+    };
+    let mut by_merchant: Vec<Value> = merchants
+        .into_iter()
+        .map(|((currency, id), (name, t))| json!({"billing_merchant_id":id,"billing_merchant":name,"amount":exact_sum(t.units,&currency),"chain_count":t.postings}))
+        .collect();
+    by_merchant.sort_by(by_amount);
+    let mut by_agent: Vec<Value> = agents
+        .into_iter()
+        .map(|((currency, agent), t)| json!({"agent_id":agent,"amount":exact_sum(t.units,&currency),"chain_count":t.postings}))
+        .collect();
+    by_agent.sort_by(by_amount);
+    Ok(json!({"schema_version":VERSION,
+        "filters":{"agent_id":query.get("agent_id"),"account_id":query.get("account_id")},
+        "basis":"latest_corrected_total_per_chain",
+        "totals":totals.into_iter().map(|(currency,t)|json!({"amount":exact_sum(t.units,&currency),"chain_count":t.postings})).collect::<Vec<_>>(),
+        "by_billing_merchant":by_merchant,
+        "by_agent":by_agent,
+        "daily":{"days":days,"from":first_day.to_string(),"through":today.to_string(),
+            "buckets":daily.into_iter().map(|((date,currency),t)|json!({"date":date,"amount":exact_sum(t.units,&currency),"chain_count":t.postings})).collect::<Vec<_>>()},
+        "unpriced_chain_count":unpriced}))
+}
+
 fn effective_hold_status(hold: &BudgetHold, now: DateTime<Utc>) -> &'static str {
     if matches!(hold.status, BudgetHoldStatus::Frozen) && hold.expires_at <= now {
         "expired"

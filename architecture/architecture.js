@@ -681,6 +681,7 @@ const components = {
       ["One ledger", "Wallet and provider postings share the same immutable tables, keeping exact precision with cent views for compatibility."],
       ["Clear ownership", "`LedgerService` owns corrections and reads; settlement changes the ledger and budget atomically."],
       ["Authorization records", "Read-only decision → hold → claim → receipt projections at /spend/authorizations use authorization_id. HTTP, CLI, and MCP read one owner snapshot with filters and cursor paging; Gongbu owns orchestration."],
+      ["Spend summary", "Read-only /ledger/summary totals settled cost per currency by billing merchant, agent and UTC day, counting each correction chain once at its latest total."],
     ],
     links: [sharedLinks.ledger, sharedLinks.providerAccounting, sharedLinks.payment, ["Ledger accounting", "docs/ledger-accounting.md"], ["History contract", "docs/ledger-history.md"], ["Read projections", "crates/hubu-api/src/history.rs"], ["Wallet persistence", "crates/hubu-wallet/src/persistence.rs"]],
     nodes: [

@@ -2091,6 +2091,7 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
             return governance::read(&request, state);
         }
         ("GET", "/ledger/transactions") => history::ledger(&request, state),
+        ("GET", "/ledger/summary") => history::spend_summary(&request, state),
         ("GET", "/spend/authorizations") => history::authorization_records(&request, state, false),
         ("GET", "/spend/authorizations/show") => {
             history::authorization_records(&request, state, true)
@@ -6715,7 +6716,10 @@ fn parse_request(raw: &str) -> Result<HttpRequest> {
     let mut invalid_governance_query = false;
     if matches!(
         path.as_str(),
-        "/ledger/transactions" | "/spend/authorizations" | "/spend/authorizations/show"
+        "/ledger/transactions"
+            | "/ledger/summary"
+            | "/spend/authorizations"
+            | "/spend/authorizations/show"
     ) || governance_path
     {
         let mut keys = std::collections::HashSet::new();
