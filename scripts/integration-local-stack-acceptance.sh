@@ -580,6 +580,7 @@ try:
         "hubu_feedback_guidance",
         "hubu_prepare_feedback",
         "gongbu_list_execution_targets",
+        "gongbu_list_reference_images",
         "hubu_get_spend_approval",
         "hubu_resolve_spend_approval",
         "hubu_resume_operation",
@@ -588,7 +589,7 @@ try:
     tools = request("tools/list").get("tools", [])
     tool_names = {tool.get("name") for tool in tools}
     if (
-        len(tool_names) != 39
+        len(tool_names) != 40
         or not expected_tools.issubset(tool_names)
         or tool_names.intersection({
             "hubu_replace_budget", "hubu_add_policy", "hubu_export_policy",

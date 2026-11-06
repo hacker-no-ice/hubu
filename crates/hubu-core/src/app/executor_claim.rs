@@ -576,6 +576,7 @@ mod tests {
 
     fn settlement_receipt(actual_vendor_cost_cents: i64) -> SpendExecutorSettlementReceipt {
         SpendExecutorSettlementReceipt {
+            cost_basis: Default::default(),
             actual_vendor_cost: SpendExecutorVendorCost {
                 amount: actual_vendor_cost_cents,
                 scale: 2,

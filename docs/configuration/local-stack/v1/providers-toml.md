@@ -119,7 +119,10 @@ are alternatives: bind one of them. Gemini Nano Banana 2.1 and Gemini 3 Pro
 Image are separate models with their own contracts
 (`hubu.gemini-nano-banana-2.1.text-to-image/v1`,
 `hubu.gemini-3-pro-image.text-to-image/v1` and their `image-edit/v1`
-contracts); each is available only when bound.
+contracts); each is available only when bound. Every FLUX model also has its
+own [`image-edit/v1` contract](../../../operations/flux-provider-contract.md#flux-image-editing),
+such as `hubu.flux-2-max.image-edit/v1`, bound beside or instead of its
+text-to-image contract.
 
 ```toml
 [[contract_bindings]]
@@ -312,7 +315,7 @@ Optional inline table of named dimensions used to distinguish prices for the sam
 
 Selector keys are lowercase identifiers (`a`–`z`, digits and `_`, starting with a letter). Values are trimmed and lowercased and may contain letters, digits, `_`, `-`, `.` and `:` (for example `aspect_ratio = "16:9"`). An empty selector is rejected.
 
-A rule whose selector includes `image_size` prices only images: exactly one `image` component, or `megapixel` / `additional_megapixel` components with or without an `image` component, plus an optional `input_image` component for edits. Define one unambiguous rule for every enabled image size. Two rules with the same provider, model, workload, and selector are rejected.
+A rule whose selector includes `image_size` prices only images: exactly one `image` component, or `megapixel` / `additional_megapixel` components with or without an `image` component, plus optional `input_image` or `input_megapixel` components for edits. Define one unambiguous rule for every enabled image size. Two rules with the same provider, model, workload, and selector are rejected.
 
 ### `pricing_rules.selector.image_size`
 
@@ -346,6 +349,10 @@ Required. Allowed values:
   image (`additional_megapixels`). Pair it with an `image` component to price
   "first megapixel, then each additional one". Its quantity may be zero;
 - `input_image` — each input image an edit request sends (`input_images`).
+- `input_megapixel` — billed megapixels of the input images an edit request
+  sends (`input_megapixels`), as a pack's
+  [`input_megapixels` rule](../../../provider-packs.md#input-megapixels) counts
+  them.
 
 The two megapixel units are available only to [provider packs](../../../provider-packs.md#megapixels),
 which derive them from certified output sizes and settle them from the
@@ -392,7 +399,7 @@ billable component.
 - Every selectable live target needs a pricing rule for its exact provider/model, workload, and request selector.
 - Rule IDs are globally unique within the catalog.
 - Provider/model/workload/selector combinations are unambiguous.
-- Selectors that include `image_size` price only images: one `image` component or megapixel components, plus at most an `input_image` component.
+- Selectors that include `image_size` price only images: one `image` component or megapixel components, plus at most one `input_image` and one `input_megapixel` component.
 - Component units cannot repeat within one rule.
 - Rates cannot be negative and denominators must be positive.
 - Unsupported currencies, units, selectors, or old flat pricing shapes are rejected.

@@ -254,7 +254,7 @@ impl Fixture {
     fn reconcile(&self, repo: &mut SqliteGovernanceRepository, billed: bool) {
         let now = Utc::now() + chrono::Duration::hours(2);
         if billed {
-            repo.reconcile_executor_claim_as_billed_transactionally(&self.claim,&self.owner,"provider-reference","confirmed fixture invoice",PaymentId::new(),SpendExecutorSettlementReceipt {actual_vendor_cost:crate::spend::SpendExecutorVendorCost {amount:3_000,scale:6,currency:Currency::Usd},provider_request_id:"private provider reference".into(),price_model_snapshot:serde_json::json!({"provider":"fixture","model":"pricing-v1","currency":"usd"}),artifact_reference:"private artifact".into()},now).unwrap();
+            repo.reconcile_executor_claim_as_billed_transactionally(&self.claim,&self.owner,"provider-reference","confirmed fixture invoice",PaymentId::new(),SpendExecutorSettlementReceipt {cost_basis: Default::default(),actual_vendor_cost:crate::spend::SpendExecutorVendorCost {amount:3_000,scale:6,currency:Currency::Usd},provider_request_id:"private provider reference".into(),price_model_snapshot:serde_json::json!({"provider":"fixture","model":"pricing-v1","currency":"usd"}),artifact_reference:"private artifact".into()},now).unwrap();
         } else {
             repo.reconcile_executor_claim_as_not_billed_transactionally(
                 &self.claim,
