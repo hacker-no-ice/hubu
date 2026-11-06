@@ -181,37 +181,12 @@ impl ArtifactService {
         {
             return Err(Error::Limit("artifact count"));
         }
-        if bytes.len() as u64 > self.limits.max_encoded_bytes {
-            return Err(Error::Limit("encoded size"));
-        }
-        let (format, extension) = match media_type {
-            "image/png" => (ImageFormat::Png, "png"),
-            "image/jpeg" => (ImageFormat::Jpeg, "jpg"),
+        let extension = match media_type {
+            "image/png" => "png",
+            "image/jpeg" => "jpg",
             _ => return Err(Error::UnsupportedMediaType),
         };
-        if image::guess_format(bytes).ok() != Some(format) {
-            return Err(Error::MediaTypeMismatch);
-        }
-        let (width, height) = image::io::Reader::with_format(Cursor::new(bytes), format)
-            .into_dimensions()
-            .map_err(|_| Error::InvalidImage)?;
-        if width > self.limits.max_width || height > self.limits.max_height {
-            return Err(Error::Limit("dimensions"));
-        }
-        let decoded_size = u64::from(width)
-            .checked_mul(u64::from(height))
-            .and_then(|pixels| pixels.checked_mul(4))
-            .ok_or(Error::Limit("decoded size"))?;
-        if decoded_size > self.limits.max_decoded_bytes {
-            return Err(Error::Limit("decoded size"));
-        }
-        let mut decoder = image::io::Reader::with_format(Cursor::new(bytes), format);
-        let mut decoder_limits = image::io::Limits::default();
-        decoder_limits.max_image_width = Some(self.limits.max_width);
-        decoder_limits.max_image_height = Some(self.limits.max_height);
-        decoder_limits.max_alloc = Some(self.limits.max_decoded_bytes);
-        decoder.limits(decoder_limits);
-        decoder.decode().map_err(|_| Error::InvalidImage)?;
+        let (width, height) = validate_image(bytes, media_type, &self.limits)?;
 
         let artifact_id = Uuid::new_v4().to_string();
         let storage_key = format!("executions/{execution_id}/{artifact_id}.{extension}");
@@ -326,6 +301,56 @@ impl InputImageSource for AccountInputImages<'_> {
     }
 }
 
+/// Check that `bytes` are a whole, decodable image of `media_type` within
+/// `limits`, and return its dimensions.
+pub fn validate_image(
+    bytes: &[u8],
+    media_type: &str,
+    limits: &ArtifactLimits,
+) -> Result<(u32, u32)> {
+    if bytes.len() as u64 > limits.max_encoded_bytes {
+        return Err(Error::Limit("encoded size"));
+    }
+    let format = match media_type {
+        "image/png" => ImageFormat::Png,
+        "image/jpeg" => ImageFormat::Jpeg,
+        _ => return Err(Error::UnsupportedMediaType),
+    };
+    if image::guess_format(bytes).ok() != Some(format) {
+        return Err(Error::MediaTypeMismatch);
+    }
+    let (width, height) = image::io::Reader::with_format(Cursor::new(bytes), format)
+        .into_dimensions()
+        .map_err(|_| Error::InvalidImage)?;
+    if width > limits.max_width || height > limits.max_height {
+        return Err(Error::Limit("dimensions"));
+    }
+    let decoded_size = u64::from(width)
+        .checked_mul(u64::from(height))
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or(Error::Limit("decoded size"))?;
+    if decoded_size > limits.max_decoded_bytes {
+        return Err(Error::Limit("decoded size"));
+    }
+    let mut decoder = image::io::Reader::with_format(Cursor::new(bytes), format);
+    let mut decoder_limits = image::io::Limits::default();
+    decoder_limits.max_image_width = Some(limits.max_width);
+    decoder_limits.max_image_height = Some(limits.max_height);
+    decoder_limits.max_alloc = Some(limits.max_decoded_bytes);
+    decoder.limits(decoder_limits);
+    decoder.decode().map_err(|_| Error::InvalidImage)?;
+    Ok((width, height))
+}
+
+/// The media type `bytes` sniff as, among those Gongbu stores.
+pub fn sniff_image_media_type(bytes: &[u8]) -> Option<&'static str> {
+    match image::guess_format(bytes).ok()? {
+        ImageFormat::Png => Some("image/png"),
+        ImageFormat::Jpeg => Some("image/jpeg"),
+        _ => None,
+    }
+}
+
 pub fn validate_storage_key(key: &str) -> Result<()> {
     let path = Path::new(key);
     if key.is_empty()
@@ -341,7 +366,7 @@ pub fn validate_storage_key(key: &str) -> Result<()> {
     Ok(())
 }
 
-fn hex_sha256(bytes: &[u8]) -> String {
+pub(crate) fn hex_sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 

@@ -340,6 +340,19 @@ pub(crate) struct OperationRegistry {
 /// Request JSON is cleared once Gongbu reports the execution, so the submitted
 /// image size is not available here.
 pub(crate) fn gallery_context(path: &Path, handle: &str) -> Result<(String, String)> {
+    read_artifact_context(path, handle, true)
+}
+
+/// Read an existing binding without opening workers or migrating the registry.
+pub(crate) fn artifact_context(path: &Path, handle: &str) -> Result<(String, String)> {
+    read_artifact_context(path, handle, false)
+}
+
+fn read_artifact_context(
+    path: &Path,
+    handle: &str,
+    settled_only: bool,
+) -> Result<(String, String)> {
     validate_public_operation_handle(handle)?;
     if !path.is_absolute() || fs::symlink_metadata(path)?.file_type().is_symlink() {
         bail!("gallery requires an existing absolute regular operation registry");
@@ -354,18 +367,23 @@ pub(crate) fn gallery_context(path: &Path, handle: &str) -> Result<(String, Stri
     if application_id != APPLICATION_ID || !matches!(version, 6 | SCHEMA_VERSION) {
         bail!("gallery requires the current unified operation registry schema; it never migrates state");
     }
-    succeeded_governed_context(&connection, handle)
+    governed_artifact_context(&connection, handle, settled_only)
 }
 
 /// Returns the `(decision_id, gongbu_execution_id)` binding of a succeeded
 /// governed execution. Shared by gallery export and artifact save.
-fn succeeded_governed_context(connection: &Connection, handle: &str) -> Result<(String, String)> {
+fn governed_artifact_context(
+    connection: &Connection,
+    handle: &str,
+    settled_only: bool,
+) -> Result<(String, String)> {
     connection
         .query_row(
             "SELECT decision_id, gongbu_execution_id
-         FROM harness_operations WHERE operation_handle = ?1 AND operation_state = 'succeeded'
+         FROM harness_operations WHERE operation_handle = ?1 AND (?2 = 0 OR operation_state = 'succeeded')
+         AND decision_id IS NOT NULL AND gongbu_execution_id IS NOT NULL
          AND tool_name = 'hubu_submit_governed_execution'",
-            [handle],
+            rusqlite::params![handle, settled_only],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )
         .optional()?
@@ -373,10 +391,10 @@ fn succeeded_governed_context(connection: &Connection, handle: &str) -> Result<(
 }
 
 impl OperationRegistry {
-    /// Read-only binding lookup for saving a succeeded operation's artifact.
+    /// Read-only binding lookup; artifact and billing eligibility are checked live.
     pub(crate) fn saved_artifact_context(&self, handle: &str) -> Result<(String, String)> {
         validate_public_operation_handle(handle)?;
-        succeeded_governed_context(&self.connection, handle)
+        governed_artifact_context(&self.connection, handle, false)
     }
 }
 

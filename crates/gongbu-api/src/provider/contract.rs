@@ -462,6 +462,9 @@ pub enum PricingUnit {
     /// Each input image an edit request sends, priced where the provider
     /// charges for reading it.
     InputImage,
+    /// Billed megapixels of the input images an edit request sends, as the
+    /// pack's `input_megapixels` rule counts them.
+    InputMegapixel,
 }
 
 impl PricingUnit {
@@ -479,17 +482,18 @@ impl PricingUnit {
             Self::Megapixel => Some("megapixels"),
             Self::AdditionalMegapixel => Some("additional_megapixels"),
             Self::InputImage => Some("input_images"),
+            Self::InputMegapixel => Some("input_megapixels"),
         }
     }
 
     /// Whether a size-selected rule's units price only images: one `image`
     /// component, or per-image megapixel components with or without it,
-    /// plus any `input_image` component an edit adds. Size never selects a
-    /// token or request price.
+    /// plus any `input_image` or `input_megapixel` component an edit adds.
+    /// Size never selects a token or request price.
     pub fn prices_images_only(units: impl IntoIterator<Item = Self>) -> bool {
         let units: Vec<_> = units
             .into_iter()
-            .filter(|unit| *unit != Self::InputImage)
+            .filter(|unit| !unit.prices_inputs())
             .collect();
         units == [Self::Image]
             || (!units.is_empty()
@@ -499,6 +503,11 @@ impl PricingUnit {
                 && units.iter().all(|u| {
                     matches!(u, Self::Image | Self::Megapixel | Self::AdditionalMegapixel)
                 }))
+    }
+
+    /// Whether this unit prices the input images an edit sends.
+    pub fn prices_inputs(self) -> bool {
+        matches!(self, Self::InputImage | Self::InputMegapixel)
     }
 
     /// Whether a frozen quantity of zero is a real price. Only additional
@@ -519,11 +528,13 @@ pub const REQUEST_QUANTITIES: &[&str] = &[
     "megapixels",
     "additional_megapixels",
     "input_images",
+    "input_megapixels",
 ];
 
-/// Request quantities a pack derives from the output dimensions; no input
-/// parameter may set them.
-pub const DERIVED_QUANTITIES: &[&str] = &["megapixels", "additional_megapixels"];
+/// Request quantities a pack derives from the output dimensions or the input
+/// images; no input parameter may set them.
+pub const DERIVED_QUANTITIES: &[&str] =
+    &["megapixels", "additional_megapixels", "input_megapixels"];
 
 #[derive(Clone, Debug)]
 pub struct PricingCatalog(Arc<FrozenCatalog>);
@@ -1305,6 +1316,20 @@ impl PricingSnapshot {
         })
     }
 
+    /// Settle the immutable exact quote, never the possibly larger authorization.
+    /// This does not assert that the provider reported or billed this amount.
+    pub fn settle_from_quote(
+        &self,
+        usage: &NormalizedUsage,
+        authorized_units: i64,
+    ) -> Result<PreciseSettlement> {
+        self.validate_integrity()?;
+        let quote = self
+            .exact_estimate()?
+            .to_actual_vendor_cost(&self.currency)?;
+        self.settle_precise(usage, Some(&quote), authorized_units)
+    }
+
     /// The budget charge in micro-units for `usage`.
     pub fn settle(&self, usage: &NormalizedUsage, authorized_units: i64) -> Result<i64> {
         Ok(self
@@ -1363,6 +1388,9 @@ pub struct NormalizedUsage {
     /// Input images the request sent to the provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_images: Option<i64>,
+    /// Billed megapixels of the input images the request sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_megapixels: Option<i64>,
 }
 impl NormalizedUsage {
     fn quantity_for(&self, unit: PricingUnit) -> Option<i64> {
@@ -1378,13 +1406,46 @@ impl NormalizedUsage {
             PricingUnit::Megapixel => self.megapixels,
             PricingUnit::AdditionalMegapixel => self.additional_megapixels,
             PricingUnit::InputImage => self.input_images,
+            PricingUnit::InputMegapixel => self.input_megapixels,
         }
         .filter(|v| *v >= 0)
     }
 }
 
+/// Provenance of the amount used for settlement, independent of image delivery.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SettlementCostBasis {
+    #[default]
+    LegacyUnspecified,
+    ProviderReported,
+    CatalogUsage,
+    FrozenQuote,
+}
+
+impl SettlementCostBasis {
+    pub fn is_legacy(&self) -> bool {
+        *self == Self::LegacyUnspecified
+    }
+    pub fn for_provider_outcome(
+        cost: Option<&ActualVendorCost>,
+        billing_failure: Option<&str>,
+    ) -> Self {
+        if billing_failure == Some("pack_response_cost_missing") {
+            Self::FrozenQuote
+        } else if cost.is_some() {
+            Self::ProviderReported
+        } else {
+            Self::CatalogUsage
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct AdapterOutcome {
+    /// Missing billing evidence settles the frozen quote; invalid evidence reconciles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub billing_failure: Option<String>,
     pub usage: Option<NormalizedUsage>,
     pub actual_vendor_cost: Option<ActualVendorCost>,
     pub provider_request_id: Option<String>,
@@ -1554,6 +1615,14 @@ pub struct NormalizedArtifact {
 }
 impl AdapterOutcome {
     pub fn validate(&self) -> Result<()> {
+        if self.billing_failure.as_deref().is_some_and(|code| {
+            !matches!(
+                code,
+                "pack_response_cost_missing" | "pack_response_cost_invalid"
+            ) || self.actual_vendor_cost.is_some()
+        }) {
+            return Err(ContractError::IndeterminableCost);
+        }
         if self
             .actual_vendor_cost
             .as_ref()
@@ -1895,6 +1964,39 @@ mod tests {
             Err(ContractError::SettlementOverage)
         );
     }
+    #[test]
+    fn exact_quote_fallback_is_bounded_and_does_not_use_the_authorization_cap() {
+        let snapshot = PricingCatalog::from_json(CATALOG.as_bytes())
+            .unwrap()
+            .snapshot(&request())
+            .unwrap();
+        let usage = NormalizedUsage {
+            images: Some(1),
+            ..Default::default()
+        };
+        let settled = snapshot.settle_from_quote(&usage, 10_000_000).unwrap();
+        assert_eq!(settled.budget_units, 2_500_000);
+        assert_eq!(
+            settled.actual_vendor_cost,
+            ActualVendorCost::new(25, 1, "USD").unwrap()
+        );
+        assert_eq!(
+            snapshot.settle_from_quote(&usage, 2_499_999),
+            Err(ContractError::SettlementOverage)
+        );
+        let too_many = NormalizedUsage {
+            images: Some(3),
+            ..Default::default()
+        };
+        assert_eq!(
+            snapshot.settle_from_quote(&too_many, 10_000_000),
+            Err(ContractError::SettlementOverage)
+        );
+        let mut corrupt = snapshot.clone();
+        corrupt.exact_estimate_numerator = "1".into();
+        assert!(corrupt.settle_from_quote(&usage, 10_000_000).is_err());
+    }
+
     #[test]
     fn canonical_digest_is_format_independent_and_catalog_is_frozen() {
         let a = PricingCatalog::from_json(CATALOG.as_bytes()).unwrap();
@@ -2259,6 +2361,7 @@ mod tests {
                 assert_eq!(secret.expose(), b"selected-canary");
                 self.0.fetch_add(1, Ordering::SeqCst);
                 Ok(AdapterOutcome {
+                    billing_failure: None,
                     usage: None,
                     actual_vendor_cost: None,
                     provider_request_id: None,

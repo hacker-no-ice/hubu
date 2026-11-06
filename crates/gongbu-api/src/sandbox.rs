@@ -1490,6 +1490,7 @@ impl DeterministicProvider {
             ));
         }
         Ok(ProviderSuccess {
+            billing_failure: None,
             request_id: Some(deterministic_id("request", 0, attempt_id)),
             operation_id: None,
             usage: NormalizedUsage {

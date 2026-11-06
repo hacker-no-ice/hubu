@@ -27,6 +27,7 @@ mod money;
 mod save_folders;
 mod stack;
 mod terminal;
+mod ui;
 mod watch;
 
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:8787";
@@ -280,6 +281,7 @@ fn run() -> Result<()> {
         "gallery" => gallery::command(&client, args),
         "artifact" => artifact::command(&client, args),
         "folders" => save_folders::command(&hubu_home, args),
+        "ui" => ui::command(&client, &hubu_home, args),
         "version" | "--version" | "-V" => version(),
         "-h" | "--help" | "help" => {
             print_help();
@@ -3223,6 +3225,31 @@ fn request_json(
     include_approval_capability: bool,
     include_reconciliation_capability: bool,
 ) -> Result<Value> {
+    let (status, json) = request_json_status(
+        client,
+        method,
+        path,
+        body,
+        include_approval_capability,
+        include_reconciliation_capability,
+    )?;
+    if !(200..300).contains(&status) {
+        return Err(HttpApplicationError { status, body: json }.into());
+    }
+    Ok(json)
+}
+
+/// Send one request to the Hubu server and return its status and JSON body
+/// without turning application errors into `Err`, so callers such as the
+/// admin UI proxy can relay structured rejections unchanged.
+fn request_json_status(
+    client: &CliContext,
+    method: &str,
+    path: &str,
+    body: Option<Value>,
+    include_approval_capability: bool,
+    include_reconciliation_capability: bool,
+) -> Result<(u16, Value)> {
     let target = client.target()?;
     let (host, port) = parse_base_url(&target.base_url)?;
     let body_text = body.map(|body| body.to_string()).unwrap_or_default();
@@ -3264,12 +3291,7 @@ fn request_json(
     let (status, response_body) = parse_http_response(&raw)?;
     let json: Value = serde_json::from_str(response_body)
         .with_context(|| format!("parse server response body `{response_body}`"))?;
-
-    if !(200..300).contains(&status) {
-        return Err(HttpApplicationError { status, body: json }.into());
-    }
-
-    Ok(json)
+    Ok((status, json))
 }
 
 fn get_json(client: &CliContext, path: &str) -> Result<Value> {
@@ -3729,6 +3751,7 @@ Commands:
   gallery    Export completed images to a local directory
   feedback   Send feedback: guidance and local report preview (hubu feedback --help)
   health     Check the Hubu server
+  ui         Run the local admin web UI (hubu ui --help)
   version    Print product, source, and executor-contract versions
 
 Global options:
