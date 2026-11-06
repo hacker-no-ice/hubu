@@ -138,6 +138,15 @@ pub(crate) fn string<'a>(value: &'a Value, name: &str) -> Result<&'a str> {
 }
 
 pub(crate) fn history_record(client: &BackendClient, id: &str) -> Result<Value> {
+    let record = artifact_history_record(client, id)?;
+    ensure!(
+        record["status"] == "settled",
+        "authorization is not settled"
+    );
+    Ok(record)
+}
+
+pub(crate) fn artifact_history_record(client: &BackendClient, id: &str) -> Result<Value> {
     let value = read_json(
         client,
         "spend/authorizations/show",
@@ -149,8 +158,8 @@ pub(crate) fn history_record(client: &BackendClient, id: &str) -> Result<Value> 
     );
     let record = &value["authorization_record"];
     ensure!(
-        record["authorization_id"] == id && record["status"] == "settled",
-        "authorization is mismatched or not settled"
+        record["authorization_id"] == id,
+        "authorization is mismatched"
     );
     Ok(record.clone())
 }

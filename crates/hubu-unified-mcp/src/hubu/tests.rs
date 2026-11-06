@@ -332,7 +332,7 @@ fn combined_catalog_exposes_both_approved_sets_under_readiness_gates() {
         None,
     );
     let tools = server.list_tools_for_snapshot();
-    assert_eq!(tools.len(), 42);
+    assert_eq!(tools.len(), 43);
     assert!(tools.contains(&gongbu::operation_status_definition()));
     for definition in super::catalog::tool_definitions()
         .into_iter()
@@ -350,7 +350,7 @@ fn combined_catalog_exposes_both_approved_sets_under_readiness_gates() {
         snapshot.gongbu.reason_code = Some("backend_not_ready");
     }
     let degraded = server.list_tools_for_snapshot();
-    assert_eq!(degraded.len(), 40);
+    assert_eq!(degraded.len(), 41);
     assert!(!degraded
         .iter()
         .any(|tool| tool["name"] == "gongbu_create_execution"));
@@ -372,7 +372,7 @@ fn combined_catalog_exposes_both_approved_sets_under_readiness_gates() {
         snapshot.hubu.reason_code = Some("health_unavailable");
     }
     let hubu_down = server.list_tools_for_snapshot();
-    assert_eq!(hubu_down.len(), 8);
+    assert_eq!(hubu_down.len(), 9);
     assert!(!hubu_down
         .iter()
         .any(|tool| tool["name"]
@@ -2528,7 +2528,7 @@ fn save_artifact_tool_is_listed_only_for_human_allowlisted_folders() {
         ),
         (
             json!({"operation_handle":handle,"folder":"brand"}),
-            "not yet succeeded",
+            "not a bound governed execution",
         ),
     ] {
         let response = tool_call(&server, artifact_save::TOOL_NAME, arguments, None);

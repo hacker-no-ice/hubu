@@ -26,6 +26,7 @@ struct Fixture {
     endpoint: String,
     requests: Arc<Mutex<Vec<String>>>,
     stop: Arc<AtomicBool>,
+    billing_settled: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
     bytes: Vec<u8>,
 }
@@ -47,6 +48,13 @@ impl Fixture {
         db.execute("INSERT INTO harness_operations VALUES (?1,'succeeded','hubu_submit_governed_execution','decision-1','execution-1',NULL)",
             [HANDLE]).unwrap();
         db.execute("INSERT INTO harness_operations VALUES ('hubu:public-operation:v1:queued','queued','hubu_submit_governed_execution',NULL,NULL,'{}')", []).unwrap();
+        if fault.starts_with("pending") {
+            db.execute(
+                "UPDATE harness_operations SET operation_state='failed' WHERE operation_handle=?1",
+                [HANDLE],
+            )
+            .unwrap();
+        }
         drop(db);
         let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
         bytes.extend((0..3 * 1024 * 1024).map(|i| (i % 251) as u8));
@@ -88,6 +96,8 @@ impl Fixture {
         let stop = Arc::new(AtomicBool::new(false));
         let worker_requests = requests.clone();
         let worker_stop = stop.clone();
+        let billing_settled = Arc::new(AtomicBool::new(!fault.starts_with("pending")));
+        let worker_billing_settled = billing_settled.clone();
         let body = bytes.clone();
         let worker = thread::spawn(move || {
             let mut authorization_reads = 0;
@@ -130,6 +140,23 @@ impl Fixture {
                 let (media, response) = if path.starts_with("/spend/authorizations/show?") {
                     authorization_reads += 1;
                     let mut current = record.clone();
+                    if fault == "quote" {
+                        current["receipt"]["cost_basis"] = json!("frozen_quote");
+                        current["receipt"]["provider_actual_cost"] = Value::Null;
+                        current["receipt"]["settlement_amount"] = cost.clone();
+                    }
+                    if !worker_billing_settled.load(Ordering::SeqCst) {
+                        current["status"] = json!("reconciliation_required");
+                        current["claim"] = json!({"id":"claim-1", "status":"claimed"});
+                        current["receipt"] = Value::Null;
+                        current["ledger_transaction_ids"] = json!([]);
+                        if fault == "pending-released" {
+                            current["claim"]["status"] = json!("released");
+                        }
+                        if fault == "pending-race" && authorization_reads >= 2 {
+                            current = record.clone();
+                        }
+                    }
                     if correction && authorization_reads >= 2 {
                         current["ledger_transaction_ids"] = json!(["ledger-1", "correction-1"]);
                     }
@@ -153,6 +180,8 @@ impl Fixture {
                         Vec::new()
                     };
                     ("application/json", serde_json::to_vec(&json!({"schema_version":"hubu-history-v1","transactions":rows,"next_cursor":if last {Value::Null} else {json!("next")}})).unwrap())
+                } else if path == "/v1/executions/execution-1" {
+                    ("application/json", serde_json::to_vec(&json!({"schema_version":1,"execution_id":"execution-1","status":"reconciliation_required","artifact_outcome":if fault == "pending-no-artifact" { "failed" } else { "succeeded" }})).unwrap())
                 } else if path == "/v1/executions/execution-1/artifacts" {
                     ("application/json", serde_json::to_vec(&json!({"schema_version":1,"execution_id":"execution-1","artifacts":artifacts})).unwrap())
                 } else if matches!(path, "/v1/artifacts/image-1" | "/v1/artifacts/image-2") {
@@ -173,6 +202,7 @@ impl Fixture {
             endpoint,
             requests,
             stop,
+            billing_settled,
             thread: Some(worker),
             bytes,
         }
@@ -506,4 +536,91 @@ fn native_save_refuses_unlisted_folders_paths_and_unsettled_accounting_before_wr
             .count(),
         0
     );
+}
+
+#[test]
+fn native_save_pending_billing_then_refreshes_exact_reconciled_cost_without_changing_image() {
+    let fixture = Fixture::with_fault("flux", false, false, "pending");
+    let brand = fixture.root.path().join("brand");
+    std::fs::create_dir(&brand).unwrap();
+    let pending = fixture.save(&["--folder", "brand", "--name", "recovered"]);
+    assert!(
+        pending.status.success(),
+        "{}",
+        String::from_utf8_lossy(&pending.stderr)
+    );
+    let receipt_path = brand.join("recovered.png.receipt.json");
+    let receipt: Value = serde_json::from_slice(&std::fs::read(&receipt_path).unwrap()).unwrap();
+    assert_eq!(receipt["billing_status"], "pending_reconciliation");
+    for key in [
+        "settled_cost",
+        "settlement_id",
+        "ledger_transaction_id",
+        "budget_charge_cents",
+    ] {
+        assert!(receipt[key].is_null(), "{key}: {receipt}");
+    }
+    assert_eq!(
+        std::fs::read(brand.join("recovered.png")).unwrap(),
+        fixture.bytes
+    );
+    // Human reconciliation is authoritative in Hubu; the same bound artifact
+    // remains saveable even if the local operation was terminally exhausted.
+    fixture.billing_settled.store(true, Ordering::SeqCst);
+    let settled = fixture.save(&["--folder", "brand", "--name", "recovered"]);
+    assert!(
+        settled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&settled.stderr)
+    );
+    let fresh: Value = serde_json::from_slice(&std::fs::read(receipt_path).unwrap()).unwrap();
+    assert_eq!(fresh["billing_status"], "settled");
+    assert_eq!(
+        fresh["settled_cost"],
+        json!({"amount":"1","scale":3,"currency":"usd"})
+    );
+    assert_eq!(fresh["artifact_id"], receipt["artifact_id"]);
+    assert_eq!(fresh["sha256"], receipt["sha256"]);
+    assert_eq!(
+        std::fs::read(brand.join("recovered.png")).unwrap(),
+        fixture.bytes
+    );
+    assert!(fixture
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|r| r.starts_with("GET ")));
+}
+
+#[test]
+fn native_save_pending_billing_refuses_released_claim_missing_artifacts_and_accounting_race() {
+    for fault in ["pending-released", "pending-no-artifact", "pending-race"] {
+        let fixture = Fixture::with_fault("flux", false, false, fault);
+        let brand = fixture.root.path().join("brand");
+        std::fs::create_dir(&brand).unwrap();
+        let result = fixture.save(&["--folder", "brand"]);
+        assert!(!result.status.success(), "{fault}");
+        assert_eq!(std::fs::read_dir(brand).unwrap().count(), 0);
+    }
+}
+
+#[test]
+fn native_save_quote_receipt_distinguishes_settlement_from_provider_actual() {
+    let fixture = Fixture::with_fault("flux", false, false, "quote");
+    let brand = fixture.root.path().join("brand");
+    std::fs::create_dir(&brand).unwrap();
+    let result = fixture.save(&["--folder", "brand", "--name", "quote"]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let receipt: Value =
+        serde_json::from_slice(&std::fs::read(brand.join("quote.png.receipt.json")).unwrap())
+            .unwrap();
+    assert_eq!(receipt["cost_basis"], "frozen_quote");
+    assert_eq!(receipt["settlement_amount"], receipt["settled_cost"]);
+    assert_eq!(receipt["billing_status"], "settled");
+    assert!(receipt["provider_actual_cost"].is_null());
 }

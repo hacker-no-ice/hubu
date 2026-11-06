@@ -60,6 +60,26 @@ claiming aggregate reconciliation. Unknown historical attribution remains
 unassigned. Historical wallet reconciliation is explicitly incomplete; wallet
 atomicity and remaining legacy wallet validation are deferred in HUB-210.
 
+## Spend summary
+
+`GET /ledger/summary` totals the owner's settled ledger cost for dashboards
+such as the admin UI's Spend history view. It accepts optional `agent_id`,
+`account_id` and `days` (1 to 366, default 30) query parameters; any other
+parameter fails. It never changes state.
+
+Each correction chain counts once, at its **latest** `effective_cost` (the
+corrected total when the posting was adjusted), and is attributed by its
+original posting: agent, billing merchant from the trusted execution-scope
+catalog (`null` when the posting has no linked catalog scope), and UTC day.
+The response (`schema_version: "hubu-history-v1"`,
+`basis: "latest_corrected_total_per_chain"`) has `totals`,
+`by_billing_merchant`, `by_agent`, and `daily.buckets` for the trailing
+`daily.days` days from `daily.from` through `daily.through`; days with no spend
+are omitted. Every amount is an exact `{"amount","scale","currency","display"}`
+object grouped by currency, so USD and USDC are never added together, and each
+row has a `chain_count`. `unpriced_chain_count` counts chains whose latest
+posting carries no cost metadata and is therefore not included.
+
 ## Discover authorization records
 
 ```sh

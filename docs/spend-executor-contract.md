@@ -368,6 +368,26 @@ the exact cost and authorization, and an identical retry must supply the same
 JSON value. A numerically equal cost encoded with a different amount or scale
 is changed receipt data and conflicts after settlement.
 
+Hubu advertises `executor_receipt_cost_basis_v1: true` on `/version`.
+Gongbu requires this capability during startup/readiness compatibility checks
+before accepting paid work, so an older Hubu cannot first accept a generation
+and then reject its provenance-bearing settlement receipt.
+
+Receipts also accept an additive `cost_basis`: `provider_reported`,
+`catalog_usage`, `frozen_quote`, or `legacy_unspecified` (the default for old
+receipts). This value is persisted and participates in idempotency checks.
+The existing `actual_vendor_cost` request field remains the compatibility name
+for the amount to settle; it must be interpreted with `cost_basis`. New
+response and history projections expose `settlement_amount` and an optional
+`provider_actual_cost`, which is populated only for `provider_reported`.
+A quote is never labeled provider-confirmed. Historical receipts without
+provenance remain `legacy_unspecified`; their payloads are not rewritten.
+
+Gongbu uses the exact frozen pricing quote when an expected reported cost is
+missing or null, and records `frozen_quote`. It validates delivered usage and
+both the quote and authorization bounds before settlement. Invalid reported
+cost still requires reconciliation; valid artifacts are retained independently.
+
 For v4.3 input compatibility, a receipt may instead supply
 `actual_vendor_cost_cents`. Hubu maps that non-negative integer to
 `actual_vendor_cost = {amount: actual_vendor_cost_cents, scale: 2, currency:
