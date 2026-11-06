@@ -63,7 +63,8 @@ class RendererGuards(unittest.TestCase):
         release = self.root / "site/app/releases/v0.2.5"
         release.mkdir(parents=True)
         (release / "page.tsx").write_text("export default function Page() { return null; }\n")
-        (release / "report.ts").write_text((ROOT / "site/app/releases/v0.2.5/report.ts").read_text())
+        # An independent unmeasured fixture: the repository's own releases may be measured.
+        (release / "report.ts").write_text('import type { ReleaseReport } from "../report-types";\n' + load_renderer().PLACEHOLDER + "\n")
         (self.root / "break-hubu/cards").mkdir(parents=True)
         for episode in load_renderer().EPISODES:
             (self.evidence / episode).mkdir(parents=True)
@@ -111,12 +112,19 @@ class RendererGuards(unittest.TestCase):
 
 
 class SiteContract(unittest.TestCase):
-    def test_unmeasured_report_is_the_renderers_placeholder(self):
-        placeholder = load_renderer().PLACEHOLDER
-        self.assertIn(placeholder, (ROOT / "site/app/releases/v0.2.5/report.ts").read_text())
-
-    def test_measured_release_wrapper_matches_the_renderer(self):
-        self.assertEqual((ROOT / "site/app/releases/v0.2.4/report/page.tsx").read_text(), load_renderer().WRAPPER)
+    def test_release_reports_are_placeholders_or_rendered(self):
+        renderer = load_renderer()
+        reports = sorted((ROOT / "site/app/releases").glob("v*/report.ts"))
+        self.assertTrue(reports)
+        for report in reports:
+            with self.subTest(release=report.parent.name):
+                source = report.read_text()
+                wrapper = report.parent / "report/page.tsx"
+                if renderer.PLACEHOLDER in source:
+                    self.assertFalse(wrapper.exists(), "an unmeasured release has no analysis page")
+                else:
+                    self.assertIn("Generated from captured public evidence by break-hubu/render-report.py.", source)
+                    self.assertEqual(wrapper.read_text(), renderer.WRAPPER)
 
 
 class WorkflowPrivileges(unittest.TestCase):
