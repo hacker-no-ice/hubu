@@ -1,5 +1,7 @@
 import { EngineeringHeader } from "../../components/EngineeringHeader";
 import { documentMetadata } from "../../lib/metadata";
+import { MeasuredClaims, systemCardKicker } from "../components/MeasuredClaims";
+import { report } from "./report";
 
 export const metadata = documentMetadata({
   title: "v0.2.5 release notes", href: "/releases/v0.2.5",
@@ -7,16 +9,6 @@ export const metadata = documentMetadata({
 });
 
 const repository = "https://github.com/hacker-no-ice/hubu";
-// The Break Hubu kits run only against a published release tag. Until the
-// v0.2.5 run is recorded, every claim stays "Not tested"; v0.2.4 verdicts are
-// never carried forward.
-const claims: { title: string; question: string }[] = [
-  { title: "Budget exhaustion", question: "Does Hubu stop authorizing new work once a fixed budget is consumed?" },
-  { title: "Overrun accounting", question: "Is a confirmed charge above its authorization recorded in full, with the overrun visible?" },
-  { title: "Crash recovery", question: "Does a restart preserve an unresolved claim’s financial obligation?" },
-  { title: "Shared-budget burst", question: "Can many clients sharing one budget reserve more than that budget?" },
-];
-
 export default function ReleaseNotes() {
   return <div className="engineering-shell">
     <EngineeringHeader section="releases" />
@@ -44,21 +36,14 @@ export default function ReleaseNotes() {
         </section>
 
         <section className="release-section" aria-labelledby="system-card-title">
-          <div className="release-section-heading"><h2 id="system-card-title">System card</h2><span className="proof-kicker">Measured run pending</span></div>
+          <div className="release-section-heading"><h2 id="system-card-title">System card</h2><span className="proof-kicker">{systemCardKicker(report)}</span></div>
           <dl className="release-system-card">
             <div><dt>Tested system</dt><dd>Hubu remains experimental and local-first. Release validation runs formatting, lints, locked workspace tests, integration and packaging checks, and published-asset smoke tests. It never supplies provider credentials or makes live provider calls.</dd></div>
             <div><dt>Provider coverage</dt><dd>New packs and targets are verified in CI with recorded fixtures and mock transports. Prices come from each provider’s published rates on the review dates stated in the contract docs; provider invoices may differ. Redaction attestation covers FLUX.2 [pro] v1 only.</dd></div>
             <div><dt>Known authority limits</dt><dd>Registered agent accounts are not bound to an authenticated runtime or thread. The normal bearer can change budgets and policies. <code>hubu ui</code> holds the bearer and approval credentials in a local process protected by loopback binding, a one-time login link, and same-origin checks, not per-user accounts.</dd></div>
             <div><dt>Reproduction</dt><dd>The release experiment kits build the exact published release and need no model subscription or provider credentials. <a href={`${repository}/blob/main/break-hubu/README.md`}>Prerequisites and commands ↗</a></dd></div>
           </dl>
-          <p className="release-scope-note">The four ledger experiments run only against a published release tag. Their v0.2.5 results will be recorded here after publication. Until then each claim is not tested, and earlier results are not carried forward.</p>
-          <div className="release-claims">
-            {claims.map((claim) => <div className="release-claim" key={claim.title}>
-              <div><h3>{claim.title}</h3><span className="proof-verdict proof-verdict-not-tested"><span aria-hidden="true" />Not tested</span></div>
-              <p>{claim.question}</p>
-            </div>)}
-          </div>
-          <div className="release-analysis-link"><div><h3>Previous measured analysis</h3><p>The v0.2.4 analysis applies only to v0.2.4’s released source. It shows the setup, scripts, and evidence the v0.2.5 run will repeat.</p></div><a className="button secondary" href="/releases/v0.2.4/report">Read the v0.2.4 analysis <span aria-hidden="true">↗</span></a></div>
+          <MeasuredClaims release="v0.2.5" report={report} previous="v0.2.4" />
         </section>
         <footer className="engineering-article-footer proof-footer"><a href="/releases">← All release notes</a><a href={`${repository}/releases/tag/v0.2.5`}>Release on GitHub ↗</a></footer>
       </article>
