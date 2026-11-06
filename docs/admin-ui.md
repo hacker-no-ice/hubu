@@ -27,13 +27,18 @@ browser, stop `hubu ui` and start it again.
 | --- | --- |
 | Overview | Three groups: people and agents; the spend lifecycle (pending approvals, automatic denials, unresolved reconciliations, recent decisions); and policies and budgets (spend against limits, budgets near their limit, policies, spending targets). A non-zero approval or denial count is highlighted, and every tile opens the matching page, pre-filtered where it helps. |
 | Approvals | Review pending spend requests, then approve or deny them. |
-| Spend history | Authorization records filtered by agent and status, with details. Ledger transactions with their entries. |
+| Spend history | A spend summary with charts: total spent, the split by platform (billing merchant) and by agent, and spend per day over the last 7, 30, 90 or 365 days, filtered by agent. Each currency is totaled and charted separately, and the daily chart has a table view. Below it, authorization records filtered by agent and status, with details, and ledger transactions with their entries. |
 | Decisions | Governance records filtered by agent, category and time, with the summary for the same filter. |
 | Agents | Register an agent from a name and a version label, list agents, rename an agent from the pencil next to its name, view its name history. |
 | Users & targets | List human users, register a human user, set or revoke advisory spending targets. |
 | Policies | Read any revision of a policy (rules in plain language and the YAML source), compare a past revision with the current one, then switch to Edit to change the YAML, validate it and save it as a new revision. |
 | Budgets | Create budgets, change a limit, revoke, view version history. |
 | Providers & secrets | Read-only view grouped by platform: each platform's models, config versions, secret reference name and which targets Gongbu currently offers. |
+
+The spend summary comes from the read-only
+[`GET /ledger/summary`](ledger-history.md#spend-summary) endpoint, so totals
+cover the whole ledger rather than the loaded table rows. Charts are plain CSS
+bars; hover a bar for its exact amount.
 
 **Overview** and **Spend history** reload themselves every 15 seconds while
 the browser tab is visible, keeping your scroll position. Auto-refresh pauses
