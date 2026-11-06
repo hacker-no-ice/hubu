@@ -25,6 +25,96 @@ Future release template
 
 ## Unreleased
 
+## v0.2.5 — 2026-11-05
+
+### Highlights
+
+- Gongbu runs every shipped provider integration from a verified
+  [provider pack](docs/provider-packs.md): one TOML file per integration,
+  executed by one of two reviewed engines. `sync_fixed` serves providers that
+  answer in one request; `async_poll` submits once, checkpoints the job and
+  polls under a deadline, resuming after a restart without resubmitting.
+  Engines own retries, settlement, reconciliation and credential hosts; packs
+  that try to weaken them are rejected by name. The Gemini and FLUX.2 Rust
+  adapters are deleted, and the unshipped Ideogram adapter is removed. The
+  cost model now prices any workload (per request, result, page, second or
+  megapixel) with the same exact rational rounding as v0.2.4.
+
+- A larger image catalog, all priced from the providers' published rates and
+  verified with fixtures:
+  - FLUX.2 [pro] contract v2 with 1k/2k/4k tiers × six aspect ratios, priced
+    per binary megapixel, plus new FLUX.2 [max], [flex] (with `steps` and
+    `guidance`), [klein] 9B and [klein] 4B targets.
+  - FLUX 3 Image (768sq, 1k, 1.5k and 2k tiers at any aspect ratio, grounding
+    always off) and FLUX 3 Image Klein.
+  - Gemini v2 contracts with ten certified aspect ratios, Gemini 3 Pro Image,
+    and Gemini Nano Banana 2.1 (an explicit choice, never a default).
+
+  Earlier contract versions stay available unchanged.
+
+- Image editing for every shipped image model. An `image_edit` contract takes
+  1–4 input images by the artifact ID of an earlier governed output, or by a
+  pinned `reference:<name>@sha256:<hex>` token for the operator's own images
+  in a read-only `gongbu.reference_images_root` folder
+  (`gongbu_list_reference_images` lists them). Input digests are part of the
+  approved request and are re-verified before anything is sent. Where a
+  provider bills reference images, discovery publishes the
+  `input_megapixels` rule that prices them.
+
+- Policies can tier creative work by model and output size. Execution scope
+  schema version 2 adds `model` and `image_size`, which Gongbu binds to the
+  execution it actually runs: an authorization for a draft model or size
+  cannot be spent on a final-size render. Scope version 1 remains supported
+  and unchanged. See the
+  [creative tiers cookbook](policies/README.md#cookbook-draft--final--deny-tiers).
+
+- Agents can save a chosen output into a human-allowlisted project folder with
+  `hubu_save_artifact` (or `hubu artifact save`). The human manages folders
+  with `hubu folders allow|list|remove`; agents name a folder but never a
+  path. Each save verifies the artifact's bytes and writes a
+  `NAME.png.receipt.json` sidecar with its digest, identities and exact
+  settlement. Saves never overwrite a different file.
+
+- `hubu ui` starts a loopback-only admin web UI for agents, users and spending
+  targets, policies, budgets, approvals, spend and ledger history, governance
+  decisions, and a read-only providers view. Sessions start from a one-time
+  login link printed in the terminal; secret values are never shown. Views
+  refresh every 15 seconds without discarding in-progress edits, and Spend
+  history shows totals by platform, agent and day from the new read-only
+  `GET /ledger/summary`. See the [admin web UI guide](docs/admin-ui.md).
+
+- Settlement receipts record their `cost_basis` (`provider_reported`,
+  `catalog_usage`, `frozen_quote` or `legacy_unspecified`). When a provider
+  omits an expected cost, Gongbu settles from the exact frozen quote,
+  labels it `frozen_quote`, and keeps the delivered artifacts. A quote is
+  never shown as a provider-confirmed cost.
+
+### Breaking or operational changes
+
+- Read [Upgrading to v0.2.5: provider packs](docs/operations/upgrading-to-v0.2.5.md)
+  before upgrading. Shipped targets now name their pack and its digest, so
+  their revision digests change: **drain unfinished Gongbu work first**,
+  including executions awaiting reconciliation. Gongbu refuses to start while
+  an unfinished execution references a target revision the configuration no
+  longer has. Re-render the stack so the provider target config uses pack
+  settings; configs naming the removed `gemini_developer_image` or
+  `flux2_api` settings types are rejected. Redaction attestation of FLUX
+  executions created before the upgrade fails with `UnsupportedTarget`;
+  receipts, ledger, settlement history and artifacts are unaffected.
+- Gongbu requires Hubu to advertise `executor_receipt_cost_basis_v1` before
+  it accepts paid work. Upgrade Hubu and Gongbu together, as the unified
+  release does.
+- Unified MCP routing revision is 18 (from 14), adding `hubu_save_artifact`
+  and `gongbu_list_reference_images`.
+
+### Important fixes
+
+- Concurrent first opens of a pre-v0.2.4 database no longer race for the same
+  pre-migration backup file.
+- FLUX image edits whose response omits the reported cost are reconciled
+  instead of left unresolved, and FLUX image editing is registered in the
+  trusted execution-scope catalog.
+
 ## v0.2.4 — 2026-10-19
 
 ### Highlights
