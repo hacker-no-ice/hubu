@@ -25,7 +25,7 @@ Future release template
 
 ## Unreleased
 
-## v0.2.5 — 2026-11-05
+## v0.2.5 — 2026-11-06
 
 ### Highlights
 

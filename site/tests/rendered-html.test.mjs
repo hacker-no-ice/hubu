@@ -119,7 +119,7 @@ test("v0.2.5 release notes keep the system card honest until the measured run is
   assert.equal(response.status, 200);
   const html = await response.text();
   assert.match(html, /<h1>Hubu v0.2.5<\/h1>/);
-  assert.match(html, /CHANGELOG\.md#v025--2026-11-05/);
+  assert.match(html, /CHANGELOG\.md#v025--2026-11-06/);
   assert.match(html, /href="\/docs\/operations\/upgrading-to-v0.2.5"/);
   assert.match(html, /drain unfinished Gongbu work/);
   assert.ok(html.indexOf('id="changes-title"') < html.indexOf('id="system-card-title"'));

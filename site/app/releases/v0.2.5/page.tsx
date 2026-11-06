@@ -24,10 +24,10 @@ export default function ReleaseNotes() {
       <article className="engineering-article-inner">
         <header className="release-heading">
           <a className="engineering-back" href="/releases">← Release notes</a>
-          <p className="eyebrow"><span /> Stable release · November 5, 2026</p>
+          <p className="eyebrow"><span /> Stable release · November 6, 2026</p>
           <h1>Hubu v0.2.5</h1>
           <p className="engineering-deck">Provider packs and a governed creative workflow.</p>
-          <div className="release-links"><a href={`${repository}/releases/tag/v0.2.5`}>Release on GitHub ↗</a><a href={`${repository}/blob/main/CHANGELOG.md#v025--2026-11-05`}>Complete changelog ↗</a></div>
+          <div className="release-links"><a href={`${repository}/releases/tag/v0.2.5`}>Release on GitHub ↗</a><a href={`${repository}/blob/main/CHANGELOG.md#v025--2026-11-06`}>Complete changelog ↗</a></div>
         </header>
 
         <section className="release-section" aria-labelledby="changes-title">

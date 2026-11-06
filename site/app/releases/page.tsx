@@ -16,7 +16,7 @@ export default function Releases() {
         <p>What changed, what to know before upgrading, and what the recorded evidence supports.</p>
       </header>
       <a className="proof-release-link" href="/releases/v0.2.5">
-        <div><span className="proof-kicker">Stable · November 5, 2026</span><h2>v0.2.5</h2></div>
+        <div><span className="proof-kicker">Stable · November 6, 2026</span><h2>v0.2.5</h2></div>
         <div><p>Provider packs, a larger image catalog, image editing, model and size policy tiers, saved artifacts, and a local admin web UI.</p><span className="proof-text-link">Read release notes and system card <span aria-hidden="true">↗</span></span></div>
       </a>
       <a className="proof-release-link" href="/releases/v0.2.4">
