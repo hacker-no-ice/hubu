@@ -1292,3 +1292,183 @@ fn watch_overrun_limit_is_version_limit_not_balance_sum() {
     );
     std::fs::remove_file(path).ok();
 }
+
+#[test]
+fn quote_settlement_preserves_provenance_and_never_claims_provider_actual_cost() {
+    let (path, state, agent, auth) = setup_executor_authorization("history-quote");
+    let claim = claim_executor_spend(json!({"spend_auth_token_id":auth.auth_token_id,"account_id":agent.account_id,"amount_cents":auth.budget_hold.as_ref().unwrap().amount_cents,"merchant":"gongbu.image"}).to_string(), &state).unwrap();
+    let mut receipt = precise_settlement_receipt_json(160, 4);
+    receipt["cost_basis"] = json!("frozen_quote");
+    let request = json!({"claim_id":claim.claim_id,"receipt":receipt}).to_string();
+    let settled = finalize_executor_spend(request.clone(), &state, true, None).unwrap();
+    assert_eq!(settled["receipt"]["cost_basis"], "frozen_quote");
+    assert_eq!(settled["receipt"]["settlement_amount"]["amount"], 160);
+    assert!(settled["receipt"]["provider_actual_cost"].is_null());
+    assert_eq!(
+        finalize_executor_spend(request, &state, true, None).unwrap(),
+        settled
+    );
+    let shown = read(
+        &state,
+        &format!(
+            "/spend/authorizations/show?authorization_id={}",
+            auth.decision_id
+        ),
+    );
+    let saved = &shown["authorization_record"]["receipt"];
+    assert_eq!(saved["cost_basis"], "frozen_quote");
+    assert_eq!(
+        saved["settlement_amount"],
+        json!({"amount":"160","scale":4,"currency":"usd"})
+    );
+    assert!(saved["provider_actual_cost"].is_null());
+    // The cost basis participates in receipt identity: changing it is not a replay.
+    receipt["cost_basis"] = json!("provider_reported");
+    assert!(finalize_executor_spend(
+        json!({"claim_id":claim.claim_id,"receipt":receipt}).to_string(),
+        &state,
+        true,
+        None
+    )
+    .is_err());
+    std::fs::remove_file(path).ok();
+}
+
+#[test]
+fn spend_summary_totals_latest_corrections_by_merchant_agent_and_day() {
+    let path = std::env::temp_dir().join(format!(
+        "hubu-history-spend-summary-{}.sqlite",
+        UserId::new()
+    ));
+    let state = ServerState::new_with_db_path(&path).unwrap();
+    init(
+        json!({"display_name":"Summary owner","email":"summary@example.com"}).to_string(),
+        &state,
+    )
+    .unwrap();
+    let agent = register_agent(
+        json!({"name":"summary-agent","version":"v1"}).to_string(),
+        &state,
+    )
+    .unwrap();
+    let idle = register_agent(
+        json!({"name":"summary-idle-agent","version":"v1"}).to_string(),
+        &state,
+    )
+    .unwrap();
+    add_policy(
+        json!({"agent_id":agent.agent_id,"daily_limit_cents":500}).to_string(),
+        &state,
+    )
+    .unwrap();
+    create_test_agent_budget(&state, &agent.agent_id, 1000);
+    let empty = read(&state, "/ledger/summary");
+    assert_eq!(empty["totals"], json!([]));
+    assert_eq!(empty["daily"]["days"], 30);
+    let catalog = trusted_execution_scope_catalog();
+    for (index, scope) in catalog.iter().take(2).enumerate() {
+        let selector = scope_as_selector(scope);
+        let auth=authorize_spend(json!({"operation_key":format!("summary-{index}"),"account_id":agent.account_id,"amount_cents":100,"execution_scope":selector,"reason":"summary"}).to_string(),&state).unwrap();
+        let claim = claim_executor_spend(json!({"spend_auth_token_id":auth.auth_token_id,"account_id":agent.account_id,"amount_cents":100,"execution_scope":scope}).to_string(),&state).unwrap();
+        finalize_executor_spend(json!({"claim_id":claim.claim_id,"receipt":precise_settlement_receipt_json((index+1) as i64,3)}).to_string(),&state,true,None).unwrap();
+    }
+    // Correct the first merchant's USD 0.001 twice; only the latest total counts.
+    let first_merchant = &catalog[0].billing_merchant.id;
+    let postings = read(&state, "/ledger/transactions")["transactions"].clone();
+    let original: hubu_common::ids::LedgerTransactionId = postings
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["effective_cost"]["amount"] == "1")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let owner = authenticated_user_context(&state).unwrap().user_id;
+    let mut previous = original.clone();
+    for (step, amount) in ["9", "7"].into_iter().enumerate() {
+        previous = hubu_core::ledger::LedgerService::adjust(
+            &mut state.budgets.lock().unwrap(),
+            hubu_core::ledger::AccountingAdjustment {
+                owner_user_id: owner.clone(),
+                original_transaction_id: original.clone(),
+                expected_previous_transaction_id: previous.clone(),
+                operation_key: format!("summary-correction-{step}"),
+                corrected_cost: hubu_core::ledger::ExactMoney {
+                    amount: amount.into(),
+                    scale: 3,
+                    currency: Currency::Usd,
+                },
+                reason: "corrected invoice".into(),
+                evidence: format!("invoice://summary-{step}"),
+            },
+        )
+        .unwrap()
+        .id;
+    }
+    let summary = read(&state, "/ledger/summary?days=7");
+    // 0.007 (corrected) + 0.002, exact, one chain each.
+    assert_eq!(
+        summary["totals"],
+        json!([{"amount":{"amount":"9","scale":3,"currency":"usd","display":"0.009"},"chain_count":2}])
+    );
+    let merchants = summary["by_billing_merchant"].as_array().unwrap();
+    assert_eq!(merchants.len(), 2);
+    assert_eq!(merchants[0]["billing_merchant_id"], json!(first_merchant));
+    assert_eq!(merchants[0]["amount"]["display"], "0.007");
+    assert_eq!(
+        merchants[1]["billing_merchant"],
+        json!(catalog[1].billing_merchant.display_name)
+    );
+    assert_eq!(merchants[1]["amount"]["display"], "0.002");
+    assert_eq!(summary["by_agent"].as_array().unwrap().len(), 1);
+    assert_eq!(summary["by_agent"][0]["agent_id"], json!(agent.agent_id));
+    assert_eq!(summary["by_agent"][0]["chain_count"], 2);
+    let buckets = summary["daily"]["buckets"].as_array().unwrap();
+    assert_eq!(buckets.len(), 1);
+    assert_eq!(buckets[0]["date"], summary["daily"]["through"]);
+    assert_eq!(buckets[0]["amount"], summary["totals"][0]["amount"]);
+    assert_eq!(summary["unpriced_chain_count"], 0);
+    // Agent filters narrow every section; the idle agent has spent nothing.
+    let filtered = read(
+        &state,
+        &format!("/ledger/summary?agent_id={}", agent.agent_id),
+    );
+    assert_eq!(filtered["totals"], summary["totals"]);
+    let idle_summary = read(
+        &state,
+        &format!("/ledger/summary?agent_id={}", idle.agent_id),
+    );
+    assert_eq!(idle_summary["totals"], json!([]));
+    assert_eq!(idle_summary["by_agent"], json!([]));
+    for bad in [
+        "/ledger/summary?days=0",
+        "/ledger/summary?days=367",
+        "/ledger/summary?budget_id=x",
+        "/ledger/summary?limit=5",
+    ] {
+        assert_ne!(
+            route(authenticated_get_request(bad), &state).status,
+            200,
+            "{bad}"
+        );
+    }
+    // Another owner sees none of it, even with a known public agent id.
+    init(
+        json!({"username":"bob-summary","display_name":"Bob","email":"bob-summary@example.com"})
+            .to_string(),
+        &state,
+    )
+    .unwrap();
+    assert_eq!(read(&state, "/ledger/summary")["totals"], json!([]));
+    assert_ne!(
+        route(
+            authenticated_get_request(&format!("/ledger/summary?agent_id={}", agent.agent_id)),
+            &state
+        )
+        .status,
+        200
+    );
+    std::fs::remove_file(path).ok();
+}

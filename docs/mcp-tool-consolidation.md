@@ -89,6 +89,7 @@ not forwarded as a backend query parameter.
 | Tool | Prerequisites | Purpose |
 | --- | --- | --- |
 | `gongbu_list_execution_targets` | Gongbu | Approved targets, scope and pricing |
+| `gongbu_list_reference_images` | Gongbu | The operator's reference images and their pinned edit tokens |
 | `hubu_submit_governed_execution` | Hubu + Gongbu + store | Optional managed execution; internally composes primitives |
 | `gongbu_create_execution` | Gongbu + Hubu + store | Continue an existing authorization into managed execution |
 | `gongbu_get_execution` | Gongbu | Read execution status by ID, including when the MCP store is unavailable |
