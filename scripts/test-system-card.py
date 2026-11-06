@@ -127,6 +127,30 @@ class SiteContract(unittest.TestCase):
                     self.assertEqual(wrapper.read_text(), renderer.WRAPPER)
 
 
+class ClaimsCatalog(unittest.TestCase):
+    def setUp(self):
+        self.catalog = json.loads((ROOT / "site/app/releases/claims.json").read_text())
+
+    def test_lists_the_six_hubu_claims_in_order(self):
+        self.assertEqual([claim["id"] for claim in self.catalog["claims"]], ["C1", "C2", "C3", "C4", "C5", "C6"])
+        for claim in self.catalog["claims"]:
+            self.assertTrue(claim["title"] and claim["invariant"], claim["id"])
+
+    def test_every_kit_experiment_measures_exactly_one_claim(self):
+        experiments = [episode for claim in self.catalog["claims"] for episode in claim["experiments"]]
+        self.assertEqual(sorted(experiments), sorted(load_renderer().EPISODES))
+        self.assertEqual(sorted(self.catalog["experiments"]), sorted(load_renderer().EPISODES))
+
+    def test_release_pages_assess_every_unmeasured_claim(self):
+        for page in sorted((ROOT / "site/app/releases").glob("v*/page.tsx")):
+            source = page.read_text()
+            if "MeasuredClaims" not in source:
+                continue
+            with self.subTest(release=page.parent.name):
+                for claim in ("C2", "C3", "C4", "C5", "C6"):
+                    self.assertRegex(source, rf"{claim}: {{ status: \"(not-tested|known-gap|not-applicable|holds|holds-with-caveat|does-not-hold)\", note: \"[^\"]+\" }}")
+
+
 class WorkflowPrivileges(unittest.TestCase):
     def setUp(self):
         self.workflow = (ROOT / ".github/workflows/system-card.yml").read_text()

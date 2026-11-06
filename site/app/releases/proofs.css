@@ -219,3 +219,16 @@
   .proof-reproduce-grid, .proof-release-link { grid-template-columns: 1fr; gap: 20px; }
   .proof-footer { flex-wrap: wrap; font-size: 12px; }
 }
+.release-claims-catalog > #claim-c1 { grid-column: 1 / -1; }
+.release-claim-id { display: inline-block; min-width: 28px; margin: 0 6px 0 0 !important; color: var(--indigo) !important; font: 12px/1 var(--font-geist-mono), monospace; }
+.release-claim .release-claim-note { color: var(--text); opacity: .82; font-size: 12.5px; margin-top: 9px; }
+.release-claim-experiments { display: grid; grid-template-columns: 1fr 1fr; gap: 16px 28px; margin: 18px 0 0; padding: 0; list-style: none; }
+.release-claim-experiments li { padding: 14px 0 0; border-top: 1px dashed var(--line); }
+.release-claim-experiments li > div { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px; align-items: baseline; }
+.release-claim-experiments h4 { margin: 0; font-size: 13.5px; font-weight: 520; }
+.release-claim-experiments h4 a span { color: var(--cyan); margin-left: 4px; }
+.release-claim-experiments p { margin-top: 9px; }
+@media (max-width: 760px) { .release-claim-experiments { grid-template-columns: 1fr; } }
+.proof-claim-tag { margin: 22px 0 -12px 65px; color: var(--indigo); }
+@media (max-width: 900px) { .proof-claim-tag { margin-left: 48px; } }
+@media (max-width: 640px) { .proof-claim-tag { margin-left: 0; } }

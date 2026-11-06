@@ -146,21 +146,28 @@ test("release system cards match their measured or unmeasured report", async () 
     const reportSource = await readFile(new URL(`${release}/report.ts`, releasesDir), "utf8");
     const measured = !reportSource.includes("export const report = null as ReleaseReport | null;");
     const html = await (await render(`/releases/${release}`)).text();
-    const claims = html.match(/<div class="release-claims">[\s\S]*?<\/div><\/div><\/div>(?=<)/)?.[0] ?? html;
-    const shown = [...claims.matchAll(/class="proof-verdict proof-verdict-([a-z-]+)"/g)].map((match) => match[1]);
+    // Card order: C1, its four experiments, then C2–C6.
+    const shown = [...html.matchAll(/data-status="([a-z-]+)"/g)].map((match) => match[1]);
+    assert.equal(shown.length, 10, release);
+    for (const id of ["c1", "c2", "c3", "c4", "c5", "c6"]) assert.match(html, new RegExp(`id="claim-${id}"`));
+    const [c1, ...rest] = shown;
+    const experiments = rest.slice(0, 4);
+    for (const status of rest.slice(4)) assert.ok(["not-tested", "known-gap", "not-applicable", "holds", "holds-with-caveat", "does-not-hold"].includes(status));
     const reportPage = await render(`/releases/${release}/report`);
     if (measured) {
       const expected = [...reportSource.matchAll(/"verdict": "([a-z-]+)"/g)].map((match) => match[1]);
       assert.equal(expected.length, 4, release);
-      assert.deepEqual(shown.slice(0, 4), expected, release);
+      assert.deepEqual(experiments, expected, release);
+      const weakest = ["does-not-hold", "not-tested", "holds-with-caveat"].find((verdict) => expected.includes(verdict)) ?? "holds";
+      assert.equal(c1, weakest, release);
       assert.match(html, new RegExp(`href="/releases/${release.replaceAll(".", "\\.")}/report"`));
       assert.match(html, /Recorded \d{4}-\d{2}-\d{2}/);
       assert.equal(reportPage.status, 200, release);
       assert.match(await reportPage.text(), new RegExp(`<h1>${release.replaceAll(".", "\\.")} system analysis</h1>`));
       assert.ok(sitemap.includes(`https://hubustack.dev/releases/${release}/report</loc>`), release);
     } else {
-      assert.deepEqual(shown.slice(0, 4), ["not-tested", "not-tested", "not-tested", "not-tested"], release);
-      assert.doesNotMatch(claims, /proof-verdict-holds|proof-verdict-does-not-hold/);
+      assert.deepEqual([c1, ...experiments], ["not-tested", "not-tested", "not-tested", "not-tested", "not-tested"], release);
+      assert.ok(!shown.some((status) => status.startsWith("holds")), release);
       assert.match(html, /Measured run pending/);
       assert.match(html, /earlier results are not carried forward/);
       assert.doesNotMatch(html, new RegExp(`href="/releases/${release.replaceAll(".", "\\.")}/report"`));
