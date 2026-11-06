@@ -3394,16 +3394,50 @@ fn backup_before_accounting_scale(conn: &Connection) -> Result<(), StorageError>
     if !has_budget_data {
         return Ok(());
     }
-    let mut backup = format!("{path}.pre-accounting-scale.bak");
-    if std::path::Path::new(&backup).exists() {
-        backup = format!(
-            "{path}.pre-accounting-scale.{}.bak",
-            Utc::now().format("%Y%m%dT%H%M%S%.fZ")
-        );
+    // The backup runs outside the write lock (`VACUUM INTO` cannot run in a
+    // transaction), so concurrent first opens may each take one. Claim the
+    // output file atomically: two openers that picked the same name after an
+    // `exists()` check would both pass SQLite's empty-target check, and the
+    // slower one would fail replaying the schema into the faster one's copy.
+    let backup = reserve_backup_path(path)?;
+    if let Err(error) = conn.execute("VACUUM INTO ?1", params![backup]) {
+        let _ = std::fs::remove_file(&backup);
+        return Err(error.into());
     }
-    conn.execute("VACUUM INTO ?1", params![backup])?;
     eprintln!("hubu: backed up the database to {backup} before the accounting-scale migration");
     Ok(())
+}
+
+/// Creates an empty, previously nonexistent backup file for `path` and returns
+/// its name. `VACUUM INTO` accepts an existing empty target.
+fn reserve_backup_path(path: &str) -> Result<String, StorageError> {
+    let canonical = format!("{path}.pre-accounting-scale.bak");
+    let stamp = Utc::now().format("%Y%m%dT%H%M%S%.fZ");
+    let candidates = std::iter::once(canonical).chain(
+        std::iter::once(format!("{path}.pre-accounting-scale.{stamp}.bak")).chain(
+            (1..).map(move |attempt| format!("{path}.pre-accounting-scale.{stamp}-{attempt}.bak")),
+        ),
+    );
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    // SQLite keeps a pre-created target's mode, so match the 0644 it would
+    // use for a file it created itself instead of inheriting a looser umask.
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o644);
+    for candidate in candidates.take(64) {
+        match options.open(&candidate) {
+            Ok(_) => return Ok(candidate),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(StorageError::InvalidData(format!(
+                    "cannot create accounting-scale backup {candidate}: {error}"
+                )));
+            }
+        }
+    }
+    Err(StorageError::InvalidData(format!(
+        "cannot find a free accounting-scale backup name for {path}"
+    )))
 }
 
 fn verify_accounting_scale_backfill(conn: &Connection) -> Result<(), StorageError> {
