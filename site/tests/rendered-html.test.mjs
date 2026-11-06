@@ -170,9 +170,10 @@ test("home page walks through an illustrative governed image request", async () 
   assert.ok(html.indexOf('id="worked-example-title"') < html.indexOf('id="intro-video-title"'));
   const mascot = html.match(/<figure class="example-mascot">[\s\S]*?<\/figure>/)?.[0];
   assert.ok(mascot);
-  assert.match(mascot, /src="\/brand\/hubu-mascot.png"/);
+  assert.match(mascot, /src="\/brand\/hubu-mascot-evolved.jpg"/);
   assert.match(mascot, /loading="lazy"/);
-  assert.match(mascot, /alt="Hubu&#x27;s cream-and-jade seal mascot on a cinnabar base"/);
+  assert.match(mascot, /alt="Hubu&#x27;s cream-and-jade seal mascot on a cinnabar base, with violet and cyan glowing edges"/);
+  assert.match(mascot, /href="https:\/\/x.com\/hacker_no_ice\/status\/2118507555794374942"/);
   assert.match(mascot, /href="\/demos\/local-stack"/);
 });
 
