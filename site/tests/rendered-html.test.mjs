@@ -59,15 +59,17 @@ test("release notes lead from the landing page to one concise stable release and
   const hero = home.match(/<section class="hero">[\s\S]*?<\/section>/)?.[0];
   assert.ok(header);
   assert.ok(hero);
-  assert.match(header, /class="header-version" href="\/releases\/v0\.2\.4" aria-label="Read Hubu v0.2.4 release notes and system card"/);
-  assert.match(header, /v0\.2\.4 <span aria-hidden="true">↗<\/span>/);
+  assert.match(header, /class="header-version" href="\/releases\/v0\.2\.5" aria-label="Read Hubu v0.2.5 release notes and system card"/);
+  assert.match(header, /v0\.2\.5 <span aria-hidden="true">↗<\/span>/);
   assert.doesNotMatch(header, /\/ docs/);
-  assert.doesNotMatch(hero, /v0\.2\.4|hero-version/);
+  assert.doesNotMatch(hero, /v0\.2\.[45]|hero-version/);
   for (const html of [home, index, overview, docs, blog]) {
     assert.match(html, /href="\/releases"/);
     assert.doesNotMatch(html, /Break Hubu|href="\/break-hubu"|linear\.app|HUB-\d+/);
   }
+  assert.match(index, /href="\/releases\/v0.2.5"/);
   assert.match(index, /href="\/releases\/v0.2.4"/);
+  assert.ok(index.indexOf('href="/releases/v0.2.5"') < index.indexOf('href="/releases/v0.2.4"'));
   assert.doesNotMatch(index, /href="\/releases\/v0\.2\.[0-3]/);
   assert.match(overview, /What changed/);
   assert.match(overview, /System card/);
@@ -85,7 +87,7 @@ test("release notes lead from the landing page to one concise stable release and
   assert.match(overview, /href="\/releases\/v0.2.4\/report"/);
   assert.ok(overview.indexOf('id="changes-title"') < overview.indexOf('id="system-card-title"'));
   assert.doesNotMatch(overview, /<svg|Captured terminal excerpt/);
-  for (const path of ["/releases", "/releases/v0.2.4", "/releases/v0.2.4/report"]) {
+  for (const path of ["/releases", "/releases/v0.2.5", "/releases/v0.2.4", "/releases/v0.2.4/report"]) {
     assert.ok(sitemap.includes(`https://hubustack.dev${path}</loc>`));
   }
   assert.doesNotMatch(sitemap, /\/break-hubu/);
@@ -110,6 +112,27 @@ test("the mascot history links the governed variations before the evolution arti
   assert.match(html, /href="https:\/\/hubustack.dev\/mascot"/);
   const sitemap = await readFile(new URL("../dist/client/sitemap.xml", import.meta.url), "utf8");
   assert.ok(sitemap.includes("https://hubustack.dev/mascot</loc>"));
+});
+
+test("v0.2.5 release notes keep the system card honest until the measured run is recorded", async () => {
+  const response = await render("/releases/v0.2.5");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /<h1>Hubu v0.2.5<\/h1>/);
+  assert.match(html, /CHANGELOG\.md#v025--2026-11-05/);
+  assert.match(html, /href="\/docs\/operations\/upgrading-to-v0.2.5"/);
+  assert.match(html, /drain unfinished Gongbu work/);
+  assert.ok(html.indexOf('id="changes-title"') < html.indexOf('id="system-card-title"'));
+  assert.match(html, /Hubu remains experimental and local-first/);
+  assert.match(html, /never supplies provider credentials or makes live provider calls/);
+  assert.match(html, /Registered agent accounts are not bound/);
+  assert.match(html, /normal bearer can change budgets and policies/);
+  assert.match(html, /earlier results are not carried forward/);
+  assert.equal((html.match(/class="proof-verdict proof-verdict-not-tested"/g) ?? []).length, 4);
+  assert.doesNotMatch(html, /proof-verdict-holds|proof-verdict-does-not-hold/);
+  assert.match(html, /href="\/releases\/v0.2.4\/report"/);
+  assert.match(html, /href="https:\/\/hubustack.dev\/releases\/v0.2.5"/);
+  assert.doesNotMatch(html, /Break Hubu|linear\.app|HUB-\d+/);
 });
 
 test("the detailed system analysis keeps reproducibility and authority limits alongside its claims", async () => {
