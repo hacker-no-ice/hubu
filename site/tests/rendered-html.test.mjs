@@ -59,15 +59,17 @@ test("release notes lead from the landing page to one concise stable release and
   const hero = home.match(/<section class="hero">[\s\S]*?<\/section>/)?.[0];
   assert.ok(header);
   assert.ok(hero);
-  assert.match(header, /class="header-version" href="\/releases\/v0\.2\.4" aria-label="Read Hubu v0.2.4 release notes and system card"/);
-  assert.match(header, /v0\.2\.4 <span aria-hidden="true">↗<\/span>/);
+  assert.match(header, /class="header-version" href="\/releases\/v0\.2\.5" aria-label="Read Hubu v0.2.5 release notes and system card"/);
+  assert.match(header, /v0\.2\.5 <span aria-hidden="true">↗<\/span>/);
   assert.doesNotMatch(header, /\/ docs/);
-  assert.doesNotMatch(hero, /v0\.2\.4|hero-version/);
+  assert.doesNotMatch(hero, /v0\.2\.[45]|hero-version/);
   for (const html of [home, index, overview, docs, blog]) {
     assert.match(html, /href="\/releases"/);
     assert.doesNotMatch(html, /Break Hubu|href="\/break-hubu"|linear\.app|HUB-\d+/);
   }
+  assert.match(index, /href="\/releases\/v0.2.5"/);
   assert.match(index, /href="\/releases\/v0.2.4"/);
+  assert.ok(index.indexOf('href="/releases/v0.2.5"') < index.indexOf('href="/releases/v0.2.4"'));
   assert.doesNotMatch(index, /href="\/releases\/v0\.2\.[0-3]/);
   assert.match(overview, /What changed/);
   assert.match(overview, /System card/);
@@ -85,7 +87,7 @@ test("release notes lead from the landing page to one concise stable release and
   assert.match(overview, /href="\/releases\/v0.2.4\/report"/);
   assert.ok(overview.indexOf('id="changes-title"') < overview.indexOf('id="system-card-title"'));
   assert.doesNotMatch(overview, /<svg|Captured terminal excerpt/);
-  for (const path of ["/releases", "/releases/v0.2.4", "/releases/v0.2.4/report"]) {
+  for (const path of ["/releases", "/releases/v0.2.5", "/releases/v0.2.4", "/releases/v0.2.4/report"]) {
     assert.ok(sitemap.includes(`https://hubustack.dev${path}</loc>`));
   }
   assert.doesNotMatch(sitemap, /\/break-hubu/);
@@ -94,6 +96,43 @@ test("release notes lead from the landing page to one concise stable release and
   for (const path of ["/break-hubu", "/break-hubu/v0.2.4", "/releases/v0.2.3"]) {
     assert.equal((await render(path)).status, 404);
   }
+});
+
+test("the mascot history links the governed variations before the evolution article", async () => {
+  const response = await render("/mascot");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /<h1>How the mascot evolved\.<\/h1>/);
+  for (const src of ["/demos/local-stack/concepts-builtin.png", "/brand/hubu-mascot.png", "/demos/local-stack/mascot-flux-ledger.jpg", "/demos/local-stack/mascot-gemini-blocked.jpg", "/brand/hubu-mascot-evolved.jpg"]) {
+    assert.ok(html.includes(`src="${src}"`), src);
+  }
+  const variations = html.indexOf('href="/demos/local-stack#mascot-gallery"');
+  const article = html.indexOf('href="https://x.com/hacker_no_ice/status/2118507555794374942"');
+  assert.ok(variations > 0 && article > variations);
+  assert.match(html, /href="https:\/\/hubustack.dev\/mascot"/);
+  const sitemap = await readFile(new URL("../dist/client/sitemap.xml", import.meta.url), "utf8");
+  assert.ok(sitemap.includes("https://hubustack.dev/mascot</loc>"));
+});
+
+test("v0.2.5 release notes keep the system card honest until the measured run is recorded", async () => {
+  const response = await render("/releases/v0.2.5");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /<h1>Hubu v0.2.5<\/h1>/);
+  assert.match(html, /CHANGELOG\.md#v025--2026-11-06/);
+  assert.match(html, /href="\/docs\/operations\/upgrading-to-v0.2.5"/);
+  assert.match(html, /drain unfinished Gongbu work/);
+  assert.ok(html.indexOf('id="changes-title"') < html.indexOf('id="system-card-title"'));
+  assert.match(html, /Hubu remains experimental and local-first/);
+  assert.match(html, /never supplies provider credentials or makes live provider calls/);
+  assert.match(html, /Registered agent accounts are not bound/);
+  assert.match(html, /normal bearer can change budgets and policies/);
+  assert.match(html, /earlier results are not carried forward/);
+  assert.equal((html.match(/class="proof-verdict proof-verdict-not-tested"/g) ?? []).length, 4);
+  assert.doesNotMatch(html, /proof-verdict-holds|proof-verdict-does-not-hold/);
+  assert.match(html, /href="\/releases\/v0.2.4\/report"/);
+  assert.match(html, /href="https:\/\/hubustack.dev\/releases\/v0.2.5"/);
+  assert.doesNotMatch(html, /Break Hubu|linear\.app|HUB-\d+/);
 });
 
 test("the detailed system analysis keeps reproducibility and authority limits alongside its claims", async () => {
@@ -147,10 +186,11 @@ test("home page walks through an illustrative governed image request", async () 
   assert.ok(html.indexOf('id="worked-example-title"') < html.indexOf('id="intro-video-title"'));
   const mascot = html.match(/<figure class="example-mascot">[\s\S]*?<\/figure>/)?.[0];
   assert.ok(mascot);
-  assert.match(mascot, /src="\/brand\/hubu-mascot.png"/);
+  assert.match(mascot, /src="\/brand\/hubu-mascot-evolved.jpg"/);
   assert.match(mascot, /loading="lazy"/);
-  assert.match(mascot, /alt="Hubu&#x27;s cream-and-jade seal mascot on a cinnabar base"/);
-  assert.match(mascot, /href="\/demos\/local-stack"/);
+  assert.match(mascot, /alt="Hubu&#x27;s cream-and-jade seal mascot on a cinnabar base, with violet and cyan glowing edges"/);
+  assert.match(mascot, /href="\/mascot"/);
+  assert.doesNotMatch(mascot, /x\.com|href="\/demos\/local-stack"/);
 });
 
 test("links demos from home and publishes the sandbox video before its concise script", async () => {

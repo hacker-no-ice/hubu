@@ -2,6 +2,11 @@
 
 > Maintainers publishing a release: see [Publishing releases (maintainers)](publishing-releases.md).
 
+> Upgrading to v0.2.5: read
+> [Upgrading to v0.2.5: provider packs](upgrading-to-v0.2.5.md) first.
+> Drain unfinished Gongbu work before installing; Gongbu refuses to start
+> while unfinished executions reference replaced provider target revisions.
+
 > Upgrading a stack with budget data to v0.2.4: read
 > [Upgrading to v0.2.4: exact amounts](upgrading-to-v0.2.4.md) first. It
 > carries a one-way storage migration and executor contract v4.5.
