@@ -73,17 +73,14 @@ test("release notes lead from the landing page to one concise stable release and
   assert.doesNotMatch(index, /href="\/releases\/v0\.2\.[0-3]/);
   assert.match(overview, /What changed/);
   assert.match(overview, /System card/);
-  assert.match(overview, /Hubu remains experimental and local-first/);
+  assert.match(overview, /synthetic executor and fixed USD budgets/);
   assert.match(overview, /CHANGELOG\.md#v024--2026-10-19/);
   assert.match(overview, /href="\/docs\/operations\/upgrading-to-v0.2.4"/);
   assert.match(overview, /Storage migrations are one-way/);
-  assert.match(overview, /governance-query coverage/);
-  assert.match(overview, /four experiments do not qualify every new release feature/);
+  assert.match(overview, /USDC, governance queries, Gongbu/);
   assert.match(overview, /Wallet rails remain USD-only/);
-  assert.match(overview, /Registered agent accounts are not bound/);
+  assert.match(overview, /Agent accounts aren’t bound to a runtime/);
   assert.match(overview, /normal bearer can change budgets and policies/);
-  assert.match(overview, /handles requests serially/);
-  assert.match(overview, /Requires explicit owner reconciliation/);
   assert.match(overview, /href="\/releases\/v0.2.4\/report"/);
   assert.ok(overview.indexOf('id="changes-title"') < overview.indexOf('id="system-card-title"'));
   assert.doesNotMatch(overview, /<svg|Captured terminal excerpt/);
@@ -123,17 +120,19 @@ test("v0.2.5 release notes summarize the release and its upgrade", async () => {
   assert.match(html, /href="\/docs\/operations\/upgrading-to-v0.2.5"/);
   assert.match(html, /drain unfinished Gongbu work/);
   assert.ok(html.indexOf('id="changes-title"') < html.indexOf('id="system-card-title"'));
-  assert.match(html, /Hubu remains experimental and local-first/);
-  assert.match(html, /never supplies provider credentials or makes live provider calls/);
-  assert.match(html, /Registered agent accounts are not bound/);
+  assert.match(html, /No live provider calls/);
+  assert.match(html, /Agent accounts aren’t bound to a runtime/);
   assert.match(html, /normal bearer can change budgets and policies/);
   assert.match(html, /href="https:\/\/hubustack.dev\/releases\/v0.2.5"/);
   assert.doesNotMatch(html, /Break Hubu|linear\.app|HUB-\d+/);
 });
 
-// Release notes built on MeasuredClaims must match their report.ts: no challenge
-// holds until the renderer writes measured data, then exactly its verdicts, and
-// every claim's tier follows the challenge rule.
+// Release notes show six claims; the analysis shows every challenge. Each claim's
+// tier follows the challenge rule, and both pages agree.
+function claimTiers(html) {
+  return Object.fromEntries([...html.matchAll(/id="claim-(c\d)"[\s\S]*?data-tier="([a-z-]+)"/g)].map((m) => [m[1], m[2]]));
+}
+
 test("release system cards match their measured or unmeasured report", async () => {
   const releasesDir = new URL("../app/releases/", import.meta.url);
   const catalog = JSON.parse(await readFile(new URL("claims.json", releasesDir), "utf8"));
@@ -149,40 +148,47 @@ test("release system cards match their measured or unmeasured report", async () 
     const measured = !reportSource.includes("export const report = null as ReleaseReport | null;");
     const html = await (await render(`/releases/${release}`)).text();
     const escaped = release.replaceAll(".", "\\.");
-    const sections = html.split(/(?=<div class="release-claim" id="claim-c\d")/).slice(1);
-    assert.equal(sections.length, 6, release);
-    const shown = {};
-    for (const [index, section] of sections.entries()) {
-      const id = `C${index + 1}`;
-      const tier = section.match(/data-tier="([a-z-]+)"/)[1];
-      const statuses = [...section.matchAll(/data-status="([a-z-]+)"/g)].map((match) => match[1]);
-      const own = catalog.challenges.filter((challenge) => challenge.claim === id);
-      assert.equal(statuses.length, own.length, `${release} ${id} challenge count`);
-      own.forEach((challenge, i) => { shown[challenge.id] = statuses[i]; });
-      const inScope = statuses.filter((status) => status !== "out-of-scope");
-      const held = inScope.filter((status) => status.startsWith("holds")).length;
-      const failed = inScope.some((status) => status === "does-not-hold" || status === "known-gap");
-      const expected = failed ? "does-not-hold" : inScope.length && held === inScope.length ? "verified" : held ? "partially-verified" : "unverified";
-      assert.equal(tier, expected, `${release} ${id} tier`);
-      assert.match(section, new RegExp(`${held} of ${inScope.length} challenges hold`));
-    }
-    for (const challenge of catalog.challenges.filter((c) => c.status === "out-of-scope")) assert.equal(shown[challenge.id], "out-of-scope");
+    const card = html.match(/<ul class="release-claim-summary">[\s\S]*?<\/ul>/)?.[0];
+    assert.ok(card, release);
+    const cardTiers = claimTiers(card);
+    assert.deepEqual(Object.keys(cardTiers), ["c1", "c2", "c3", "c4", "c5", "c6"], release);
+    assert.doesNotMatch(card, /data-status=/, `${release} card lists challenges`);
     const reportPage = await render(`/releases/${release}/report`);
     if (measured) {
-      const report = JSON.parse(reportSource.slice(reportSource.indexOf("= {") + 2, reportSource.lastIndexOf(";")));
-      for (const challenge of catalog.challenges.filter((c) => c.kit && report.episodes[c.kit])) {
-        assert.equal(shown[challenge.id], report.episodes[challenge.kit].verdict, `${release} ${challenge.id}`);
-      }
-      assert.match(html, new RegExp(`href="/releases/${escaped}/report"`));
-      assert.match(html, /Recorded \d{4}-\d{2}-\d{2}/);
+      const analysis = await reportPage.text();
       assert.equal(reportPage.status, 200, release);
-      assert.match(await reportPage.text(), new RegExp(`<h1>${escaped} system analysis</h1>`));
+      const report = JSON.parse(reportSource.slice(reportSource.indexOf("= {") + 2, reportSource.lastIndexOf(";")));
+      const sections = analysis.split(/(?=<section class="claim-detail" id="claim-c\d")/).slice(1).map((section) => section.split("</section>")[0]);
+      assert.equal(sections.length, 6, release);
+      const shown = {};
+      for (const [index, section] of sections.entries()) {
+        const id = `C${index + 1}`;
+        const tier = section.match(/data-tier="([a-z-]+)"/)[1];
+        const statuses = [...section.matchAll(/data-status="([a-z-]+)"/g)].map((match) => match[1]);
+        const own = catalog.challenges.filter((challenge) => challenge.claim === id);
+        assert.equal(statuses.length, own.length, `${release} ${id} challenge count`);
+        own.forEach((challenge, i) => { shown[challenge.id] = statuses[i]; });
+        const inScope = statuses.filter((status) => status !== "out-of-scope");
+        const held = inScope.filter((status) => status.startsWith("holds")).length;
+        const failed = inScope.some((status) => status === "does-not-hold" || status === "known-gap");
+        const expected = failed ? "does-not-hold" : inScope.length && held === inScope.length ? "verified" : held ? "partially-verified" : "unverified";
+        assert.equal(tier, expected, `${release} ${id} tier`);
+        assert.equal(cardTiers[`c${index + 1}`], tier, `${release} ${id} card and analysis agree`);
+        assert.match(card, new RegExp(`${held} of ${inScope.length} challenges hold`));
+        assert.match(card, new RegExp(`href="/releases/${escaped}/report#claim-c${index + 1}"`));
+      }
+      for (const challenge of catalog.challenges) {
+        if (challenge.status === "out-of-scope") assert.equal(shown[challenge.id], "out-of-scope");
+        if (challenge.kit && report.episodes[challenge.kit]) assert.equal(shown[challenge.id], report.episodes[challenge.kit].verdict, `${release} ${challenge.id}`);
+      }
+      assert.match(html, /Recorded \d{4}-\d{2}-\d{2}/);
+      assert.match(analysis, new RegExp(`<h1>${escaped} system analysis</h1>`));
       assert.ok(sitemap.includes(`https://hubustack.dev/releases/${release}/report</loc>`), release);
     } else {
-      assert.ok(!Object.values(shown).some((status) => status.startsWith("holds")), release);
+      assert.ok(Object.values(cardTiers).every((tier) => tier === "unverified" || tier === "does-not-hold"), release);
       assert.match(html, /Measured run pending/);
-      assert.match(html, /earlier results are not carried forward/);
-      assert.doesNotMatch(html, new RegExp(`href="/releases/${escaped}/report"`));
+      assert.match(html, /no challenge counts as holding/);
+      assert.doesNotMatch(html, new RegExp(`href="/releases/${escaped}/report`));
       assert.equal(reportPage.status, 404, release);
       assert.ok(!sitemap.includes(`https://hubustack.dev/releases/${release}/report</loc>`), release);
     }
@@ -209,6 +215,8 @@ test("the detailed system analysis keeps reproducibility and authority limits al
   assert.match(html, /not server-enforced role isolation/);
   assert.match(html, /Does not hold/);
   assert.match(html, /a timeout never counts as a denial/i);
+  assert.match(html, /handles requests serially/);
+  assert.match(html, /Requires explicit owner reconciliation/);
   assert.doesNotMatch(html, /All claims pass|100% secure|autoplay|setInterval/);
 });
 

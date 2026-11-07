@@ -36,17 +36,12 @@ export default function ReleaseNotes() {
         <section className="release-section" aria-labelledby="system-card-title">
           <div className="release-section-heading"><h2 id="system-card-title">System card</h2><span className="proof-kicker">{systemCardKicker(report)}</span></div>
           <dl className="release-system-card">
-            <div><dt>Tested system</dt><dd>Hubu remains experimental and local-first. This run uses the released CLI and HTTP API, fresh SQLite, a synthetic external executor, and fixed USD budgets and policies.</dd></div>
-            <div><dt>Outside this analysis</dt><dd>USDC, governance-query coverage, Gongbu, Temporal, MCP transport, provider adapters, and actual provider billing. The four experiments do not qualify every new release feature.</dd></div>
-            <div><dt>Known authority limits</dt><dd>Registered agent accounts are not bound to an authenticated runtime or thread. The normal bearer can change budgets and policies. These known gaps are planned for future releases.</dd></div>
-            <div><dt>Reproduction</dt><dd>Recorded on macOS with the pinned released source and public test scripts. No model subscription or provider credentials required. <a href="/releases/v0.2.4/report#reproduce">Setup and commands ↗</a></dd></div>
+            <div><dt>Tested</dt><dd>Released CLI and HTTP API, fresh SQLite, a synthetic executor and fixed USD budgets.</dd></div>
+            <div><dt>Not covered</dt><dd>USDC, governance queries, Gongbu, MCP and real provider billing.</dd></div>
+            <div><dt>Known gaps</dt><dd>Agent accounts aren’t bound to a runtime (C3); the normal bearer can change budgets and policies (C5).</dd></div>
+            <div><dt>Reproduce</dt><dd>macOS, the released source, no provider credentials. <a href="/releases/v0.2.4/report#reproduce">Commands ↗</a></dd></div>
           </dl>
-          <MeasuredClaims release="v0.2.4" report={report} notes={{
-            C3: "Registered agent accounts are not bound to an authenticated runtime or thread.",
-            C5: "The normal bearer can change budgets and policies.",
-            C6: "Provider packs did not exist in v0.2.4; every provider was a built-in adapter.",
-          }}
-          documented={{ "C3.1": "known-gap", "C3.2": "known-gap", "C5.1": "known-gap" }} />
+          <MeasuredClaims release="v0.2.4" report={report} />
         </section>
         <footer className="engineering-article-footer proof-footer"><a href="/releases">← All release notes</a><a href={`${repository}/tree/${report.sourceCommit}`}>Released source · {report.sourceCommit.slice(0, 8)} ↗</a></footer>
       </article>
