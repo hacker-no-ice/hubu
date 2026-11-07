@@ -46,7 +46,7 @@ export default function Home() {
           <a className="brand" href="/" aria-label="Hubu home">
             <HubuWordmark className="brand-wordmark" decorative />
           </a>
-          <a className="header-version" href="/releases/v0.2.4" aria-label="Read Hubu v0.2.4 release notes and system card">v0.2.4 <span aria-hidden="true">↗</span></a>
+          <a className="header-version" href="/releases/v0.2.5" aria-label="Read Hubu v0.2.5 release notes and system card">v0.2.5 <span aria-hidden="true">↗</span></a>
         </div>
         <details className="site-menu">
           <summary>Menu</summary>
@@ -109,8 +109,8 @@ export default function Home() {
             </ol>
             <figure className="example-mascot">
               {/* eslint-disable-next-line @next/next/no-img-element -- Static artwork is served directly by the site worker. */}
-              <img src="/brand/hubu-mascot.png" width="1388" height="1133" alt="Hubu's cream-and-jade seal mascot on a cinnabar base" loading="lazy" decoding="async" />
-              <figcaption>Hubu&apos;s mascot<a href="/demos/local-stack">Watch the agent create variations →</a></figcaption>
+              <img src="/brand/hubu-mascot-evolved.jpg" width="1254" height="975" alt="Hubu's cream-and-jade seal mascot on a cinnabar base, with violet and cyan glowing edges" loading="lazy" decoding="async" />
+              <figcaption>Hubu&apos;s mascot<a href="/mascot">See how the mascot evolved →</a></figcaption>
             </figure>
           </div>
         </section>
