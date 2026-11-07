@@ -10,8 +10,9 @@ PRs.
 
 1. Write the release notes page, `site/app/releases/vX.Y.Z/page.tsx`, with a
    `report.ts` beside it that exports `report = null as ReleaseReport | null`.
-   The page's system card uses `MeasuredClaims`, so it shows every claim as
-   **Not tested** until the measured report lands. Add the release to
+   The page's system card uses `MeasuredClaims`, so until the measured report
+   lands no challenge counts as holding: claims show **Unverified**, or **Does
+   not hold** for challenges the page marks as documented known gaps. Add the release to
    `/releases` and point the navbar version badge at it.
 2. Review the four claims, caveats and known limits against the new release.
    If the public contract the kits exercise changed (for example a new
@@ -29,9 +30,14 @@ PRs.
    - runs every kit from a clean checkout of `main` and keeps the raw public
      evidence as a workflow artifact;
    - renders `site/app/releases/vX.Y.Z/report.ts`, the
-     `/releases/vX.Y.Z/report` analysis page, public evidence under
-     `site/public/break-hubu/evidence/vX.Y.Z/`, and `cards/vX.Y.Z.md`;
+     `/releases/vX.Y.Z/report` analysis page, the evidence bundle and archive
+     in `site/evidence/vX.Y.Z/` (the site build unpacks the bundle to the
+     public evidence URLs), and `cards/vX.Y.Z.md` with claim tiers;
    - lints and tests the site, then opens a `system-card/vX.Y.Z` PR.
+
+   When the catalog gains kits after a release was measured, the workflow
+   runs only the missing kits and renders with `--supplement`, which adds
+   their results without changing any published one.
 
    To measure a release by hand, dispatch the workflow with its tag, or run
    the kits locally:
@@ -39,6 +45,9 @@ PRs.
    ```sh
    ./break-hubu/run-all.sh --release vX.Y.Z --output /tmp/vX.Y.Z-card-evidence
    python3 break-hubu/render-report.py /tmp/vX.Y.Z-card-evidence
+   # later, for kits the published card lacks:
+   ./break-hubu/run-all.sh --release vX.Y.Z --kits ep05-denied-operation --output /tmp/vX.Y.Z-more
+   python3 break-hubu/render-report.py --supplement /tmp/vX.Y.Z-more
    ```
 
 4. Review the PR. Inspect every result, including incomplete or contradicted
@@ -57,7 +66,7 @@ PRs.
    to run the required checks.
 
 5. After the PR merges and the site deploys, verify the live report, attach
-   the evidence archive to the GitHub release, and add the card and
+   `site/evidence/vX.Y.Z/evidence.zip` to the GitHub release, and add the card and
    reproduction links to the release notes. Preserve existing release assets
    and notes. Check downloads from an unauthenticated browser. Posting or
    messaging needs separate authorization.

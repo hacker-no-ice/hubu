@@ -1,6 +1,0 @@
-{"event":"restart","at":"2026-11-07T00:16:35.274110+00:00","pid":6988}
-{"event":"fixture_saved","at":"2026-11-07T00:16:35.529039+00:00","path":"fixtures/crash-billed-receipt.json"}
-{"event":"fixture_saved","at":"2026-11-07T00:16:35.529434+00:00","path":"fixtures/synthetic-receipt.json"}
-{"event":"kill","at":"2026-11-07T00:16:35.580540+00:00","pid":6988,"signal":"SIGKILL","exit_code":-9}
-{"event":"restart","at":"2026-11-07T00:16:35.733902+00:00","pid":7009}
-{"event":"restart","at":"2026-11-07T00:17:05.964897+00:00","pid":7706}

@@ -1,5 +1,43 @@
 {
   "release": "v0.2.5",
+  "claims": {
+    "C1": {
+      "tier": "partially-verified",
+      "held": 4,
+      "total": 6,
+      "failed": 0
+    },
+    "C2": {
+      "tier": "unverified",
+      "held": 0,
+      "total": 2,
+      "failed": 0
+    },
+    "C3": {
+      "tier": "does-not-hold",
+      "held": 0,
+      "total": 2,
+      "failed": 2
+    },
+    "C4": {
+      "tier": "unverified",
+      "held": 0,
+      "total": 3,
+      "failed": 0
+    },
+    "C5": {
+      "tier": "does-not-hold",
+      "held": 0,
+      "total": 5,
+      "failed": 1
+    },
+    "C6": {
+      "tier": "unverified",
+      "held": 0,
+      "total": 3,
+      "failed": 0
+    }
+  },
   "verdicts": {
     "ep01-runaway": "holds",
     "ep02-last-cent": "holds-with-caveat",

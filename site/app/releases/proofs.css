@@ -219,16 +219,42 @@
   .proof-reproduce-grid, .proof-release-link { grid-template-columns: 1fr; gap: 20px; }
   .proof-footer { flex-wrap: wrap; font-size: 12px; }
 }
-.release-claims-catalog > #claim-c1 { grid-column: 1 / -1; }
-.release-claim-id { display: inline-block; min-width: 28px; margin: 0 6px 0 0 !important; color: var(--indigo) !important; font: 12px/1 var(--font-geist-mono), monospace; }
-.release-claim .release-claim-note { color: var(--text); opacity: .82; font-size: 12.5px; margin-top: 9px; }
-.release-claim-experiments { display: grid; grid-template-columns: 1fr 1fr; gap: 16px 28px; margin: 18px 0 0; padding: 0; list-style: none; }
-.release-claim-experiments li { padding: 14px 0 0; border-top: 1px dashed var(--line); }
-.release-claim-experiments li > div { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px; align-items: baseline; }
-.release-claim-experiments h4 { margin: 0; font-size: 13.5px; font-weight: 520; }
-.release-claim-experiments h4 a span { color: var(--cyan); margin-left: 4px; }
-.release-claim-experiments p { margin-top: 9px; }
-@media (max-width: 760px) { .release-claim-experiments { grid-template-columns: 1fr; } }
 .proof-claim-tag { margin: 22px 0 -12px 65px; color: var(--indigo); }
 @media (max-width: 900px) { .proof-claim-tag { margin-left: 48px; } }
 @media (max-width: 640px) { .proof-claim-tag { margin-left: 0; } }
+.release-claim .release-claim-count { margin-top: 8px; color: var(--muted); font: 12px/1.6 var(--font-geist-mono), monospace; }
+.release-challenge-id { display: inline-block; min-width: 34px; color: var(--dim); font: 11.5px/1 var(--font-geist-mono), monospace; }
+
+/* Release notes: six claims and their results. */
+.release-claim-summary { display: grid; gap: 0; margin: 22px 0 0; padding: 0; list-style: none; border-top: 1px solid var(--line); }
+.release-claim-summary li { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 18px; align-items: center; padding: 14px 0; border-bottom: 1px solid var(--line); }
+.release-claim-summary a, .release-claim-summary li > span:first-child { color: var(--text); font-size: 15px; font-weight: 520; text-decoration: none; }
+.release-claim-summary a:hover { color: var(--cyan); }
+.release-claim-summary .release-claim-count { margin: 0; white-space: nowrap; }
+.release-claim-id { display: inline-block; min-width: 34px; color: var(--indigo); font: 12px/1 var(--font-geist-mono), monospace; }
+.release-claim-count { color: var(--muted); font: 12px/1.6 var(--font-geist-mono), monospace; }
+@media (max-width: 640px) {
+  .release-claim-summary li { grid-template-columns: minmax(0, 1fr) auto; gap: 6px 12px; }
+  .release-claim-summary .release-claim-count { grid-row: 2; }
+}
+
+/* Analysis: every claim with its challenges. */
+.claim-details { display: grid; gap: 34px; margin-top: 30px; }
+.claim-detail header { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; align-items: baseline; padding-top: 18px; border-top: 1px solid var(--line); }
+.claim-detail h3 { margin: 0; font-size: 18px; font-weight: 550; letter-spacing: -.02em; }
+.claim-detail > p { margin: 8px 0 0; color: var(--muted); font-size: 14px; line-height: 1.7; }
+.claim-detail .claim-detail-note { color: var(--text); opacity: .82; font-size: 13px; }
+.claim-challenges { width: 100%; margin-top: 14px; border-collapse: collapse; font-size: 13px; }
+.claim-challenges th, .claim-challenges td { padding: 11px 12px 11px 0; border-top: 1px dashed var(--line); text-align: left; vertical-align: top; }
+.claim-challenges th { width: 38%; font-weight: 500; color: var(--text); }
+.claim-challenges th a { color: var(--text); }
+.claim-challenges th a span { color: var(--cyan); }
+.claim-challenges td { color: var(--muted); line-height: 1.6; }
+.claim-challenges td:nth-child(2) { width: 1%; white-space: nowrap; }
+.claim-challenges .release-condition { display: block; margin-top: 6px; color: var(--warning); font-size: 12px; }
+.release-challenge-id { display: inline-block; min-width: 38px; color: var(--dim); font: 11.5px/1 var(--font-geist-mono), monospace; }
+@media (max-width: 640px) {
+  .claim-challenges, .claim-challenges tbody, .claim-challenges tr, .claim-challenges th, .claim-challenges td { display: block; width: auto; }
+  .claim-challenges tr { padding: 10px 0; border-top: 1px dashed var(--line); }
+  .claim-challenges th, .claim-challenges td { padding: 4px 0; border: 0; }
+}

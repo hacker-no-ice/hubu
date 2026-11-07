@@ -253,4 +253,29 @@ const internalArchitectureTarget = path.join(architectureTarget, "internal");
 await mkdir(internalArchitectureTarget, { recursive: true });
 await cp(path.join(repoRoot, "architecture"), internalArchitectureTarget, { recursive: true });
 
+// Proof-kit evidence is committed as one text bundle plus one archive per release
+// (site/evidence/vX.Y.Z/) and unpacked here to the public URLs the reports link.
+const evidenceSource = path.join(siteRoot, "evidence");
+const evidenceTarget = path.join(siteRoot, "public/break-hubu/evidence");
+let evidenceFiles = 0;
+for (const entry of await readdir(evidenceSource, { withFileTypes: true }).catch(() => [])) {
+  if (!entry.isDirectory() || !/^v\d+\.\d+\.\d+$/.test(entry.name)) continue;
+  const bundle = JSON.parse(await readFile(path.join(evidenceSource, entry.name, "bundle.json"), "utf8"));
+  if (bundle.schema !== "hubu-proof-evidence-bundle-v1" || bundle.release !== entry.name) {
+    throw new Error(`Unsupported evidence bundle for ${entry.name}`);
+  }
+  const releaseTarget = path.join(evidenceTarget, entry.name);
+  // Only releases with a bundle are regenerated; nothing else under public/ is touched.
+  await rm(releaseTarget, { recursive: true, force: true });
+  for (const [name, text] of Object.entries(bundle.files)) {
+    const target = path.resolve(releaseTarget, name);
+    if (!target.startsWith(releaseTarget + path.sep) || name.includes("\\")) throw new Error(`Unsafe evidence path: ${name}`);
+    await mkdir(path.dirname(target), { recursive: true });
+    await writeFile(target, text);
+    evidenceFiles += 1;
+  }
+  await cp(path.join(evidenceSource, entry.name, "evidence.zip"), path.join(releaseTarget, "evidence.zip"));
+}
+
+console.log(`Unpacked ${evidenceFiles} proof-kit evidence files.`);
 console.log(`Generated ${documents.length} documentation pages, ${engineeringPosts.length} engineering posts, the sitemap, and both architecture visualizers.`);

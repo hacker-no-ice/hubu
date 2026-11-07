@@ -38,18 +38,12 @@ export default function ReleaseNotes() {
         <section className="release-section" aria-labelledby="system-card-title">
           <div className="release-section-heading"><h2 id="system-card-title">System card</h2><span className="proof-kicker">{systemCardKicker(report)}</span></div>
           <dl className="release-system-card">
-            <div><dt>Tested system</dt><dd>Hubu remains experimental and local-first. Release validation runs formatting, lints, locked workspace tests, integration and packaging checks, and published-asset smoke tests. It never supplies provider credentials or makes live provider calls.</dd></div>
-            <div><dt>Provider coverage</dt><dd>New packs and targets are verified in CI with recorded fixtures and mock transports. Prices come from each provider’s published rates on the review dates stated in the contract docs; provider invoices may differ. Redaction attestation covers FLUX.2 [pro] v1 only.</dd></div>
-            <div><dt>Known authority limits</dt><dd>Registered agent accounts are not bound to an authenticated runtime or thread. The normal bearer can change budgets and policies. <code>hubu ui</code> holds the bearer and approval credentials in a local process protected by loopback binding, a one-time login link, and same-origin checks, not per-user accounts.</dd></div>
-            <div><dt>Reproduction</dt><dd>The release experiment kits build the exact published release and need no model subscription or provider credentials. <a href={`${repository}/blob/main/break-hubu/README.md`}>Prerequisites and commands ↗</a></dd></div>
+            <div><dt>Tested</dt><dd>Released CLI and HTTP API, fresh SQLite and a synthetic executor. No live provider calls.</dd></div>
+            <div><dt>Not covered</dt><dd>Gongbu, MCP and real provider billing. New provider packs are fixture-tested in CI.</dd></div>
+            <div><dt>Known gaps</dt><dd>Agent accounts aren’t bound to a runtime (C3); the normal bearer can change budgets and policies (C5).</dd></div>
+            <div><dt>Reproduce</dt><dd>No model subscription or provider credentials needed. <a href={`${repository}/blob/main/break-hubu/README.md`}>Commands ↗</a></dd></div>
           </dl>
-          <MeasuredClaims release="v0.2.5" report={report} previous="v0.2.4" assessments={{
-            C2: { status: "not-tested", note: "Policy denial and human approval run through Hubu and Gongbu, but no system-card experiment measures them yet." },
-            C3: { status: "known-gap", note: "Registered agent accounts are not bound to an authenticated runtime or thread. Strong binding is planned for a future release." },
-            C4: { status: "not-tested", note: "The experiments use a synthetic executor, so Gongbu’s credential custody is outside this analysis." },
-            C5: { status: "known-gap", note: "The normal bearer can change budgets and policies. hubu ui holds the bearer and approval credentials in a local process, not per-user accounts." },
-            C6: { status: "not-tested", note: "Only verified packs from the repository ship in v0.2.5, and pack validation rejects packs that weaken engine-owned settlement or credential hosts. Self-serve packs are not available, and no system-card experiment covers this yet." },
-          }} />
+          <MeasuredClaims release="v0.2.5" report={report} previous="v0.2.4" />
         </section>
         <footer className="engineering-article-footer proof-footer"><a href="/releases">← All release notes</a><a href={`${repository}/releases/tag/v0.2.5`}>Release on GitHub ↗</a></footer>
       </article>

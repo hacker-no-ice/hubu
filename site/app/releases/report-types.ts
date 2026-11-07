@@ -1,5 +1,6 @@
 export type Verdict = "holds" | "holds-with-caveat" | "does-not-hold" | "not-tested";
-export type EpisodeId = "ep01-runaway" | "ep02-last-cent" | "ep03-crash-recovery" | "ep04-many-clients";
+// Kit identifiers come from site/app/releases/claims.json.
+export type EpisodeId = string;
 export type EvidenceLink = { label: string; href: string };
 
 // These are observations from exported public evidence, never acceptance targets.
@@ -21,6 +22,8 @@ export type EpisodeResult = {
   evidence: EvidenceLink[];
 };
 
+export type ReleaseSupplement = { kitsCommit: string; recordedAt: string; host: string; episodes: EpisodeId[] };
+
 export type ReleaseReport = {
   release: string;
   sourceCommit: string;
@@ -29,5 +32,7 @@ export type ReleaseReport = {
   host: string | null;
   evidenceBundle: EvidenceLink | null;
   episodes: Record<EpisodeId, EpisodeResult>;
+  // Kits added later against the same released source; never replacements.
+  supplements?: ReleaseSupplement[];
 };
 

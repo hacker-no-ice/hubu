@@ -34,6 +34,8 @@ jobs:
       release: ${{ steps.resolve.outputs.release }}
       base: ${{ steps.resolve.outputs.base }}
       needed: ${{ steps.resolve.outputs.needed }}
+      mode: ${{ steps.resolve.outputs.mode }}
+      kits: ${{ steps.resolve.outputs.kits }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -63,14 +65,30 @@ jobs:
             echo "${release} is not a published stable release" >&2
             exit 1
           fi
-          needed=true
-          if [[ -f "site/app/releases/${release}/report/page.tsx" ]]; then
-            echo "${release} already has a measured system card."
-            needed=false
-          elif [[ ! -f "site/app/releases/${release}/page.tsx" ]]; then
+          if [[ ! -f "site/app/releases/${release}/page.tsx" ]]; then
             echo "Write the ${release} release notes page before measuring its card." >&2
             exit 1
-          elif [[ -n "$(gh pr list --repo "${GITHUB_REPOSITORY}" --head "system-card/${release}" --state open --json number --jq '.[].number')" ]]; then
+          fi
+          # A new card runs every catalog kit; a measured card only gains kits it
+          # lacks (supplement mode never replaces a published result).
+          read -r mode kits < <(python3 - "${release}" <<'PY'
+          import json, pathlib, sys
+          release = sys.argv[1]
+          catalog = json.loads(pathlib.Path('site/app/releases/claims.json').read_text())
+          report = pathlib.Path(f'site/app/releases/{release}/report.ts').read_text()
+          if 'export const report = null as ReleaseReport | null;' in report:
+              print('full', ','.join(catalog['kits']))
+          else:
+              measured = json.loads(report[report.index('= {') + 2:report.rindex(';')])['episodes']
+              missing = [kit for kit in catalog['kits'] if kit not in measured]
+              print('supplement' if missing else 'none', ','.join(missing) or '-')
+          PY
+          )
+          needed=true
+          if [[ "${mode}" == "none" ]]; then
+            echo "${release} already has every catalog kit measured."
+            needed=false
+          elif gh pr list --repo "${GITHUB_REPOSITORY}" --state open --json headRefName --jq '.[].headRefName' | grep -q "^system-card/${release}"; then
             echo "A system card PR for ${release} is already open."
             needed=false
           fi
@@ -78,6 +96,8 @@ jobs:
             echo "release=${release}"
             echo "base=$(git rev-parse HEAD)"
             echo "needed=${needed}"
+            echo "mode=${mode}"
+            echo "kits=${kits}"
           } >> "${GITHUB_OUTPUT}"
 
   measure:
@@ -106,10 +126,11 @@ jobs:
         id: kits
         env:
           RELEASE: ${{ needs.resolve.outputs.release }}
+          KITS: ${{ needs.resolve.outputs.kits }}
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           set +e -uo pipefail
-          ./break-hubu/run-all.sh --release "${RELEASE}" --output "${RUNNER_TEMP}/evidence" --cache "${RUNNER_TEMP}/build-cache"
+          ./break-hubu/run-all.sh --release "${RELEASE}" --kits "${KITS}" --output "${RUNNER_TEMP}/evidence" --cache "${RUNNER_TEMP}/build-cache"
           code=$?
           # 1 = a claim does not hold, 2 = a claim was not tested. Both are
           # results to publish; anything else is a harness failure.
@@ -129,7 +150,14 @@ jobs:
           retention-days: 30
 
       - name: Render the card
-        run: python3 break-hubu/render-report.py "${RUNNER_TEMP}/evidence"
+        env:
+          MODE: ${{ needs.resolve.outputs.mode }}
+        run: |
+          if [[ "${MODE}" == "supplement" ]]; then
+            python3 break-hubu/render-report.py --supplement "${RUNNER_TEMP}/evidence"
+          else
+            python3 break-hubu/render-report.py "${RUNNER_TEMP}/evidence"
+          fi
 
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
@@ -153,7 +181,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "${RUNNER_TEMP}/card"
-          git add -A break-hubu/cards site/app/releases "site/public/break-hubu/evidence/${RELEASE}"
+          git add -A break-hubu/cards site/app/releases "site/evidence/${RELEASE}"
           git diff --cached --binary > "${RUNNER_TEMP}/card/card.patch"
           cp "break-hubu/cards/${RELEASE}.json" "${RUNNER_TEMP}/card/verdicts.json"
           if git status --porcelain --untracked-files=all | grep -qv '^[AM] '; then
@@ -191,31 +219,39 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE: ${{ needs.resolve.outputs.release }}
+          MODE: ${{ needs.resolve.outputs.mode }}
           BASE_BRANCH: ${{ github.event.repository.default_branch }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
           branch="system-card/${RELEASE}"
+          [[ "${MODE}" == "supplement" ]] && branch="system-card/${RELEASE}-supplement-${GITHUB_RUN_ID}"
           git apply --index "${RUNNER_TEMP}/card/card.patch"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -c "${branch}"
-          git commit -m "docs(release): publish the measured ${RELEASE} system card" \
+          subject="docs(release): publish the measured ${RELEASE} system card"
+          [[ "${MODE}" == "supplement" ]] && subject="docs(release): add newly measured challenges to the ${RELEASE} system card"
+          git commit -m "${subject}" \
             -m "Generated by the System card workflow from the public proof kits run against the published ${RELEASE} tag: ${RUN_URL}"
           git push origin "HEAD:refs/heads/${branch}"
           table="$(python3 - "${RUNNER_TEMP}/card/verdicts.json" <<'PY'
           import json, sys
           labels = {'holds': 'Holds', 'holds-with-caveat': 'Holds with caveat', 'does-not-hold': 'Does not hold', 'not-tested': 'Not tested'}
-          verdicts = json.load(open(sys.argv[1]))['verdicts']
-          print('| Experiment | Verdict |\n| --- | --- |')
-          for episode, verdict in verdicts.items():
+          tiers = {'verified': 'Verified', 'partially-verified': 'Partially verified', 'unverified': 'Unverified', 'does-not-hold': 'Does not hold'}
+          card = json.load(open(sys.argv[1]))
+          print('| Claim | Status | Challenges that hold |\n| --- | --- | --- |')
+          for claim, tier in card['claims'].items():
+              print(f'| {claim} | {tiers[tier["tier"]]} | {tier["held"]} of {tier["total"]} |')
+          print('\n| Experiment | Verdict |\n| --- | --- |')
+          for episode, verdict in card['verdicts'].items():
               print(f'| `{episode}` | {labels[verdict]} |')
           PY
           )"
           body="$(printf '%s\n\n%s\n\n%s\n\n%s\n' \
-            "The System card workflow ran the four public proof kits against the published \`${RELEASE}\` tag on macOS and rendered its system card. Run: ${RUN_URL}" \
+            "The System card workflow ran the public proof kits (${MODE} run) against the published \`${RELEASE}\` tag on macOS and rendered its system card. Run: ${RUN_URL}" \
             "${table}" \
             "**Human review required** (see break-hubu/release-checklist.md): inspect every result, including incomplete or contradicted claims; check the caveats and known limits still describe this release; and decide whether to publish a disclosed failure or fix it first. Do not alter acceptance criteria to manufacture a pass." \
-            "PRs opened with GITHUB_TOKEN do not start other workflows. This run already linted and tested the site with the card. To run the required checks here, push a commit to this branch or close and reopen the PR. After merging, attach \`site/public/break-hubu/evidence/${RELEASE}/evidence.zip\` to the GitHub release.")"
+            "PRs opened with GITHUB_TOKEN do not start other workflows. This run already linted and tested the site with the card. To run the required checks here, push a commit to this branch or close and reopen the PR. After merging, attach \`site/evidence/${RELEASE}/evidence.zip\` to the GitHub release.")"
           gh pr create --repo "${GITHUB_REPOSITORY}" --base "${BASE_BRANCH}" --head "${branch}" \
-            --title "docs(release): publish the measured ${RELEASE} system card" --body "${body}"
+            --title "${subject}" --body "${body}"
