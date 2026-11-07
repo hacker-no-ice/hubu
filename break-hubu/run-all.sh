@@ -12,16 +12,24 @@ import tempfile
 
 root = Path(sys.argv[1])
 parser = argparse.ArgumentParser(description='Run every Break Hubu public proof kit')
-parser.add_argument('--release', default='v0.2.4')
+parser.add_argument('--release', required=True, help='published stable tag, such as v0.2.5')
 parser.add_argument('--output')
 parser.add_argument('--cache')
+parser.add_argument('--kits', help='comma-separated kit subset, such as ep05-denied-operation,ep06-approval-reuse')
 args = parser.parse_args(sys.argv[2:])
 output = Path(args.output).resolve() if args.output else Path(tempfile.mkdtemp(prefix='break-hubu-all-'))
 if output.exists() and any(output.iterdir()):
     parser.error('--output must name a fresh empty directory')
 output.mkdir(parents=True, exist_ok=True)
 results = []
-for episode in ('ep01-runaway', 'ep02-last-cent', 'ep03-crash-recovery', 'ep04-many-clients'):
+catalog = json.loads((root.parent / 'site/app/releases/claims.json').read_text())
+kits = list(catalog['kits'])
+if args.kits:
+    chosen = [kit.strip() for kit in args.kits.split(',') if kit.strip()]
+    unknown = sorted(set(chosen) - set(kits))
+    if unknown: parser.error('Unknown kits: ' + ', '.join(unknown))
+    kits = [kit for kit in kits if kit in chosen]
+for episode in kits:
     command = [str(root / episode / 'run.sh'), '--release', args.release, '--output', str(output / episode)]
     if args.cache:
         command += ['--cache', args.cache]
@@ -36,7 +44,7 @@ for episode in ('ep01-runaway', 'ep02-last-cent', 'ep03-crash-recovery', 'ep04-m
         result = {'episode': episode, 'verdict': 'not tested', 'execution': 'incomplete', 'execution_error': str(error)}
     results.append(result)
 summary = {'release': args.release, 'episodes': results,
-           'documentary_identity_gap': 'Does not hold in v0.2.4: runtime/thread-bound account authority (HUB-162).',
+           'documentary_identity_gap': f'Does not hold in {args.release}: runtime/thread-bound account authority (HUB-162).',
            'authority_boundary': 'Normal bearer has broad administrative authority (HUB-32); configuration stays fixed.',
            'scope': 'Hubu public HTTP/CLI accounting with synthetic executor receipts; no provider billing or Gongbu execution.'}
 (output / 'summary.json').write_text(json.dumps(summary, indent=2) + '\n')

@@ -35,6 +35,39 @@ rules:
         string: provider:local:fixture
 '''
 
+# Tiered fixture policy for approval and denial kits. Effects merge by strict
+# precedence (deny > needs_approval > allow): up to USD 0.05 is allowed, above
+# that needs a human, and above USD 1.00 is denied.
+TIERED_POLICY = '''id: break_hubu_tiers
+version: v1
+default_effect: deny
+rules:
+  - id: deny_over_one_dollar
+    effect: deny
+    reason: synthetic fixture single-request cap
+    when:
+      op: gt
+      field: amount
+      value:
+        money: "1.00"
+  - id: approve_over_five_cents
+    effect: needs_approval
+    reason: synthetic fixture approval threshold
+    when:
+      op: gt
+      field: amount
+      value:
+        money: "0.05"
+  - id: allow_synthetic_fixture
+    effect: allow
+    reason: synthetic local fixture only
+    when:
+      op: eq
+      field: provider
+      value:
+        string: provider:local:fixture
+'''
+
 
 def now():
     return datetime.now(timezone.utc).isoformat()
@@ -97,13 +130,14 @@ class Runtime:
         if check and result.returncode: raise RuntimeError(f'CLI failed: {shlex.join(args)}: {result.stderr}')
         return {'exit_code': result.returncode, 'stdout': result.stdout, 'stderr': result.stderr}
 
-    def request(self, method, route, body=None, label='request', retry=True):
+    def request(self, method, route, body=None, label='request', retry=True, headers=None):
         encoded = None if body is None else json.dumps(body, separators=(',', ':')).encode()
         request_file = self.private / 'requests' / (secrets.token_hex(12) + '.json')
         durable = dict(label=label, method=method, route=route, body=body)
         save(request_file, durable)
+        extra = dict(headers or {})
         headers = {'Authorization': 'Bearer ' + Path(self.context['auth_file']).read_text().strip(),
-                   'Content-Type': 'application/json'}
+                   'Content-Type': 'application/json', **extra}
         # Exact persisted body is reused on ambiguous transport responses.
         for attempt in range(1, 4 if retry else 2):
             started = now()
@@ -120,6 +154,9 @@ class Runtime:
                 result = {'status': None, 'body': None, 'transport_error': str(error)}
             record = dict(type='http', label=label, attempt=attempt, started_at=started, ended_at=now(),
                           method=method, route=route, request=redact(body), **redact(result))
+            if extra:
+                # Header names only: capability values never enter public evidence.
+                record['extra_headers'] = sorted(extra)
             save(request_file, dict(**durable, last_attempt=attempt, response=result))
             append(self.output / 'requests.jsonl', record)
             self.note(f'{label} {method} {route} -> {result["status"]}: ' + json.dumps(redact(result['body'])))
@@ -127,17 +164,25 @@ class Runtime:
             if attempt < (3 if retry else 1): time.sleep(0.2 * attempt)
         return result
 
-    def authorize(self, label, amount):
+    def authorize(self, label, amount, account_id=None, scope=None, reason=None, operation_key=None):
         path = self.private / 'operations' / (label + '.json')
         if path.exists():
             body = json.loads(path.read_text())
             if body['amount'] != amount: raise ValueError('Retry changes amount')
         else:
-            body = dict(operation_key='break-hubu:' + secrets.token_hex(24), account_id=self.ids['account_id'],
-                        amount=amount, currency='usd', reason='Synthetic proof kit: ' + label,
-                        execution_scope=SCOPE, lease_profile=self.context['lease_profile'])
+            body = dict(operation_key=operation_key or 'break-hubu:' + secrets.token_hex(24),
+                        account_id=account_id or self.ids['account_id'],
+                        amount=amount, currency='usd', reason=reason or 'Synthetic proof kit: ' + label,
+                        execution_scope=scope or SCOPE, lease_profile=self.context['lease_profile'])
             save(path, body)
         return self.request('POST', '/spend/authorize', body, label=label)
+
+    def operation_key(self, label):
+        return json.loads((self.private / 'operations' / (label + '.json')).read_text())['operation_key']
+
+    def approve(self, approval_request_id, decision='approve', label='owner-approve'):
+        # The human approval capability stays in the parent; the attack process asks for it by message.
+        return self.control('approve', approval_request_id=approval_request_id, decision=decision, label=label)
 
     def claim(self, authorization, label='claim'):
         token = authorization['body']['auth_token_id']
@@ -145,6 +190,19 @@ class Runtime:
         if resolved['status'] != 200: return resolved
         body = dict(spend_auth_token_id=token, contract_version='hubu-spend-executor-v4.5',
                     **{key: resolved['body'][key] for key in ('account_id', 'amount', 'execution_scope')})
+        return self.request('POST', '/spend/executor/claim', body, label=label)
+
+    def claim_with_amount(self, authorization, amount, label):
+        # Executor claim that asserts a different amount than the authorization holds.
+        token = authorization['body']['auth_token_id']
+        resolved = self.request('POST', '/spend/executor/resolve', {'spend_auth_token_id': token}, label=label + '-resolve')
+        if resolved['status'] != 200: return resolved
+        altered = dict(resolved['body']['amount'])
+        altered['units'] = str(int(Decimal(amount) * 1000000))
+        if 'display' in altered: altered['display'] = amount
+        body = dict(spend_auth_token_id=token, contract_version='hubu-spend-executor-v4.5',
+                    account_id=resolved['body']['account_id'], amount=altered,
+                    execution_scope=resolved['body']['execution_scope'])
         return self.request('POST', '/spend/executor/claim', body, label=label)
 
     def receipt(self, label, amount):
@@ -245,6 +303,12 @@ class Runtime:
             else: raise RuntimeError('Hubu health deadline exceeded')
             event = dict(event='restart', at=now(), pid=self.server.pid)
             append(self.output / 'process-events.jsonl', event); return event
+        if action == 'approve':
+            self.note('OWNER STEP: human approval decision with the approval capability; capability stays in parent')
+            token = (self.private / 'approval.token').read_text().strip()
+            return self.request('POST', '/spend/approval/resolve',
+                                {'approval_request_id': kwargs['approval_request_id'], 'decision': kwargs['decision']},
+                                label=kwargs['label'], headers={'x-hubu-approval-capability': token})
         if action == 'reconcile':
             claim, receipt = kwargs['claim'], kwargs['receipt']; cost = receipt['actual_vendor_cost']
             self.note('OWNER STEP: explicit reconciliation of a synthetic known bill; capability stays in parent')
@@ -260,14 +324,16 @@ class Runtime:
         raise ValueError('Unknown parent operation')
 
 
-def run_episode(attack, verify, *, episode, budget, short_lease=False):
+def run_episode(attack, verify, *, episode, budget, short_lease=False, policy=POLICY, setup=None):
     parser = argparse.ArgumentParser(description=episode + ': unchanged released Hubu, synthetic executor')
-    parser.add_argument('--release', default='v0.2.4'); parser.add_argument('--output'); parser.add_argument('--cache')
+    parser.add_argument('--release', help='published stable tag, such as v0.2.5'); parser.add_argument('--output'); parser.add_argument('--cache')
     parser.add_argument('--attack-context', help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.attack_context:
         attack(Runtime(json.loads(Path(args.attack_context).read_text())))
         return
+    if not args.release:
+        parser.error('--release is required, such as --release v0.2.5')
     output = Path(args.output).resolve() if args.output else Path(tempfile.mkdtemp(prefix=episode + '-evidence-'))
     if output.exists() and any(output.iterdir()): raise RuntimeError('Output must be a fresh empty directory')
     output.mkdir(parents=True, exist_ok=True)
@@ -305,14 +371,18 @@ def run_episode(attack, verify, *, episode, budget, short_lease=False):
         context['ids'] = {key: re.search(r'\b' + key + r':\s*(\S+)', registration).group(1)
                           for key in ('agent_id', 'account_id')}
         rt.ids = context['ids']
-        policy = private / 'policy.yaml'; policy.write_text(POLICY)
-        rt.cli('policy', 'validate', '--path', policy)
-        rt.cli('policy', 'apply', '--path', policy, '--name', 'Synthetic fixture allow policy', '--agent-id', rt.ids['agent_id'])
+        policy_path = private / 'policy.yaml'; policy_path.write_text(policy)
+        rt.cli('policy', 'validate', '--path', policy_path)
+        rt.cli('policy', 'apply', '--path', policy_path, '--name',
+               'Synthetic fixture allow policy' if policy == POLICY else 'Synthetic fixture policy', '--agent-id', rt.ids['agent_id'])
         rt.cli('budget', 'create', '--agent-id', rt.ids['agent_id'], '--amount', budget,
                '--currency', 'usd', '--ending-before', '2999-01-01T00:00:00Z')
         budgets = rt.request('GET', '/budgets', label='setup-budget')['body']['budgets']
         if len(budgets) != 1: raise RuntimeError('Fresh fixture must have exactly one budget')
         rt.ids['budget_id'] = budgets[0]['budget_id']
+        if setup:
+            # Owner-side fixture additions (for example a second agent) before the initial export.
+            setup(rt)
         guidance = rt.request('GET', '/.well-known/hubu-spend-executor.json', label='executor-guidance')
         save(output / 'executor-guidance.json', guidance['body'])
         if guidance['status'] != 200 or guidance['body']['lease']['lease_profiles'][context['lease_profile']]['claim_ttl_seconds'] != (30 if short_lease else 900):
