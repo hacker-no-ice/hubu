@@ -197,7 +197,9 @@ def episode_report(directory, episode, caveat):
         if verdict != 'does-not-hold':
             row['verdict'] = 'not-tested'
     if failures:
-        row['summary'] = '; '.join(failures[:2]) + '. ' + row['summary']
+        # Check names state the property; label them so a failure never reads as a pass.
+        label = 'Failed checks' if verdict == 'does-not-hold' else 'Unconfirmed checks'
+        row['summary'] = f'{label}: ' + '; '.join(name[0].lower() + name[1:] for name in failures[:2]) + '. ' + row['summary']
     transcript = directory / 'transcript.txt'
     if transcript.exists():
         excerpts = re.findall(r'^\[[^\]]+\] \$ [^\n]+ budget list\n.*?^CLI exit=\d+\n', transcript.read_text(), re.M | re.S)
