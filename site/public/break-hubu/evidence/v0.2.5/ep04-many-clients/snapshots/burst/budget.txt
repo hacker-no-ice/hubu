@@ -1,0 +1,4 @@
+  budget_id: bgt_d4d8bsq3kzr5  agent_id: agt_q5tzwg9haafv  status: active
+    limit: $1.00  consumed: $0.00  frozen: $0.99  remaining: $0.01
+    current_version_id: bgv_cwkd66s2gcr1  current_revision: 1
+    period: 2026-11-07T00:17:06.777004+00:00 -> 2999-01-01T00:00:00+00:00

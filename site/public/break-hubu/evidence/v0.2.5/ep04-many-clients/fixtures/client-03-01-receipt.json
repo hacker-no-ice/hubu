@@ -1,0 +1,16 @@
+{
+  "actual_vendor_cost": {
+    "amount": 30000,
+    "scale": 6,
+    "currency": "usd"
+  },
+  "provider_request_id": "synthetic:client-03-01",
+  "price_model_snapshot": {
+    "provider": "provider:local:fixture",
+    "model": "synthetic-no-provider",
+    "pricing_unit": "operation",
+    "currency": "usd",
+    "synthetic": true
+  },
+  "artifact_reference": "fixture://ep04-many-clients/client-03-01"
+}
