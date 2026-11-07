@@ -153,16 +153,24 @@ def load_catalog(root):
     return read(root / 'site/app/releases/claims.json')
 
 
-def challenge_status(challenge, report):
+def documented_gaps(root, release):
+    # The same per-release known gaps the site reads (site/app/releases/assessments.json).
+    path = root / 'site/app/releases/assessments.json'
+    return read(path).get(release, {}).get('documented', {}) if path.exists() else {}
+
+
+def challenge_status(challenge, report, documented=None):
     if challenge['status'] == 'out-of-scope':
         return 'out-of-scope'
     episode = report['episodes'].get(challenge.get('kit') or '')
-    return episode['verdict'] if episode else 'not-tested'
+    if episode:
+        return episode['verdict']
+    return 'does-not-hold' if (documented or {}).get(challenge['id']) == 'known-gap' else 'not-tested'
 
 
-def claim_tier(claim_id, catalog, report):
+def claim_tier(claim_id, catalog, report, documented=None):
     """Verified when every in-scope challenge holds; any failure means the claim does not hold."""
-    statuses = [challenge_status(c, report) for c in catalog['challenges'] if c['claim'] == claim_id]
+    statuses = [challenge_status(c, report, documented) for c in catalog['challenges'] if c['claim'] == claim_id]
     in_scope = [s for s in statuses if s != 'out-of-scope']
     held = sum(s in ('holds', 'holds-with-caveat') for s in in_scope)
     if 'does-not-hold' in in_scope:
@@ -259,17 +267,19 @@ def collect(evidence_dir, episode):
     return files
 
 
-def claims_section(catalog, report):
+def claims_section(catalog, report, documented):
     lines = ['## Claims', '', '| Claim | Status | Challenges that hold |', '| --- | --- | --- |']
     for claim in catalog['claims']:
-        tier = claim_tier(claim['id'], catalog, report)
+        tier = claim_tier(claim['id'], catalog, report, documented)
         lines.append(f'| {claim["id"]} · {claim["title"]} | {TIER_LABELS[tier["tier"]]} | {tier["held"]} of {tier["total"]} |')
     lines += ['', 'Out-of-scope challenges are not counted. Untested, planned and blocked challenges count as not holding,',
               'and any failed challenge means its claim does not hold.', '', '## Challenges', '',
               '| Challenge | Status | Kit |', '| --- | --- | --- |']
     for challenge in catalog['challenges']:
-        status = challenge_status(challenge, report)
+        status = challenge_status(challenge, report, documented)
         label = 'Out of scope' if status == 'out-of-scope' else VERDICT_LABELS[status]
+        if status == 'does-not-hold' and challenge.get('kit') not in report['episodes']:
+            label = 'Known gap (documented)'
         if status == 'not-tested' and challenge['status'] in ('planned', 'blocked'):
             label += f' ({challenge["status"]})'
         kit = f'`{challenge["kit"]}`' if challenge.get('kit') else '—'
@@ -277,7 +287,7 @@ def claims_section(catalog, report):
     return lines + ['']
 
 
-def plain_card(report, catalog):
+def plain_card(report, catalog, documented=None):
     kits = [episode for episode in catalog['kits'] if episode in report['episodes']]
     revisions = [report['kitsCommit']] + [s['kitsCommit'] for s in report.get('supplements', [])]
     lines = [f'# {report["release"]} system analysis', '',
@@ -291,7 +301,7 @@ def plain_card(report, catalog):
              f'| Kits revisions | {", ".join(f"`{r}`" for r in revisions)} |',
              f'| Recorded | {report["recordedAt"]} |',
              f'| Host | `{report["host"]}` |', '']
-    lines += claims_section(catalog, report)
+    lines += claims_section(catalog, report, documented or {})
     lines += ['## Experiments', '', '| Experiment | Verdict | Observed |', '| --- | --- | --- |']
     for episode in kits:
         row = report['episodes'][episode]
@@ -394,9 +404,10 @@ def main():
     if not wrapper.exists():
         wrapper.parent.mkdir(exist_ok=True)
         wrapper.write_text(WRAPPER)
-    card_path.write_text(plain_card(report, catalog))
+    documented = documented_gaps(root, RELEASE)
+    card_path.write_text(plain_card(report, catalog, documented))
     card = {'release': RELEASE,
-            'claims': {claim['id']: claim_tier(claim['id'], catalog, report) for claim in catalog['claims']},
+            'claims': {claim['id']: claim_tier(claim['id'], catalog, report, documented) for claim in catalog['claims']},
             'verdicts': {episode: row['verdict'] for episode, row in report['episodes'].items()}}
     (root / 'break-hubu/cards' / (RELEASE + '.json')).write_text(json.dumps(card, indent=2) + '\n')
     print(('Supplemented' if args.supplement else 'Prepared') + ' website report and evidence:', store)

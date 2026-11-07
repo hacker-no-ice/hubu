@@ -14,10 +14,10 @@
       "failed": 0
     },
     "C3": {
-      "tier": "unverified",
+      "tier": "does-not-hold",
       "held": 0,
       "total": 2,
-      "failed": 0
+      "failed": 2
     },
     "C4": {
       "tier": "unverified",
@@ -26,10 +26,10 @@
       "failed": 0
     },
     "C5": {
-      "tier": "unverified",
+      "tier": "does-not-hold",
       "held": 0,
       "total": 5,
-      "failed": 0
+      "failed": 1
     },
     "C6": {
       "tier": "unverified",

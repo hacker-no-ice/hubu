@@ -113,6 +113,24 @@ class RendererGuards(unittest.TestCase):
 
 
 class SiteContract(unittest.TestCase):
+    def test_rendered_tiers_include_documented_gaps_like_the_site(self):
+        renderer = load_renderer()
+        report = {"episodes": {kit: {"verdict": "holds"} for kit in ("ep01-runaway", "ep02-last-cent", "ep03-crash-recovery", "ep04-many-clients")}}
+        documented = renderer.documented_gaps(ROOT, "v0.2.4")
+        catalog = json.loads((ROOT / "site/app/releases/claims.json").read_text())
+        self.assertEqual(renderer.claim_tier("C3", catalog, report, documented)["tier"], "does-not-hold")
+        self.assertEqual(renderer.claim_tier("C3", catalog, report)["tier"], "unverified")
+        measured = dict(report["episodes"], **{"ep07-impersonate-agent": {"verdict": "holds"}, "ep08-cross-session": {"verdict": "holds"}})
+        self.assertEqual(renderer.claim_tier("C3", catalog, {"episodes": measured}, documented)["tier"], "verified",
+                         "a measured result must take precedence over a documented gap")
+
+    def test_site_and_renderer_read_the_same_assessments(self):
+        self.assertIn('import data from "./assessments.json";', (ROOT / "site/app/releases/assessments.ts").read_text())
+        for release, assessment in json.loads((ROOT / "site/app/releases/assessments.json").read_text()).items():
+            ids = {challenge["id"] for challenge in json.loads((ROOT / "site/app/releases/claims.json").read_text())["challenges"]}
+            self.assertLessEqual(set(assessment["documented"]), ids, release)
+            self.assertTrue(all(value == "known-gap" for value in assessment["documented"].values()), release)
+
     def test_release_reports_are_placeholders_or_rendered(self):
         renderer = load_renderer()
         reports = sorted((ROOT / "site/app/releases").glob("v*/report.ts"))

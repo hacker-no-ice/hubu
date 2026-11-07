@@ -74,7 +74,8 @@ function ObservedVisual({ data, id, report }: { data: EvidenceVisual; id: string
 }
 
 function Episode({ episode, result, report }: { episode: Kit; result: EpisodeResult; report: ReleaseReport }) {
-  const sourceRef = report.kitsCommit ?? "main";
+  // A supplemented kit links to the kits revision that measured it.
+  const sourceRef = report.supplements?.find((supplement) => supplement.episodes.includes(episode.id))?.kitsCommit ?? report.kitsCommit ?? "main";
   return <section className="proof-episode" id={episode.id} aria-labelledby={`${episode.id}-title`}>
     <header className="proof-episode-header"><span className="proof-episode-number">{episode.number}</span><div><p className="proof-kicker">{episode.question}</p><h2 id={`${episode.id}-title`}>{episode.title}</h2></div><VerdictLabel verdict={result.verdict} /></header>
     {episode.challenge && <p className="proof-kicker proof-claim-tag">Challenge {episode.challenge.id} · {claimTitle(episode.challenge.claim)}</p>}

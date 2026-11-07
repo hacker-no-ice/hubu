@@ -9,7 +9,7 @@ from verify import verify
 
 
 def attack(rt):
-    rt.note('ATTACK: request USD 2.00, above the explicit USD 1.00 deny rule, then try every way around it.')
+    rt.note('ATTACK: request USD 2.00 against a USD 5.00 budget, above the explicit USD 1.00 deny rule, then try every way around it.')
     rt.authorize('denied-request', '2.00')
     rt.authorize('denied-request', '2.00')  # exact replay of the same logical operation
     rt.authorize('denied-new-operation', '2.00')
@@ -29,4 +29,4 @@ def attack(rt):
 
 
 if __name__ == '__main__':
-    run_episode(attack, verify, episode='ep05-denied-operation', budget='1.00', policy=TIERED_POLICY)
+    run_episode(attack, verify, episode='ep05-denied-operation', budget='5.00', policy=TIERED_POLICY)
