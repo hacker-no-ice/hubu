@@ -1,0 +1,9 @@
+{
+  "release": "v0.2.5",
+  "verdicts": {
+    "ep01-runaway": "holds",
+    "ep02-last-cent": "holds-with-caveat",
+    "ep03-crash-recovery": "holds",
+    "ep04-many-clients": "holds-with-caveat"
+  }
+}
