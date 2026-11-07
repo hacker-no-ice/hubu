@@ -61,7 +61,7 @@ found none of those values in the public files.
 The independent verifiers inspect saved public data, not the driver's success
 counters or SQLite. They check complete pagination, exact signed charges,
 balanced ledger entries, authorization/claim/settlement linkage, coverage, and
-fixed operator configuration. The [public evidence bundle](../site/public/break-hubu/evidence/v0.2.4/evidence.zip)
+fixed operator configuration. The [public evidence bundle](../site/evidence/v0.2.4/evidence.zip)
 contains the recording used by the card, including raw transcripts and exports.
 The public summary omits internal tracker references from the runner's two
 explanatory gap annotations; measured results and raw protocol exports are unchanged.
