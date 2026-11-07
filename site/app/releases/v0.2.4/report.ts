@@ -1,5 +1,5 @@
-import type { ReleaseReport } from "./types";
-export type { EpisodeId, EpisodeResult, EvidenceVisual, Verdict } from "./types";
+import type { ReleaseReport } from "../report-types";
+export type { EpisodeId, EpisodeResult, EvidenceVisual, Verdict } from "../report-types";
 
 // Generated from captured public evidence by break-hubu/render-report.py.
 export const report: ReleaseReport = {

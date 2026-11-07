@@ -83,6 +83,9 @@ jobs:
       - name: Test advisory detection and targeted remediation
         run: python3 scripts/test-security-advisories.py
 
+      - name: Test system card automation guards
+        run: python3 scripts/test-system-card.py
+
       - name: Test advisory publication and duplicate suppression
         run: node --test scripts/test-security-advisories-github.js
 

@@ -12,7 +12,7 @@ import tempfile
 
 root = Path(sys.argv[1])
 parser = argparse.ArgumentParser(description='Run every Break Hubu public proof kit')
-parser.add_argument('--release', default='v0.2.4')
+parser.add_argument('--release', required=True, help='published stable tag, such as v0.2.5')
 parser.add_argument('--output')
 parser.add_argument('--cache')
 args = parser.parse_args(sys.argv[2:])
@@ -36,7 +36,7 @@ for episode in ('ep01-runaway', 'ep02-last-cent', 'ep03-crash-recovery', 'ep04-m
         result = {'episode': episode, 'verdict': 'not tested', 'execution': 'incomplete', 'execution_error': str(error)}
     results.append(result)
 summary = {'release': args.release, 'episodes': results,
-           'documentary_identity_gap': 'Does not hold in v0.2.4: runtime/thread-bound account authority (HUB-162).',
+           'documentary_identity_gap': f'Does not hold in {args.release}: runtime/thread-bound account authority (HUB-162).',
            'authority_boundary': 'Normal bearer has broad administrative authority (HUB-32); configuration stays fixed.',
            'scope': 'Hubu public HTTP/CLI accounting with synthetic executor receipts; no provider billing or Gongbu execution.'}
 (output / 'summary.json').write_text(json.dumps(summary, indent=2) + '\n')

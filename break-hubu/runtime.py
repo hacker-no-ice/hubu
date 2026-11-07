@@ -262,12 +262,14 @@ class Runtime:
 
 def run_episode(attack, verify, *, episode, budget, short_lease=False):
     parser = argparse.ArgumentParser(description=episode + ': unchanged released Hubu, synthetic executor')
-    parser.add_argument('--release', default='v0.2.4'); parser.add_argument('--output'); parser.add_argument('--cache')
+    parser.add_argument('--release', help='published stable tag, such as v0.2.5'); parser.add_argument('--output'); parser.add_argument('--cache')
     parser.add_argument('--attack-context', help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.attack_context:
         attack(Runtime(json.loads(Path(args.attack_context).read_text())))
         return
+    if not args.release:
+        parser.error('--release is required, such as --release v0.2.5')
     output = Path(args.output).resolve() if args.output else Path(tempfile.mkdtemp(prefix=episode + '-evidence-'))
     if output.exists() and any(output.iterdir()): raise RuntimeError('Output must be a fresh empty directory')
     output.mkdir(parents=True, exist_ok=True)

@@ -74,10 +74,12 @@ Apple silicon, archive verification, and native published-asset smoke tests.
 Ordinary release validation never supplies provider credentials or enables
 provider spend.
 
-For stable releases, follow the manual [Break Hubu release-card
-checklist](../../break-hubu/release-checklist.md) to record version-specific
-claims, known gaps and public reproduction evidence. This is a separate manual
-activity; it does not add a PR CI gate.
+Before a stable release, write its release notes page; after it publishes, the
+[System card workflow](../../.github/workflows/system-card.yml) runs the public
+proof kits against the exact tag on macOS and opens a PR with the measured
+system card. Review and merge that PR by following the [release-card
+checklist](../../break-hubu/release-checklist.md). It never makes provider
+calls, edits the release or merges anything, and it does not add a PR CI gate.
 
 ## Rollback and retention
 

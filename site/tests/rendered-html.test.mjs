@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, readFile } from "node:fs/promises";
+import { access, readdir, readFile } from "node:fs/promises";
 import test from "node:test";
 import { waitForRevision } from "../scripts/verify-production-revision.mjs";
 
@@ -114,7 +114,7 @@ test("the mascot history links the governed variations before the evolution arti
   assert.ok(sitemap.includes("https://hubustack.dev/mascot</loc>"));
 });
 
-test("v0.2.5 release notes keep the system card honest until the measured run is recorded", async () => {
+test("v0.2.5 release notes summarize the release and its upgrade", async () => {
   const response = await render("/releases/v0.2.5");
   assert.equal(response.status, 200);
   const html = await response.text();
@@ -127,12 +127,55 @@ test("v0.2.5 release notes keep the system card honest until the measured run is
   assert.match(html, /never supplies provider credentials or makes live provider calls/);
   assert.match(html, /Registered agent accounts are not bound/);
   assert.match(html, /normal bearer can change budgets and policies/);
-  assert.match(html, /earlier results are not carried forward/);
-  assert.equal((html.match(/class="proof-verdict proof-verdict-not-tested"/g) ?? []).length, 4);
-  assert.doesNotMatch(html, /proof-verdict-holds|proof-verdict-does-not-hold/);
-  assert.match(html, /href="\/releases\/v0.2.4\/report"/);
   assert.match(html, /href="https:\/\/hubustack.dev\/releases\/v0.2.5"/);
   assert.doesNotMatch(html, /Break Hubu|linear\.app|HUB-\d+/);
+});
+
+// Release notes built on MeasuredClaims must match their report.ts: "Not tested"
+// everywhere until the renderer writes measured data, then exactly its verdicts.
+test("release system cards match their measured or unmeasured report", async () => {
+  const releasesDir = new URL("../app/releases/", import.meta.url);
+  const sitemap = await readFile(new URL("../dist/client/sitemap.xml", import.meta.url), "utf8");
+  const releases = (await readdir(releasesDir, { withFileTypes: true }))
+    .filter((entry) => entry.isDirectory() && /^v\d+\.\d+\.\d+$/.test(entry.name)).map((entry) => entry.name);
+  let checked = 0;
+  for (const release of releases) {
+    const page = await readFile(new URL(`${release}/page.tsx`, releasesDir), "utf8");
+    if (!page.includes("MeasuredClaims")) continue;
+    checked += 1;
+    const reportSource = await readFile(new URL(`${release}/report.ts`, releasesDir), "utf8");
+    const measured = !reportSource.includes("export const report = null as ReleaseReport | null;");
+    const html = await (await render(`/releases/${release}`)).text();
+    // Card order: C1, its four experiments, then C2–C6.
+    const shown = [...html.matchAll(/data-status="([a-z-]+)"/g)].map((match) => match[1]);
+    assert.equal(shown.length, 10, release);
+    for (const id of ["c1", "c2", "c3", "c4", "c5", "c6"]) assert.match(html, new RegExp(`id="claim-${id}"`));
+    const [c1, ...rest] = shown;
+    const experiments = rest.slice(0, 4);
+    for (const status of rest.slice(4)) assert.ok(["not-tested", "known-gap", "not-applicable", "holds", "holds-with-caveat", "does-not-hold"].includes(status));
+    const reportPage = await render(`/releases/${release}/report`);
+    if (measured) {
+      const expected = [...reportSource.matchAll(/"verdict": "([a-z-]+)"/g)].map((match) => match[1]);
+      assert.equal(expected.length, 4, release);
+      assert.deepEqual(experiments, expected, release);
+      const weakest = ["does-not-hold", "not-tested", "holds-with-caveat"].find((verdict) => expected.includes(verdict)) ?? "holds";
+      assert.equal(c1, weakest, release);
+      assert.match(html, new RegExp(`href="/releases/${release.replaceAll(".", "\\.")}/report"`));
+      assert.match(html, /Recorded \d{4}-\d{2}-\d{2}/);
+      assert.equal(reportPage.status, 200, release);
+      assert.match(await reportPage.text(), new RegExp(`<h1>${release.replaceAll(".", "\\.")} system analysis</h1>`));
+      assert.ok(sitemap.includes(`https://hubustack.dev/releases/${release}/report</loc>`), release);
+    } else {
+      assert.deepEqual([c1, ...experiments], ["not-tested", "not-tested", "not-tested", "not-tested", "not-tested"], release);
+      assert.ok(!shown.some((status) => status.startsWith("holds")), release);
+      assert.match(html, /Measured run pending/);
+      assert.match(html, /earlier results are not carried forward/);
+      assert.doesNotMatch(html, new RegExp(`href="/releases/${release.replaceAll(".", "\\.")}/report"`));
+      assert.equal(reportPage.status, 404, release);
+      assert.ok(!sitemap.includes(`https://hubustack.dev/releases/${release}/report</loc>`), release);
+    }
+  }
+  assert.ok(checked >= 1);
 });
 
 test("the detailed system analysis keeps reproducibility and authority limits alongside its claims", async () => {
