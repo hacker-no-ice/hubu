@@ -131,10 +131,12 @@ test("v0.2.5 release notes summarize the release and its upgrade", async () => {
   assert.doesNotMatch(html, /Break Hubu|linear\.app|HUB-\d+/);
 });
 
-// Release notes built on MeasuredClaims must match their report.ts: "Not tested"
-// everywhere until the renderer writes measured data, then exactly its verdicts.
+// Release notes built on MeasuredClaims must match their report.ts: no challenge
+// holds until the renderer writes measured data, then exactly its verdicts, and
+// every claim's tier follows the challenge rule.
 test("release system cards match their measured or unmeasured report", async () => {
   const releasesDir = new URL("../app/releases/", import.meta.url);
+  const catalog = JSON.parse(await readFile(new URL("claims.json", releasesDir), "utf8"));
   const sitemap = await readFile(new URL("../dist/client/sitemap.xml", import.meta.url), "utf8");
   const releases = (await readdir(releasesDir, { withFileTypes: true }))
     .filter((entry) => entry.isDirectory() && /^v\d+\.\d+\.\d+$/.test(entry.name)).map((entry) => entry.name);
@@ -146,31 +148,41 @@ test("release system cards match their measured or unmeasured report", async () 
     const reportSource = await readFile(new URL(`${release}/report.ts`, releasesDir), "utf8");
     const measured = !reportSource.includes("export const report = null as ReleaseReport | null;");
     const html = await (await render(`/releases/${release}`)).text();
-    // Card order: C1, its four experiments, then C2–C6.
-    const shown = [...html.matchAll(/data-status="([a-z-]+)"/g)].map((match) => match[1]);
-    assert.equal(shown.length, 10, release);
-    for (const id of ["c1", "c2", "c3", "c4", "c5", "c6"]) assert.match(html, new RegExp(`id="claim-${id}"`));
-    const [c1, ...rest] = shown;
-    const experiments = rest.slice(0, 4);
-    for (const status of rest.slice(4)) assert.ok(["not-tested", "known-gap", "not-applicable", "holds", "holds-with-caveat", "does-not-hold"].includes(status));
+    const escaped = release.replaceAll(".", "\\.");
+    const sections = html.split(/(?=<div class="release-claim" id="claim-c\d")/).slice(1);
+    assert.equal(sections.length, 6, release);
+    const shown = {};
+    for (const [index, section] of sections.entries()) {
+      const id = `C${index + 1}`;
+      const tier = section.match(/data-tier="([a-z-]+)"/)[1];
+      const statuses = [...section.matchAll(/data-status="([a-z-]+)"/g)].map((match) => match[1]);
+      const own = catalog.challenges.filter((challenge) => challenge.claim === id);
+      assert.equal(statuses.length, own.length, `${release} ${id} challenge count`);
+      own.forEach((challenge, i) => { shown[challenge.id] = statuses[i]; });
+      const inScope = statuses.filter((status) => status !== "out-of-scope");
+      const held = inScope.filter((status) => status.startsWith("holds")).length;
+      const failed = inScope.some((status) => status === "does-not-hold" || status === "known-gap");
+      const expected = failed ? "does-not-hold" : inScope.length && held === inScope.length ? "verified" : held ? "partially-verified" : "unverified";
+      assert.equal(tier, expected, `${release} ${id} tier`);
+      assert.match(section, new RegExp(`${held} of ${inScope.length} challenges hold`));
+    }
+    for (const challenge of catalog.challenges.filter((c) => c.status === "out-of-scope")) assert.equal(shown[challenge.id], "out-of-scope");
     const reportPage = await render(`/releases/${release}/report`);
     if (measured) {
-      const expected = [...reportSource.matchAll(/"verdict": "([a-z-]+)"/g)].map((match) => match[1]);
-      assert.equal(expected.length, 4, release);
-      assert.deepEqual(experiments, expected, release);
-      const weakest = ["does-not-hold", "not-tested", "holds-with-caveat"].find((verdict) => expected.includes(verdict)) ?? "holds";
-      assert.equal(c1, weakest, release);
-      assert.match(html, new RegExp(`href="/releases/${release.replaceAll(".", "\\.")}/report"`));
+      const report = JSON.parse(reportSource.slice(reportSource.indexOf("= {") + 2, reportSource.lastIndexOf(";")));
+      for (const challenge of catalog.challenges.filter((c) => c.kit && report.episodes[c.kit])) {
+        assert.equal(shown[challenge.id], report.episodes[challenge.kit].verdict, `${release} ${challenge.id}`);
+      }
+      assert.match(html, new RegExp(`href="/releases/${escaped}/report"`));
       assert.match(html, /Recorded \d{4}-\d{2}-\d{2}/);
       assert.equal(reportPage.status, 200, release);
-      assert.match(await reportPage.text(), new RegExp(`<h1>${release.replaceAll(".", "\\.")} system analysis</h1>`));
+      assert.match(await reportPage.text(), new RegExp(`<h1>${escaped} system analysis</h1>`));
       assert.ok(sitemap.includes(`https://hubustack.dev/releases/${release}/report</loc>`), release);
     } else {
-      assert.deepEqual([c1, ...experiments], ["not-tested", "not-tested", "not-tested", "not-tested", "not-tested"], release);
-      assert.ok(!shown.some((status) => status.startsWith("holds")), release);
+      assert.ok(!Object.values(shown).some((status) => status.startsWith("holds")), release);
       assert.match(html, /Measured run pending/);
       assert.match(html, /earlier results are not carried forward/);
-      assert.doesNotMatch(html, new RegExp(`href="/releases/${release.replaceAll(".", "\\.")}/report"`));
+      assert.doesNotMatch(html, new RegExp(`href="/releases/${escaped}/report"`));
       assert.equal(reportPage.status, 404, release);
       assert.ok(!sitemap.includes(`https://hubustack.dev/releases/${release}/report</loc>`), release);
     }

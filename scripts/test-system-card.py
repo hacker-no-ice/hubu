@@ -66,7 +66,8 @@ class RendererGuards(unittest.TestCase):
         # An independent unmeasured fixture: the repository's own releases may be measured.
         (release / "report.ts").write_text('import type { ReleaseReport } from "../report-types";\n' + load_renderer().PLACEHOLDER + "\n")
         (self.root / "break-hubu/cards").mkdir(parents=True)
-        for episode in load_renderer().EPISODES:
+        (self.root / "site/app/releases/claims.json").write_text((ROOT / "site/app/releases/claims.json").read_text())
+        for episode in list(json.loads((ROOT / "site/app/releases/claims.json").read_text())["kits"])[:4]:
             (self.evidence / episode).mkdir(parents=True)
             self.write_run(episode)
 
@@ -136,19 +137,79 @@ class ClaimsCatalog(unittest.TestCase):
         for claim in self.catalog["claims"]:
             self.assertTrue(claim["title"] and claim["invariant"], claim["id"])
 
-    def test_every_kit_experiment_measures_exactly_one_claim(self):
-        experiments = [episode for claim in self.catalog["claims"] for episode in claim["experiments"]]
-        self.assertEqual(sorted(experiments), sorted(load_renderer().EPISODES))
-        self.assertEqual(sorted(self.catalog["experiments"]), sorted(load_renderer().EPISODES))
+    def test_every_challenge_belongs_to_a_claim_and_has_a_known_status(self):
+        claims = {claim["id"] for claim in self.catalog["claims"]}
+        ids = [challenge["id"] for challenge in self.catalog["challenges"]]
+        self.assertEqual(len(ids), len(set(ids)))
+        for challenge in self.catalog["challenges"]:
+            with self.subTest(challenge=challenge["id"]):
+                self.assertIn(challenge["claim"], claims)
+                self.assertTrue(challenge["id"].startswith(challenge["claim"] + "."))
+                self.assertIn(challenge["status"], {"kit", "planned", "blocked", "out-of-scope"})
+                if challenge["status"] == "kit":
+                    self.assertIn(challenge["kit"], self.catalog["kits"])
+                else:
+                    self.assertNotIn("kit", challenge)
+                    self.assertTrue(challenge["reason"])
 
-    def test_release_pages_assess_every_unmeasured_claim(self):
-        for page in sorted((ROOT / "site/app/releases").glob("v*/page.tsx")):
-            source = page.read_text()
-            if "MeasuredClaims" not in source:
-                continue
-            with self.subTest(release=page.parent.name):
-                for claim in ("C2", "C3", "C4", "C5", "C6"):
-                    self.assertRegex(source, rf"{claim}: {{ status: \"(not-tested|known-gap|not-applicable|holds|holds-with-caveat|does-not-hold)\", note: \"[^\"]+\" }}")
+    def test_every_kit_measures_exactly_one_challenge_and_exists(self):
+        measured = [challenge["kit"] for challenge in self.catalog["challenges"] if challenge.get("kit")]
+        self.assertEqual(sorted(measured), sorted(self.catalog["kits"]))
+        for kit, text in self.catalog["kits"].items():
+            with self.subTest(kit=kit):
+                for name in ("attack.py", "verify.py", "run.sh", "README.md"):
+                    self.assertTrue((KITS / kit / name).is_file(), f"{kit}/{name}")
+                for field in ("number", "title", "short", "question", "statement", "setup", "steps", "verify", "boundary"):
+                    self.assertTrue(text[field], f"{kit}.{field}")
+
+    def test_tier_rule(self):
+        renderer = load_renderer()
+        catalog = {"claims": [{"id": "C9"}], "challenges": [
+            {"id": "C9.1", "claim": "C9", "status": "kit", "kit": "a"},
+            {"id": "C9.2", "claim": "C9", "status": "kit", "kit": "b"},
+            {"id": "C9.3", "claim": "C9", "status": "out-of-scope"}]}
+        def tier(**verdicts):
+            return renderer.claim_tier("C9", catalog, {"episodes": {k: {"verdict": v} for k, v in verdicts.items()}})
+        self.assertEqual(tier(a="holds", b="holds-with-caveat"), dict(tier="verified", held=2, total=2, failed=0))
+        self.assertEqual(tier(a="holds")["tier"], "partially-verified")
+        self.assertEqual(tier()["tier"], "unverified")
+        self.assertEqual(tier(a="holds", b="does-not-hold")["tier"], "does-not-hold")
+        self.assertEqual(tier(a="not-tested", b="not-tested")["tier"], "unverified")
+
+    def test_release_reports_are_placeholders_or_rendered(self):
+        renderer = load_renderer()
+        for report in sorted((ROOT / "site/app/releases").glob("v*/report.ts")):
+            with self.subTest(release=report.parent.name):
+                source = report.read_text()
+                wrapper = report.parent / "report/page.tsx"
+                if renderer.PLACEHOLDER in source:
+                    self.assertFalse(wrapper.exists(), "an unmeasured release has no analysis page")
+                else:
+                    self.assertIn("Generated from captured public evidence by break-hubu/render-report.py.", source)
+                    self.assertEqual(wrapper.read_text(), renderer.WRAPPER)
+                    measured = renderer.load_report(report)["episodes"]
+                    self.assertLessEqual(set(measured), set(self.catalog["kits"]))
+                    bundle = json.loads((ROOT / "site/evidence" / report.parent.name / "bundle.json").read_text())
+                    self.assertEqual(bundle["schema"], renderer.BUNDLE_SCHEMA)
+                    self.assertTrue(all(any(name.startswith(kit + "/") for name in bundle["files"]) for kit in measured))
+
+
+class EvidenceStore(unittest.TestCase):
+    def test_archive_is_deterministic_and_matches_the_bundle(self):
+        renderer = load_renderer()
+        files = {"ep01-runaway/run.json": "{}\n", "summary.json": "{\"a\": 1}\n"}
+        with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second:
+            renderer.write_store(Path(first), "v9.9.9", files)
+            renderer.write_store(Path(second), "v9.9.9", dict(reversed(list(files.items()))))
+            self.assertEqual((Path(first) / "evidence.zip").read_bytes(), (Path(second) / "evidence.zip").read_bytes())
+            import zipfile
+            with zipfile.ZipFile(Path(first) / "evidence.zip") as archive:
+                self.assertEqual({name: archive.read(name).decode() for name in archive.namelist()}, files)
+            self.assertEqual(renderer.read_bundle(Path(first) / "bundle.json"), files)
+
+    def test_no_evidence_tree_is_committed_under_public(self):
+        tracked = subprocess.run(["git", "ls-files", "site/public/break-hubu"], cwd=ROOT, capture_output=True, text=True).stdout
+        self.assertEqual(tracked.strip(), "")
 
 
 class WorkflowPrivileges(unittest.TestCase):

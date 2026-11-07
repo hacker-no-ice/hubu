@@ -43,13 +43,12 @@ export default function ReleaseNotes() {
             <div><dt>Known authority limits</dt><dd>Registered agent accounts are not bound to an authenticated runtime or thread. The normal bearer can change budgets and policies. <code>hubu ui</code> holds the bearer and approval credentials in a local process protected by loopback binding, a one-time login link, and same-origin checks, not per-user accounts.</dd></div>
             <div><dt>Reproduction</dt><dd>The release experiment kits build the exact published release and need no model subscription or provider credentials. <a href={`${repository}/blob/main/break-hubu/README.md`}>Prerequisites and commands ↗</a></dd></div>
           </dl>
-          <MeasuredClaims release="v0.2.5" report={report} previous="v0.2.4" assessments={{
-            C2: { status: "not-tested", note: "Policy denial and human approval run through Hubu and Gongbu, but no system-card experiment measures them yet." },
-            C3: { status: "known-gap", note: "Registered agent accounts are not bound to an authenticated runtime or thread. Strong binding is planned for a future release." },
-            C4: { status: "not-tested", note: "The experiments use a synthetic executor, so Gongbu’s credential custody is outside this analysis." },
-            C5: { status: "known-gap", note: "The normal bearer can change budgets and policies. hubu ui holds the bearer and approval credentials in a local process, not per-user accounts." },
-            C6: { status: "not-tested", note: "Only verified packs from the repository ship in v0.2.5, and pack validation rejects packs that weaken engine-owned settlement or credential hosts. Self-serve packs are not available, and no system-card experiment covers this yet." },
-          }} />
+          <MeasuredClaims release="v0.2.5" report={report} previous="v0.2.4" notes={{
+            C3: "Registered agent accounts are not bound to an authenticated runtime or thread. Strong binding is planned for a future release.",
+            C5: "The normal bearer can change budgets and policies. hubu ui holds the bearer and approval credentials in a local process, not per-user accounts.",
+            C6: "Only verified packs from the repository ship in v0.2.5, and pack validation rejects packs that weaken engine-owned settlement or credential hosts.",
+          }}
+          documented={{ "C3.1": "known-gap", "C3.2": "known-gap", "C5.1": "known-gap" }} />
         </section>
         <footer className="engineering-article-footer proof-footer"><a href="/releases">← All release notes</a><a href={`${repository}/releases/tag/v0.2.5`}>Release on GitHub ↗</a></footer>
       </article>

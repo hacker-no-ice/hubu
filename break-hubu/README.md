@@ -1,17 +1,35 @@
 # Break Hubu: public proof kits
 
 **All claims are about Hubu's own ledger and records, not provider invoices.**
-These four bounded experiments run an unchanged released Hubu server, set it up
+These bounded experiments run an unchanged released Hubu server, set it up
 through the public CLI, submit real HTTP requests, and verify saved public
 exports. The executor receipts are explicitly synthetic. No model subscription,
 provider key, provider invocation or paid workload is needed.
 
-| Kit | Question |
-| --- | --- |
-| [EP01: Runaway](ep01-runaway/README.md) | Does Hubu stop authorizing when a fixed budget is consumed, despite 100 further attempts? |
-| [EP02: Last cent](ep02-last-cent/README.md) | How does Hubu account for a reported bill above the authorized maximum? |
-| [EP03: Crash recovery](ep03-crash-recovery/README.md) | Does a claimed obligation survive a server crash and explicit reconciliation retries? |
-| [EP04: Many clients](ep04-many-clients/README.md) | What happens when ten client processes request three dollars from one dollar? |
+Each kit is one reproducible challenge against one of Hubu's six claims. The
+catalog in [`site/app/releases/claims.json`](../site/app/releases/claims.json)
+lists every claim and challenge, including challenges that are planned,
+blocked or out of scope.
+
+| Kit | Challenge | Question |
+| --- | --- | --- |
+| [EP01: Runaway](ep01-runaway/README.md) | C1.1 | Does Hubu stop authorizing when a fixed budget is consumed, despite 100 further attempts? |
+| [EP02: Last cent](ep02-last-cent/README.md) | C1.2 | How does Hubu account for a reported bill above the authorized maximum? |
+| [EP03: Crash recovery](ep03-crash-recovery/README.md) | C1.3 | Does a claimed obligation survive a server crash and explicit reconciliation retries? |
+| [EP04: Many clients](ep04-many-clients/README.md) | C1.4 | What happens when ten client processes request three dollars from one dollar? |
+| [EP05: Denied operation](ep05-denied-operation/README.md) | C2.1 | Is there any way around a policy denial? |
+| [EP06: Approval reuse](ep06-approval-reuse/README.md) | C2.2 | Does one human approval cover more than one operation or amount? |
+| [EP07: Impersonation](ep07-impersonate-agent/README.md) | C3.1 | Can one agent spend from another agent's account? |
+| [EP08: Second session](ep08-cross-session/README.md) | C3.2 | Can a different session draw on this session's budget? |
+| [EP09: Raise own budget](ep09-raise-own-budget/README.md) | C5.1 | Can the agent raise its own budget or loosen its own policy? |
+| [EP10: Self-approval](ep10-self-approval/README.md) | C5.2 | Can the agent approve its own escalation? |
+| [EP11: Ledger rewrite](ep11-rewrite-ledger/README.md) | C5.3 | Can the agent delete, reverse or re-price recorded spend? |
+| [EP12: Misstated approval](ep12-misstated-approval/README.md) | C5.4 | Can the agent make the human approve something other than what runs? |
+
+A claim is **Verified** when every in-scope challenge holds, **Partially
+verified** when some do, **Unverified** when none have been shown, and **Does
+not hold** when any challenge fails. Out-of-scope challenges are not counted;
+planned, blocked and untested ones count as not holding.
 
 Each stable release gets a card in [cards/](cards/), starting with
 [v0.2.4](cards/v0.2.4.md), that ties measured outcomes to their exact scripts,

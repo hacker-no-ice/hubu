@@ -41,13 +41,12 @@ export default function ReleaseNotes() {
             <div><dt>Known authority limits</dt><dd>Registered agent accounts are not bound to an authenticated runtime or thread. The normal bearer can change budgets and policies. These known gaps are planned for future releases.</dd></div>
             <div><dt>Reproduction</dt><dd>Recorded on macOS with the pinned released source and public test scripts. No model subscription or provider credentials required. <a href="/releases/v0.2.4/report#reproduce">Setup and commands ↗</a></dd></div>
           </dl>
-          <MeasuredClaims release="v0.2.4" report={report} assessments={{
-            C2: { status: "not-tested", note: "No system-card experiment measured policy denial or human approval." },
-            C3: { status: "known-gap", note: "Registered agent accounts are not bound to an authenticated runtime or thread." },
-            C4: { status: "not-tested", note: "The experiments use a synthetic executor, so Gongbu’s credential custody is outside this analysis." },
-            C5: { status: "known-gap", note: "The normal bearer can change budgets and policies." },
-            C6: { status: "not-applicable", note: "Provider packs did not exist in v0.2.4; every provider was a built-in adapter." },
-          }} />
+          <MeasuredClaims release="v0.2.4" report={report} notes={{
+            C3: "Registered agent accounts are not bound to an authenticated runtime or thread.",
+            C5: "The normal bearer can change budgets and policies.",
+            C6: "Provider packs did not exist in v0.2.4; every provider was a built-in adapter.",
+          }}
+          documented={{ "C3.1": "known-gap", "C3.2": "known-gap", "C5.1": "known-gap" }} />
         </section>
         <footer className="engineering-article-footer proof-footer"><a href="/releases">← All release notes</a><a href={`${repository}/tree/${report.sourceCommit}`}>Released source · {report.sourceCommit.slice(0, 8)} ↗</a></footer>
       </article>

@@ -232,3 +232,7 @@
 .proof-claim-tag { margin: 22px 0 -12px 65px; color: var(--indigo); }
 @media (max-width: 900px) { .proof-claim-tag { margin-left: 48px; } }
 @media (max-width: 640px) { .proof-claim-tag { margin-left: 0; } }
+.release-claims-catalog { grid-template-columns: 1fr; }
+.release-claim .release-claim-count { margin-top: 8px; color: var(--muted); font: 12px/1.6 var(--font-geist-mono), monospace; }
+.release-challenge-id { display: inline-block; min-width: 34px; color: var(--dim); font: 11.5px/1 var(--font-geist-mono), monospace; }
+.release-claim .release-challenge-reason { color: var(--dim); font-size: 12px; margin-top: 8px; }
