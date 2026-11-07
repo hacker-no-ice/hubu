@@ -1,6 +1,7 @@
 import { EngineeringHeader } from "../../components/EngineeringHeader";
 import { documentMetadata } from "../../lib/metadata";
-import { report, type EpisodeId, type Verdict } from "./report";
+import { MeasuredClaims, systemCardKicker } from "../components/MeasuredClaims";
+import { report } from "./report";
 
 export const metadata = documentMetadata({
   title: "v0.2.4 release notes", href: "/releases/v0.2.4",
@@ -8,16 +9,6 @@ export const metadata = documentMetadata({
 });
 
 const repository = "https://github.com/hacker-no-ice/hubu";
-const verdicts: Record<Verdict, string> = {
-  holds: "Holds", "holds-with-caveat": "Holds with caveat", "does-not-hold": "Does not hold", "not-tested": "Not tested",
-};
-const claims: { id: EpisodeId; title: string; condition?: string }[] = [
-  { id: "ep01-runaway", title: "Budget exhaustion" },
-  { id: "ep02-last-cent", title: "Overrun accounting", condition: "Requires explicit owner reconciliation after lease expiry." },
-  { id: "ep03-crash-recovery", title: "Crash recovery" },
-  { id: "ep04-many-clients", title: "Shared-budget burst", condition: "The released HTTP server handles requests serially. This does not establish behavior under parallel server execution." },
-];
-
 export default function ReleaseNotes() {
   return <div className="engineering-shell">
     <EngineeringHeader section="releases" />
@@ -43,25 +34,14 @@ export default function ReleaseNotes() {
         </section>
 
         <section className="release-section" aria-labelledby="system-card-title">
-          <div className="release-section-heading"><h2 id="system-card-title">System card</h2><span className="proof-kicker">Recorded {report.recordedAt}</span></div>
+          <div className="release-section-heading"><h2 id="system-card-title">System card</h2><span className="proof-kicker">{systemCardKicker(report)}</span></div>
           <dl className="release-system-card">
-            <div><dt>Tested system</dt><dd>Hubu remains experimental and local-first. This run uses the released CLI and HTTP API, fresh SQLite, a synthetic external executor, and fixed USD budgets and policies.</dd></div>
-            <div><dt>Outside this analysis</dt><dd>USDC, governance-query coverage, Gongbu, Temporal, MCP transport, provider adapters, and actual provider billing. The four experiments do not qualify every new release feature.</dd></div>
-            <div><dt>Known authority limits</dt><dd>Registered agent accounts are not bound to an authenticated runtime or thread. The normal bearer can change budgets and policies. These known gaps are planned for future releases.</dd></div>
-            <div><dt>Reproduction</dt><dd>Recorded on macOS with the pinned released source and public test scripts. No model subscription or provider credentials required. <a href="/releases/v0.2.4/report#reproduce">Setup and commands ↗</a></dd></div>
+            <div><dt>Tested</dt><dd>Released CLI and HTTP API, fresh SQLite, a synthetic executor and fixed USD budgets.</dd></div>
+            <div><dt>Not covered</dt><dd>USDC, governance queries, Gongbu, MCP and real provider billing.</dd></div>
+            <div><dt>Known gaps</dt><dd>Agent accounts aren’t bound to a runtime (C3); the normal bearer can change budgets and policies (C5).</dd></div>
+            <div><dt>Reproduce</dt><dd>macOS, the released source, no provider credentials. <a href="/releases/v0.2.4/report#reproduce">Commands ↗</a></dd></div>
           </dl>
-          <p className="release-scope-note">These findings concern Hubu’s own ledger and records, not provider invoices. Each result applies only to its stated setup.</p>
-          <div className="release-claims">
-            {claims.map((claim) => {
-              const result = report.episodes[claim.id];
-              return <div className="release-claim" key={claim.id}>
-                <div><h3><a href={`/releases/v0.2.4/report#${claim.id}`}>{claim.title} <span aria-hidden="true">↗</span></a></h3><span className={`proof-verdict proof-verdict-${result.verdict}`}><span aria-hidden="true" />{verdicts[result.verdict]}</span></div>
-                <p>{result.summary}</p>
-                {claim.condition && <p className="release-condition">{claim.condition}</p>}
-              </div>;
-            })}
-          </div>
-          <div className="release-analysis-link"><div><h3>Full system analysis</h3><p>Inspect the setup, scripts, measured charts, captured output, raw evidence, and known identity gap.</p></div><a className="button primary" href="/releases/v0.2.4/report">Read the analysis <span aria-hidden="true">↗</span></a></div>
+          <MeasuredClaims release="v0.2.4" report={report} />
         </section>
         <footer className="engineering-article-footer proof-footer"><a href="/releases">← All release notes</a><a href={`${repository}/tree/${report.sourceCommit}`}>Released source · {report.sourceCommit.slice(0, 8)} ↗</a></footer>
       </article>

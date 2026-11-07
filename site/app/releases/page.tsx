@@ -15,6 +15,10 @@ export default function Releases() {
         <h1>Release notes.</h1>
         <p>What changed, what to know before upgrading, and what the recorded evidence supports.</p>
       </header>
+      <a className="proof-release-link" href="/releases/v0.2.5">
+        <div><span className="proof-kicker">Stable · November 6, 2026</span><h2>v0.2.5</h2></div>
+        <div><p>Provider packs, a larger image catalog, image editing, model and size policy tiers, saved artifacts, and a local admin web UI.</p><span className="proof-text-link">Read release notes and system card <span aria-hidden="true">↗</span></span></div>
+      </a>
       <a className="proof-release-link" href="/releases/v0.2.4">
         <div><span className="proof-kicker">Stable · October 19, 2026</span><h2>v0.2.4</h2></div>
         <div><p>Exact amounts, governance evidence, USDC budgets, and an updated executor contract.</p><span className="proof-text-link">Read release notes and system card <span aria-hidden="true">↗</span></span></div>

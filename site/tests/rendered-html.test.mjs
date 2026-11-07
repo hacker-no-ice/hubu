@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, readFile } from "node:fs/promises";
+import { access, readdir, readFile } from "node:fs/promises";
 import test from "node:test";
 import { waitForRevision } from "../scripts/verify-production-revision.mjs";
 
@@ -59,33 +59,32 @@ test("release notes lead from the landing page to one concise stable release and
   const hero = home.match(/<section class="hero">[\s\S]*?<\/section>/)?.[0];
   assert.ok(header);
   assert.ok(hero);
-  assert.match(header, /class="header-version" href="\/releases\/v0\.2\.4" aria-label="Read Hubu v0.2.4 release notes and system card"/);
-  assert.match(header, /v0\.2\.4 <span aria-hidden="true">↗<\/span>/);
+  assert.match(header, /class="header-version" href="\/releases\/v0\.2\.5" aria-label="Read Hubu v0.2.5 release notes and system card"/);
+  assert.match(header, /v0\.2\.5 <span aria-hidden="true">↗<\/span>/);
   assert.doesNotMatch(header, /\/ docs/);
-  assert.doesNotMatch(hero, /v0\.2\.4|hero-version/);
+  assert.doesNotMatch(hero, /v0\.2\.[45]|hero-version/);
   for (const html of [home, index, overview, docs, blog]) {
     assert.match(html, /href="\/releases"/);
     assert.doesNotMatch(html, /Break Hubu|href="\/break-hubu"|linear\.app|HUB-\d+/);
   }
+  assert.match(index, /href="\/releases\/v0.2.5"/);
   assert.match(index, /href="\/releases\/v0.2.4"/);
+  assert.ok(index.indexOf('href="/releases/v0.2.5"') < index.indexOf('href="/releases/v0.2.4"'));
   assert.doesNotMatch(index, /href="\/releases\/v0\.2\.[0-3]/);
   assert.match(overview, /What changed/);
   assert.match(overview, /System card/);
-  assert.match(overview, /Hubu remains experimental and local-first/);
+  assert.match(overview, /synthetic executor and fixed USD budgets/);
   assert.match(overview, /CHANGELOG\.md#v024--2026-10-19/);
   assert.match(overview, /href="\/docs\/operations\/upgrading-to-v0.2.4"/);
   assert.match(overview, /Storage migrations are one-way/);
-  assert.match(overview, /governance-query coverage/);
-  assert.match(overview, /four experiments do not qualify every new release feature/);
+  assert.match(overview, /USDC, governance queries, Gongbu/);
   assert.match(overview, /Wallet rails remain USD-only/);
-  assert.match(overview, /Registered agent accounts are not bound/);
+  assert.match(overview, /Agent accounts aren’t bound to a runtime/);
   assert.match(overview, /normal bearer can change budgets and policies/);
-  assert.match(overview, /handles requests serially/);
-  assert.match(overview, /Requires explicit owner reconciliation/);
   assert.match(overview, /href="\/releases\/v0.2.4\/report"/);
   assert.ok(overview.indexOf('id="changes-title"') < overview.indexOf('id="system-card-title"'));
   assert.doesNotMatch(overview, /<svg|Captured terminal excerpt/);
-  for (const path of ["/releases", "/releases/v0.2.4", "/releases/v0.2.4/report"]) {
+  for (const path of ["/releases", "/releases/v0.2.5", "/releases/v0.2.4", "/releases/v0.2.4/report"]) {
     assert.ok(sitemap.includes(`https://hubustack.dev${path}</loc>`));
   }
   assert.doesNotMatch(sitemap, /\/break-hubu/);
@@ -94,6 +93,107 @@ test("release notes lead from the landing page to one concise stable release and
   for (const path of ["/break-hubu", "/break-hubu/v0.2.4", "/releases/v0.2.3"]) {
     assert.equal((await render(path)).status, 404);
   }
+});
+
+test("the mascot history links the governed variations before the evolution article", async () => {
+  const response = await render("/mascot");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /<h1>How the mascot evolved\.<\/h1>/);
+  for (const src of ["/demos/local-stack/concepts-builtin.png", "/brand/hubu-mascot.png", "/demos/local-stack/mascot-flux-ledger.jpg", "/demos/local-stack/mascot-gemini-blocked.jpg", "/brand/hubu-mascot-evolved.jpg"]) {
+    assert.ok(html.includes(`src="${src}"`), src);
+  }
+  const variations = html.indexOf('href="/demos/local-stack#mascot-gallery"');
+  const article = html.indexOf('href="https://x.com/hacker_no_ice/status/2118507555794374942"');
+  assert.ok(variations > 0 && article > variations);
+  assert.match(html, /href="https:\/\/hubustack.dev\/mascot"/);
+  const sitemap = await readFile(new URL("../dist/client/sitemap.xml", import.meta.url), "utf8");
+  assert.ok(sitemap.includes("https://hubustack.dev/mascot</loc>"));
+});
+
+test("v0.2.5 release notes summarize the release and its upgrade", async () => {
+  const response = await render("/releases/v0.2.5");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /<h1>Hubu v0.2.5<\/h1>/);
+  assert.match(html, /CHANGELOG\.md#v025--2026-11-06/);
+  assert.match(html, /href="\/docs\/operations\/upgrading-to-v0.2.5"/);
+  assert.match(html, /drain unfinished Gongbu work/);
+  assert.ok(html.indexOf('id="changes-title"') < html.indexOf('id="system-card-title"'));
+  assert.match(html, /No live provider calls/);
+  assert.match(html, /Agent accounts aren’t bound to a runtime/);
+  assert.match(html, /normal bearer can change budgets and policies/);
+  assert.match(html, /href="https:\/\/hubustack.dev\/releases\/v0.2.5"/);
+  assert.doesNotMatch(html, /Break Hubu|linear\.app|HUB-\d+/);
+});
+
+// Release notes show six claims; the analysis shows every challenge. Each claim's
+// tier follows the challenge rule, and both pages agree.
+function claimTiers(html) {
+  return Object.fromEntries([...html.matchAll(/id="claim-(c\d)"[\s\S]*?data-tier="([a-z-]+)"/g)].map((m) => [m[1], m[2]]));
+}
+
+test("release system cards match their measured or unmeasured report", async () => {
+  const releasesDir = new URL("../app/releases/", import.meta.url);
+  const catalog = JSON.parse(await readFile(new URL("claims.json", releasesDir), "utf8"));
+  const sitemap = await readFile(new URL("../dist/client/sitemap.xml", import.meta.url), "utf8");
+  const releases = (await readdir(releasesDir, { withFileTypes: true }))
+    .filter((entry) => entry.isDirectory() && /^v\d+\.\d+\.\d+$/.test(entry.name)).map((entry) => entry.name);
+  let checked = 0;
+  for (const release of releases) {
+    const page = await readFile(new URL(`${release}/page.tsx`, releasesDir), "utf8");
+    if (!page.includes("MeasuredClaims")) continue;
+    checked += 1;
+    const reportSource = await readFile(new URL(`${release}/report.ts`, releasesDir), "utf8");
+    const measured = !reportSource.includes("export const report = null as ReleaseReport | null;");
+    const html = await (await render(`/releases/${release}`)).text();
+    const escaped = release.replaceAll(".", "\\.");
+    const card = html.match(/<ul class="release-claim-summary">[\s\S]*?<\/ul>/)?.[0];
+    assert.ok(card, release);
+    const cardTiers = claimTiers(card);
+    assert.deepEqual(Object.keys(cardTiers), ["c1", "c2", "c3", "c4", "c5", "c6"], release);
+    assert.doesNotMatch(card, /data-status=/, `${release} card lists challenges`);
+    const reportPage = await render(`/releases/${release}/report`);
+    if (measured) {
+      const analysis = await reportPage.text();
+      assert.equal(reportPage.status, 200, release);
+      const report = JSON.parse(reportSource.slice(reportSource.indexOf("= {") + 2, reportSource.lastIndexOf(";")));
+      const sections = analysis.split(/(?=<section class="claim-detail" id="claim-c\d")/).slice(1).map((section) => section.split("</section>")[0]);
+      assert.equal(sections.length, 6, release);
+      const shown = {};
+      for (const [index, section] of sections.entries()) {
+        const id = `C${index + 1}`;
+        const tier = section.match(/data-tier="([a-z-]+)"/)[1];
+        const statuses = [...section.matchAll(/data-status="([a-z-]+)"/g)].map((match) => match[1]);
+        const own = catalog.challenges.filter((challenge) => challenge.claim === id);
+        assert.equal(statuses.length, own.length, `${release} ${id} challenge count`);
+        own.forEach((challenge, i) => { shown[challenge.id] = statuses[i]; });
+        const inScope = statuses.filter((status) => status !== "out-of-scope");
+        const held = inScope.filter((status) => status.startsWith("holds")).length;
+        const failed = inScope.some((status) => status === "does-not-hold" || status === "known-gap");
+        const expected = failed ? "does-not-hold" : inScope.length && held === inScope.length ? "verified" : held ? "partially-verified" : "unverified";
+        assert.equal(tier, expected, `${release} ${id} tier`);
+        assert.equal(cardTiers[`c${index + 1}`], tier, `${release} ${id} card and analysis agree`);
+        assert.match(card, new RegExp(`${held} of ${inScope.length} challenges hold`));
+        assert.match(card, new RegExp(`href="/releases/${escaped}/report#claim-c${index + 1}"`));
+      }
+      for (const challenge of catalog.challenges) {
+        if (challenge.status === "out-of-scope") assert.equal(shown[challenge.id], "out-of-scope");
+        if (challenge.kit && report.episodes[challenge.kit]) assert.equal(shown[challenge.id], report.episodes[challenge.kit].verdict, `${release} ${challenge.id}`);
+      }
+      assert.match(html, /Recorded \d{4}-\d{2}-\d{2}/);
+      assert.match(analysis, new RegExp(`<h1>${escaped} system analysis</h1>`));
+      assert.ok(sitemap.includes(`https://hubustack.dev/releases/${release}/report</loc>`), release);
+    } else {
+      assert.ok(Object.values(cardTiers).every((tier) => tier === "unverified" || tier === "does-not-hold"), release);
+      assert.match(html, /Measured run pending/);
+      assert.match(html, /no challenge counts as holding/);
+      assert.doesNotMatch(html, new RegExp(`href="/releases/${escaped}/report`));
+      assert.equal(reportPage.status, 404, release);
+      assert.ok(!sitemap.includes(`https://hubustack.dev/releases/${release}/report</loc>`), release);
+    }
+  }
+  assert.ok(checked >= 1);
 });
 
 test("the detailed system analysis keeps reproducibility and authority limits alongside its claims", async () => {
@@ -115,6 +215,8 @@ test("the detailed system analysis keeps reproducibility and authority limits al
   assert.match(html, /not server-enforced role isolation/);
   assert.match(html, /Does not hold/);
   assert.match(html, /a timeout never counts as a denial/i);
+  assert.match(html, /handles requests serially/);
+  assert.match(html, /Requires explicit owner reconciliation/);
   assert.doesNotMatch(html, /All claims pass|100% secure|autoplay|setInterval/);
 });
 
@@ -147,10 +249,11 @@ test("home page walks through an illustrative governed image request", async () 
   assert.ok(html.indexOf('id="worked-example-title"') < html.indexOf('id="intro-video-title"'));
   const mascot = html.match(/<figure class="example-mascot">[\s\S]*?<\/figure>/)?.[0];
   assert.ok(mascot);
-  assert.match(mascot, /src="\/brand\/hubu-mascot.png"/);
+  assert.match(mascot, /src="\/brand\/hubu-mascot-evolved.jpg"/);
   assert.match(mascot, /loading="lazy"/);
-  assert.match(mascot, /alt="Hubu&#x27;s cream-and-jade seal mascot on a cinnabar base"/);
-  assert.match(mascot, /href="\/demos\/local-stack"/);
+  assert.match(mascot, /alt="Hubu&#x27;s cream-and-jade seal mascot on a cinnabar base, with violet and cyan glowing edges"/);
+  assert.match(mascot, /href="\/mascot"/);
+  assert.doesNotMatch(mascot, /x\.com|href="\/demos\/local-stack"/);
 });
 
 test("links demos from home and publishes the sandbox video before its concise script", async () => {
