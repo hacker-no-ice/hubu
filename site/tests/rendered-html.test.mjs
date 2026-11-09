@@ -183,6 +183,8 @@ test("release system cards match their measured or unmeasured report", async () 
       }
       assert.match(html, /Recorded \d{4}-\d{2}-\d{2}/);
       assert.match(analysis, new RegExp(`<h1>${escaped} system analysis</h1>`));
+      assert.match(analysis, /<h2 id="results-title">Six claims, judged by their challenges\.<\/h2>/, `${release} headline`);
+      assert.doesNotMatch(analysis, /tests\. One known gap/, `${release} stale headline`);
       assert.ok(sitemap.includes(`https://hubustack.dev/releases/${release}/report</loc>`), release);
     } else {
       assert.ok(Object.values(cardTiers).every((tier) => tier === "unverified" || tier === "does-not-hold"), release);
