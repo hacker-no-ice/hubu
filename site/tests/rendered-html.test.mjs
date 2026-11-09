@@ -99,7 +99,7 @@ test("the mascot history links the governed variations before the evolution arti
   const response = await render("/mascot");
   assert.equal(response.status, 200);
   const html = await response.text();
-  assert.match(html, /<h1>How the mascot evolved\.<\/h1>/);
+  assert.match(html, /<h1>How Marty evolved\.<\/h1>/);
   for (const src of ["/demos/local-stack/concepts-builtin.png", "/brand/hubu-mascot.png", "/demos/local-stack/mascot-flux-ledger.jpg", "/demos/local-stack/mascot-gemini-blocked.jpg", "/brand/hubu-mascot-evolved.jpg"]) {
     assert.ok(html.includes(`src="${src}"`), src);
   }
@@ -253,7 +253,8 @@ test("home page walks through an illustrative governed image request", async () 
   assert.ok(mascot);
   assert.match(mascot, /src="\/brand\/hubu-mascot-evolved.jpg"/);
   assert.match(mascot, /loading="lazy"/);
-  assert.match(mascot, /alt="Hubu&#x27;s cream-and-jade seal mascot on a cinnabar base, with violet and cyan glowing edges"/);
+  assert.match(mascot, /<figcaption>Marty, Hubu&#x27;s mascot/);
+  assert.match(mascot, /alt="Marty, Hubu&#x27;s cream-and-jade seal mascot on a cinnabar base, with violet and cyan glowing edges"/);
   assert.match(mascot, /href="\/mascot"/);
   assert.doesNotMatch(mascot, /x\.com|href="\/demos\/local-stack"/);
 });
