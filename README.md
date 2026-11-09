@@ -201,7 +201,7 @@ explains each one. Inspect what Hubu recorded with
 
 ## Development
 
-Hubu and Gongbu share one Cargo workspace (MSRV Rust 1.88). Install `protoc`,
+Hubu and Gongbu share one Cargo workspace (MSRV Rust 1.89). Install `protoc`,
 then run from the repository root:
 
 ```sh

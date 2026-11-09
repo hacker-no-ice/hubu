@@ -10,7 +10,7 @@ cat > "$proof_dir/Cargo.toml" <<'EOF'
 name = "hubu-security-proof"
 version = "0.0.0"
 edition = "2021"
-rust-version = "1.88"
+rust-version = "1.89"
 publish = false
 license = "MIT"
 
@@ -50,7 +50,7 @@ PY
 cmp "$proof_dir/manifest.before" "$proof_dir/Cargo.toml"
 cmp "$proof_dir/policy.before" "$proof_dir/deny.toml"
 cargo deny --manifest-path "$proof_dir/Cargo.toml" --all-features --locked check advisories licenses sources
-cargo +1.88.0 check --manifest-path "$proof_dir/Cargo.toml" --all-targets --all-features --locked
+cargo +1.89.0 check --manifest-path "$proof_dir/Cargo.toml" --all-targets --all-features --locked
 cargo test --manifest-path "$proof_dir/Cargo.toml" --all-targets --locked
 cat "$proof_dir/fix.md"
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then

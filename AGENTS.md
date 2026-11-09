@@ -42,7 +42,7 @@ commands from the repository root and use package selectors such as
 `-p gongbu-api` for component-focused work. Do not require or document a
 separate Gongbu checkout, lockfile, toolchain, CI workflow, or release version.
 
-The workspace MSRV is Rust 1.88. Keep root `Cargo.toml`, `Cargo.lock`, CI, and
+The workspace MSRV is Rust 1.89. Keep root `Cargo.toml`, `Cargo.lock`, CI, and
 runbooks consistent when changing dependencies or toolchain requirements.
 Install `protoc` before building Gongbu/Temporal code.
 
