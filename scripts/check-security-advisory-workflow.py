@@ -115,7 +115,7 @@ if not re.search(r"cargo install cargo-deny --version ['\"]=?0\.20\.2['\"] --loc
 
 for required in (
     "scripts/security-advisories.py",
-    "cargo +1.88.0 check --workspace --all-targets --all-features --locked",
+    "cargo +1.89.0 check --workspace --all-targets --all-features --locked",
     "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings",
     "cargo test --workspace --all-targets --locked",
     "cargo build --release --locked",

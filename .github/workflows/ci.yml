@@ -199,7 +199,7 @@ jobs:
           exit "${status}"
 
   msrv:
-    name: Check MSRV (Rust 1.88.0)
+    name: Check MSRV (Rust 1.89.0)
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -210,18 +210,18 @@ jobs:
         run: sudo apt-get update && sudo apt-get install --yes protobuf-compiler
 
       - name: Install MSRV toolchain
-        run: rustup toolchain install 1.88.0 --profile minimal
+        run: rustup toolchain install 1.89.0 --profile minimal
 
       - name: Restore Rust dependency cache
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         env:
-          RUSTUP_TOOLCHAIN: 1.88.0
+          RUSTUP_TOOLCHAIN: 1.89.0
         with:
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           cache-bin: false
 
       - name: Check workspace with MSRV
-        run: cargo +1.88.0 check --workspace --all-targets --all-features --locked
+        run: cargo +1.89.0 check --workspace --all-targets --all-features --locked
 
   security:
     name: Security policy
