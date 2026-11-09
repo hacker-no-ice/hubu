@@ -131,7 +131,7 @@ Merge a Dependabot PR only when every one of these holds:
    [repository security controls](repository-security.md#dependencies-and-github-actions).
 5. The PR is up to date with `main` (merge state `CLEAN`), and every check on
    its current head passed or was skipped by its own path filters. This
-   includes `Test workspace`, `Check MSRV (Rust 1.88.0)` and `Security policy`,
+   includes `Test workspace`, `Check MSRV (Rust 1.89.0)` and `Security policy`,
    which the ruleset requires, and `Validate site` whenever `site/` changed.
 6. The update doesn't raise the workspace MSRV, the Node engine in
    `site/package.json`, or a pinned toolchain, and doesn't touch `deny.toml`.
