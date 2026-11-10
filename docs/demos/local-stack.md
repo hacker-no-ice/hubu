@@ -16,7 +16,7 @@ This companion script summarizes the recording, not installation steps. Waiting 
 
 ### 1. Real providers, bounded spending
 
-Hubu governs how AI agents spend money. Here, an agent iterates on a Hubu mascot using FLUX and Gemini. Hubu, Gongbu, and Temporal run locally; image generation uses live, billable providers.
+Hubu governs how AI agents spend money. Here, an agent iterates on Marty, Hubu's mascot, using FLUX and Gemini. Hubu, Gongbu, and Temporal run locally; image generation uses live, billable providers.
 
 The demo policy permits approved USD image-generation scopes through Gongbu. Requests below 4¢ are automatically allowed, requests above 15¢ are denied, and the middle range requires human approval. These are limits on the requested authorization cap, not the eventual settled cost.
 
@@ -48,12 +48,12 @@ Compare the generated images and review the decisions, settled costs, and remain
 
 ## Mascot gallery
 
-The original mascot is the starting design. The FLUX and Gemini variations below are artifacts from the governed requests in this demo. Select an image to view it full size.
+Marty, Hubu's cream-and-jade seal mascot, is the starting design. The FLUX and Gemini variations below are artifacts from the governed requests in this demo. Select an image to view it full size.
 
 <div class="demo-gallery">
 <figure class="original-mascot">
-<a href="/brand/hubu-mascot.png"><img src="/brand/hubu-mascot.png" alt="Original cream-and-jade Hubu seal mascot on a cinnabar base" width="1388" height="1133" loading="lazy" decoding="async"></a>
-<figcaption><strong>Original mascot</strong><span>The selected seal design, before the demo's iterations.</span></figcaption>
+<a href="/brand/hubu-mascot.png"><img src="/brand/hubu-mascot.png" alt="Marty, Hubu's cream-and-jade seal mascot on a cinnabar base" width="1388" height="1133" loading="lazy" decoding="async"></a>
+<figcaption><strong>Marty · original design</strong><span>The selected seal design, before the demo's iterations.</span></figcaption>
 </figure>
 <figure>
 <a href="/demos/local-stack/mascot-flux-ledger.jpg"><img src="/demos/local-stack/mascot-flux-ledger.jpg" alt="FLUX-generated Hubu mascot holding a green ledger" width="1024" height="1024" loading="lazy" decoding="async"></a>

@@ -24,7 +24,7 @@ EXPECTED_PACKAGES = {
     "hubu-wallet",
     "hubu-ledger",
 }
-EXPECTED_RUST_VERSION = "1.88"
+EXPECTED_RUST_VERSION = "1.89"
 
 
 def fail(message: str) -> None:

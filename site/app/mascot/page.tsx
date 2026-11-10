@@ -3,8 +3,8 @@ import { EngineeringHeader } from "../components/EngineeringHeader";
 import { documentMetadata } from "../lib/metadata";
 
 export const metadata = documentMetadata({
-  title: "How the mascot evolved", href: "/mascot",
-  description: "How Hubu's seal mascot went from a concept sheet to governed variations to a design that matches the wordmark.",
+  title: "How Marty evolved", href: "/mascot",
+  description: "How Marty, Hubu's seal mascot, went from a concept sheet to governed variations to a design that matches the wordmark.",
 });
 
 const articleUrl = "https://x.com/hacker_no_ice/status/2118507555794374942";
@@ -15,13 +15,13 @@ type Stage = { title: string; copy: string; images: Image[]; link?: { href: stri
 const stages: Stage[] = [
   {
     title: "A concept sheet",
-    copy: "The mascot started as one of five concepts from a built-in image generator: a treasurer, a seal, a guardian, an owl, and an ink spirit. The seal was selected.",
+    copy: "Marty started as one of five concepts from a built-in image generator: a treasurer, a seal, a guardian, an owl, and an ink spirit. The seal was selected.",
     images: [{ src: "/demos/local-stack/concepts-builtin.png", width: 1536, height: 1024, alt: "Built-in image generator's five Hubu mascot concepts: treasurer, seal, guardian, owl, and ink spirit", caption: "Initial concept sheet, including the seal.", tone: "light" }],
   },
   {
     title: "The original seal",
-    copy: "A cream-and-jade seal resting on a cinnabar base became Hubu's first mascot.",
-    images: [{ src: "/brand/hubu-mascot.png", width: 1388, height: 1133, alt: "Original cream-and-jade Hubu seal mascot on a cinnabar base", caption: "The original mascot." }],
+    copy: "A cream-and-jade seal resting on a cinnabar base became Marty, Hubu's mascot.",
+    images: [{ src: "/brand/hubu-mascot.png", width: 1388, height: 1133, alt: "Marty's original cream-and-jade seal design on a cinnabar base", caption: "Marty’s original design." }],
   },
   {
     title: "Governed variations",
@@ -35,7 +35,7 @@ const stages: Stage[] = [
   {
     title: "Evolved to match the wordmark",
     copy: "The seal then evolved to share the wordmark’s theme, with violet and cyan light along its jade swirls.",
-    images: [{ src: "/brand/hubu-mascot-evolved.jpg", width: 1254, height: 975, alt: "Evolved Hubu seal mascot on a cinnabar base, with violet and cyan glowing edges", caption: "The current mascot.", tone: "evolved" }],
+    images: [{ src: "/brand/hubu-mascot-evolved.jpg", width: 1254, height: 975, alt: "Marty, Hubu's evolved seal mascot on a cinnabar base, with violet and cyan glowing edges", caption: "Marty’s current design.", tone: "evolved" }],
     link: { href: articleUrl, label: "Read how it evolved ↗", external: true },
   },
 ];
@@ -47,8 +47,8 @@ export default function MascotHistory() {
       <article className="engineering-article-inner">
         <header className="mascot-history-heading">
           <a className="engineering-back" href="/">← Home</a>
-          <p className="eyebrow"><span /> Hubu&apos;s mascot</p>
-          <h1>How the mascot evolved.</h1>
+          <p className="eyebrow"><span /> Marty, Hubu&apos;s mascot</p>
+          <h1>How Marty evolved.</h1>
           <p className="engineering-deck">From a concept sheet, through variations an agent made under Hubu&apos;s spending rules, to a design that matches the wordmark.</p>
         </header>
         <ol className="mascot-timeline">
