@@ -1,0 +1,76 @@
+name: Merge guard
+
+# Fails a pull request labeled `merge:auto` if it changes any path listed in
+# .github/auto-merge-blocklist. Make "Merge guard" a required check so a
+# failing run also stops GitHub auto-merge. PRs without the label always pass.
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: merge-guard-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  guard:
+    name: Merge guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Skip unless labeled merge:auto
+        id: label
+        env:
+          AUTO: ${{ contains(github.event.pull_request.labels.*.name, 'merge:auto') }}
+        run: |
+          echo "auto=${AUTO}" >> "$GITHUB_OUTPUT"
+          if [ "${AUTO}" != "true" ]; then
+            echo "Not labeled merge:auto; nothing to check."
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.label.outputs.auto == 'true'
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check changed paths against the blocklist
+        if: steps.label.outputs.auto == 'true'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # Read the blocklist from the base branch so a PR cannot loosen it
+          # in the same change.
+          git show "${BASE_SHA}:.github/auto-merge-blocklist" \
+            | sed -e 's/#.*//' -e 's/[[:space:]]*$//' | grep -v '^$' > /tmp/blocklist
+
+          git diff --name-only "${BASE_SHA}...${HEAD_SHA}" > /tmp/changed
+
+          blocked=0
+          while IFS= read -r file; do
+            while IFS= read -r entry; do
+              if [ "${entry%/}" != "${entry}" ]; then
+                case "${file}" in "${entry}"*) match=1 ;; *) match=0 ;; esac
+              else
+                [ "${file}" = "${entry}" ] && match=1 || match=0
+              fi
+              if [ "${match}" = 1 ]; then
+                echo "::error file=${file}::${file} is on the auto-merge blocklist (${entry})"
+                blocked=1
+                break
+              fi
+            done < /tmp/blocklist
+          done < /tmp/changed
+
+          if [ "${blocked}" = 1 ]; then
+            echo "This PR is labeled merge:auto but changes blocklisted paths."
+            echo "Switch the label to merge:manual for owner review."
+            exit 1
+          fi
+          echo "No blocklisted paths changed."
