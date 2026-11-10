@@ -8,8 +8,8 @@
       "failed": 0
     },
     "C2": {
-      "tier": "unverified",
-      "held": 0,
+      "tier": "verified",
+      "held": 2,
       "total": 2,
       "failed": 0
     },
@@ -27,7 +27,7 @@
     },
     "C5": {
       "tier": "does-not-hold",
-      "held": 0,
+      "held": 3,
       "total": 5,
       "failed": 1
     },
@@ -42,6 +42,14 @@
     "ep01-runaway": "holds",
     "ep02-last-cent": "holds-with-caveat",
     "ep03-crash-recovery": "holds",
-    "ep04-many-clients": "holds-with-caveat"
+    "ep04-many-clients": "holds-with-caveat",
+    "ep05-denied-operation": "holds",
+    "ep06-approval-reuse": "holds",
+    "ep07-impersonate-agent": "does-not-hold",
+    "ep08-cross-session": "does-not-hold",
+    "ep09-raise-own-budget": "does-not-hold",
+    "ep10-self-approval": "holds",
+    "ep11-rewrite-ledger": "holds-with-caveat",
+    "ep12-misstated-approval": "holds-with-caveat"
   }
 }

@@ -347,6 +347,343 @@ export const report: ReleaseReport = {
           "href": "/break-hubu/evidence/v0.2.5/ep04-many-clients/run.json"
         }
       ]
+    },
+    "ep05-denied-operation": {
+      "verdict": "holds",
+      "execution": "complete",
+      "caveat": "This covers Hubu’s decision and executor contract. Whether Gongbu also refuses to run denied work is part of the planned Gongbu harness.",
+      "summary": "9 of 9 checks held.",
+      "metrics": [
+        {
+          "label": "Checks held",
+          "value": "9 / 9"
+        }
+      ],
+      "visual": null,
+      "terminal": "[2026-11-09T19:25:42.119592+00:00] $ /Users/runner/work/_temp/build-cache/v0.2.5/target/release/hubu --url http://127.0.0.1:49179 budget list\n[2026-11-09T19:25:42.135346+00:00]   budget_id: bgt_dy822mba4adc  agent_id: agt_bb1rm0wg6d34  status: active\n    limit: $5.00  consumed: $0.01  frozen: $0.00  remaining: $4.99\n    current_version_id: bgv_8ake6mmt5z0e  current_revision: 1\n    period: 2026-11-09T19:25:41.137906+00:00 -> 2999-01-01T00:00:00+00:00\nCLI exit=0\n",
+      "evidence": [
+        {
+          "label": "Full transcript",
+          "href": "/break-hubu/evidence/v0.2.5/ep05-denied-operation/transcript.txt"
+        },
+        {
+          "label": "Request trace",
+          "href": "/break-hubu/evidence/v0.2.5/ep05-denied-operation/requests.jsonl"
+        },
+        {
+          "label": "Verification result",
+          "href": "/break-hubu/evidence/v0.2.5/ep05-denied-operation/result.json"
+        },
+        {
+          "label": "Final ledger (page 1)",
+          "href": "/break-hubu/evidence/v0.2.5/ep05-denied-operation/snapshots/final/ledger-001.json"
+        },
+        {
+          "label": "Final budget",
+          "href": "/break-hubu/evidence/v0.2.5/ep05-denied-operation/snapshots/final/budgets.json"
+        },
+        {
+          "label": "Run provenance",
+          "href": "/break-hubu/evidence/v0.2.5/ep05-denied-operation/run.json"
+        }
+      ]
+    },
+    "ep06-approval-reuse": {
+      "verdict": "holds",
+      "execution": "complete",
+      "caveat": "The owner approves through the approval capability over HTTP; the human-facing notification and review screens are outside this test.",
+      "summary": "12 of 12 checks held.",
+      "metrics": [
+        {
+          "label": "Checks held",
+          "value": "12 / 12"
+        }
+      ],
+      "visual": null,
+      "terminal": "[2026-11-09T19:25:44.049497+00:00] $ /Users/runner/work/_temp/build-cache/v0.2.5/target/release/hubu --url http://127.0.0.1:49211 budget list\n[2026-11-09T19:25:44.059498+00:00]   budget_id: bgt_cnpmxpcp9c0s  agent_id: agt_cc50jwfcs68g  status: active\n    limit: $1.00  consumed: $0.10  frozen: $0.00  remaining: $0.90\n    current_version_id: bgv_wvbr2sya8c5c  current_revision: 1\n    period: 2026-11-09T19:25:43.737152+00:00 -> 2999-01-01T00:00:00+00:00\nCLI exit=0\n",
+      "evidence": [
+        {
+          "label": "Full transcript",
+          "href": "/break-hubu/evidence/v0.2.5/ep06-approval-reuse/transcript.txt"
+        },
+        {
+          "label": "Request trace",
+          "href": "/break-hubu/evidence/v0.2.5/ep06-approval-reuse/requests.jsonl"
+        },
+        {
+          "label": "Verification result",
+          "href": "/break-hubu/evidence/v0.2.5/ep06-approval-reuse/result.json"
+        },
+        {
+          "label": "Final ledger (page 1)",
+          "href": "/break-hubu/evidence/v0.2.5/ep06-approval-reuse/snapshots/final/ledger-001.json"
+        },
+        {
+          "label": "Final budget",
+          "href": "/break-hubu/evidence/v0.2.5/ep06-approval-reuse/snapshots/final/budgets.json"
+        },
+        {
+          "label": "Run provenance",
+          "href": "/break-hubu/evidence/v0.2.5/ep06-approval-reuse/run.json"
+        }
+      ]
+    },
+    "ep07-impersonate-agent": {
+      "verdict": "does-not-hold",
+      "execution": "complete",
+      "caveat": "Hubu agents share one bearer credential and Hubu does not bind an account to an authenticated runtime or thread; this experiment measures that known gap.",
+      "summary": "Failed checks: a request naming another agent's account is refused; the other agent's budget is never charged. 3 of 5 checks held.",
+      "metrics": [
+        {
+          "label": "Checks held",
+          "value": "3 / 5"
+        }
+      ],
+      "visual": null,
+      "terminal": "[2026-11-09T19:25:45.178839+00:00] $ /Users/runner/work/_temp/build-cache/v0.2.5/target/release/hubu --url http://127.0.0.1:49246 budget list\n[2026-11-09T19:25:45.189681+00:00]   budget_id: bgt_y7mzgfvmhmt6  agent_id: agt_tvrjgx7ysc1q  status: active\n    limit: $0.10  consumed: $0.00  frozen: $0.00  remaining: $0.10\n    current_version_id: bgv_vqkv3cyspaas  current_revision: 1\n    period: 2026-11-09T19:25:44.855615+00:00 -> 2999-01-01T00:00:00+00:00\n  budget_id: bgt_apnjt2ke8xma  agent_id: agt_dvyv0fck078r  status: active\n    limit: $1.00  consumed: $0.05  frozen: $0.00  remaining: $0.95\n    current_version_id: bgv_270gkwn4t15t  current_revision: 1\n    period: 2026-11-09T19:25:44.902986+00:00 -> 2999-01-01T00:00:00+00:00\nCLI exit=0\n",
+      "evidence": [
+        {
+          "label": "Full transcript",
+          "href": "/break-hubu/evidence/v0.2.5/ep07-impersonate-agent/transcript.txt"
+        },
+        {
+          "label": "Request trace",
+          "href": "/break-hubu/evidence/v0.2.5/ep07-impersonate-agent/requests.jsonl"
+        },
+        {
+          "label": "Verification result",
+          "href": "/break-hubu/evidence/v0.2.5/ep07-impersonate-agent/result.json"
+        },
+        {
+          "label": "Final ledger (page 1)",
+          "href": "/break-hubu/evidence/v0.2.5/ep07-impersonate-agent/snapshots/final/ledger-001.json"
+        },
+        {
+          "label": "Final budget",
+          "href": "/break-hubu/evidence/v0.2.5/ep07-impersonate-agent/snapshots/final/budgets.json"
+        },
+        {
+          "label": "Run provenance",
+          "href": "/break-hubu/evidence/v0.2.5/ep07-impersonate-agent/run.json"
+        }
+      ]
+    },
+    "ep08-cross-session": {
+      "verdict": "does-not-hold",
+      "execution": "complete",
+      "caveat": "Hubu has no session identity of its own in this release; strong session binding is planned for a future release.",
+      "summary": "Failed checks: a second session cannot draw that budget without its own runtime-bound identity. 3 of 4 checks held.",
+      "metrics": [
+        {
+          "label": "Checks held",
+          "value": "3 / 4"
+        }
+      ],
+      "visual": null,
+      "terminal": "[2026-11-09T19:25:46.616650+00:00] $ /Users/runner/work/_temp/build-cache/v0.2.5/target/release/hubu --url http://127.0.0.1:49276 budget list\n[2026-11-09T19:25:46.626024+00:00]   budget_id: bgt_zsw804p4vg92  agent_id: agt_am2ah30db5g5  status: exhausted\n    limit: $0.10  consumed: $0.00  frozen: $0.10  remaining: $0.00\n    current_version_id: bgv_t038e6t2bh59  current_revision: 1\n    period: 2026-11-09T19:25:46.236680+00:00 -> 2999-01-01T00:00:00+00:00\nCLI exit=0\n",
+      "evidence": [
+        {
+          "label": "Full transcript",
+          "href": "/break-hubu/evidence/v0.2.5/ep08-cross-session/transcript.txt"
+        },
+        {
+          "label": "Request trace",
+          "href": "/break-hubu/evidence/v0.2.5/ep08-cross-session/requests.jsonl"
+        },
+        {
+          "label": "Verification result",
+          "href": "/break-hubu/evidence/v0.2.5/ep08-cross-session/result.json"
+        },
+        {
+          "label": "Final ledger (page 1)",
+          "href": "/break-hubu/evidence/v0.2.5/ep08-cross-session/snapshots/final/ledger-001.json"
+        },
+        {
+          "label": "Final budget",
+          "href": "/break-hubu/evidence/v0.2.5/ep08-cross-session/snapshots/final/budgets.json"
+        },
+        {
+          "label": "Run provenance",
+          "href": "/break-hubu/evidence/v0.2.5/ep08-cross-session/run.json"
+        }
+      ]
+    },
+    "ep09-raise-own-budget": {
+      "verdict": "does-not-hold",
+      "execution": "complete",
+      "caveat": "The normal bearer has administrative authority in this release; separating owner and agent credentials is planned. This experiment measures that known gap.",
+      "summary": "Failed checks: the agent credential cannot raise its own budget; the agent credential cannot replace its own policy. 1 of 4 checks held.",
+      "metrics": [
+        {
+          "label": "Checks held",
+          "value": "1 / 4"
+        }
+      ],
+      "visual": null,
+      "terminal": "[2026-11-09T19:25:47.609482+00:00] $ /Users/runner/work/_temp/build-cache/v0.2.5/target/release/hubu --url http://127.0.0.1:49302 budget list\n[2026-11-09T19:25:47.619361+00:00]   budget_id: bgt_0peb3fzcs59y  agent_id: agt_zxgbtqxyq70r  status: active\n    limit: $100.00  consumed: $0.00  frozen: $0.50  remaining: $99.50\n    current_version_id: bgv_hw7cxe9qrp8s  current_revision: 2\n    period: 2026-11-09T19:25:47.358849+00:00 -> 2999-01-01T00:00:00+00:00\nCLI exit=0\n",
+      "evidence": [
+        {
+          "label": "Full transcript",
+          "href": "/break-hubu/evidence/v0.2.5/ep09-raise-own-budget/transcript.txt"
+        },
+        {
+          "label": "Request trace",
+          "href": "/break-hubu/evidence/v0.2.5/ep09-raise-own-budget/requests.jsonl"
+        },
+        {
+          "label": "Verification result",
+          "href": "/break-hubu/evidence/v0.2.5/ep09-raise-own-budget/result.json"
+        },
+        {
+          "label": "Final ledger (page 1)",
+          "href": "/break-hubu/evidence/v0.2.5/ep09-raise-own-budget/snapshots/final/ledger-001.json"
+        },
+        {
+          "label": "Final budget",
+          "href": "/break-hubu/evidence/v0.2.5/ep09-raise-own-budget/snapshots/final/budgets.json"
+        },
+        {
+          "label": "Run provenance",
+          "href": "/break-hubu/evidence/v0.2.5/ep09-raise-own-budget/run.json"
+        }
+      ]
+    },
+    "ep10-self-approval": {
+      "verdict": "holds",
+      "execution": "complete",
+      "caveat": "This covers the HTTP approval route. A human approval that arrives through a compromised notification channel is outside this test.",
+      "summary": "10 of 10 checks held.",
+      "metrics": [
+        {
+          "label": "Checks held",
+          "value": "10 / 10"
+        }
+      ],
+      "visual": null,
+      "terminal": "[2026-11-09T19:25:48.437140+00:00] $ /Users/runner/work/_temp/build-cache/v0.2.5/target/release/hubu --url http://127.0.0.1:49327 budget list\n[2026-11-09T19:25:48.446609+00:00]   budget_id: bgt_b9y0vc69et1j  agent_id: agt_j87w30ghzb9f  status: active\n    limit: $1.00  consumed: $0.00  frozen: $0.00  remaining: $1.00\n    current_version_id: bgv_70epyrgr340b  current_revision: 1\n    period: 2026-11-09T19:25:48.244308+00:00 -> 2999-01-01T00:00:00+00:00\nCLI exit=0\n",
+      "evidence": [
+        {
+          "label": "Full transcript",
+          "href": "/break-hubu/evidence/v0.2.5/ep10-self-approval/transcript.txt"
+        },
+        {
+          "label": "Request trace",
+          "href": "/break-hubu/evidence/v0.2.5/ep10-self-approval/requests.jsonl"
+        },
+        {
+          "label": "Verification result",
+          "href": "/break-hubu/evidence/v0.2.5/ep10-self-approval/result.json"
+        },
+        {
+          "label": "Final ledger (page 1)",
+          "href": "/break-hubu/evidence/v0.2.5/ep10-self-approval/snapshots/final/ledger-001.json"
+        },
+        {
+          "label": "Final budget",
+          "href": "/break-hubu/evidence/v0.2.5/ep10-self-approval/snapshots/final/budgets.json"
+        },
+        {
+          "label": "Run provenance",
+          "href": "/break-hubu/evidence/v0.2.5/ep10-self-approval/run.json"
+        }
+      ]
+    },
+    "ep11-rewrite-ledger": {
+      "verdict": "holds-with-caveat",
+      "execution": "complete",
+      "caveat": "This covers Hubu’s public HTTP and CLI interfaces. Editing the database file directly is a separate challenge.",
+      "summary": "12 of 12 checks held.",
+      "metrics": [
+        {
+          "label": "Checks held",
+          "value": "12 / 12"
+        }
+      ],
+      "visual": null,
+      "terminal": "[2026-11-09T19:26:19.324397+00:00] $ /Users/runner/work/_temp/build-cache/v0.2.5/target/release/hubu --url http://127.0.0.1:49355 budget list\n[2026-11-09T19:26:19.342181+00:00]   budget_id: bgt_kh36xm1h8grp  agent_id: agt_f424setntr96  status: active\n    limit: $0.10  consumed: $0.09  frozen: $0.00  remaining: $0.01\n    current_version_id: bgv_apb7c780sja1  current_revision: 1\n    period: 2026-11-09T19:25:48.984366+00:00 -> 2999-01-01T00:00:00+00:00\nCLI exit=0\n",
+      "evidence": [
+        {
+          "label": "Full transcript",
+          "href": "/break-hubu/evidence/v0.2.5/ep11-rewrite-ledger/transcript.txt"
+        },
+        {
+          "label": "Request trace",
+          "href": "/break-hubu/evidence/v0.2.5/ep11-rewrite-ledger/requests.jsonl"
+        },
+        {
+          "label": "Verification result",
+          "href": "/break-hubu/evidence/v0.2.5/ep11-rewrite-ledger/result.json"
+        },
+        {
+          "label": "Final ledger (page 1)",
+          "href": "/break-hubu/evidence/v0.2.5/ep11-rewrite-ledger/snapshots/final/ledger-001.json"
+        },
+        {
+          "label": "Final budget",
+          "href": "/break-hubu/evidence/v0.2.5/ep11-rewrite-ledger/snapshots/final/budgets.json"
+        },
+        {
+          "label": "Run provenance",
+          "href": "/break-hubu/evidence/v0.2.5/ep11-rewrite-ledger/run.json"
+        }
+      ]
+    },
+    "ep12-misstated-approval": {
+      "verdict": "holds-with-caveat",
+      "execution": "complete",
+      "caveat": "The agent’s free-text description is shown verbatim beside the exact amount; a misleading description is visible to the human but not rejected.",
+      "summary": "8 of 8 checks held.",
+      "metrics": [
+        {
+          "label": "Checks held",
+          "value": "8 / 8"
+        }
+      ],
+      "visual": null,
+      "terminal": "[2026-11-09T19:26:20.741618+00:00] $ /Users/runner/work/_temp/build-cache/v0.2.5/target/release/hubu --url http://127.0.0.1:49432 budget list\n[2026-11-09T19:26:20.751340+00:00]   budget_id: bgt_s1drfzh10hnw  agent_id: agt_3mb2sm7jjxta  status: active\n    limit: $1.00  consumed: $0.50  frozen: $0.00  remaining: $0.50\n    current_version_id: bgv_dw70p469aw5j  current_revision: 1\n    period: 2026-11-09T19:26:20.422275+00:00 -> 2999-01-01T00:00:00+00:00\nCLI exit=0\n",
+      "evidence": [
+        {
+          "label": "Full transcript",
+          "href": "/break-hubu/evidence/v0.2.5/ep12-misstated-approval/transcript.txt"
+        },
+        {
+          "label": "Request trace",
+          "href": "/break-hubu/evidence/v0.2.5/ep12-misstated-approval/requests.jsonl"
+        },
+        {
+          "label": "Verification result",
+          "href": "/break-hubu/evidence/v0.2.5/ep12-misstated-approval/result.json"
+        },
+        {
+          "label": "Final ledger (page 1)",
+          "href": "/break-hubu/evidence/v0.2.5/ep12-misstated-approval/snapshots/final/ledger-001.json"
+        },
+        {
+          "label": "Final budget",
+          "href": "/break-hubu/evidence/v0.2.5/ep12-misstated-approval/snapshots/final/budgets.json"
+        },
+        {
+          "label": "Run provenance",
+          "href": "/break-hubu/evidence/v0.2.5/ep12-misstated-approval/run.json"
+        }
+      ]
     }
-  }
+  },
+  "supplements": [
+    {
+      "kitsCommit": "de1104f2b343e09713966c58a037e00d27b8de7d",
+      "recordedAt": "2026-11-09 UTC",
+      "host": "macOS-15.8.2-arm64-arm-64bit-Mach-O",
+      "episodes": [
+        "ep05-denied-operation",
+        "ep06-approval-reuse",
+        "ep07-impersonate-agent",
+        "ep08-cross-session",
+        "ep09-raise-own-budget",
+        "ep10-self-approval",
+        "ep11-rewrite-ledger",
+        "ep12-misstated-approval"
+      ]
+    }
+  ]
 };
