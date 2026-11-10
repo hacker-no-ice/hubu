@@ -33,7 +33,7 @@ blocking; scheduled detection does not replace it.
 For an end-to-end detection and repair exercise, dispatch the workflow with
 `exercise` enabled. It creates an isolated temporary Rust project locked to the
 known vulnerable `rustls 0.23.45`, detects its real RustSec advisories, prepares a
-compatible fixed lockfile, and checks policy, Rust 1.88, and a TLS-provider test.
+compatible fixed lockfile, and checks policy, Rust 1.89, and a TLS-provider test.
 The fixture does not change the workspace or publish vulnerable dependencies.
 Ordinary PR tests use deterministic diagnostic and GitHub API fixtures so a
 historical vulnerable-version exercise cannot become a new global CI blocker.
@@ -41,7 +41,7 @@ historical vulnerable-version exercise cannot become a new global CI blocker.
 The monitor scans the committed `Cargo.lock` against RustSec with the same
 all-feature advisory policy used in CI. When a compatible fix is available, it
 attempts only the smallest targeted dependency updates and validates the result
-with the exact Rust 1.88 MSRV check, locked workspace tests and Clippy, the full
+with the exact Rust 1.89 MSRV check, locked workspace tests and Clippy, the full
 advisory/license/source policy, and builds of all four production binaries.
 It publishes the verified lockfile change to one reusable
 `codex/security-advisories` branch and PR. It never changes manifests, raises the
@@ -140,7 +140,7 @@ The default branch must use an enforced ruleset with:
 
 - pull requests required;
 - strict, up-to-date required checks;
-- `Test workspace`, exact Rust 1.88 MSRV, and `Security policy` required
+- `Test workspace`, exact Rust 1.89 MSRV, and `Security policy` required
   (`Test workspace` aggregates the parallel lint, test, and push-only
   release-build jobs and fails unless each one succeeded);
 - deletion and non-fast-forward updates prohibited; and
