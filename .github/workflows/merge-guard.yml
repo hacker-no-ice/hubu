@@ -50,7 +50,9 @@ jobs:
           git show "${BASE_SHA}:.github/auto-merge-blocklist" \
             | sed -e 's/#.*//' -e 's/[[:space:]]*$//' | grep -v '^$' > /tmp/blocklist
 
-          git diff --name-only "${BASE_SHA}...${HEAD_SHA}" > /tmp/changed
+          # --no-renames lists both sides of a move, so moving a file out of a
+          # blocked directory still reports the protected source path.
+          git diff --name-only --no-renames "${BASE_SHA}...${HEAD_SHA}" > /tmp/changed
 
           blocked=0
           while IFS= read -r file; do
