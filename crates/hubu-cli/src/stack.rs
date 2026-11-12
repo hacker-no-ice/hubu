@@ -32,7 +32,7 @@ const MANAGED_GONGBU_CALLER_ACCOUNT: &str = "gongbu-caller";
 const PROVIDER_CONTRACTS_DOCUMENT: &str =
     include_str!("../../../contracts/provider-contracts-v1.json");
 const PROVIDER_CONTRACTS_DOCUMENT_SHA256: &str =
-    "2ed1523bc1dcfa99e856ddd8326d37563bcf10d26bd1bbbfb44665d45624b91d";
+    "9d97b56f5276eed7948c5a99d6e48d842b650d84e30b705b40cc06bcce596275";
 const MANAGED_CREDENTIAL_IGNORE: &[u8] =
     b"# Hubu-managed credentials. Do not edit or remove.\n*\n!.gitignore\n";
 

@@ -101,6 +101,109 @@ mod tests {
             .unwrap()
     }
 
+    #[test]
+    fn gemini_timeouts_reach_transport_and_preserve_activity_headroom_and_reconciliation() {
+        use crate::provider::{
+            contract::{InputImage, InputImageSource, NoopProviderTransportObserver},
+            http_kernel::{ActivityDeadlineGuard, ACTIVITY_OPERATIONAL_HEADROOM},
+        };
+        use std::{
+            sync::atomic::{AtomicUsize, Ordering},
+            time::SystemTime,
+        };
+
+        struct Drafts;
+        impl InputImageSource for Drafts {
+            fn load(&self, _: &str) -> crate::provider::contract::Result<InputImage> {
+                Ok(InputImage {
+                    media_type: "image/png".into(),
+                    bytes: PNG.to_vec(),
+                })
+            }
+        }
+
+        struct TimeoutTransport {
+            calls: AtomicUsize,
+            budget: Duration,
+        }
+        impl SyncTransport for TimeoutTransport {
+            fn post_json(
+                &self,
+                _: &Url,
+                _: (&str, &str),
+                _: &BTreeMap<String, String>,
+                _: &Value,
+                timeout: Duration,
+            ) -> Result<TransportResponse, TransportFailure> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                // The engine passes the remaining invocation budget, not a
+                // hard-coded HTTP default or a fresh Temporal activity budget.
+                assert!(timeout <= self.budget);
+                assert!(timeout > self.budget - Duration::from_secs(5));
+                Err(TransportFailure::UnknownOutcome {
+                    request_id: Some("req-timeout".into()),
+                })
+            }
+            fn download(
+                &self,
+                _: &Url,
+                _: &ArtifactDownloadPolicy,
+                _: InvocationDeadline,
+            ) -> Result<Vec<u8>, ArtifactFetchError> {
+                panic!("a lost response cannot yield an artifact")
+            }
+        }
+
+        for source in [
+            GOOGLE_GEMINI_DEVELOPER_IMAGE,
+            GOOGLE_GEMINI_DEVELOPER_IMAGE_EDIT,
+            GOOGLE_GEMINI_DEVELOPER_IMAGE_V2,
+            GOOGLE_GEMINI_DEVELOPER_IMAGE_EDIT_V2,
+        ] {
+            let pack = Arc::new(Pack::from_toml_str(source).unwrap());
+            assert_eq!(pack.transport().timeout_ms, 270_000);
+            let mut input = json!({"prompt": "a cat", "image_size": "1k",
+                "input_images": ["0f5c2a64-3f0e-4c9b-9a51-2b7d1c4e8a10"]});
+            // Generation packs do not accept the edit parameter.
+            if pack.input_images_parameter().is_none() {
+                input.as_object_mut().unwrap().remove("input_images");
+            }
+            if pack.has_size_presets() {
+                input["aspect_ratio"] = json!("1:1");
+            }
+            let model = "gemini-3.1-flash-image";
+            let request = pack
+                .prepare(model, &input)
+                .unwrap_or_else(|err| panic!("{} {}: {err:?}", pack.pack_id(), pack.pack_version()))
+                .request;
+            for budget in [Duration::from_secs(270), Duration::from_secs(90)] {
+                let activity_deadline = (budget.as_secs() == 90)
+                    .then(|| SystemTime::now() + budget + ACTIVITY_OPERATIONAL_HEADROOM);
+                let _guard = ActivityDeadlineGuard::enter(activity_deadline).unwrap();
+                let transport = Arc::new(TimeoutTransport {
+                    calls: AtomicUsize::new(0),
+                    budget,
+                });
+                let engine =
+                    SyncFixedEngine::new(pack.clone(), model, transport.clone(), 1 << 20).unwrap();
+                let failure = engine
+                    .submit_with_inputs(
+                        &request,
+                        &input,
+                        &Drafts,
+                        &secret_for_test("k"),
+                        None,
+                        &NoopProviderTransportObserver,
+                    )
+                    .unwrap_err();
+                assert_eq!(failure.code, "timeout_unknown_outcome");
+                assert_eq!(failure.spend_disposition, SpendDisposition::Reconcile);
+                assert_eq!(failure.evidence.request_id.as_deref(), Some("req-timeout"));
+                assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
+            }
+        }
+    }
+
     /// The contract document carries each verified pack's checked-in
     /// projection. Changing a pack without re-projecting it fails here.
     #[test]

@@ -30,7 +30,7 @@ api_version = "v1beta"
 allowed_hosts = ["generativelanguage.googleapis.com"]
 auth_header = "x-goog-api-key"
 credential = "gemini"
-timeout_ms = 30000
+timeout_ms = 270000
 
 [request]
 path = "/v1beta/interactions"
