@@ -43,6 +43,44 @@ Google's [Lite model page](https://ai.google.dev/gemini-api/docs/models/gemini-3
 and [Developer API pricing](https://ai.google.dev/gemini-api/docs/pricing).
 Changing any frozen fact requires a new immutable contract and pricing version.
 
+## Invocation timeout and local-stack refresh
+
+The shipped generation and editing packs, including legacy and v2 variants,
+configure `transport.timeout_ms = 270000`. This is an operational budget,
+not a documented Google service deadline. Submission and artifact handling
+share the invocation deadline. The executor still caps provider work at 270
+seconds within the 300-second Temporal activity, preserving 30 seconds of
+operational headroom; time already spent in the activity can shorten the
+provider budget.
+
+An MCP/client wait can expire while durable provider work continues. Keep
+observing the existing operation; do not submit another paid request. A lost
+response after sending still becomes `timeout_unknown_outcome` and requires
+reconciliation. The longer timeout neither retries the request nor releases
+an uncertain hold.
+
+The timeout changes pack and target revision digests. Existing local-stack
+profiles need an explicit refresh after installing binaries built with the
+updated packs and contract projection:
+
+1. Stop new provider submissions. Finish or reconcile unfinished Gemini work
+   using the previous binaries and active configuration before upgrading.
+   Pending reconciliation counts as unfinished; the new digests cannot resume
+   that work. See [the upgrade safety checks](upgrading-to-v0.2.5.md).
+2. Run `hubu stack stop` and take cold backups of both state directories.
+3. Install the updated workspace binaries. Shipped packs and their contract
+   projection are embedded; there is no separate pack download. If using custom
+   pack files and explicit target settings, refresh those files and pinned
+   digests together as well.
+4. Run `hubu stack render`, review the staged generation and its Gemini target
+   revisions, then run `hubu stack activate --generation ID` with the printed
+   generation ID. Use the same explicit `--profile ABSOLUTE_DIR` on these
+   commands when refreshing a profile other than the selected one.
+5. Run `hubu stack start` for that profile.
+
+Do not activate this update over unresolved incident claims. Their
+reconciliation remains a separate operator action on the previous revision.
+
 ## Image editing
 
 | Frozen field | Value |
