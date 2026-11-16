@@ -340,23 +340,22 @@ scale < 6: amount × 10^(6 - scale)
 Every exponentiation, multiplication, addition, and division is checked for
 overflow. Costs at scale 6 or coarser are charged exactly; only digits beyond
 the sixth decimal round up, so settlement never understates governed
-consumption. `budget_charge_cents` is the legacy projection of that charge,
-rounded up to a whole cent. Hubu does
+consumption. `budget_charge` is returned as an exact scale-6 money object. Hubu does
 not round individual pricing components and then add them; Gongbu preserves and
 evaluates its exact frozen pricing snapshot, and Hubu converts the final exact
 vendor cost once.
 
 For USD, the boundary behavior is deterministic:
 
-| Exact `actual_vendor_cost` | `budget_charge` | `budget_charge_cents` | Result against a 5.00 maximum |
+| Exact `actual_vendor_cost` | `budget_charge` | µ units | Result against a 5.00 maximum |
 | --- | ---: | ---: | --- |
 | `{amount: 0, scale: 6}` | 0.00 | 0 | accepted |
 | `{amount: 1, scale: 6}` | 0.000001 | 1 | accepted; exact micro-unit |
 | `{amount: 1, scale: 7}` | 0.000001 | 1 | accepted; rounded up to a micro-unit |
-| `{amount: 10000, scale: 6}` | 0.01 | 1 | accepted; exact one cent |
-| `{amount: 10001, scale: 6}` | 0.010001 | 2 | accepted; just above one cent |
-| `{amount: 5000000, scale: 6}` | 5.00 | 500 | accepted at the exact maximum |
-| `{amount: 5000001, scale: 6}` | 5.000001 | 501 | normal settlement rejected; reconcile |
+| `{amount: 10000, scale: 6}` | 0.01 | 10000 | accepted; exact one cent |
+| `{amount: 10001, scale: 6}` | 0.010001 | 10001 | accepted; just above one cent |
+| `{amount: 5000000, scale: 6}` | 5.00 | 5000000 | accepted at the exact maximum |
+| `{amount: 5000001, scale: 6}` | 5.000001 | 5000001 | normal settlement rejected; reconcile |
 
 The receipt stores the exact `actual_vendor_cost` amount and original scale,
 plus the canonical USD code and complete `price_model_snapshot` supplied by
@@ -394,9 +393,9 @@ For v4.3 input compatibility, a receipt may instead supply
 usd}` before validation and persistence. The frozen snapshot and authorization
 must also identify USD. A request must not
 supply both forms. New callers use `actual_vendor_cost`; v4.3 responses return
-the precise form and explicit budget accounting fields. They also retain
-`actual_vendor_cost_cents` as the legacy compatibility projection of
-`budget_charge_cents`; it is not a replacement for the exact cost object.
+the precise form and explicit budget accounting money objects. General cent
+response projections have been removed; only the executor authorization
+`amount_cents` assertion/projection remains until HUB-299.
 
 ## Lease Profiles
 
@@ -509,7 +508,7 @@ guidance.
          "operation_key": "codex:tool-call:01JABC123",
          "account_id": "aga_example",
          "agent_id": "agt_example",
-         "amount_cents": 500,
+         "amount": {"units":"5000000","scale":6,"currency":"usd"},
          "currency": "usd",
          "lease_profile": "long_running",
          "reason": "hubu-logo-demo",
@@ -789,10 +788,10 @@ guidance.
       "hold_id": "uuid",
       "budget_id": "bgt_...",
       "status": "claimed",
-      "amount_cents": 500,
-      "consumed_amount_cents": 0,
-      "frozen_amount_cents": 500,
-      "remaining_amount_cents": 0
+      "amount": {"units":"5000000","scale":6,"currency":"usd"},
+      "consumed_amount": {"units":"0","scale":6,"currency":"usd"},
+      "frozen_amount": {"units":"5000000","scale":6,"currency":"usd"},
+      "remaining_amount": {"units":"0","scale":6,"currency":"usd"}
     }
   }
 }
@@ -819,7 +818,6 @@ user, and timestamp.
   "claim_id": "uuid",
   "status": "settled",
   "receipt": {
-    "authorized_max_cents": 500,
     "actual_vendor_cost": {
       "amount": 4000001,
       "scale": 6,
@@ -829,10 +827,6 @@ user, and timestamp.
     "budget_charge": {"units": "4000001", "scale": 6, "currency": "usd", "display": "4.000001"},
     "released_amount": {"units": "999999", "scale": 6, "currency": "usd", "display": "0.999999"},
     "overrun_amount": {"units": "0", "scale": 6, "currency": "usd", "display": "0.00"},
-    "actual_vendor_cost_cents": 401,
-    "budget_charge_cents": 401,
-    "released_amount_cents": 99,
-    "overrun_amount_cents": 0,
     "currency": "usd",
     "provider_request_id": "provider-request-abc123",
     "price_model_snapshot": {
@@ -870,7 +864,7 @@ check the claim against that timestamp, and atomically update:
 - the claimed budget hold to `settled`, or `released`
 - the immutable exact provider receipt and complete frozen pricing snapshot for
   settlement
-- the checked conservative `budget_charge_cents`, released remainder, and any
+- the checked scale-6 `budget_charge`, released remainder, and any
   human-confirmed overrun
 - the budget balance from frozen to conservative cost consumed plus the unused
   remainder returned, or the full hold returned for release
@@ -890,8 +884,8 @@ its own failure domain:
 
 - Hubu maps every legacy `actual_vendor_cost_cents` receipt to exact
   `{amount: legacy_cents, scale: 2, currency: stored_currency}`. Its historical
-  consumed amount becomes `budget_charge_cents`, its released amount is
-  preserved, `overrun_amount_cents` is zero, and the stored price/model snapshot
+  consumed amount becomes `budget_charge` in µ units, its released amount is
+  preserved, `overrun_amount` is zero, and the stored price/model snapshot
   JSON remains unchanged.
 - Gongbu maps legacy provider-attempt and receipt minor-unit amounts to exact
   `{amount: legacy_minor, scale: 2, currency: stored_currency}`. For a legacy
@@ -998,14 +992,14 @@ payloads.
 
 Human-confirmed billed reconciliation applies the same exact-cost validation
 and checked ceiling conversion as normal settlement. Unlike an executor, the
-human may confirm a legitimate vendor charge whose `budget_charge_cents`
+human may confirm a legitimate vendor charge whose `budget_charge`
 exceeds the authorization. Hubu then records and consumes the full conservative
-charge, sets `released_amount_cents` to zero, and records
-`overrun_amount_cents = budget_charge_cents - authorized_max_cents`. The budget
+charge, sets `released_amount` to zero, and records
+`overrun_amount = budget_charge - authorized_max` in µ units. The budget
 remaining balance may become negative; this is retrospective accounting for a
 charge that already occurred, not new authorization. The budget is exhausted
 and later reservations fail. For example, an exact USD 5.000001 charge against
-a 500-cent maximum consumes 501 cents and records a one-cent overrun.
+a USD 5.00 maximum consumes 5,000,001µ and records a 1µ overrun.
 
 Normal executor settlement never gains this authority. An executor overrun
 must leave the hold claimed and route to human reconciliation with Gongbu's

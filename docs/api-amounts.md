@@ -42,7 +42,9 @@ Responses use exact money objects:
 `units` is an integer string of 10^-`scale` of `currency`. Use integer or decimal
 arithmetic. `display` is the exact adaptive form for people, with 2 to 6 decimal
 places and no rounding. General HTTP, CLI JSON and MCP responses no longer carry
-legacy cent projections. CLI `--round cents` remains an explicit display option.
+legacy cent projections. Native artifact and gallery receipts carry
+`budget_charge` as the same exact money object. Existing on-disk gallery
+manifests remain readable. CLI `--round cents` remains an explicit display option.
 
 ## Persistence and compatibility
 
