@@ -213,9 +213,9 @@ def main() -> int:
         budget = old.ok(
             "POST",
             "/budgets",
-            {"agent_id": agent["agent_id"], "amount_cents": 1000, "ending_before": "2999-01-01T00:00:00Z"},
+            {"agent_id": agent["agent_id"], "amount": "10.00", "ending_before": "2999-01-01T00:00:00Z"},
         )["budget"]
-        update = {"amount_limit_cents": 1200, "expected_revision": budget["current_revision"], "reason": "upgrade drill"}
+        update = {"amount_limit": "12.00", "expected_revision": budget["current_revision"], "reason": "upgrade drill"}
         old.ok("POST", f"/budgets/{budget['budget_id']}/versions", update)
 
         def authorize(server: Server, key: str, cents: int, lease: str = "default") -> dict[str, Any]:
@@ -225,7 +225,7 @@ def main() -> int:
                 {
                     "operation_key": key,
                     "account_id": agent["account_id"],
-                    "amount_cents": cents,
+                    "amount": f"{cents // 100}.{cents % 100:02d}",
                     "reason": "upgrade drill",
                     "lease_profile": lease,
                     "execution_scope": SCOPE,
@@ -265,23 +265,23 @@ def main() -> int:
     try:
         report["new_version"] = new.ok("GET", "/version")
         backup = Path(f"{database}.pre-accounting-scale.bak")
-        check(backup.exists(), f"missing migration backup {backup}")
-        report["backup"] = {"path": str(backup), "bytes": backup.stat().st_size}
+        if before and "amount_limit" not in before[0]:
+            check(backup.exists(), f"missing migration backup {backup}")
+        if backup.exists():
+            report["backup"] = {"path": str(backup), "bytes": backup.stat().st_size}
         after = new.ok("GET", "/budgets?all=true")["budgets"]
         by_id = {b["budget_id"]: b for b in after}
         for previous in before:
             current = by_id[previous["budget_id"]]
             for field in ("amount_limit", "consumed_amount", "frozen_amount", "remaining_amount"):
-                check(
-                    int(current[field]["units"]) == previous[f"{field}_cents"] * 10_000,
-                    f"{previous['budget_id']} {field}: {previous[f'{field}_cents']}c -> {current[field]}",
-                )
-                check(current[f"{field}_cents"] == previous[f"{field}_cents"], f"{field}_cents changed")
+                previous_units = int(previous[field]["units"]) if field in previous else previous[f"{field}_cents"] * 10_000
+                check(int(current[field]["units"]) == previous_units, f"{previous['budget_id']} {field} changed")
+                check(f"{field}_cents" not in current, f"{field}_cents was not removed")
         coverage_after = coverage(new, before)
         for budget_id, prior in report["before_coverage"].items():
-            for field in ("consumed_amount_cents", "recorded_budget_charges_cents", "unaccounted_consumption_cents"):
-                check(coverage_after[budget_id][field] == prior[field], f"coverage {budget_id} {field} changed")
-            check(coverage_after[budget_id]["unaccounted_consumption"]["units"] == str(prior["unaccounted_consumption_cents"] * 10_000), "coverage units")
+            for field in ("consumed_amount", "recorded_budget_charges", "unaccounted_consumption"):
+                previous_units = int(prior[field]["units"]) if field in prior else prior[f"{field}_cents"] * 10_000
+                check(int(coverage_after[budget_id][field]["units"]) == previous_units, f"coverage {budget_id} {field} changed")
         report["after_coverage"] = coverage_after
 
         receipt = {
@@ -318,7 +318,7 @@ def main() -> int:
         status, recreated = new.request(
             "POST",
             "/budgets",
-            {"agent_id": agent["agent_id"], "amount_cents": 1000, "ending_before": "2999-01-01T00:00:00Z"},
+            {"agent_id": agent["agent_id"], "amount": "10.00", "ending_before": "2999-01-01T00:00:00Z"},
         )
         report["cross_version_replay"] = {
             "budget_update": {"status": update_status, "idempotent_replay": replayed_update["idempotent_replay"]},

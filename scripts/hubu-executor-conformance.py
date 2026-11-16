@@ -586,7 +586,7 @@ class Runner:
             bearer=self.auth,
             body={
                 "agent_id": agent["agent_id"],
-                "amount_cents": scenario["setup"]["budget_cents"],
+                "amount": f'{scenario["setup"]["budget_cents"] // 100}.{scenario["setup"]["budget_cents"] % 100:02d}',
                 "ending_before": self.corpus["setup"]["budget_ending_before"],
             },
         )

@@ -1,6 +1,6 @@
 {
   "schema": "hubu-executor-conformance-v1",
-  "corpus_version": "2026-10-15.1",
+  "corpus_version": "2026-11-16.1",
   "protocol_version": "hubu-spend-executor-v4.5",
   "description": "Executor-neutral black-box conformance fixtures for the Hubu spend-executor contract. Every request targets the public Hubu HTTP API. Agents authorize exact decimal amounts; executors send contract_version and the exact amount {units, scale, currency} instead of whole cents. Executors claim by the spend_auth_token_id and settle or release by the claim_id Hubu issued; the retired v4.3 agent_id/operation_key identity appears only in steps marked legacy_identity_probe, which must be rejected. Server-generated IDs and timestamps are captured and asserted by relation, never by literal value. Executor responses never carry the private operation key. Router-only admission voids use a private operation-key and account binding; they do not change claim-based executor release identity.",
   "server_profile": {
@@ -479,8 +479,8 @@
               "lease_profile": "default",
               "payment": null,
               "budget_hold.status": "frozen",
-              "budget_hold.amount_cents": 400,
-              "budget_hold.budget_id": "${budget.budget_id}"
+              "budget_hold.budget_id": "${budget.budget_id}",
+              "budget_hold.amount.units": "4000000"
             },
             "capture": {
               "token_a": "auth_token_id",
@@ -499,6 +499,9 @@
                 "@attempt_history[0].submitted_at",
                 "@authorization_expires_at"
               ]
+            ],
+            "absent": [
+              "budget_hold.amount_cents"
             ]
           }
         },
@@ -522,8 +525,8 @@
               "revision": 1,
               "idempotent_replay": false,
               "budget_hold.status": "frozen",
-              "budget_hold.amount_cents": 300,
-              "budget_hold.budget_id": "${budget.budget_id}"
+              "budget_hold.budget_id": "${budget.budget_id}",
+              "budget_hold.amount.units": "3000000"
             },
             "capture": {
               "token_b": "auth_token_id",
@@ -546,6 +549,9 @@
                 "${decision_b}",
                 "${decision_a}"
               ]
+            ],
+            "absent": [
+              "budget_hold.amount_cents"
             ]
           }
         },
@@ -556,10 +562,15 @@
             "status": 200,
             "match": {
               "budgets[agent_id=${agent.agent_id}].budget_id": "${budget.budget_id}",
-              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents": 700,
-              "budgets[agent_id=${agent.agent_id}].consumed_amount_cents": 0,
-              "budgets[agent_id=${agent.agent_id}].remaining_amount_cents": 300
-            }
+              "budgets[agent_id=${agent.agent_id}].frozen_amount.units": "7000000",
+              "budgets[agent_id=${agent.agent_id}].consumed_amount.units": "0",
+              "budgets[agent_id=${agent.agent_id}].remaining_amount.units": "3000000"
+            },
+            "absent": [
+              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents",
+              "budgets[agent_id=${agent.agent_id}].consumed_amount_cents",
+              "budgets[agent_id=${agent.agent_id}].remaining_amount_cents"
+            ]
           }
         },
         {
@@ -692,10 +703,15 @@
           "expect": {
             "status": 200,
             "match": {
-              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents": 700,
-              "budgets[agent_id=${agent.agent_id}].consumed_amount_cents": 0,
-              "budgets[agent_id=${agent.agent_id}].remaining_amount_cents": 300
-            }
+              "budgets[agent_id=${agent.agent_id}].frozen_amount.units": "7000000",
+              "budgets[agent_id=${agent.agent_id}].consumed_amount.units": "0",
+              "budgets[agent_id=${agent.agent_id}].remaining_amount.units": "3000000"
+            },
+            "absent": [
+              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents",
+              "budgets[agent_id=${agent.agent_id}].consumed_amount_cents",
+              "budgets[agent_id=${agent.agent_id}].remaining_amount_cents"
+            ]
           }
         },
         {
@@ -742,14 +758,18 @@
             "status": 200,
             "match": {
               "coverage.pending_hold_count": 2,
-              "coverage.consumed_amount_cents": 0,
-              "coverage.recorded_budget_charges_cents": 0
+              "coverage.consumed_amount.units": "0",
+              "coverage.recorded_budget_charges.units": "0"
             },
             "counts": [
               {
                 "path": "transactions",
                 "equals": 0
               }
+            ],
+            "absent": [
+              "coverage.consumed_amount_cents",
+              "coverage.recorded_budget_charges_cents"
             ]
           }
         }
@@ -778,16 +798,15 @@
               "status": "settled",
               "claim_id": "${claim_a}",
               "receipt.actual_vendor_cost": "${defs.exact_cost.op_a}",
-              "receipt.authorized_max_cents": 400,
-              "receipt.budget_charge_cents": 351,
-              "receipt.actual_vendor_cost_cents": 351,
-              "receipt.released_amount_cents": 49,
-              "receipt.overrun_amount_cents": 0,
               "receipt.currency": "usd",
               "receipt.provider_request_id": "fixture-provider-request:op-a",
               "receipt.artifact_reference": "artifact://conformance/op-a.png",
               "receipt.price_model_snapshot": "${defs.receipts.op_a.price_model_snapshot}",
-              "spend.budget_hold.status": "settled"
+              "spend.budget_hold.status": "settled",
+              "receipt.authorized_max.units": "4000000",
+              "receipt.budget_charge.units": "3500001",
+              "receipt.released_amount.units": "499999",
+              "receipt.overrun_amount.units": "0"
             },
             "capture": {
               "settlement_a": "settlement_id",
@@ -802,7 +821,12 @@
             ],
             "absent": [
               "operation_key",
-              "spend.operation_key"
+              "spend.operation_key",
+              "receipt.authorized_max_cents",
+              "receipt.budget_charge_cents",
+              "receipt.actual_vendor_cost_cents",
+              "receipt.released_amount_cents",
+              "receipt.overrun_amount_cents"
             ]
           }
         },
@@ -819,13 +843,13 @@
               "status": "settled",
               "claim_id": "${claim_b}",
               "receipt.actual_vendor_cost": "${defs.exact_cost.op_b}",
-              "receipt.authorized_max_cents": 300,
-              "receipt.budget_charge_cents": 251,
-              "receipt.released_amount_cents": 49,
-              "receipt.overrun_amount_cents": 0,
               "receipt.provider_request_id": "fixture-provider-request:op-b",
               "receipt.artifact_reference": "artifact://conformance/op-b.txt",
-              "receipt.price_model_snapshot": "${defs.receipts.op_b.price_model_snapshot}"
+              "receipt.price_model_snapshot": "${defs.receipts.op_b.price_model_snapshot}",
+              "receipt.authorized_max.units": "3000000",
+              "receipt.budget_charge.units": "2500100",
+              "receipt.released_amount.units": "499900",
+              "receipt.overrun_amount.units": "0"
             },
             "capture": {
               "settlement_b": "settlement_id"
@@ -839,7 +863,11 @@
             ],
             "absent": [
               "operation_key",
-              "spend.operation_key"
+              "spend.operation_key",
+              "receipt.authorized_max_cents",
+              "receipt.budget_charge_cents",
+              "receipt.released_amount_cents",
+              "receipt.overrun_amount_cents"
             ]
           }
         },
@@ -931,11 +959,12 @@
               "receipt.created_at": "${receipt_a_created_at}",
               "receipt.provider_request_id": "fixture-provider-request:op-a",
               "receipt.artifact_reference": "artifact://conformance/op-a.png",
-              "receipt.budget_charge_cents": 351
+              "receipt.budget_charge.units": "3500001"
             },
             "absent": [
               "operation_key",
-              "spend.operation_key"
+              "spend.operation_key",
+              "receipt.budget_charge_cents"
             ]
           }
         },
@@ -945,10 +974,15 @@
           "expect": {
             "status": 200,
             "match": {
-              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents": 0,
-              "budgets[agent_id=${agent.agent_id}].consumed_amount_cents": 601,
-              "budgets[agent_id=${agent.agent_id}].remaining_amount_cents": 399
-            }
+              "budgets[agent_id=${agent.agent_id}].frozen_amount.units": "0",
+              "budgets[agent_id=${agent.agent_id}].consumed_amount.units": "6000101",
+              "budgets[agent_id=${agent.agent_id}].remaining_amount.units": "3999899"
+            },
+            "absent": [
+              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents",
+              "budgets[agent_id=${agent.agent_id}].consumed_amount_cents",
+              "budgets[agent_id=${agent.agent_id}].remaining_amount_cents"
+            ]
           }
         },
         {
@@ -966,7 +1000,6 @@
               "transactions[settlement_id=${settlement_a}].claim_id": "${claim_a}",
               "transactions[settlement_id=${settlement_a}].authorization_id": "${decision_a}",
               "transactions[settlement_id=${settlement_a}].budget_id": "${budget.budget_id}",
-              "transactions[settlement_id=${settlement_a}].budget_charge_delta_cents": 351,
               "transactions[settlement_id=${settlement_a}].effective_cost": {
                 "amount": "3500001",
                 "scale": 6,
@@ -985,16 +1018,17 @@
               },
               "transactions[settlement_id=${settlement_b}].claim_id": "${claim_b}",
               "transactions[settlement_id=${settlement_b}].authorization_id": "${decision_b}",
-              "transactions[settlement_id=${settlement_b}].budget_charge_delta_cents": 251,
               "transactions[settlement_id=${settlement_b}].effective_cost": {
                 "amount": "25001",
                 "scale": 4,
                 "currency": "usd"
               },
-              "coverage.consumed_amount_cents": 601,
-              "coverage.recorded_budget_charges_cents": 601,
-              "coverage.unaccounted_consumption_cents": 0,
-              "coverage.pending_hold_count": 0
+              "coverage.pending_hold_count": 0,
+              "transactions[settlement_id=${settlement_a}].budget_charge_delta.units": "3500001",
+              "transactions[settlement_id=${settlement_b}].budget_charge_delta.units": "2500100",
+              "coverage.consumed_amount.units": "6000101",
+              "coverage.recorded_budget_charges.units": "6000101",
+              "coverage.unaccounted_consumption.units": "0"
             },
             "counts": [
               {
@@ -1023,7 +1057,14 @@
             "capture": {
               "ledger_a": "transactions[settlement_id=${settlement_a}].id",
               "ledger_b": "transactions[settlement_id=${settlement_b}].id"
-            }
+            },
+            "absent": [
+              "transactions[settlement_id=${settlement_a}].budget_charge_delta_cents",
+              "transactions[settlement_id=${settlement_b}].budget_charge_delta_cents",
+              "coverage.consumed_amount_cents",
+              "coverage.recorded_budget_charges_cents",
+              "coverage.unaccounted_consumption_cents"
+            ]
           }
         },
         {
@@ -1040,7 +1081,6 @@
                 "${ledger_a}"
               ],
               "authorization_records[decision_id=${decision_a}].receipt.settlement_id": "${settlement_a}",
-              "authorization_records[decision_id=${decision_a}].receipt.budget_charge_cents": 351,
               "authorization_records[decision_id=${decision_a}].receipt.actual_vendor_cost": {
                 "amount": "3500001",
                 "scale": 6,
@@ -1050,7 +1090,8 @@
               "authorization_records[decision_id=${decision_b}].ledger_transaction_ids": [
                 "${ledger_b}"
               ],
-              "authorization_records[decision_id=${decision_b}].receipt.budget_charge_cents": 251
+              "authorization_records[decision_id=${decision_a}].receipt.budget_charge.units": "3500001",
+              "authorization_records[decision_id=${decision_b}].receipt.budget_charge.units": "2500100"
             },
             "counts": [
               {
@@ -1069,6 +1110,10 @@
                 "@authorization_records[decision_id=${decision_a}].receipt.provider_request_reference",
                 "@authorization_records[decision_id=${decision_b}].receipt.provider_request_reference"
               ]
+            ],
+            "absent": [
+              "authorization_records[decision_id=${decision_a}].receipt.budget_charge_cents",
+              "authorization_records[decision_id=${decision_b}].receipt.budget_charge_cents"
             ]
           }
         }
@@ -1156,9 +1201,13 @@
           "expect": {
             "status": 200,
             "match": {
-              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents": 500,
-              "budgets[agent_id=${agent.agent_id}].remaining_amount_cents": 500
-            }
+              "budgets[agent_id=${agent.agent_id}].frozen_amount.units": "5000000",
+              "budgets[agent_id=${agent.agent_id}].remaining_amount.units": "5000000"
+            },
+            "absent": [
+              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents",
+              "budgets[agent_id=${agent.agent_id}].remaining_amount_cents"
+            ]
           }
         },
         {
@@ -1243,9 +1292,13 @@
           "expect": {
             "status": 200,
             "match": {
-              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents": 500,
-              "budgets[agent_id=${agent.agent_id}].consumed_amount_cents": 0
-            }
+              "budgets[agent_id=${agent.agent_id}].frozen_amount.units": "5000000",
+              "budgets[agent_id=${agent.agent_id}].consumed_amount.units": "0"
+            },
+            "absent": [
+              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents",
+              "budgets[agent_id=${agent.agent_id}].consumed_amount_cents"
+            ]
           }
         },
         {
@@ -1270,8 +1323,8 @@
             "match": {
               "status": "settled",
               "claim_id": "${claim}",
-              "receipt.budget_charge_cents": 351,
-              "receipt.released_amount_cents": 149
+              "receipt.budget_charge.units": "3500001",
+              "receipt.released_amount.units": "1499999"
             },
             "capture": {
               "settlement": "settlement_id",
@@ -1279,7 +1332,9 @@
             },
             "absent": [
               "operation_key",
-              "spend.operation_key"
+              "spend.operation_key",
+              "receipt.budget_charge_cents",
+              "receipt.released_amount_cents"
             ]
           }
         },
@@ -1308,10 +1363,15 @@
           "expect": {
             "status": 200,
             "match": {
-              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents": 0,
-              "budgets[agent_id=${agent.agent_id}].consumed_amount_cents": 351,
-              "budgets[agent_id=${agent.agent_id}].remaining_amount_cents": 649
-            }
+              "budgets[agent_id=${agent.agent_id}].frozen_amount.units": "0",
+              "budgets[agent_id=${agent.agent_id}].consumed_amount.units": "3500001",
+              "budgets[agent_id=${agent.agent_id}].remaining_amount.units": "6499999"
+            },
+            "absent": [
+              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents",
+              "budgets[agent_id=${agent.agent_id}].consumed_amount_cents",
+              "budgets[agent_id=${agent.agent_id}].remaining_amount_cents"
+            ]
           }
         },
         {
@@ -1325,16 +1385,22 @@
             "status": 200,
             "match": {
               "transactions[0].settlement_id": "${settlement}",
-              "transactions[0].budget_charge_delta_cents": 351,
-              "coverage.consumed_amount_cents": 351,
-              "coverage.recorded_budget_charges_cents": 351,
-              "coverage.unaccounted_consumption_cents": 0
+              "transactions[0].budget_charge_delta.units": "3500001",
+              "coverage.consumed_amount.units": "3500001",
+              "coverage.recorded_budget_charges.units": "3500001",
+              "coverage.unaccounted_consumption.units": "0"
             },
             "counts": [
               {
                 "path": "transactions",
                 "equals": 1
               }
+            ],
+            "absent": [
+              "transactions[0].budget_charge_delta_cents",
+              "coverage.consumed_amount_cents",
+              "coverage.recorded_budget_charges_cents",
+              "coverage.unaccounted_consumption_cents"
             ]
           }
         },
@@ -1449,9 +1515,13 @@
           "expect": {
             "status": 200,
             "match": {
-              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents": 300,
-              "budgets[agent_id=${agent.agent_id}].remaining_amount_cents": 700
-            }
+              "budgets[agent_id=${agent.agent_id}].frozen_amount.units": "3000000",
+              "budgets[agent_id=${agent.agent_id}].remaining_amount.units": "7000000"
+            },
+            "absent": [
+              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents",
+              "budgets[agent_id=${agent.agent_id}].remaining_amount_cents"
+            ]
           }
         },
         {
@@ -1619,9 +1689,13 @@
           "expect": {
             "status": 200,
             "match": {
-              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents": 300,
-              "budgets[agent_id=${agent.agent_id}].consumed_amount_cents": 0
-            }
+              "budgets[agent_id=${agent.agent_id}].frozen_amount.units": "3000000",
+              "budgets[agent_id=${agent.agent_id}].consumed_amount.units": "0"
+            },
+            "absent": [
+              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents",
+              "budgets[agent_id=${agent.agent_id}].consumed_amount_cents"
+            ]
           }
         }
       ]
@@ -1774,10 +1848,15 @@
           "expect": {
             "status": 200,
             "match": {
-              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents": 0,
-              "budgets[agent_id=${agent.agent_id}].consumed_amount_cents": 0,
-              "budgets[agent_id=${agent.agent_id}].remaining_amount_cents": 1000
-            }
+              "budgets[agent_id=${agent.agent_id}].frozen_amount.units": "0",
+              "budgets[agent_id=${agent.agent_id}].consumed_amount.units": "0",
+              "budgets[agent_id=${agent.agent_id}].remaining_amount.units": "10000000"
+            },
+            "absent": [
+              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents",
+              "budgets[agent_id=${agent.agent_id}].consumed_amount_cents",
+              "budgets[agent_id=${agent.agent_id}].remaining_amount_cents"
+            ]
           }
         },
         {
@@ -1828,16 +1907,21 @@
           "expect": {
             "status": 200,
             "match": {
-              "coverage.consumed_amount_cents": 0,
-              "coverage.recorded_budget_charges_cents": 0,
-              "coverage.unaccounted_consumption_cents": 0,
-              "coverage.pending_hold_count": 0
+              "coverage.pending_hold_count": 0,
+              "coverage.consumed_amount.units": "0",
+              "coverage.recorded_budget_charges.units": "0",
+              "coverage.unaccounted_consumption.units": "0"
             },
             "counts": [
               {
                 "path": "transactions",
                 "equals": 0
               }
+            ],
+            "absent": [
+              "coverage.consumed_amount_cents",
+              "coverage.recorded_budget_charges_cents",
+              "coverage.unaccounted_consumption_cents"
             ]
           }
         },
@@ -1990,15 +2074,17 @@
               "settlement_id": "${settlement}",
               "status": "settled",
               "receipt.actual_vendor_cost": "${defs.exact_cost.op_a}",
-              "receipt.budget_charge_cents": 351,
-              "receipt.released_amount_cents": 149,
               "receipt.provider_request_id": "fixture-provider-request:op-a",
               "receipt.artifact_reference": "artifact://conformance/op-a.png",
-              "receipt.price_model_snapshot": "${defs.receipts.op_a.price_model_snapshot}"
+              "receipt.price_model_snapshot": "${defs.receipts.op_a.price_model_snapshot}",
+              "receipt.budget_charge.units": "3500001",
+              "receipt.released_amount.units": "1499999"
             },
             "absent": [
               "operation_key",
-              "spend.operation_key"
+              "spend.operation_key",
+              "receipt.budget_charge_cents",
+              "receipt.released_amount_cents"
             ]
           }
         },
@@ -2022,10 +2108,15 @@
           "expect": {
             "status": 200,
             "match": {
-              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents": 0,
-              "budgets[agent_id=${agent.agent_id}].consumed_amount_cents": 351,
-              "budgets[agent_id=${agent.agent_id}].remaining_amount_cents": 649
-            }
+              "budgets[agent_id=${agent.agent_id}].frozen_amount.units": "0",
+              "budgets[agent_id=${agent.agent_id}].consumed_amount.units": "3500001",
+              "budgets[agent_id=${agent.agent_id}].remaining_amount.units": "6499999"
+            },
+            "absent": [
+              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents",
+              "budgets[agent_id=${agent.agent_id}].consumed_amount_cents",
+              "budgets[agent_id=${agent.agent_id}].remaining_amount_cents"
+            ]
           }
         },
         {
@@ -2039,15 +2130,20 @@
             "status": 200,
             "match": {
               "transactions[settlement_id=${settlement}].claim_id": "${claim}",
-              "transactions[settlement_id=${settlement}].budget_charge_delta_cents": 351,
-              "coverage.recorded_budget_charges_cents": 351,
-              "coverage.unaccounted_consumption_cents": 0
+              "transactions[settlement_id=${settlement}].budget_charge_delta.units": "3500001",
+              "coverage.recorded_budget_charges.units": "3500001",
+              "coverage.unaccounted_consumption.units": "0"
             },
             "counts": [
               {
                 "path": "transactions",
                 "equals": 1
               }
+            ],
+            "absent": [
+              "transactions[settlement_id=${settlement}].budget_charge_delta_cents",
+              "coverage.recorded_budget_charges_cents",
+              "coverage.unaccounted_consumption_cents"
             ]
           }
         },
@@ -2197,8 +2293,8 @@
             "match": {
               "claims[claim_id=${claim}].reconciliation_required": true,
               "claims[claim_id=${claim}].status": "claimed",
-              "claims[claim_id=${claim}].spend.budget_hold.amount_cents": 300,
-              "claims[claim_id=${claim}].spend.budget_hold.status": "claimed"
+              "claims[claim_id=${claim}].spend.budget_hold.status": "claimed",
+              "claims[claim_id=${claim}].spend.budget_hold.amount.units": "3000000"
             },
             "counts": [
               {
@@ -2208,6 +2304,9 @@
                 },
                 "equals": 1
               }
+            ],
+            "absent": [
+              "claims[claim_id=${claim}].spend.budget_hold.amount_cents"
             ]
           }
         },
@@ -2217,10 +2316,15 @@
           "expect": {
             "status": 200,
             "match": {
-              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents": 300,
-              "budgets[agent_id=${agent.agent_id}].consumed_amount_cents": 0,
-              "budgets[agent_id=${agent.agent_id}].remaining_amount_cents": 700
-            }
+              "budgets[agent_id=${agent.agent_id}].frozen_amount.units": "3000000",
+              "budgets[agent_id=${agent.agent_id}].consumed_amount.units": "0",
+              "budgets[agent_id=${agent.agent_id}].remaining_amount.units": "7000000"
+            },
+            "absent": [
+              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents",
+              "budgets[agent_id=${agent.agent_id}].consumed_amount_cents",
+              "budgets[agent_id=${agent.agent_id}].remaining_amount_cents"
+            ]
           }
         },
         {
@@ -2234,13 +2338,16 @@
             "status": 200,
             "match": {
               "coverage.pending_hold_count": 1,
-              "coverage.consumed_amount_cents": 0
+              "coverage.consumed_amount.units": "0"
             },
             "counts": [
               {
                 "path": "transactions",
                 "equals": 0
               }
+            ],
+            "absent": [
+              "coverage.consumed_amount_cents"
             ]
           }
         },
@@ -2459,9 +2566,13 @@
           "expect": {
             "status": 200,
             "match": {
-              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents": 500,
-              "budgets[agent_id=${agent.agent_id}].consumed_amount_cents": 0
-            }
+              "budgets[agent_id=${agent.agent_id}].frozen_amount.units": "5000000",
+              "budgets[agent_id=${agent.agent_id}].consumed_amount.units": "0"
+            },
+            "absent": [
+              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents",
+              "budgets[agent_id=${agent.agent_id}].consumed_amount_cents"
+            ]
           }
         },
         {
@@ -2624,10 +2735,15 @@
           "expect": {
             "status": 200,
             "match": {
-              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents": 0,
-              "budgets[agent_id=${agent.agent_id}].consumed_amount_cents": 251,
-              "budgets[agent_id=${agent.agent_id}].remaining_amount_cents": 749
-            }
+              "budgets[agent_id=${agent.agent_id}].frozen_amount.units": "0",
+              "budgets[agent_id=${agent.agent_id}].consumed_amount.units": "2500001",
+              "budgets[agent_id=${agent.agent_id}].remaining_amount.units": "7499999"
+            },
+            "absent": [
+              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents",
+              "budgets[agent_id=${agent.agent_id}].consumed_amount_cents",
+              "budgets[agent_id=${agent.agent_id}].remaining_amount_cents"
+            ]
           }
         },
         {
@@ -2641,16 +2757,16 @@
             "status": 200,
             "match": {
               "transactions[claim_id=${claim_billed}].settlement_id": "${settlement_billed}",
-              "transactions[claim_id=${claim_billed}].budget_charge_delta_cents": 251,
               "transactions[claim_id=${claim_billed}].effective_cost": {
                 "amount": "2500001",
                 "scale": 6,
                 "currency": "usd"
               },
-              "coverage.consumed_amount_cents": 251,
-              "coverage.recorded_budget_charges_cents": 251,
-              "coverage.unaccounted_consumption_cents": 0,
-              "coverage.pending_hold_count": 0
+              "coverage.pending_hold_count": 0,
+              "transactions[claim_id=${claim_billed}].budget_charge_delta.units": "2500001",
+              "coverage.consumed_amount.units": "2500001",
+              "coverage.recorded_budget_charges.units": "2500001",
+              "coverage.unaccounted_consumption.units": "0"
             },
             "counts": [
               {
@@ -2664,6 +2780,12 @@
                 },
                 "equals": 0
               }
+            ],
+            "absent": [
+              "transactions[claim_id=${claim_billed}].budget_charge_delta_cents",
+              "coverage.consumed_amount_cents",
+              "coverage.recorded_budget_charges_cents",
+              "coverage.unaccounted_consumption_cents"
             ]
           }
         },
@@ -2678,12 +2800,15 @@
             "match": {
               "authorization_records[decision_id=${decision_billed}].status": "settled",
               "authorization_records[decision_id=${decision_billed}].claim.reconciliation_outcome": "vendor_billed",
-              "authorization_records[decision_id=${decision_billed}].receipt.budget_charge_cents": 251,
               "authorization_records[decision_id=${decision_not_billed}].status": "released",
               "authorization_records[decision_id=${decision_not_billed}].claim.reconciliation_outcome": "vendor_did_not_bill",
               "authorization_records[decision_id=${decision_not_billed}].receipt": null,
-              "authorization_records[decision_id=${decision_not_billed}].ledger_transaction_ids": []
-            }
+              "authorization_records[decision_id=${decision_not_billed}].ledger_transaction_ids": [],
+              "authorization_records[decision_id=${decision_billed}].receipt.budget_charge.units": "2500001"
+            },
+            "absent": [
+              "authorization_records[decision_id=${decision_billed}].receipt.budget_charge_cents"
+            ]
           }
         }
       ]
@@ -2901,9 +3026,13 @@
           "expect": {
             "status": 200,
             "match": {
-              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents": 500,
-              "budgets[agent_id=${agent.agent_id}].remaining_amount_cents": 500
-            }
+              "budgets[agent_id=${agent.agent_id}].frozen_amount.units": "5000000",
+              "budgets[agent_id=${agent.agent_id}].remaining_amount.units": "5000000"
+            },
+            "absent": [
+              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents",
+              "budgets[agent_id=${agent.agent_id}].remaining_amount_cents"
+            ]
           }
         },
         {
@@ -2953,12 +3082,14 @@
             "match": {
               "settlement_id": "${settlement}",
               "claim_id": "${claim}",
-              "receipt.budget_charge_cents": 351,
-              "receipt.released_amount_cents": 49
+              "receipt.budget_charge.units": "3500001",
+              "receipt.released_amount.units": "499999"
             },
             "absent": [
               "operation_key",
-              "spend.operation_key"
+              "spend.operation_key",
+              "receipt.budget_charge_cents",
+              "receipt.released_amount_cents"
             ]
           }
         },
@@ -2968,10 +3099,15 @@
           "expect": {
             "status": 200,
             "match": {
-              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents": 100,
-              "budgets[agent_id=${agent.agent_id}].consumed_amount_cents": 351,
-              "budgets[agent_id=${agent.agent_id}].remaining_amount_cents": 549
-            }
+              "budgets[agent_id=${agent.agent_id}].frozen_amount.units": "1000000",
+              "budgets[agent_id=${agent.agent_id}].consumed_amount.units": "3500001",
+              "budgets[agent_id=${agent.agent_id}].remaining_amount.units": "5499999"
+            },
+            "absent": [
+              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents",
+              "budgets[agent_id=${agent.agent_id}].consumed_amount_cents",
+              "budgets[agent_id=${agent.agent_id}].remaining_amount_cents"
+            ]
           }
         },
         {
@@ -2986,14 +3122,18 @@
             "match": {
               "transactions[0].settlement_id": "${settlement}",
               "transactions[0].authorization_id": "${decision}",
-              "coverage.recorded_budget_charges_cents": 351,
-              "coverage.unaccounted_consumption_cents": 0
+              "coverage.recorded_budget_charges.units": "3500001",
+              "coverage.unaccounted_consumption.units": "0"
             },
             "counts": [
               {
                 "path": "transactions",
                 "equals": 1
               }
+            ],
+            "absent": [
+              "coverage.recorded_budget_charges_cents",
+              "coverage.unaccounted_consumption_cents"
             ]
           }
         }
@@ -3033,9 +3173,13 @@
           "expect": {
             "status": 200,
             "match": {
-              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents": 0,
-              "budgets[agent_id=${agent.agent_id}].remaining_amount_cents": 1000
-            }
+              "budgets[agent_id=${agent.agent_id}].frozen_amount.units": "0",
+              "budgets[agent_id=${agent.agent_id}].remaining_amount.units": "10000000"
+            },
+            "absent": [
+              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents",
+              "budgets[agent_id=${agent.agent_id}].remaining_amount_cents"
+            ]
           }
         },
         {
@@ -3121,9 +3265,13 @@
           "expect": {
             "status": 200,
             "match": {
-              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents": 1000,
-              "budgets[agent_id=${agent.agent_id}].remaining_amount_cents": 0
-            }
+              "budgets[agent_id=${agent.agent_id}].frozen_amount.units": "10000000",
+              "budgets[agent_id=${agent.agent_id}].remaining_amount.units": "0"
+            },
+            "absent": [
+              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents",
+              "budgets[agent_id=${agent.agent_id}].remaining_amount_cents"
+            ]
           }
         },
         {
@@ -3208,9 +3356,13 @@
           "expect": {
             "status": 200,
             "match": {
-              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents": 1000,
-              "budgets[agent_id=${agent.agent_id}].consumed_amount_cents": 0
-            }
+              "budgets[agent_id=${agent.agent_id}].frozen_amount.units": "10000000",
+              "budgets[agent_id=${agent.agent_id}].consumed_amount.units": "0"
+            },
+            "absent": [
+              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents",
+              "budgets[agent_id=${agent.agent_id}].consumed_amount_cents"
+            ]
           }
         },
         {
@@ -3224,17 +3376,21 @@
             "status": 200,
             "match": {
               "status": "settled",
-              "receipt.budget_charge_cents": 600,
-              "receipt.authorized_max_cents": 600,
-              "receipt.released_amount_cents": 0,
-              "receipt.overrun_amount_cents": 0
+              "receipt.budget_charge.units": "6000000",
+              "receipt.authorized_max.units": "6000000",
+              "receipt.released_amount.units": "0",
+              "receipt.overrun_amount.units": "0"
             },
             "capture": {
               "settlement_a": "settlement_id"
             },
             "absent": [
               "operation_key",
-              "spend.operation_key"
+              "spend.operation_key",
+              "receipt.budget_charge_cents",
+              "receipt.authorized_max_cents",
+              "receipt.released_amount_cents",
+              "receipt.overrun_amount_cents"
             ]
           }
         },
@@ -3300,13 +3456,16 @@
             "match": {
               "decision": "allow",
               "revision": 2,
-              "budget_hold.amount_cents": 400
+              "budget_hold.amount.units": "4000000"
             },
             "counts": [
               {
                 "path": "attempt_history",
                 "equals": 2
               }
+            ],
+            "absent": [
+              "budget_hold.amount_cents"
             ]
           }
         },
@@ -3332,10 +3491,15 @@
           "expect": {
             "status": 200,
             "match": {
-              "budgets[agent_id=${agent.agent_id}].consumed_amount_cents": 600,
-              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents": 400,
-              "budgets[agent_id=${agent.agent_id}].remaining_amount_cents": 0
-            }
+              "budgets[agent_id=${agent.agent_id}].consumed_amount.units": "6000000",
+              "budgets[agent_id=${agent.agent_id}].frozen_amount.units": "4000000",
+              "budgets[agent_id=${agent.agent_id}].remaining_amount.units": "0"
+            },
+            "absent": [
+              "budgets[agent_id=${agent.agent_id}].consumed_amount_cents",
+              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents",
+              "budgets[agent_id=${agent.agent_id}].remaining_amount_cents"
+            ]
           }
         },
         {
@@ -3349,16 +3513,21 @@
             "status": 200,
             "match": {
               "transactions[0].settlement_id": "${settlement_a}",
-              "transactions[0].budget_charge_delta_cents": 600,
-              "coverage.consumed_amount_cents": 600,
-              "coverage.recorded_budget_charges_cents": 600,
-              "coverage.pending_hold_count": 1
+              "coverage.pending_hold_count": 1,
+              "transactions[0].budget_charge_delta.units": "6000000",
+              "coverage.consumed_amount.units": "6000000",
+              "coverage.recorded_budget_charges.units": "6000000"
             },
             "counts": [
               {
                 "path": "transactions",
                 "equals": 1
               }
+            ],
+            "absent": [
+              "transactions[0].budget_charge_delta_cents",
+              "coverage.consumed_amount_cents",
+              "coverage.recorded_budget_charges_cents"
             ]
           }
         }
@@ -3378,13 +3547,16 @@
             "status": 200,
             "match": {
               "decision": "allow",
-              "budget_hold.frozen_amount_cents": 400
+              "budget_hold.frozen_amount.units": "4000000"
             },
             "capture": {
               "void_token": "auth_token_id",
               "void_decision": "decision_id",
               "void_scope": "execution_scope"
-            }
+            },
+            "absent": [
+              "budget_hold.frozen_amount_cents"
+            ]
           },
           "body": {
             "operation_key": "conformance:v4.5:s11:void",
@@ -3412,10 +3584,15 @@
           "expect": {
             "status": 200,
             "match": {
-              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents": 400,
-              "budgets[agent_id=${agent.agent_id}].remaining_amount_cents": 100,
-              "budgets[agent_id=${agent.agent_id}].consumed_amount_cents": 0
-            }
+              "budgets[agent_id=${agent.agent_id}].frozen_amount.units": "4000000",
+              "budgets[agent_id=${agent.agent_id}].remaining_amount.units": "1000000",
+              "budgets[agent_id=${agent.agent_id}].consumed_amount.units": "0"
+            },
+            "absent": [
+              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents",
+              "budgets[agent_id=${agent.agent_id}].remaining_amount_cents",
+              "budgets[agent_id=${agent.agent_id}].consumed_amount_cents"
+            ]
           }
         },
         {
@@ -3441,10 +3618,15 @@
           "expect": {
             "status": 200,
             "match": {
-              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents": 0,
-              "budgets[agent_id=${agent.agent_id}].remaining_amount_cents": 500,
-              "budgets[agent_id=${agent.agent_id}].consumed_amount_cents": 0
-            }
+              "budgets[agent_id=${agent.agent_id}].frozen_amount.units": "0",
+              "budgets[agent_id=${agent.agent_id}].remaining_amount.units": "5000000",
+              "budgets[agent_id=${agent.agent_id}].consumed_amount.units": "0"
+            },
+            "absent": [
+              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents",
+              "budgets[agent_id=${agent.agent_id}].remaining_amount_cents",
+              "budgets[agent_id=${agent.agent_id}].consumed_amount_cents"
+            ]
           }
         },
         {
@@ -3505,10 +3687,15 @@
           "expect": {
             "status": 200,
             "match": {
-              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents": 0,
-              "budgets[agent_id=${agent.agent_id}].remaining_amount_cents": 500,
-              "budgets[agent_id=${agent.agent_id}].consumed_amount_cents": 0
-            }
+              "budgets[agent_id=${agent.agent_id}].frozen_amount.units": "0",
+              "budgets[agent_id=${agent.agent_id}].remaining_amount.units": "5000000",
+              "budgets[agent_id=${agent.agent_id}].consumed_amount.units": "0"
+            },
+            "absent": [
+              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents",
+              "budgets[agent_id=${agent.agent_id}].remaining_amount_cents",
+              "budgets[agent_id=${agent.agent_id}].consumed_amount_cents"
+            ]
           }
         },
         {
@@ -3551,13 +3738,16 @@
             "status": 200,
             "match": {
               "decision": "allow",
-              "budget_hold.frozen_amount_cents": 400
+              "budget_hold.frozen_amount.units": "4000000"
             },
             "capture": {
               "void_token": "auth_token_id",
               "void_decision": "decision_id",
               "void_scope": "execution_scope"
-            }
+            },
+            "absent": [
+              "budget_hold.frozen_amount_cents"
+            ]
           },
           "body": {
             "operation_key": "conformance:v4.5:s12:void",
@@ -3609,10 +3799,15 @@
           "expect": {
             "status": 200,
             "match": {
-              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents": 400,
-              "budgets[agent_id=${agent.agent_id}].remaining_amount_cents": 100,
-              "budgets[agent_id=${agent.agent_id}].consumed_amount_cents": 0
-            }
+              "budgets[agent_id=${agent.agent_id}].frozen_amount.units": "4000000",
+              "budgets[agent_id=${agent.agent_id}].remaining_amount.units": "1000000",
+              "budgets[agent_id=${agent.agent_id}].consumed_amount.units": "0"
+            },
+            "absent": [
+              "budgets[agent_id=${agent.agent_id}].frozen_amount_cents",
+              "budgets[agent_id=${agent.agent_id}].remaining_amount_cents",
+              "budgets[agent_id=${agent.agent_id}].consumed_amount_cents"
+            ]
           }
         }
       ]
@@ -3642,14 +3837,16 @@
               "decision": "allow",
               "budget_hold.status": "frozen",
               "budget_hold.amount.units": "5000",
-              "budget_hold.amount.scale": 6,
-              "budget_hold.amount_cents": 1
+              "budget_hold.amount.scale": 6
             },
             "capture": {
               "token": "auth_token_id",
               "hold": "budget_hold.hold_id",
               "expanded_scope": "execution_scope"
-            }
+            },
+            "absent": [
+              "budget_hold.amount_cents"
+            ]
           }
         },
         {
@@ -3858,13 +4055,13 @@
               "receipt.budget_charge.units": "3100",
               "receipt.budget_charge.display": "0.0031",
               "receipt.released_amount.units": "1900",
-              "receipt.budget_charge_cents": 1,
-              "receipt.released_amount_cents": 0,
               "spend.budget_hold.status": "settled"
             },
             "absent": [
               "operation_key",
-              "spend.operation_key"
+              "spend.operation_key",
+              "receipt.budget_charge_cents",
+              "receipt.released_amount_cents"
             ]
           }
         }
