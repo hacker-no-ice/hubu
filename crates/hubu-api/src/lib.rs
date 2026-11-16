@@ -986,12 +986,11 @@ struct UserHttpResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AddPolicyHttpRequest {
     agent_id: Option<String>,
     /// Single-spend limit of the starter policy as a decimal string ("5.00").
     daily_limit: Option<String>,
-    /// Deprecated whole-cent form of `daily_limit`.
-    daily_limit_cents: Option<i64>,
     policy_yaml: Option<String>,
     display_name: Option<String>,
     declarative_key: Option<String>,
@@ -1059,10 +1058,8 @@ struct AgentHttpResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CreateBudgetHttpRequest {
-    /// Deprecated whole-cent limit; `amount` is the exact decimal form.
-    #[serde(default)]
-    amount_cents: Option<i64>,
     #[serde(default)]
     amount: Option<String>,
     /// Budget currency (`usd` when omitted). Budgets are per currency.
@@ -1080,9 +1077,6 @@ struct BudgetIdHttpRequest {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UpdateBudgetLimitHttpRequest {
-    /// Deprecated whole-cent limit; `amount_limit` is the exact decimal form.
-    #[serde(default)]
-    amount_limit_cents: Option<i64>,
     #[serde(default)]
     amount_limit: Option<String>,
     expected_revision: i64,
@@ -1090,10 +1084,8 @@ struct UpdateBudgetLimitHttpRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SetSpendingTargetHttpRequest {
-    /// Deprecated whole-cent amount; `amount` is the exact decimal form.
-    #[serde(default)]
-    amount_cents: Option<i64>,
     #[serde(default)]
     amount: Option<String>,
     starting_at: Option<String>,
@@ -1151,8 +1143,7 @@ struct RevokeSpendingTargetHttpResponse {
 }
 
 /// An exact amount: `units` of 10^-`scale` of `currency`, as an integer
-/// string, plus an adaptive human-readable `display`. Legacy `*_cents`
-/// fields beside it are conservative projections.
+/// string, plus an adaptive human-readable `display`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct MoneyHttpResponse {
     units: String,
@@ -1188,7 +1179,6 @@ struct BudgetHttpResponse {
     current_version_id: String,
     current_revision: u64,
     amount_limit: MoneyHttpResponse,
-    amount_limit_cents: i64,
     currency: String,
     starting_at: String,
     ending_before: Option<String>,
@@ -1196,9 +1186,6 @@ struct BudgetHttpResponse {
     consumed_amount: MoneyHttpResponse,
     frozen_amount: MoneyHttpResponse,
     remaining_amount: MoneyHttpResponse,
-    consumed_amount_cents: i64,
-    frozen_amount_cents: i64,
-    remaining_amount_cents: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -1208,7 +1195,6 @@ struct BudgetVersionHttpResponse {
     predecessor_version_id: Option<String>,
     predecessor_revision: Option<u64>,
     amount_limit: MoneyHttpResponse,
-    amount_limit_cents: i64,
     effective_at: String,
     actor: String,
     source: String,
@@ -1239,9 +1225,6 @@ struct SpendingTargetHttpResponse {
     target_amount: MoneyHttpResponse,
     allocated_amount: MoneyHttpResponse,
     exceeded_by: MoneyHttpResponse,
-    target_amount_cents: i64,
-    allocated_amount_cents: i64,
-    exceeded_by_cents: i64,
     is_exceeded: bool,
     currency: String,
     starting_at: String,
@@ -1255,9 +1238,6 @@ struct SpendingTargetWarningHttpResponse {
     target_amount: MoneyHttpResponse,
     allocated_amount: MoneyHttpResponse,
     exceeded_by: MoneyHttpResponse,
-    target_amount_cents: i64,
-    allocated_amount_cents: i64,
-    exceeded_by_cents: i64,
     message: String,
 }
 
@@ -1267,9 +1247,7 @@ struct SpendHttpRequest {
     operation_key: Option<String>,
     agent_id: Option<String>,
     account_id: Option<String>,
-    /// Deprecated whole-cent amount; `amount` is the exact decimal form.
-    #[serde(default)]
-    amount_cents: Option<i64>,
+
     #[serde(default)]
     amount: Option<String>,
     #[serde(default)]
@@ -1344,7 +1322,6 @@ struct SpendApprovalReviewHttpResponse {
     account_id: String,
     agent_id: String,
     amount: MoneyHttpResponse,
-    amount_cents: i64,
     currency: String,
     merchant: Option<String>,
     execution_scope: Option<ExecutionScope>,
@@ -1705,17 +1682,13 @@ struct ExecutorSpendSettlementReceiptHttpResponse {
     budget_charge: MoneyHttpResponse,
     released_amount: MoneyHttpResponse,
     overrun_amount: MoneyHttpResponse,
-    authorized_max_cents: i64,
+
     /// Compatibility settlement amount; consult cost_basis.
     actual_vendor_cost: SpendExecutorVendorCost,
     settlement_amount: SpendExecutorVendorCost,
     cost_basis: hubu_core::spend::SettlementCostBasis,
     provider_actual_cost: Option<SpendExecutorVendorCost>,
     /// v4.3 compatibility projection of the conservative budget charge.
-    actual_vendor_cost_cents: i64,
-    budget_charge_cents: i64,
-    released_amount_cents: i64,
-    overrun_amount_cents: i64,
     currency: String,
     provider_request_id: String,
     price_model_snapshot: Value,
@@ -1732,10 +1705,6 @@ struct BudgetHoldHttpResponse {
     consumed_amount: MoneyHttpResponse,
     frozen_amount: MoneyHttpResponse,
     remaining_amount: MoneyHttpResponse,
-    amount_cents: i64,
-    consumed_amount_cents: i64,
-    frozen_amount_cents: i64,
-    remaining_amount_cents: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -1773,7 +1742,7 @@ struct LedgerEntryHttpResponse {
     owner_user_name: String,
     account_id: String,
     direction: String,
-    amount_cents: i64,
+    amount: MoneyHttpResponse,
     currency: String,
 }
 
@@ -1814,14 +1783,13 @@ fn handle_connection(mut stream: TcpStream, state: &ServerState) -> Result<()> {
     }
     let method = request.method.clone();
     let path = request.path.clone();
-    let deprecated_amounts = uses_only_legacy_amount_fields(&request);
     let response = if invalid_governance_query {
         governance::reject_parsed_query(&request, state)
     } else {
         route(request, state)
     };
     let status = response.status;
-    write_response(&mut stream, response, deprecated_amounts)
+    write_response(&mut stream, response)
         .with_context(|| format!("write response for request {request_id}"))?;
     if operational_probe {
         if !(200..300).contains(&status) {
@@ -1929,7 +1897,6 @@ fn read_http_request_with_guard<R: Read>(
         raw.extend_from_slice(&chunk[..bytes_read]);
     }
     raw.truncate(request_len);
-
     String::from_utf8(raw).context("HTTP request is not valid UTF-8")
 }
 
@@ -2268,10 +2235,9 @@ fn budget_version_error_response(error: &anyhow::Error) -> Option<HttpResponse> 
                 422,
                 "budget limit is below committed usage",
                 "budget_limit_below_committed",
-                Some(json!({
-                    "requested_amount_cents": requested_amount.legacy_cents_floor(),
-                    "committed_amount_cents": committed_amount.legacy_cents_ceil(),
-                })),
+                Some(
+                    json!({"requested_amount": requested_amount.display(), "committed_amount": committed_amount.display()}),
+                ),
                 Some(json!({
                     "action": "increase_limit_to_committed_usage",
                     "message": "choose a total budget limit at least as large as committed usage"
@@ -2301,7 +2267,7 @@ fn budget_update_storage_error_response() -> HttpResponse {
         None,
         Some(json!({
             "action": "retry_exactly",
-            "message": "retry with the same budget_id, expected_revision, amount_limit_cents, and reason after an ambiguous outcome"
+            "message": "retry with the same budget_id, expected_revision, amount_limit, and reason after an ambiguous outcome"
         })),
     )
 }
@@ -2564,7 +2530,7 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
             "required": [
                 "operation_key",
                 "account_id",
-                "amount (exact decimal string, at most 6 decimal places; amount_cents is deprecated)",
+                "amount (exact decimal string, at most 6 decimal places)",
                 "reason"
             ],
             "optional": [
@@ -2628,7 +2594,7 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
             "optional": ["receipt.cost_basis (provider_reported, catalog_usage, frozen_quote, or legacy_unspecified)"],
             "settlement_provenance": "actual_vendor_cost is the compatibility settlement amount; response settlement_amount and cost_basis distinguish it from nullable provider_actual_cost",
             "legacy_v4_3_input": "receipt.actual_vendor_cost_cents maps exactly to amount with scale 2 and usd; price_model_snapshot remains the complete immutable JSON snapshot",
-            "legacy_v4_3_response": "receipt.actual_vendor_cost_cents remains available as the conservative budget_charge_cents projection; actual_vendor_cost preserves the exact settlement decimal; cost_basis identifies its provenance"
+            "settlement_response": "actual_vendor_cost preserves the exact settlement decimal; budget_charge is a micro-unit money object; cost_basis identifies its provenance"
         },
         "release_request": {
             "identity": "claim_id",
@@ -3279,8 +3245,8 @@ fn hex_encode(bytes: &[u8]) -> String {
     encoded
 }
 
-/// The requested spend amount: the exact decimal `amount`, or the deprecated
-/// whole-cent `amount_cents`. Exactly one must be sent, and it must be positive.
+/// The requested spend amount is the exact
+/// decimal `amount`. It must be positive.
 /// The wallet moves whole US-dollar cents. Refuse a wallet spend it can never
 /// pay before any decision or budget hold exists, so nothing is left to release
 /// (or to race with an executor claim).
@@ -3298,47 +3264,26 @@ fn refuse_unpayable_wallet_spend(request: &SpendHttpRequest) -> Result<()> {
             hubu_core::app::SpendApprovalError::UnsupportedPaymentCurrency(currency).into(),
         );
     }
-    let amount = requested_spend_amount(request.amount.as_deref(), request.amount_cents)?;
+    let amount = requested_spend_amount(request.amount.as_deref())?;
     if amount.legacy_cents_floor() != amount.legacy_cents_ceil() {
         return Err(hubu_core::app::SpendApprovalError::SubCentPaymentRail(amount).into());
     }
     Ok(())
 }
 
-fn requested_spend_amount(amount: Option<&str>, amount_cents: Option<i64>) -> Result<Amount> {
-    decimal_or_legacy_cents(amount, amount_cents, "amount", "amount_cents", "spend")
+fn requested_spend_amount(amount: Option<&str>) -> Result<Amount> {
+    decimal_amount(amount, "amount", "spend")
 }
 
-/// Reads an amount sent either as an exact decimal string (`field`) or as
-/// deprecated whole cents (`legacy_field`). Exactly one must be sent, it must
-/// be positive, and decimals allow at most 6 fractional digits.
-fn decimal_or_legacy_cents(
-    decimal: Option<&str>,
-    cents: Option<i64>,
-    field: &str,
-    legacy_field: &str,
-    subject: &str,
-) -> Result<Amount> {
-    let requested = match (decimal, cents) {
-        (Some(_), Some(_)) => {
-            return Err(anyhow!(
-                "send either `{field}` or the deprecated `{legacy_field}`, not both"
-            ))
-        }
-        (Some(decimal), None) => decimal.parse::<Amount>()?,
-        (None, Some(cents)) => legacy_cents_amount(cents)?,
-        (None, None) => return Err(anyhow!("{subject} requires `{field}`")),
-    };
+/// Parse a positive decimal string at accounting scale.
+fn decimal_amount(decimal: Option<&str>, field: &str, subject: &str) -> Result<Amount> {
+    let requested = decimal
+        .ok_or_else(|| anyhow!("{subject} requires `{field}`"))?
+        .parse::<Amount>()?;
     if requested <= Amount::ZERO {
         return Err(anyhow!("{subject} amount must be positive"));
     }
     Ok(requested)
-}
-
-/// Converts a cent amount from the HTTP wire into accounting units.
-fn legacy_cents_amount(cents: i64) -> Result<Amount> {
-    Amount::from_legacy_cents(cents)
-        .map_err(|_| anyhow!("amount of {cents} cents exceeds the supported range"))
 }
 
 fn add_policy(body: String, state: &ServerState) -> Result<AddPolicyHttpResponse> {
@@ -3362,37 +3307,9 @@ fn add_policy(body: String, state: &ServerState) -> Result<AddPolicyHttpResponse
         validate_policy(&policy)?;
         policy
     } else {
+        let amount = decimal_amount(request.daily_limit.as_deref(), "daily_limit", "policy add")?;
         let (limit_value, limit_description) =
-            match (request.daily_limit.as_deref(), request.daily_limit_cents) {
-                (Some(_), Some(_)) => {
-                    return Err(anyhow!(
-                        "send either `daily_limit` or the deprecated `daily_limit_cents`, not both"
-                    ))
-                }
-                (Some(daily_limit), None) => {
-                    let amount = daily_limit.parse::<Amount>()?;
-                    if amount <= Amount::ZERO {
-                        return Err(anyhow!("daily limit must be positive"));
-                    }
-                    (PolicyValue::Money(amount), format!("USD {amount}"))
-                }
-                (None, Some(daily_limit_cents)) => {
-                    if daily_limit_cents <= 0 {
-                        return Err(anyhow!("daily limit must be positive"));
-                    }
-                    // Legacy starter policies keep their exact payload so
-                    // re-applying them stays idempotent.
-                    (
-                        PolicyValue::MoneyCents(daily_limit_cents),
-                        format!("{daily_limit_cents} cents"),
-                    )
-                }
-                (None, None) => {
-                    return Err(anyhow!(
-                        "policy add requires `policy_yaml` or `daily_limit`"
-                    ))
-                }
-            };
+            (PolicyValue::Money(amount), format!("USD {amount}"));
 
         Policy {
             id: match agent_pub_id.as_deref() {
@@ -3840,13 +3757,7 @@ fn create_budget_at(
     now: DateTime<Utc>,
 ) -> Result<CreateBudgetHttpResponse> {
     let request: CreateBudgetHttpRequest = serde_json::from_str(&body)?;
-    let amount_limit = decimal_or_legacy_cents(
-        request.amount.as_deref(),
-        request.amount_cents,
-        "amount",
-        "amount_cents",
-        "budget",
-    )?;
+    let amount_limit = decimal_amount(request.amount.as_deref(), "amount", "budget")?;
     let budget_currency = normalize_spend_currency(request.currency.as_deref())?;
 
     let authenticated_user = authenticated_user(state)?;
@@ -3878,7 +3789,7 @@ fn create_budget_at(
             "budget_id": response.budget.id.to_string(),
             "user_id": user.user_id.to_string(),
             "agent_id": agent_id.to_string(),
-            "amount_cents": response.version.amount_limit.legacy_cents_floor(),
+            "amount": response.version.amount_limit.display(),
             "currency": response.budget.currency.to_string(),
             "starting_at": response.budget.period.starting_at.to_rfc3339(),
             "ending_before": response.budget.period.ending_before.map(|value| value.to_rfc3339()),
@@ -3903,13 +3814,7 @@ fn create_budget_at(
 
 fn set_spending_target(body: String, state: &ServerState) -> Result<SetSpendingTargetHttpResponse> {
     let request: SetSpendingTargetHttpRequest = serde_json::from_str(&body)?;
-    let target_amount = decimal_or_legacy_cents(
-        request.amount.as_deref(),
-        request.amount_cents,
-        "amount",
-        "amount_cents",
-        "spending target",
-    )?;
+    let target_amount = decimal_amount(request.amount.as_deref(), "amount", "spending target")?;
 
     let user = authenticated_user_context(state)?;
     let period = TimePeriod::new(
@@ -4103,11 +4008,9 @@ fn update_budget_limit_at(
         return Err(BudgetVersionHttpError::NotFound);
     }
     let request = parse_update_budget_limit_request(&body)?;
-    let amount_limit = decimal_or_legacy_cents(
+    let amount_limit = decimal_amount(
         request.amount_limit.as_deref(),
-        request.amount_limit_cents,
         "amount_limit",
-        "amount_limit_cents",
         "budget update",
     )
     .map_err(|_| BudgetVersionHttpError::InvalidAmount)?;
@@ -4217,13 +4120,7 @@ fn parse_update_budget_limit_request(
     if !object.get("expected_revision").is_some_and(Value::is_i64) {
         return Err(BudgetVersionHttpError::InvalidRevision);
     }
-    let legacy = object.get("amount_limit_cents");
-    let decimal = object.get("amount_limit");
-    let valid_amount = match (decimal, legacy) {
-        (Some(decimal), None) => decimal.is_string(),
-        (None, Some(legacy)) => legacy.is_i64(),
-        _ => false,
-    };
+    let valid_amount = object.get("amount_limit").is_some_and(Value::is_string);
     if !valid_amount {
         return Err(BudgetVersionHttpError::InvalidAmount);
     }
@@ -4521,7 +4418,7 @@ fn approval_review_response(
             account_id,
             agent_id,
             amount: MoneyHttpResponse::new(request.amount, request.currency),
-            amount_cents: request.amount.legacy_cents_ceil(),
+
             currency: request.currency.to_string(),
             merchant: request.merchant.clone(),
             execution_scope: request.execution_scope.clone(),
@@ -5165,17 +5062,14 @@ fn settle_executor_spend_request(
             budget_charge: MoneyHttpResponse::new(receipt.budget_charge, receipt.currency),
             released_amount: MoneyHttpResponse::new(receipt.released_amount, receipt.currency),
             overrun_amount: MoneyHttpResponse::new(receipt.overrun_amount, receipt.currency),
-            authorized_max_cents: receipt.authorized_max.legacy_cents_ceil(),
+
             actual_vendor_cost: receipt.receipt.actual_vendor_cost.clone(),
             settlement_amount: receipt.receipt.actual_vendor_cost.clone(),
             cost_basis: receipt.receipt.cost_basis,
             provider_actual_cost: (receipt.receipt.cost_basis
                 == hubu_core::spend::SettlementCostBasis::ProviderReported)
                 .then(|| receipt.receipt.actual_vendor_cost.clone()),
-            actual_vendor_cost_cents: receipt.budget_charge.legacy_cents_ceil(),
-            budget_charge_cents: receipt.budget_charge.legacy_cents_ceil(),
-            released_amount_cents: receipt.released_amount.legacy_cents_floor(),
-            overrun_amount_cents: receipt.overrun_amount.legacy_cents_ceil(),
+
             currency: receipt.currency.to_string(),
             provider_request_id: receipt.receipt.provider_request_id.clone(),
             price_model_snapshot: receipt.receipt.price_model_snapshot.clone(),
@@ -5403,7 +5297,7 @@ fn resolve_executor_spend_request(
         operation_key: None,
         agent_id: request.agent_id.clone(),
         account_id: request.account_id.clone(),
-        amount_cents: None,
+
         amount: None,
         currency: request.currency.clone(),
         reason: "executor authorization snapshot lookup".to_string(),
@@ -5704,11 +5598,9 @@ fn evaluate_and_reserve_spend_at(
         request.execution_scope.as_ref(),
         request.merchant.as_deref(),
     )?;
-    let requested_amount = requested_spend_amount(request.amount.as_deref(), request.amount_cents)?;
+    let requested_amount = requested_spend_amount(request.amount.as_deref())?;
     let scope_inputs = spend_scope_inputs(
-        request
-            .amount_cents
-            .unwrap_or_else(|| requested_amount.legacy_cents_ceil()),
+        requested_amount.legacy_cents_ceil(),
         currency,
         currency_supplied,
         request.merchant.as_deref(),
@@ -6195,10 +6087,6 @@ fn budget_hold_response(update: BudgetHoldUpdate) -> BudgetHoldHttpResponse {
                 response.balance.remaining_amount,
                 response.hold.currency,
             ),
-            amount_cents: response.hold.amount.legacy_cents_ceil(),
-            consumed_amount_cents: response.balance.consumed_amount.legacy_cents_ceil(),
-            frozen_amount_cents: response.balance.frozen_amount.legacy_cents_ceil(),
-            remaining_amount_cents: response.balance.remaining_amount.legacy_cents_floor(),
         },
         BudgetHoldUpdate::Released(response) => BudgetHoldHttpResponse {
             hold_id: response.hold.id.to_string(),
@@ -6217,10 +6105,6 @@ fn budget_hold_response(update: BudgetHoldUpdate) -> BudgetHoldHttpResponse {
                 response.balance.remaining_amount,
                 response.hold.currency,
             ),
-            amount_cents: response.hold.amount.legacy_cents_ceil(),
-            consumed_amount_cents: response.balance.consumed_amount.legacy_cents_ceil(),
-            frozen_amount_cents: response.balance.frozen_amount.legacy_cents_ceil(),
-            remaining_amount_cents: response.balance.remaining_amount.legacy_cents_floor(),
         },
         BudgetHoldUpdate::Frozen(response) => frozen_budget_hold_response(response),
     }
@@ -6244,10 +6128,6 @@ fn frozen_budget_hold_response(response: ReserveBudgetResponse) -> BudgetHoldHtt
             response.balance.remaining_amount,
             response.hold.currency,
         ),
-        amount_cents: response.hold.amount.legacy_cents_ceil(),
-        consumed_amount_cents: response.balance.consumed_amount.legacy_cents_ceil(),
-        frozen_amount_cents: response.balance.frozen_amount.legacy_cents_ceil(),
-        remaining_amount_cents: response.balance.remaining_amount.legacy_cents_floor(),
     }
 }
 
@@ -6263,10 +6143,6 @@ fn budget_hold_state_response(
         consumed_amount: MoneyHttpResponse::new(balance.consumed_amount, hold.currency),
         frozen_amount: MoneyHttpResponse::new(balance.frozen_amount, hold.currency),
         remaining_amount: MoneyHttpResponse::new(balance.remaining_amount, hold.currency),
-        amount_cents: hold.amount.legacy_cents_ceil(),
-        consumed_amount_cents: balance.consumed_amount.legacy_cents_ceil(),
-        frozen_amount_cents: balance.frozen_amount.legacy_cents_ceil(),
-        remaining_amount_cents: balance.remaining_amount.legacy_cents_floor(),
     }
 }
 
@@ -6293,7 +6169,7 @@ fn evaluated_budget_response(
         current_version_id: public_budget_version_id(&current.version.id),
         current_revision: current.version.revision,
         amount_limit: MoneyHttpResponse::new(current.version.amount_limit, current.budget.currency),
-        amount_limit_cents: current.version.amount_limit.legacy_cents_floor(),
+
         currency: current.budget.currency.to_string(),
         starting_at: current.budget.period.starting_at.to_rfc3339(),
         ending_before: current
@@ -6314,9 +6190,6 @@ fn evaluated_budget_response(
             current.balance.remaining_amount,
             current.budget.currency,
         ),
-        consumed_amount_cents: current.balance.consumed_amount.legacy_cents_ceil(),
-        frozen_amount_cents: current.balance.frozen_amount.legacy_cents_ceil(),
-        remaining_amount_cents: current.balance.remaining_amount.legacy_cents_floor(),
     })
 }
 
@@ -6338,7 +6211,7 @@ fn budget_version_http_response(
             .map(public_budget_version_id),
         predecessor_revision,
         amount_limit: MoneyHttpResponse::new(version.amount_limit, currency),
-        amount_limit_cents: version.amount_limit.legacy_cents_floor(),
+
         effective_at: version.effective_at.to_rfc3339(),
         actor: public_budget_version_actor(version.actor),
         source: version.source,
@@ -6369,9 +6242,7 @@ fn spending_target_response(
         target_amount: MoneyHttpResponse::new(target.target_amount, target.currency),
         allocated_amount: MoneyHttpResponse::new(allocated, target.currency),
         exceeded_by: MoneyHttpResponse::new(exceeded_by, target.currency),
-        target_amount_cents: target.target_amount.legacy_cents_floor(),
-        allocated_amount_cents: allocated.legacy_cents_ceil(),
-        exceeded_by_cents: exceeded_by.legacy_cents_ceil(),
+
         is_exceeded: exceeded_by > Amount::ZERO,
         currency: target.currency.to_string(),
         starting_at: target.period.starting_at.to_rfc3339(),
@@ -6414,9 +6285,9 @@ fn spending_target_warnings_for_periods(
                 target_amount: MoneyHttpResponse::new(target.target_amount, target.currency),
                 allocated_amount: MoneyHttpResponse::new(allocated, target.currency),
                 exceeded_by: MoneyHttpResponse::new(exceeded_by, target.currency),
-                target_amount_cents: target.target_amount.legacy_cents_floor(),
-                allocated_amount_cents: allocated.legacy_cents_ceil(),
-                exceeded_by_cents: exceeded_by.legacy_cents_ceil(),
+
+
+
                 message: format!(
                     "agent budget allocations exceed the advisory spending target by {} {}; the budget change was not blocked",
                     target.currency.to_string().to_ascii_uppercase(),
@@ -6633,7 +6504,11 @@ fn ledger_transaction_response(
                     hubu_wallet::LedgerDirection::Credit => "credit",
                 }
                 .to_string(),
-                amount_cents: entry.amount_cents,
+
+                amount: MoneyHttpResponse::new(
+                    Amount::from_legacy_cents(entry.amount_cents)?,
+                    entry.currency,
+                ),
                 currency: entry.currency.to_string(),
             })
         })
@@ -6796,30 +6671,7 @@ fn query_flag(request: &HttpRequest, name: &str) -> bool {
         .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes"))
 }
 
-/// Whether a POST sends an amount only through a deprecated whole-cent field
-/// (for example `amount_cents` without `amount`). Such responses carry a
-/// `Deprecation` header; the request itself still works for one release.
-fn uses_only_legacy_amount_fields(request: &HttpRequest) -> bool {
-    if request.method != "POST" {
-        return false;
-    }
-    let (legacy, current) = match request.path.as_str() {
-        "/budgets" | "/user/spending-target" | "/spend" | "/spend/authorize" => {
-            ("amount_cents", "amount")
-        }
-        "/policies" => ("daily_limit_cents", "daily_limit"),
-        path if budget_versions_public_id(path).is_some() => ("amount_limit_cents", "amount_limit"),
-        _ => return false,
-    };
-    serde_json::from_str::<Value>(&request.body)
-        .is_ok_and(|body| body.get(legacy).is_some() && body.get(current).is_none())
-}
-
-fn write_response(
-    stream: &mut impl Write,
-    response: HttpResponse,
-    deprecated_amounts: bool,
-) -> Result<()> {
+fn write_response(stream: &mut impl Write, response: HttpResponse) -> Result<()> {
     let body = response.body.to_string();
     let status_text = match response.status {
         200 => "OK",
@@ -6830,20 +6682,12 @@ fn write_response(
         500 => "Internal Server Error",
         _ => "Bad Request",
     };
-    // `Deprecation: true` marks requests that used whole-cent amount fields;
-    // `Link` points at the replacement fields' documentation.
-    let deprecation = if deprecated_amounts {
-        "Deprecation: true\r\nLink: <https://github.com/hacker-no-ice/hubu/blob/main/docs/api-amounts.md>; rel=\"deprecation\"\r\n"
-    } else {
-        ""
-    };
     write!(
         stream,
-        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{}Connection: close\r\n\r\n{}",
+        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         response.status,
         status_text,
         body.len(),
-        deprecation,
         body
     )?;
     Ok(())
@@ -6851,6 +6695,19 @@ fn write_response(
 
 #[cfg(test)]
 mod tests {
+    fn test_amount_units(value: &Value) -> i64 {
+        let units = value["units"].as_str().unwrap().parse::<i64>().unwrap();
+        let scale = value["scale"].as_u64().unwrap();
+        assert!(scale <= 6);
+        units * 10_i64.pow(6 - scale as u32)
+    }
+    impl MoneyHttpResponse {
+        fn whole_cents(&self) -> i64 {
+            let units = self.units.parse::<i64>().unwrap();
+            assert_eq!(units % 10000, 0, "whole-cent fixture must stay exact");
+            units / 10000
+        }
+    }
     mod authorization_void;
     mod governance;
     mod history;
@@ -7218,7 +7075,7 @@ lease_profiles:
     ) -> SpendingTargetHttpResponse {
         set_spending_target(
             json!({
-                "amount_cents": amount_cents,
+                "amount": Amount::from_legacy_cents(amount_cents).unwrap().display(),
             })
             .to_string(),
             state,
@@ -7235,7 +7092,7 @@ lease_profiles:
         create_budget(
             json!({
                 "agent_id": agent_pub_id,
-                "amount_cents": amount_cents,
+                "amount": Amount::from_legacy_cents(amount_cents).unwrap().display(),
             })
             .to_string(),
             state,
@@ -7291,7 +7148,7 @@ lease_profiles:
         let agent_id = registered["agent_id"].as_str().unwrap().to_string();
         let account_id = registered["account_id"].as_str().unwrap().to_string();
         add_policy(
-            json!({ "agent_id": agent_id, "daily_limit_cents": 5_000 }).to_string(),
+            json!({ "agent_id": agent_id, "daily_limit": "50.00" }).to_string(),
             &state,
         )
         .expect("agent policy should attach");
@@ -7300,7 +7157,7 @@ lease_profiles:
             json!({
                 "operation_key": "before-rename",
                 "account_id": account_id,
-                "amount_cents": 1_000,
+                "amount": "10.00",
                 "reason": "test purchase",
                 "merchant": "Acme Cafe",
             })
@@ -7336,7 +7193,7 @@ lease_profiles:
             json!({
                 "operation_key": "after-rename",
                 "account_id": account_id,
-                "amount_cents": 1_000,
+                "amount": "10.00",
                 "reason": "test purchase",
                 "merchant": "Acme Cafe",
             })
@@ -8192,7 +8049,7 @@ lease_profiles:
 
         add_policy(
             json!({
-                "daily_limit_cents": 5_000,
+                "daily_limit": "50.00",
             })
             .to_string(),
             &state,
@@ -8205,7 +8062,7 @@ lease_profiles:
             json!({
                 "operation_key": "owner-metadata-job",
                 "account_id": agent.account_id,
-                "amount_cents": 2_500,
+                "amount": "25.00",
                 "reason": "test purchase",
                 "merchant": "Acme Cafe",
             })
@@ -8220,9 +8077,9 @@ lease_profiles:
             .budget_hold
             .expect("allowed spend should reserve budget");
         assert_eq!(budget_hold.status, "settled");
-        assert_eq!(budget_hold.consumed_amount_cents, 2_500);
-        assert_eq!(budget_hold.frozen_amount_cents, 0);
-        assert_eq!(budget_hold.remaining_amount_cents, 7_500);
+        assert_eq!(budget_hold.consumed_amount.whole_cents(), 2_500);
+        assert_eq!(budget_hold.frozen_amount.whole_cents(), 0);
+        assert_eq!(budget_hold.remaining_amount.whole_cents(), 7_500);
 
         let ledger = list_ledger(&state).expect("ledger should list");
         assert_eq!(ledger.transactions.len(), 1);
@@ -8263,7 +8120,7 @@ lease_profiles:
 
         add_policy(
             json!({
-                "daily_limit_cents": 5_000,
+                "daily_limit": "50.00",
             })
             .to_string(),
             &state,
@@ -8273,7 +8130,7 @@ lease_profiles:
         let agent_budget = create_budget(
             json!({
                 "agent_id": agent_pub_id.clone(),
-                "amount_cents": 3_000,
+                "amount": "30.00",
             })
             .to_string(),
             &state,
@@ -8293,7 +8150,7 @@ lease_profiles:
             json!({
                 "operation_key": "agent-budget-job",
                 "account_id": agent.account_id,
-                "amount_cents": 2_500,
+                "amount": "25.00",
                 "reason": "agent budget purchase",
                 "merchant": "Acme Cafe",
             })
@@ -8305,8 +8162,8 @@ lease_profiles:
             .budget_hold
             .expect("allowed spend should reserve budget");
         assert!(budget_hold.budget_id.starts_with("bgt_"));
-        assert_eq!(budget_hold.consumed_amount_cents, 2_500);
-        assert_eq!(budget_hold.remaining_amount_cents, 500);
+        assert_eq!(budget_hold.consumed_amount.whole_cents(), 2_500);
+        assert_eq!(budget_hold.remaining_amount.whole_cents(), 500);
         std::fs::remove_file(path).ok();
     }
 
@@ -8318,7 +8175,7 @@ lease_profiles:
             authenticated_json_request(
                 "/budgets/series",
                 json!({
-                    "amount_cents": 1_000, "recurrence": "daily", "period_count": 2
+                    "amount": "10.00", "recurrence": "daily", "period_count": 2
                 }),
             ),
             &state,
@@ -8351,7 +8208,7 @@ lease_profiles:
         .unwrap();
         let connection = rusqlite::Connection::open(&path).unwrap();
         connection.execute_batch("CREATE TRIGGER fail_budget_create BEFORE INSERT ON budget_balances BEGIN SELECT RAISE(ABORT, 'injected create failure'); END;").unwrap();
-        let create_body = json!({"agent_id":agent.agent_id,"amount_cents":1000});
+        let create_body = json!({"agent_id":agent.agent_id,"amount": "10.00"});
         let failed = route(
             authenticated_json_request("/budgets", create_body.clone()),
             &state,
@@ -8376,7 +8233,7 @@ lease_profiles:
         for (path, body) in [
             (
                 format!("/budgets/{budget_id}/versions"),
-                json!({"expected_revision":1,"amount_limit_cents":2000}),
+                json!({"expected_revision":1,"amount_limit": "20.00"}),
             ),
             (
                 "/budgets/revoke".to_string(),
@@ -8448,7 +8305,7 @@ lease_profiles:
         let single = create_budget_at(
             json!({
                 "agent_id": single_agent.agent_id,
-                "amount_cents": 1_000,
+                "amount": "10.00",
             })
             .to_string(),
             &state,
@@ -8488,7 +8345,7 @@ lease_profiles:
         let budget = create_budget(
             json!({
                 "agent_id": agent.agent_id,
-                "amount_cents": 10_000,
+                "amount": "100.00",
             })
             .to_string(),
             &state,
@@ -8536,7 +8393,7 @@ lease_profiles:
         let budget = create_budget(
             json!({
                 "agent_id": agent.agent_id,
-                "amount_cents": 10_000,
+                "amount": "100.00",
             })
             .to_string(),
             &state,
@@ -8547,7 +8404,7 @@ lease_profiles:
         assert_eq!(budget.budget.current_revision, 1);
         let versions_path = format!("/budgets/{budget_id}/versions");
         let first_request = json!({
-            "amount_limit_cents": 20_000,
+            "amount_limit": "200.00",
             "expected_revision": 1,
             "reason": "increase the total cap",
         });
@@ -8569,10 +8426,13 @@ lease_profiles:
             .starts_with("bgv_"));
         assert_eq!(first.body["current_budget"]["budget_id"], budget_id);
         assert_eq!(first.body["current_budget"]["current_revision"], 2);
-        assert_eq!(first.body["current_budget"]["amount_limit_cents"], 20_000);
         assert_eq!(
-            first.body["current_budget"]["remaining_amount_cents"],
-            20_000
+            test_amount_units(&first.body["current_budget"]["amount_limit"]),
+            200000000
+        );
+        assert_eq!(
+            test_amount_units(&first.body["current_budget"]["remaining_amount"]),
+            200000000
         );
         assert_eq!(first.body["idempotent_replay"], false);
         let first_version_id = first.body["applied_version"]["version_id"].clone();
@@ -8592,7 +8452,7 @@ lease_profiles:
             authenticated_json_request(
                 &versions_path,
                 json!({
-                    "amount_limit_cents": 25_000,
+                    "amount_limit": "250.00",
                     "expected_revision": 2,
                     "reason": "second total cap",
                 }),
@@ -8618,8 +8478,8 @@ lease_profiles:
             3
         );
         assert_eq!(
-            historical_replay.body["current_budget"]["amount_limit_cents"],
-            25_000
+            test_amount_units(&historical_replay.body["current_budget"]["amount_limit"]),
+            250000000
         );
 
         let history = route(authenticated_get_request(&versions_path), &state);
@@ -8645,7 +8505,7 @@ lease_profiles:
                 "/budgets/replace",
                 json!({
                     "budget_id": budget.budget.budget_id,
-                    "amount_cents": 30_000,
+                    "amount": "300.00",
                 }),
             ),
             &state,
@@ -8747,7 +8607,7 @@ lease_profiles:
         .unwrap();
 
         let revoked = create_budget(
-            json!({"agent_id": revoked_agent.agent_id, "amount_cents": 10_000}).to_string(),
+            json!({"agent_id": revoked_agent.agent_id, "amount": "100.00"}).to_string(),
             &state,
         )
         .unwrap();
@@ -8759,7 +8619,7 @@ lease_profiles:
         let revoked_response = route(
             authenticated_json_request(
                 &format!("/budgets/{}/versions", revoked.budget.budget_id),
-                json!({"amount_limit_cents": 12_000, "expected_revision": 1}),
+                json!({"amount_limit": "120.00", "expected_revision": 1}),
             ),
             &state,
         );
@@ -8769,7 +8629,7 @@ lease_profiles:
         let expired = create_budget_at(
             json!({
                 "agent_id": expired_agent.agent_id,
-                "amount_cents": 10_000,
+                "amount": "100.00",
                 "starting_at": "2000-01-01T00:00:00Z",
                 "ending_before": "2000-01-02T00:00:00Z",
             })
@@ -8781,7 +8641,7 @@ lease_profiles:
         let expired_response = route(
             authenticated_json_request(
                 &format!("/budgets/{}/versions", expired.budget.budget_id),
-                json!({"amount_limit_cents": 12_000, "expected_revision": 1}),
+                json!({"amount_limit": "120.00", "expected_revision": 1}),
             ),
             &state,
         );
@@ -8817,7 +8677,7 @@ lease_profiles:
         let updated = update_budget_limit_at(
             &budget_id,
             json!({
-                "amount_limit_cents": 1,
+                "amount_limit": "0.01",
                 "expected_revision": 1,
                 "reason": "expired hold no longer commits capacity",
             })
@@ -8827,8 +8687,8 @@ lease_profiles:
         )
         .expect("expired frozen usage should be reconciled before the floor check");
         assert_eq!(updated.current_budget.current_revision, 2);
-        assert_eq!(updated.current_budget.frozen_amount_cents, 0);
-        assert_eq!(updated.current_budget.remaining_amount_cents, 1);
+        assert_eq!(updated.current_budget.frozen_amount.whole_cents(), 0);
+        assert_eq!(updated.current_budget.remaining_amount.whole_cents(), 1);
         let persisted_holds = state
             .governance
             .lock()
@@ -8866,9 +8726,9 @@ lease_profiles:
             &state,
         )
         .unwrap();
-        add_policy(json!({"daily_limit_cents": 20_000}).to_string(), &state).unwrap();
+        add_policy(json!({"daily_limit": "200.00"}).to_string(), &state).unwrap();
         let budget = create_budget(
-            json!({"agent_id": agent.agent_id, "amount_cents": 10_000}).to_string(),
+            json!({"agent_id": agent.agent_id, "amount": "100.00"}).to_string(),
             &state,
         )
         .unwrap();
@@ -8877,7 +8737,7 @@ lease_profiles:
             json!({
                 "operation_key": "budget-floor-spend",
                 "account_id": agent.account_id,
-                "amount_cents": 4_000,
+                "amount": "40.00",
                 "reason": "committed usage",
                 "merchant": "Acme Cafe",
             })
@@ -8889,7 +8749,7 @@ lease_profiles:
         let invalid_amount = route(
             authenticated_json_request(
                 &versions_path,
-                json!({"amount_limit_cents": 0, "expected_revision": 1}),
+                json!({"amount_limit": "0.00", "expected_revision": 1}),
             ),
             &state,
         );
@@ -8902,7 +8762,7 @@ lease_profiles:
         let invalid_revision = route(
             authenticated_json_request(
                 &versions_path,
-                json!({"amount_limit_cents": 12_000, "expected_revision": -1}),
+                json!({"amount_limit": "120.00", "expected_revision": -1}),
             ),
             &state,
         );
@@ -8916,7 +8776,7 @@ lease_profiles:
             authenticated_json_request(
                 &versions_path,
                 json!({
-                    "amount_limit_cents": 12_000,
+                    "amount_limit": "120.00",
                     "expected_revision": 1,
                     "unexpected": true,
                 }),
@@ -8932,7 +8792,7 @@ lease_profiles:
         let below_floor = route(
             authenticated_json_request(
                 &versions_path,
-                json!({"amount_limit_cents": 3_999, "expected_revision": 1}),
+                json!({"amount_limit": "39.99", "expected_revision": 1}),
             ),
             &state,
         );
@@ -8941,31 +8801,31 @@ lease_profiles:
             below_floor.body["error_code"],
             "budget_limit_below_committed"
         );
-        assert_eq!(below_floor.body["details"]["requested_amount_cents"], 3_999);
-        assert_eq!(below_floor.body["details"]["committed_amount_cents"], 4_000);
+        assert_eq!(below_floor.body["details"]["requested_amount"], "39.99");
+        assert_eq!(below_floor.body["details"]["committed_amount"], "40.00");
 
         let updated = route(
             authenticated_json_request(
                 &versions_path,
-                json!({"amount_limit_cents": 12_000, "expected_revision": 1}),
+                json!({"amount_limit": "120.00", "expected_revision": 1}),
             ),
             &state,
         );
         assert_eq!(updated.status, 200);
         assert_eq!(
-            updated.body["current_budget"]["consumed_amount_cents"],
-            4_000
+            test_amount_units(&updated.body["current_budget"]["consumed_amount"]),
+            40000000
         );
         assert_eq!(
-            updated.body["current_budget"]["remaining_amount_cents"],
-            8_000
+            test_amount_units(&updated.body["current_budget"]["remaining_amount"]),
+            80000000
         );
 
         let conflict = route(
             authenticated_json_request(
                 &versions_path,
                 json!({
-                    "amount_limit_cents": 13_000,
+                    "amount_limit": "130.00",
                     "expected_revision": 1,
                     "reason": "different stale intent",
                 }),
@@ -9094,7 +8954,7 @@ lease_profiles:
         let budget = create_budget(
             json!({
                 "agent_id": agent.agent_id,
-                "amount_cents": 10_000,
+                "amount": "100.00",
             })
             .to_string(),
             &state,
@@ -9218,7 +9078,7 @@ lease_profiles:
                 snapshot.budget.updated_at = now;
             }
             let conn = rusqlite::Connection::open(&path).unwrap();
-            conn.execute("UPDATE budget_balances SET consumed_amount_cents = ?2, remaining_amount_cents = ?3, consumed_amount = ?2 * 10000, remaining_amount = ?3 * 10000 WHERE budget_id = ?1", rusqlite::params![snapshot.budget.id.to_string(), snapshot.balance.consumed_amount.legacy_cents_ceil(), snapshot.balance.remaining_amount.legacy_cents_floor()]).unwrap();
+            conn.execute("UPDATE budget_balances SET consumed_amount = ?2 * 10000, remaining_amount = ?3 * 10000 WHERE budget_id = ?1", rusqlite::params![snapshot.budget.id.to_string(), snapshot.balance.consumed_amount.legacy_cents_ceil(), snapshot.balance.remaining_amount.legacy_cents_floor()]).unwrap();
             if revoked {
                 conn.execute("UPDATE budgets SET administrative_state = 'revoked', updated_at = ?2 WHERE id = ?1", rusqlite::params![snapshot.budget.id.to_string(), now.to_rfc3339()]).unwrap();
             }
@@ -9302,20 +9162,20 @@ lease_profiles:
         let budget = create_budget(
             json!({
                 "agent_id": agent.agent_id,
-                "amount_cents": 2_000,
+                "amount": "20.00",
             })
             .to_string(),
             &state,
         )
         .expect("advisory target should not block budget creation");
 
-        assert_eq!(budget.budget.amount_limit_cents, 2_000);
+        assert_eq!(budget.budget.amount_limit.whole_cents(), 2_000);
         assert_eq!(budget.spending_target_warnings.len(), 1);
         let warning = &budget.spending_target_warnings[0];
         assert_eq!(warning.target_id, target.target_id);
-        assert_eq!(warning.target_amount_cents, 1_000);
-        assert_eq!(warning.allocated_amount_cents, 2_000);
-        assert_eq!(warning.exceeded_by_cents, 1_000);
+        assert_eq!(warning.target_amount.whole_cents(), 1_000);
+        assert_eq!(warning.allocated_amount.whole_cents(), 2_000);
+        assert_eq!(warning.exceeded_by.whole_cents(), 1_000);
         std::fs::remove_file(path).ok();
     }
 
@@ -9348,7 +9208,7 @@ lease_profiles:
         create_budget(
             json!({
                 "agent_id": agent.agent_id,
-                "amount_cents": 2_000,
+                "amount": "20.00",
             })
             .to_string(),
             &state,
@@ -9357,9 +9217,9 @@ lease_profiles:
 
         let target = set_test_spending_target(&state, 1_000);
 
-        assert_eq!(target.target_amount_cents, 1_000);
-        assert_eq!(target.allocated_amount_cents, 2_000);
-        assert_eq!(target.exceeded_by_cents, 1_000);
+        assert_eq!(target.target_amount.whole_cents(), 1_000);
+        assert_eq!(target.allocated_amount.whole_cents(), 2_000);
+        assert_eq!(target.exceeded_by.whole_cents(), 1_000);
         assert!(target.is_exceeded);
         std::fs::remove_file(path).ok();
     }
@@ -9402,7 +9262,7 @@ lease_profiles:
         create_budget(
             json!({
                 "agent_id": first_agent.agent_id,
-                "amount_cents": 2_000,
+                "amount": "20.00",
                 "ending_before": boundary.to_rfc3339(),
             })
             .to_string(),
@@ -9412,7 +9272,7 @@ lease_profiles:
         create_budget(
             json!({
                 "agent_id": second_agent.agent_id,
-                "amount_cents": 2_000,
+                "amount": "20.00",
                 "starting_at": boundary.to_rfc3339(),
                 "ending_before": (boundary + Duration::hours(1)).to_rfc3339(),
             })
@@ -9423,8 +9283,8 @@ lease_profiles:
 
         let target = set_test_spending_target(&state, 2_500);
 
-        assert_eq!(target.allocated_amount_cents, 2_000);
-        assert_eq!(target.exceeded_by_cents, 0);
+        assert_eq!(target.allocated_amount.whole_cents(), 2_000);
+        assert_eq!(target.exceeded_by.whole_cents(), 0);
         assert!(!target.is_exceeded);
         std::fs::remove_file(path).ok();
     }
@@ -9459,7 +9319,7 @@ lease_profiles:
             add_policy(
                 json!({
                     "agent_id": agent.agent_id,
-                    "daily_limit_cents": 2_000,
+                    "daily_limit": "20.00",
                 })
                 .to_string(),
                 &state,
@@ -9472,7 +9332,7 @@ lease_profiles:
                 json!({
                     "operation_key": "advisory-target-job",
                     "account_id": agent.account_id,
-                    "amount_cents": 1_500,
+                    "amount": "15.00",
                     "reason": "spend above advisory target",
                     "merchant": "Acme Cafe",
                 })
@@ -9485,7 +9345,8 @@ lease_profiles:
                 spend
                     .budget_hold
                     .expect("spend should settle its agent budget")
-                    .consumed_amount_cents,
+                    .consumed_amount
+                    .whole_cents(),
                 1_500
             );
         }
@@ -9496,8 +9357,8 @@ lease_profiles:
             list_spending_targets(&restarted, true).expect("spending targets should list");
         assert_eq!(targets.targets.len(), 1);
         assert_eq!(targets.targets[0].status, "active");
-        assert_eq!(targets.targets[0].allocated_amount_cents, 2_000);
-        assert_eq!(targets.targets[0].exceeded_by_cents, 1_000);
+        assert_eq!(targets.targets[0].allocated_amount.whole_cents(), 2_000);
+        assert_eq!(targets.targets[0].exceeded_by.whole_cents(), 1_000);
         std::fs::remove_file(path).ok();
     }
 
@@ -9527,7 +9388,7 @@ lease_profiles:
 
         add_policy(
             json!({
-                "daily_limit_cents": 5_000,
+                "daily_limit": "50.00",
             })
             .to_string(),
             &state,
@@ -9539,7 +9400,7 @@ lease_profiles:
         let request = json!({
             "operation_key": "account-spend-job-1",
             "account_id": agent.account_id,
-            "amount_cents": 2_500,
+            "amount": "25.00",
             "reason": "account anchored purchase",
             "merchant": "Acme Cafe",
         });
@@ -9566,7 +9427,8 @@ lease_profiles:
             retry
                 .budget_hold
                 .expect("retry should return settled hold")
-                .consumed_amount_cents,
+                .consumed_amount
+                .whole_cents(),
             2_500
         );
         assert_eq!(
@@ -9607,7 +9469,7 @@ lease_profiles:
         add_policy(
             json!({
                 "agent_id": agent.agent_id,
-                "daily_limit_cents": 500,
+                "daily_limit": "5.00",
             })
             .to_string(),
             &state,
@@ -9620,7 +9482,7 @@ lease_profiles:
             json!({
                 "operation_key": "logo-design-job-1",
                 "account_id": agent.account_id,
-                "amount_cents": 500,
+                "amount": "5.00",
                 "reason": "Generate Project Hubu logo",
                 "merchant": "hubu-model-proxy",
             })
@@ -9643,7 +9505,7 @@ lease_profiles:
             json!({
                 "operation_key": "logo-design-job-1",
                 "account_id": agent.account_id,
-                "amount_cents": 500,
+                "amount": "5.00",
                 "reason": "Generate Project Hubu logo",
                 "merchant": "hubu-model-proxy",
             })
@@ -9660,10 +9522,10 @@ lease_profiles:
             .budget_hold
             .expect("allowed authorization should reserve budget");
         assert_eq!(budget_hold.status, "frozen");
-        assert_eq!(budget_hold.amount_cents, 500);
-        assert_eq!(budget_hold.consumed_amount_cents, 0);
-        assert_eq!(budget_hold.frozen_amount_cents, 500);
-        assert_eq!(budget_hold.remaining_amount_cents, 0);
+        assert_eq!(budget_hold.amount.whole_cents(), 500);
+        assert_eq!(budget_hold.consumed_amount.whole_cents(), 0);
+        assert_eq!(budget_hold.frozen_amount.whole_cents(), 500);
+        assert_eq!(budget_hold.remaining_amount.whole_cents(), 0);
 
         let ledger = list_ledger(&state).expect("ledger should list");
         assert!(ledger.transactions.is_empty());
@@ -9820,66 +9682,36 @@ lease_profiles:
     }
 
     #[test]
-    fn legacy_only_amount_requests_get_a_deprecation_header() {
-        let request = |path: &str, body: Value| {
-            let mut request = authenticated_json_request(path, body);
-            request.method = "POST".to_string();
-            request
-        };
-        for (path, body, deprecated) in [
-            ("/budgets", json!({"amount_cents": 500}), true),
-            ("/budgets", json!({"amount": "5.00"}), false),
-            ("/spend/authorize", json!({"amount_cents": 1}), true),
-            ("/spend/authorize", json!({"amount": "0.005"}), false),
-            ("/user/spending-target", json!({"amount_cents": 1}), true),
-            ("/policies", json!({"daily_limit_cents": 500}), true),
-            ("/policies", json!({"daily_limit": "5.00"}), false),
-            (
-                "/budgets/bgt_abc/versions",
-                json!({"amount_limit_cents": 1}),
-                true,
-            ),
-            (
-                "/budgets/bgt_abc/versions",
-                json!({"amount_limit": "0.01"}),
-                false,
-            ),
-            ("/budgets/revoke", json!({"amount_cents": 1}), false),
-        ] {
-            assert_eq!(
-                uses_only_legacy_amount_fields(&request(path, body.clone())),
-                deprecated,
-                "{path} {body}"
-            );
-        }
-        let mut written = Vec::new();
+    fn legacy_amount_requests_are_rejected_and_responses_have_no_deprecation_header() {
+        assert!(
+            serde_json::from_value::<CreateBudgetHttpRequest>(json!({"amount_cents":500})).is_err()
+        );
+        assert!(serde_json::from_value::<CreateBudgetHttpRequest>(
+            json!({"amount":"5.00","amount_cents":500})
+        )
+        .is_err());
+        assert!(serde_json::from_value::<SetSpendingTargetHttpRequest>(
+            json!({"amount_cents":500})
+        )
+        .is_err());
+        assert!(
+            serde_json::from_value::<AddPolicyHttpRequest>(json!({"daily_limit_cents":500}))
+                .is_err()
+        );
+        let mut wire = Vec::new();
         write_response(
-            &mut written,
+            &mut wire,
             HttpResponse {
                 status: 200,
-                body: json!({}),
+                body: json!({"ok":true}),
             },
-            true,
         )
         .unwrap();
-        let written = String::from_utf8(written).unwrap();
-        assert!(written.contains("\r\nDeprecation: true\r\n"), "{written}");
-        assert!(written.contains("rel=\"deprecation\""), "{written}");
-        let mut plain = Vec::new();
-        write_response(
-            &mut plain,
-            HttpResponse {
-                status: 200,
-                body: json!({}),
-            },
-            false,
-        )
-        .unwrap();
-        assert!(!String::from_utf8(plain).unwrap().contains("Deprecation"));
+        assert!(!String::from_utf8(wire).unwrap().contains("Deprecation"));
     }
 
     #[test]
-    fn exact_decimal_amounts_round_trip_with_conservative_cent_projections() {
+    fn exact_decimal_amounts_round_trip_without_cent_projections() {
         let path =
             std::env::temp_dir().join(format!("hubu-api-exact-amounts-{}.sqlite", UserId::new()));
         let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
@@ -9909,7 +9741,11 @@ lease_profiles:
             budget["amount_limit"],
             json!({"units": "15000", "scale": 6, "currency": "usd", "display": "0.015"})
         );
-        assert_eq!(budget["amount_limit_cents"], 1, "limits project down");
+        assert_eq!(
+            test_amount_units(&budget["amount_limit"]),
+            15000,
+            "limits are exact"
+        );
 
         let authorization = authorize_spend(
             json!({
@@ -9927,10 +9763,18 @@ lease_profiles:
         let hold = serde_json::to_value(&authorization).unwrap()["budget_hold"].clone();
         assert_eq!(hold["amount"]["units"], "5000");
         assert_eq!(hold["amount"]["display"], "0.005");
-        assert_eq!(hold["amount_cents"], 1, "holds project up");
-        assert_eq!(hold["frozen_amount_cents"], 1, "frozen projects up");
+        assert!(hold.get("amount_cents").is_none());
+        assert_eq!(
+            test_amount_units(&hold["frozen_amount"]),
+            5000,
+            "frozen is exact"
+        );
         assert_eq!(hold["remaining_amount"]["units"], "10000");
-        assert_eq!(hold["remaining_amount_cents"], 1, "remaining projects down");
+        assert_eq!(
+            test_amount_units(&hold["remaining_amount"]),
+            10000,
+            "remaining is exact"
+        );
 
         let budget_id = budget["budget_id"].as_str().unwrap().to_string();
         let updated = update_budget_limit_at(
@@ -9956,7 +9800,7 @@ lease_profiles:
             &state,
         )
         .unwrap_err();
-        assert!(error.to_string().contains("not both"), "{error}");
+        assert!(error.to_string().contains("unknown field"), "{error}");
         let target = set_spending_target(json!({"amount": "0.25"}).to_string(), &state).unwrap();
         let target = serde_json::to_value(&target).unwrap();
         assert_eq!(target["target"]["target_amount"]["display"], "0.25");
@@ -9979,7 +9823,7 @@ lease_profiles:
         )
         .unwrap();
         add_policy(
-            json!({"agent_id": agent.agent_id, "daily_limit_cents": 500}).to_string(),
+            json!({"agent_id": agent.agent_id, "daily_limit": "5.00"}).to_string(),
             &state,
         )
         .unwrap();
@@ -10056,7 +9900,7 @@ lease_profiles:
         )
         .unwrap();
         add_policy(
-            json!({"agent_id": agent.agent_id, "daily_limit_cents": 500}).to_string(),
+            json!({"agent_id": agent.agent_id, "daily_limit": "5.00"}).to_string(),
             &state,
         )
         .unwrap();
@@ -10091,8 +9935,7 @@ lease_profiles:
         );
 
         let usdc_budget = create_budget(
-            json!({"agent_id": agent.agent_id, "amount_cents": 500, "currency": "usdc"})
-                .to_string(),
+            json!({"agent_id": agent.agent_id, "amount": "5.00", "currency": "usdc"}).to_string(),
             &state,
         )
         .unwrap();
@@ -10144,7 +9987,7 @@ lease_profiles:
             (
                 json!({"account_id": agent.account_id, "amount": "0.005", "amount_cents": 1,
                     "currency": "usdc", "reason": "both", "operation_key": "both", "merchant": "gongbu.image"}),
-                "not both",
+                "unknown field",
             ),
             (
                 json!({"account_id": agent.account_id, "currency": "usdc", "reason": "neither", "operation_key": "neither",
@@ -10235,7 +10078,7 @@ lease_profiles:
         )
         .unwrap();
         add_policy(
-            json!({"agent_id": agent.agent_id, "daily_limit_cents": 500}).to_string(),
+            json!({"agent_id": agent.agent_id, "daily_limit": "5.00"}).to_string(),
             &state,
         )
         .unwrap();
@@ -10443,7 +10286,7 @@ lease_profiles:
             json!({
                 "operation_key": operation_key,
                 "account_id": agent.account_id,
-                "amount_cents": 500,
+                "amount": "5.00",
                 "reason": "hubu-logo-demo",
                 "merchant": "gongbu.image",
             })
@@ -10474,7 +10317,7 @@ lease_profiles:
             json!({
                 "operation_key": operation_key,
                 "account_id": agent.account_id,
-                "amount_cents": 499,
+                "amount": "4.99",
                 "reason": "hubu-logo-demo",
                 "merchant": "gongbu.image",
             })
@@ -10517,23 +10360,108 @@ lease_profiles:
             .expect("executor spend should settle");
         assert_eq!(settlement.status, "settled");
         assert_eq!(settlement.spend.budget_hold.status, "settled");
-        assert_eq!(settlement.spend.budget_hold.consumed_amount_cents, 400);
-        assert_eq!(settlement.spend.budget_hold.frozen_amount_cents, 0);
-        assert_eq!(settlement.spend.budget_hold.remaining_amount_cents, 100);
-        assert_eq!(settlement.receipt.authorized_max_cents, 500);
+        assert_eq!(
+            settlement
+                .spend
+                .budget_hold
+                .consumed_amount
+                .units
+                .parse::<i64>()
+                .unwrap(),
+            3_991_000
+        );
+        assert_eq!(
+            settlement
+                .spend
+                .budget_hold
+                .frozen_amount
+                .units
+                .parse::<i64>()
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            settlement
+                .spend
+                .budget_hold
+                .remaining_amount
+                .units
+                .parse::<i64>()
+                .unwrap(),
+            1_009_000
+        );
+        assert_eq!(
+            settlement
+                .receipt
+                .authorized_max
+                .units
+                .parse::<i64>()
+                .unwrap(),
+            5000000
+        );
         assert_eq!(settlement.receipt.actual_vendor_cost.amount, 3_991);
         assert_eq!(settlement.receipt.actual_vendor_cost.scale, 3);
-        assert_eq!(settlement.receipt.actual_vendor_cost_cents, 400);
-        assert_eq!(settlement.receipt.budget_charge_cents, 400);
-        assert_eq!(settlement.receipt.released_amount_cents, 100);
-        assert_eq!(settlement.receipt.overrun_amount_cents, 0);
+        assert_eq!(
+            settlement
+                .receipt
+                .budget_charge
+                .units
+                .parse::<i64>()
+                .unwrap(),
+            3_991_000
+        );
+        assert_eq!(
+            settlement
+                .receipt
+                .budget_charge
+                .units
+                .parse::<i64>()
+                .unwrap(),
+            3_991_000
+        );
+        assert_eq!(
+            settlement
+                .receipt
+                .released_amount
+                .units
+                .parse::<i64>()
+                .unwrap(),
+            1_009_000
+        );
+        assert_eq!(
+            settlement
+                .receipt
+                .overrun_amount
+                .units
+                .parse::<i64>()
+                .unwrap(),
+            0
+        );
 
         let replay = settle_executor_spend(finalize.to_string(), &state)
             .expect("identical executor settlement should replay");
         assert_eq!(replay.settlement_id, settlement.settlement_id);
         assert_eq!(replay.status, "settled");
-        assert_eq!(replay.spend.budget_hold.consumed_amount_cents, 400);
-        assert_eq!(replay.spend.budget_hold.frozen_amount_cents, 0);
+        assert_eq!(
+            replay
+                .spend
+                .budget_hold
+                .consumed_amount
+                .units
+                .parse::<i64>()
+                .unwrap(),
+            3_991_000
+        );
+        assert_eq!(
+            replay
+                .spend
+                .budget_hold
+                .frozen_amount
+                .units
+                .parse::<i64>()
+                .unwrap(),
+            0
+        );
 
         let claim_replay = claim_executor_spend(request.to_string(), &state)
             .expect("claim retry should return the stored terminal authorization record state");
@@ -10544,7 +10472,7 @@ lease_profiles:
             json!({
                 "operation_key": operation_key,
                 "account_id": agent.account_id,
-                "amount_cents": 500,
+                "amount": "5.00",
                 "reason": "hubu-logo-demo",
                 "merchant": "gongbu.image",
             })
@@ -10638,7 +10566,7 @@ lease_profiles:
             json!({
                 "operation_key": "null-task-restart-operation",
                 "account_id": agent.account_id,
-                "amount_cents": 500,
+                "amount": "5.00",
                 "reason": "Spend without business correlation",
                 "task_id": null,
                 "merchant": "gongbu.image"
@@ -10685,7 +10613,7 @@ lease_profiles:
             add_policy(
                 json!({
                     "agent_id": agent.agent_id,
-                    "daily_limit_cents": 500,
+                    "daily_limit": "5.00",
                 })
                 .to_string(),
                 &state,
@@ -10699,7 +10627,7 @@ lease_profiles:
             json!({
                 "operation_key": operation_key,
                 "account_id": first_agent.account_id,
-                "amount_cents": 500,
+                "amount": "5.00",
                 "reason": "first-agent-task",
                 "merchant": "gongbu.image",
             })
@@ -10711,7 +10639,7 @@ lease_profiles:
             json!({
                 "operation_key": operation_key,
                 "account_id": second_agent.account_id,
-                "amount_cents": 500,
+                "amount": "5.00",
                 "reason": "second-agent-task",
                 "merchant": "gongbu.image",
             })
@@ -10800,8 +10728,8 @@ lease_profiles:
         )
         .expect("settle by claim id");
         assert_eq!(settled.claim_id, claim.claim_id);
-        assert_eq!(settled.receipt.budget_charge_cents, 400);
-        assert_eq!(settled.spend.budget_hold.consumed_amount_cents, 400);
+        assert_eq!(settled.receipt.budget_charge.whole_cents(), 400);
+        assert_eq!(settled.spend.budget_hold.consumed_amount.whole_cents(), 400);
 
         // The claim id names the same claim and replays the stored settlement
         // without consuming budget again.
@@ -10813,7 +10741,7 @@ lease_profiles:
         .expect("identical settlement replays by claim id");
         assert_eq!(replay.settlement_id, settled.settlement_id);
         assert_eq!(replay.receipt.created_at, settled.receipt.created_at);
-        assert_eq!(replay.spend.budget_hold.consumed_amount_cents, 400);
+        assert_eq!(replay.spend.budget_hold.consumed_amount.whole_cents(), 400);
 
         let retired = settle_executor_spend(
             json!({
@@ -10869,14 +10797,17 @@ lease_profiles:
             release_executor_spend(json!({"claim_id": recovered.claim_id}).to_string(), &state)
                 .expect("release by the recovered claim id");
         assert_eq!(released.status, "released");
-        assert_eq!(released.spend.budget_hold.frozen_amount_cents, 0);
-        assert_eq!(released.spend.budget_hold.remaining_amount_cents, 500);
+        assert_eq!(released.spend.budget_hold.frozen_amount.whole_cents(), 0);
+        assert_eq!(
+            released.spend.budget_hold.remaining_amount.whole_cents(),
+            500
+        );
 
         let replay =
             release_executor_spend(json!({"claim_id": released.claim_id}).to_string(), &state)
                 .expect("release replays by claim id");
         assert_eq!(replay.finalized_at, released.finalized_at);
-        assert_eq!(replay.spend.budget_hold.remaining_amount_cents, 500);
+        assert_eq!(replay.spend.budget_hold.remaining_amount.whole_cents(), 500);
         std::fs::remove_file(path).ok();
     }
 
@@ -11006,15 +10937,18 @@ lease_profiles:
             .expect("executor spend should release");
         assert_eq!(release.status, "released");
         assert_eq!(release.spend.budget_hold.status, "released");
-        assert_eq!(release.spend.budget_hold.consumed_amount_cents, 0);
-        assert_eq!(release.spend.budget_hold.frozen_amount_cents, 0);
-        assert_eq!(release.spend.budget_hold.remaining_amount_cents, 500);
+        assert_eq!(release.spend.budget_hold.consumed_amount.whole_cents(), 0);
+        assert_eq!(release.spend.budget_hold.frozen_amount.whole_cents(), 0);
+        assert_eq!(
+            release.spend.budget_hold.remaining_amount.whole_cents(),
+            500
+        );
 
         let replay = release_executor_spend(release_request.to_string(), &state)
             .expect("identical executor release should replay");
         assert_eq!(replay.status, "released");
-        assert_eq!(replay.spend.budget_hold.frozen_amount_cents, 0);
-        assert_eq!(replay.spend.budget_hold.remaining_amount_cents, 500);
+        assert_eq!(replay.spend.budget_hold.frozen_amount.whole_cents(), 0);
+        assert_eq!(replay.spend.budget_hold.remaining_amount.whole_cents(), 500);
 
         let validate_request = json!({
             "spend_auth_token_id": token,
@@ -11103,7 +11037,14 @@ lease_profiles:
         assert_eq!(queue.claims.len(), 1);
         assert_eq!(queue.claims[0].claim_id, claim.claim_id);
         assert!(queue.claims[0].reconciliation_required);
-        assert_eq!(queue.claims[0].spend.budget_hold.frozen_amount_cents, 500);
+        assert_eq!(
+            queue.claims[0]
+                .spend
+                .budget_hold
+                .frozen_amount
+                .whole_cents(),
+            500
+        );
 
         let reconciliation_body = json!({
             "claim_id": claim.claim_id,
@@ -11151,14 +11092,17 @@ lease_profiles:
             Some("openai-request-abc123")
         );
         assert!(reconciled["reconciled_by_user_id"].is_string());
-        assert_eq!(reconciled["spend"]["budget_hold"]["frozen_amount_cents"], 0);
         assert_eq!(
-            reconciled["spend"]["budget_hold"]["consumed_amount_cents"],
-            400
+            test_amount_units(&reconciled["spend"]["budget_hold"]["frozen_amount"]),
+            0
         );
         assert_eq!(
-            reconciled["spend"]["budget_hold"]["remaining_amount_cents"],
-            100
+            test_amount_units(&reconciled["spend"]["budget_hold"]["consumed_amount"]),
+            4000000
+        );
+        assert_eq!(
+            test_amount_units(&reconciled["spend"]["budget_hold"]["remaining_amount"]),
+            1000000
         );
         assert!(list_executor_claims_requiring_reconciliation(&state)
             .unwrap()
@@ -11280,7 +11224,7 @@ lease_profiles:
             json!({
                 "operation_key": authorization.operation_key,
                 "account_id": agent.account_id,
-                "amount_cents": 500,
+                "amount": "5.00",
                 "reason": "hubu-logo-demo",
                 "merchant": "gongbu.image",
             })
@@ -11332,7 +11276,7 @@ lease_profiles:
         )
         .unwrap();
         add_policy(
-            json!({"agent_id":agent.agent_id,"daily_limit_cents":500}).to_string(),
+            json!({"agent_id":agent.agent_id,"daily_limit": "5.00"}).to_string(),
             &state,
         )
         .unwrap();
@@ -11348,7 +11292,7 @@ lease_profiles:
             json!({
                 "operation_key":"typed-scope-operation",
                 "account_id":agent.account_id,
-                "amount_cents":500,
+                "amount": "5.00",
                 "reason":"typed image generation",
                 "execution_scope":scope
             })
@@ -11723,7 +11667,7 @@ rules:
             json!({
                 "operation_key": authorization.operation_key,
                 "account_id": agent.account_id,
-                "amount_cents": 500,
+                "amount": "5.00",
                 "reason": "hubu-logo-demo",
                 "merchant": "gongbu.image",
             })
@@ -11739,7 +11683,7 @@ rules:
             json!({
                 "operation_key": authorization.operation_key,
                 "account_id": agent.account_id,
-                "amount_cents": 500,
+                "amount": "5.00",
                 "reason": "hubu-logo-demo",
                 "merchant": "gongbu.image",
                 "lease_profile": "new-default",
@@ -11783,7 +11727,7 @@ rules:
         let missing_operation_key_error = spend(
             json!({
                 "account_id": agent.account_id,
-                "amount_cents": 2_500,
+                "amount": "25.00",
                 "reason": "missing operation key",
             })
             .to_string(),
@@ -11798,7 +11742,7 @@ rules:
             json!({
                 "job_id": "client-generated-job-id",
                 "account_id": agent.account_id,
-                "amount_cents": 2_500,
+                "amount": "25.00",
                 "reason": "client supplied canonical id",
             })
             .to_string(),
@@ -11813,7 +11757,7 @@ rules:
             json!({
                 "operation_key": "agent-anchor-rejection-job",
                 "agent_id": agent.agent_id,
-                "amount_cents": 2_500,
+                "amount": "25.00",
                 "reason": "agent anchored purchase",
             })
             .to_string(),
@@ -11914,7 +11858,7 @@ rules:
             json!({
                 "operation_key": "yaml-policy-job",
                 "account_id": agents.agents[0].account_id,
-                "amount_cents": 2_500,
+                "amount": "25.00",
                 "reason": "yaml-backed policy spend",
             })
             .to_string(),
@@ -12012,7 +11956,7 @@ rules: []
     }
 
     #[test]
-    fn starter_policy_accepts_decimal_daily_limit_and_keeps_legacy_cents_stable() {
+    fn starter_policy_accepts_decimal_daily_limit_and_replays_exact_payload() {
         let path = std::env::temp_dir().join(format!(
             "hubu-api-policy-decimal-limit-{}.sqlite",
             UserId::new()
@@ -12032,16 +11976,15 @@ rules: []
             "amount is within the configured single-spend limit of USD 0.005"
         );
 
-        // A legacy client re-applying the same cents limit produces the same
-        // payload, so the write stays an idempotent no-op.
+        // Reapplying the same exact limit preserves the immutable payload hash.
         let legacy = add_policy(
-            json!({"daily_limit_cents": 500, "declarative_key": "legacy"}).to_string(),
+            json!({"daily_limit": "5.00", "declarative_key": "legacy"}).to_string(),
             &state,
         )
         .unwrap();
         let replay = add_policy(
             json!({
-                "daily_limit_cents": 500,
+                "daily_limit": "5.00",
                 "declarative_key": "legacy",
                 "expected_hash": legacy.payload_hash,
             })
@@ -12055,23 +11998,23 @@ rules: []
             &state,
         );
         let rule = &show.body["policy"]["rules"][1];
-        assert_eq!(rule["when"]["value"], json!({"money_cents": 500}));
+        assert_eq!(rule["when"]["value"], json!({"money": "5.00"}));
         assert_eq!(
             rule["reason"],
-            "amount is within the configured single-spend limit of 500 cents"
+            "amount is within the configured single-spend limit of USD 5.00"
         );
 
         for (body, expected) in [
             (
                 json!({"daily_limit": "5.00", "daily_limit_cents": 500}),
-                "not both",
+                "unknown field",
             ),
             (json!({"daily_limit": "0"}), "must be positive"),
             (
                 json!({"daily_limit": "0.0000001"}),
                 "at most 6 decimal places",
             ),
-            (json!({}), "`policy_yaml` or `daily_limit`"),
+            (json!({}), "policy add requires `daily_limit`"),
         ] {
             let error = add_policy(body.to_string(), &state).unwrap_err();
             assert!(error.to_string().contains(expected), "{body}: {error}");
@@ -12293,7 +12236,7 @@ rules: []
                 json!({
                     "operation_key": operation_key,
                     "account_id": account_id,
-                    "amount_cents": 1_000,
+                    "amount": "10.00",
                     "reason": "evaluate revised shared policy",
                 })
                 .to_string(),
@@ -12334,7 +12277,7 @@ rules: []
         add_policy(
             json!({
                 "agent_id": agent.agent_id,
-                "daily_limit_cents": 5_000,
+                "daily_limit": "50.00",
             })
             .to_string(),
             &state,
@@ -12347,7 +12290,7 @@ rules: []
             json!({
                 "operation_key": "failed-payment-job",
                 "account_id": agent.account_id,
-                "amount_cents": 1_500,
+                "amount": "15.00",
                 "reason": "failed test purchase",
                 "merchant": "fail",
             })
@@ -12365,9 +12308,9 @@ rules: []
             .budget_hold
             .expect("allowed spend should reserve and release budget");
         assert_eq!(budget_hold.status, "released");
-        assert_eq!(budget_hold.consumed_amount_cents, 0);
-        assert_eq!(budget_hold.frozen_amount_cents, 0);
-        assert_eq!(budget_hold.remaining_amount_cents, 10_000);
+        assert_eq!(budget_hold.consumed_amount.whole_cents(), 0);
+        assert_eq!(budget_hold.frozen_amount.whole_cents(), 0);
+        assert_eq!(budget_hold.remaining_amount.whole_cents(), 10_000);
 
         let ledger = list_ledger(&state).expect("ledger should list");
         assert!(ledger.transactions.is_empty());
@@ -12402,7 +12345,7 @@ rules: []
         add_policy(
             json!({
                 "agent_id": agent.agent_id,
-                "daily_limit_cents": 5_000,
+                "daily_limit": "50.00",
             })
             .to_string(),
             &state,
@@ -12417,7 +12360,7 @@ rules: []
                 json!({
                     "operation_key": "over-budget-job",
                     "account_id": agent.account_id,
-                    "amount_cents": 2_500,
+                    "amount": "25.00",
                     "reason": "over budget purchase",
                     "merchant": "Acme Cafe",
                 }),
@@ -12457,7 +12400,7 @@ rules: []
                 json!({
                     "operation_key": "over-budget-job",
                     "account_id": agent.account_id,
-                    "amount_cents": 500,
+                    "amount": "5.00",
                     "reason": "corrected affordable purchase",
                     "merchant": "Acme Cafe",
                 }),
@@ -12486,7 +12429,7 @@ rules: []
                 json!({
                     "operation_key": "over-budget-job",
                     "account_id": agent.account_id,
-                    "amount_cents": 2_500,
+                    "amount": "25.00",
                     "reason": "over budget purchase",
                     "merchant": "Acme Cafe",
                 }),
@@ -12508,7 +12451,7 @@ rules: []
                 json!({
                     "operation_key": "over-budget-job",
                     "account_id": agent.account_id,
-                    "amount_cents": 400,
+                    "amount": "4.00",
                     "reason": "third changed scope",
                     "merchant": "Acme Cafe",
                 }),
@@ -12526,8 +12469,8 @@ rules: []
         );
 
         let budgets = list_budgets(&state, false).expect("budgets should list");
-        assert_eq!(budgets.budgets[0].remaining_amount_cents, 500);
-        assert_eq!(budgets.budgets[0].frozen_amount_cents, 500);
+        assert_eq!(budgets.budgets[0].remaining_amount.whole_cents(), 500);
+        assert_eq!(budgets.budgets[0].frozen_amount.whole_cents(), 500);
         std::fs::remove_file(path).ok();
     }
 
@@ -12559,7 +12502,7 @@ rules: []
         add_policy(
             json!({
                 "agent_id": agent.agent_id,
-                "daily_limit_cents": 5_000,
+                "daily_limit": "50.00",
             })
             .to_string(),
             &state,
@@ -12571,7 +12514,7 @@ rules: []
         create_budget(
             json!({
                 "agent_id": agent.agent_id,
-                "amount_cents": 5_000,
+                "amount": "50.00",
                 "starting_at": starting_at.to_rfc3339(),
                 "ending_before": ending_before.to_rfc3339(),
             })
@@ -12584,7 +12527,7 @@ rules: []
             json!({
                 "operation_key": operation_key,
                 "account_id": agent.account_id,
-                "amount_cents": 100,
+                "amount": "1.00",
                 "reason": "budget boundary purchase",
                 "merchant": "Acme Cafe",
             })
@@ -12629,8 +12572,7 @@ rules: []
             operation_key: Some("pending-exact-operation".to_string()),
             agent_id: None,
             account_id: Some(agent.account_id.clone()),
-            amount_cents: Some(100),
-            amount: None,
+            amount: Some("1.00".into()),
             currency: None,
             reason: "pending exact request".to_string(),
             task_id: FieldPresence::Missing,
@@ -12640,7 +12582,7 @@ rules: []
         };
         let account = resolve_agent_account_for_spend(&request, &user, &state).unwrap();
         let spend_request = hubu_core::spend::SpendRequest {
-            amount: Amount::from_legacy_cents(request.amount_cents.unwrap()).unwrap(),
+            amount: request.amount.as_deref().unwrap().parse().unwrap(),
             currency: Currency::Usd,
             owner_user_id: user.user_id.clone(),
             agent_id: account.agent_id,
@@ -12671,7 +12613,7 @@ rules: []
                 json!({
                     "operation_key": "pending-exact-operation",
                     "account_id": agent.account_id,
-                    "amount_cents": 100,
+                    "amount": "1.00",
                     "reason": "pending exact request",
                     "merchant": "Acme Cafe",
                 }),
@@ -12696,7 +12638,7 @@ rules: []
                 json!({
                     "operation_key": "pending-approval-operation",
                     "account_id": agent.account_id,
-                    "amount_cents": 600,
+                    "amount": "6.00",
                     "reason": "requires human approval",
                     "merchant": "Acme Cafe",
                 }),
@@ -12717,7 +12659,7 @@ rules: []
                 json!({
                     "operation_key": "pending-approval-operation",
                     "account_id": agent.account_id,
-                    "amount_cents": 400,
+                    "amount": "4.00",
                     "reason": "changed while approval pending",
                     "merchant": "Acme Cafe",
                 }),
@@ -12739,7 +12681,10 @@ rules: []
         assert_eq!(pending.body["approval"]["status"], "pending");
         assert!(pending.body["auth_token_id"].is_null());
         assert!(pending.body["budget_hold"].is_null());
-        assert_eq!(pending.body["approval"]["review"]["amount_cents"], 600);
+        assert_eq!(
+            test_amount_units(&pending.body["approval"]["review"]["amount"]),
+            6000000
+        );
         assert_eq!(
             pending.body["approval"]["review"]["account_id"],
             agent.account_id
@@ -12787,7 +12732,10 @@ rules: []
         assert_eq!(approved.body["decision"], "allow");
         assert_eq!(approved.body["approval"]["status"], "approved");
         assert!(approved.body["auth_token_id"].is_string());
-        assert_eq!(approved.body["budget_hold"]["amount_cents"], 600);
+        assert_eq!(
+            test_amount_units(&approved.body["budget_hold"]["amount"]),
+            6000000
+        );
         let auth_token_id = approved.body["auth_token_id"].clone();
         let approved_events =
             assert_human_approval_lifecycle(&state, &approval_request_id, Some("approved"));
@@ -12799,7 +12747,7 @@ rules: []
                 json!({
                     "operation_key": "approval-resume-operation",
                     "account_id": agent.account_id,
-                    "amount_cents": 600,
+                    "amount": "6.00",
                     "reason": "requires human approval",
                     "merchant": "Acme Cafe",
                 }),
@@ -12896,7 +12844,7 @@ rules: []
         let request = json!({
             "operation_key": "approval-submit-resume-operation",
             "account_id": agent.account_id,
-            "amount_cents": 600,
+            "amount": "6.00",
             "reason": "requires human approval",
             "merchant": "Acme Cafe",
         });
@@ -12966,7 +12914,7 @@ rules: []
         let request = json!({
             "operation_key": "approval-submit-failed-operation",
             "account_id": agent.account_id,
-            "amount_cents": 600,
+            "amount": "6.00",
             "reason": "requires human approval",
             "merchant": "fail",
         });
@@ -13061,7 +13009,7 @@ rules: []
                 json!({
                     "operation_key": "approval-expired-submit-operation",
                     "account_id": agent.account_id,
-                    "amount_cents": 600,
+                    "amount": "6.00",
                     "reason": "requires human approval",
                     "merchant": "Acme Cafe",
                 }),
@@ -13172,7 +13120,7 @@ rules: []
                 json!({
                     "operation_key": "approval-auth-boundary-executor-operation",
                     "account_id": agent.account_id,
-                    "amount_cents": 100,
+                    "amount": "1.00",
                     "reason": "executor-scoped credential",
                     "merchant": "Acme Cafe",
                 }),
@@ -13330,7 +13278,7 @@ rules: []
                 route(
                     authenticated_json_request(
                         &format!("/budgets/{budget_id}/versions"),
-                        json!({"amount_limit_cents": 500, "expected_revision": 1}),
+                        json!({"amount_limit": "5.00", "expected_revision": 1}),
                     ),
                     &state,
                 )
@@ -13367,7 +13315,7 @@ rules: []
                 let changed = route(
                     authenticated_json_request(
                         &format!("/budgets/{budget_id}/versions"),
-                        json!({"amount_limit_cents": 1_000, "expected_revision": 2}),
+                        json!({"amount_limit": "10.00", "expected_revision": 2}),
                     ),
                     &restarted,
                 );
@@ -13408,8 +13356,8 @@ rules: []
             assert_eq!(failed.status, 400, "{}", failed.body);
             assert_eq!(human_approval_lifecycle_events(&state, id), pending_events);
             let current_budget = list_budgets(&state, false).unwrap().budgets.remove(0);
-            assert_eq!(current_budget.frozen_amount_cents, 0);
-            assert_eq!(current_budget.remaining_amount_cents, 1_000);
+            assert_eq!(current_budget.frozen_amount.whole_cents(), 0);
+            assert_eq!(current_budget.remaining_amount.whole_cents(), 1_000);
             {
                 let governance = state.governance.lock().unwrap();
                 assert!(governance.load_spend_auth_tokens().unwrap().is_empty());
@@ -13519,7 +13467,7 @@ rules: []
             add_policy(
                 json!({
                     "agent_id": agent.agent_id,
-                    "daily_limit_cents": 5_000,
+                    "daily_limit": "50.00",
                 })
                 .to_string(),
                 &state,
@@ -13530,7 +13478,7 @@ rules: []
                 json!({
                     "operation_key": "restart-audit-job",
                     "account_id": agent.account_id,
-                    "amount_cents": 2_500,
+                    "amount": "25.00",
                     "reason": "restart audit purchase",
                     "merchant": "Acme Cafe",
                 })
@@ -13545,8 +13493,8 @@ rules: []
             ServerState::new_with_db_path(&path).expect("server state should reload from storage");
         let budgets = list_budgets(&restarted, false).expect("budgets should reload");
         assert_eq!(budgets.budgets.len(), 1);
-        assert_eq!(budgets.budgets[0].consumed_amount_cents, 2_500);
-        assert_eq!(budgets.budgets[0].remaining_amount_cents, 7_500);
+        assert_eq!(budgets.budgets[0].consumed_amount.whole_cents(), 2_500);
+        assert_eq!(budgets.budgets[0].remaining_amount.whole_cents(), 7_500);
 
         let ledger = list_ledger(&restarted).expect("ledger should reload");
         assert_eq!(ledger.transactions.len(), 1);
@@ -13565,7 +13513,7 @@ rules: []
             json!({
                 "operation_key": "post-restart-policy-job",
                 "account_id": account_id,
-                "amount_cents": 1_000,
+                "amount": "10.00",
                 "reason": "post-restart policy spend",
                 "merchant": "Acme Cafe",
             })
@@ -13799,7 +13747,7 @@ rules: []
         add_policy(
             json!({
                 "agent_id": agent.agent_id,
-                "daily_limit_cents": 500,
+                "daily_limit": "5.00",
             })
             .to_string(),
             &state,
@@ -13812,7 +13760,7 @@ rules: []
                 json!({
                     "operation_key": format!("{test_name}-operation"),
                     "account_id": agent.account_id,
-                    "amount_cents": 600,
+                    "amount": "6.00",
                     "reason": "requires human approval",
                     "merchant": merchant,
                 }),
@@ -13907,7 +13855,7 @@ rules: []
         add_policy(
             json!({
                 "agent_id": agent.agent_id,
-                "daily_limit_cents": 500,
+                "daily_limit": "5.00",
             })
             .to_string(),
             &state,
@@ -13919,7 +13867,7 @@ rules: []
         let mut request = json!({
             "operation_key": format!("{test_name}-operation"),
             "account_id": agent.account_id,
-            "amount_cents": 500,
+            "amount": "5.00",
             "reason": reason,
             "merchant": "gongbu.image",
         });
@@ -14033,7 +13981,7 @@ rules: []
         assert_ne!(default.policy_id, initial_override.policy_id);
         assert_eq!(default.policy_version, initial_override.policy_version);
 
-        let denied_body = json!({"operation_key":"capture-old-override", "account_id":override_agent.account_id, "amount_cents":5, "reason":"inspect the selected override"}).to_string();
+        let denied_body = json!({"operation_key":"capture-old-override", "account_id":override_agent.account_id, "amount": "0.05", "reason":"inspect the selected override"}).to_string();
         let denied = authorize_spend(denied_body.clone(), &state).unwrap();
         assert_eq!(denied.decision, "deny");
         let original_evidence =
@@ -14043,7 +13991,7 @@ rules: []
             "10000"
         );
         let allowed = authorize_spend(
-            json!({"operation_key":"capture-default-allow", "account_id":default_agent.account_id, "amount_cents":5, "reason":"inspect the selected default"}).to_string(),
+            json!({"operation_key":"capture-default-allow", "account_id":default_agent.account_id, "amount": "0.05", "reason":"inspect the selected default"}).to_string(),
             &state,
         )
         .unwrap();
@@ -14086,7 +14034,7 @@ rules: []
         assert_eq!(before_replay.watermark, after_replay.watermark);
 
         let updated = authorize_spend(
-            json!({"operation_key":"capture-new-override", "account_id":override_agent.account_id, "amount_cents":5, "reason":"inspect the revised override"}).to_string(),
+            json!({"operation_key":"capture-new-override", "account_id":override_agent.account_id, "amount": "0.05", "reason":"inspect the revised override"}).to_string(),
             &state,
         )
         .unwrap();
@@ -14140,7 +14088,7 @@ rules: []
                         user: owner,
                         agent_id: internal_agent,
                         agent_account_id: account.id,
-                        amount: legacy_cents_amount(5).unwrap(),
+                        amount: Amount::from_legacy_cents(5).unwrap(),
                         currency: Currency::Usd,
                         merchant: None,
                         execution_scope: None,
@@ -14166,7 +14114,7 @@ rules: []
             &original,
         );
         let current = authorize_spend(
-            json!({"operation_key":"capture-current-selection", "account_id":agent.account_id, "amount_cents":5, "reason":"use the current cached revision"}).to_string(),
+            json!({"operation_key":"capture-current-selection", "account_id":agent.account_id, "amount": "0.05", "reason":"use the current cached revision"}).to_string(),
             &state,
         )
         .unwrap();
@@ -14212,7 +14160,7 @@ rules: []
         assert_eq!(revised.revision, 2);
         let mut before_restart = Vec::new();
         for (index, agent) in [&first, &second].into_iter().enumerate() {
-            let body = json!({"operation_key":format!("capture-shared-before-{index}"), "account_id":agent.account_id, "amount_cents":5, "reason":"verify every refreshed assignment"}).to_string();
+            let body = json!({"operation_key":format!("capture-shared-before-{index}"), "account_id":agent.account_id, "amount": "0.05", "reason":"verify every refreshed assignment"}).to_string();
             let response = authorize_spend(body.clone(), &state).unwrap();
             assert_eq!(response.decision, "allow");
             automatic_capture_assert_policy_ref(&state, &response.decision_id, &revised);
@@ -14246,7 +14194,7 @@ rules: []
         );
         for (index, agent) in [&first, &second].into_iter().enumerate() {
             let response = authorize_spend(
-                json!({"operation_key":format!("capture-shared-after-{index}"), "account_id":agent.account_id, "amount_cents":5, "reason":"verify the rehydrated policy snapshot"}).to_string(),
+                json!({"operation_key":format!("capture-shared-after-{index}"), "account_id":agent.account_id, "amount": "0.05", "reason":"verify the rehydrated policy snapshot"}).to_string(),
                 &reopened,
             )
             .unwrap();

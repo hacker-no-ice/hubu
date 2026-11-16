@@ -129,6 +129,10 @@ fn backups(path: &Path) -> Vec<std::path::PathBuf> {
 /// and scheduled budgets, in-flight and expired claims, precise and legacy
 /// receipts, ledger postings and a spending target.
 fn legacy_database(path: &Path) -> LegacyFixture {
+    database_fixture(path, true)
+}
+
+fn database_fixture(path: &Path, legacy_schema: bool) -> LegacyFixture {
     let now = Utc::now();
     let mut repo = SqliteGovernanceRepository::open(path).unwrap();
     let in_flight_agent = AgentId::new();
@@ -222,7 +226,11 @@ fn legacy_database(path: &Path) -> LegacyFixture {
     drop(repo);
 
     let conn = Connection::open(path).unwrap();
-    strip_accounting_scale_columns(&conn);
+    if legacy_schema {
+        strip_accounting_scale_columns(&conn);
+    } else {
+        restore_micro_build_schema(&conn);
+    }
     LegacyFixture {
         in_flight_agent,
         in_flight,
@@ -254,13 +262,13 @@ fn legacy_database_migrates_exactly_with_backup_triggers_and_working_lifecycle()
     drop(backup);
 
     for (table, column, legacy_column) in AMOUNT_PAIRS {
+        assert!(!table_has_column(&repo.conn, table, legacy_column).unwrap());
         let (rows, mismatched): (i64, i64) = repo
             .conn
             .query_row(
                 &format!(
                     "SELECT COUNT(*), COUNT(*) FILTER (
-                         WHERE {column} IS NOT {legacy_column} * 10000
-                            OR typeof({column}) != 'integer'
+                         WHERE typeof({column}) != 'integer'
                             OR amount_scale IS NOT 6)
                      FROM {table}"
                 ),
@@ -347,16 +355,22 @@ fn legacy_database_migrates_exactly_with_backup_triggers_and_working_lifecycle()
         now,
     )
     .unwrap();
-    let (consumed, cents): (i64, i64) = repo
+    let consumed: i64 = repo
         .conn
         .query_row(
-            "SELECT consumed_amount, consumed_amount_cents FROM budget_balances
-             WHERE budget_id = (SELECT budget_id FROM budget_holds WHERE executor_claim_id = ?1)",
-            params![fixture.expired.id.to_string()],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            "SELECT consumed_amount FROM budget_balances WHERE budget_id = ?1",
+            params![repo
+                .load_budget_holds()
+                .unwrap()
+                .iter()
+                .find(|h| h.executor_claim_id.as_ref() == Some(&fixture.expired.id))
+                .unwrap()
+                .budget_id
+                .to_string()],
+            |row| row.get(0),
         )
         .unwrap();
-    assert_eq!((consumed, cents), (25_000_000, 2_500));
+    assert_eq!(consumed, 25_000_000);
 }
 
 #[test]
@@ -451,23 +465,18 @@ fn missing_authoritative_amounts_are_invalid_data() {
         Utc::now() + Duration::minutes(15),
         "invalid-data",
     );
-    repo.conn
+    let error = repo
+        .conn
         .execute(
             "UPDATE budget_balances SET consumed_amount = NULL WHERE budget_id = ?1",
             params![hold.budget_id.to_string()],
         )
-        .unwrap();
-    let error = repo.load_budget_balances().unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("accounting-scale amount is missing"),
-        "{error}"
-    );
+        .unwrap_err();
+    assert!(error.to_string().contains("NOT NULL"));
 }
 
 #[test]
-fn sub_cent_settlement_writes_exact_units_and_conservative_legacy_projections() {
+fn sub_cent_settlement_writes_only_exact_units() {
     let mut repo = SqliteGovernanceRepository::in_memory().unwrap();
     let (claim, _, hold) = persist_claimed_executor_spend_with_operation_key(
         &mut repo,
@@ -483,49 +492,10 @@ fn sub_cent_settlement_writes_exact_units_and_conservative_legacy_projections() 
         Utc::now(),
     )
     .unwrap();
-    let balance: (i64, i64, i64, i64, i64, i64) = repo
-        .conn
-        .query_row(
-            "SELECT consumed_amount, consumed_amount_cents, frozen_amount, frozen_amount_cents,
-                    remaining_amount, remaining_amount_cents
-             FROM budget_balances WHERE budget_id = ?1",
-            params![hold.budget_id.to_string()],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                ))
-            },
-        )
-        .unwrap();
-    // Consumed rounds up and remaining rounds down, so a legacy reader never
-    // sees more available budget than exists.
-    assert_eq!(balance, (3_100, 1, 0, 0, 99_996_900, 9_999));
-    let receipt: (i64, i64, i64, i64, i64, i64, i64) = repo
-        .conn
-        .query_row(
-            "SELECT authorized_max, authorized_max_cents, budget_charge, budget_charge_cents,
-                    released_amount, released_amount_cents, actual_vendor_cost_cents
-             FROM spend_executor_settlement_receipts",
-            [],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                    row.get(6)?,
-                ))
-            },
-        )
-        .unwrap();
-    assert_eq!(receipt, (25_000_000, 2_500, 3_100, 1, 24_996_900, 2_499, 1));
+    let balance: (i64,i64,i64) = repo.conn.query_row("SELECT consumed_amount,frozen_amount,remaining_amount FROM budget_balances WHERE budget_id=?1", params![hold.budget_id.to_string()],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
+    assert_eq!(balance, (3100, 0, 99_996_900));
+    let receipt: (i64,i64,i64) = repo.conn.query_row("SELECT authorized_max,budget_charge,released_amount FROM spend_executor_settlement_receipts", [], |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
+    assert_eq!(receipt, (25_000_000, 3100, 24_996_900));
     let loaded = load_budget_balance_by_id(&repo.conn, &hold.budget_id)
         .unwrap()
         .unwrap();
@@ -626,12 +596,13 @@ fn concurrent_first_opens_migrate_a_legacy_database_once() {
 
     let repo = SqliteGovernanceRepository::open(&path).unwrap();
     for (table, column, legacy_column) in AMOUNT_PAIRS {
+        assert!(!table_has_column(&repo.conn, table, legacy_column).unwrap());
         let mismatched: i64 = repo
             .conn
             .query_row(
                 &format!(
                     "SELECT COUNT(*) FROM {table}
-                     WHERE {column} IS NOT {legacy_column} * 10000 OR amount_scale IS NOT 6"
+                     WHERE typeof({column}) != 'integer' OR amount_scale IS NOT 6"
                 ),
                 [],
                 |row| row.get(0),
@@ -695,4 +666,107 @@ fn reserved_backup_is_not_group_or_world_writable() {
     let backup = reserve_backup_path(path.to_str().unwrap()).unwrap();
     let mode = std::fs::metadata(&backup).unwrap().permissions().mode();
     assert_eq!(mode & 0o022, 0, "{mode:o}");
+}
+
+#[test]
+fn micro_build_migrates_without_rounding_and_reopens_with_constraints() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("micro.sqlite3");
+    let fixture = database_fixture(&path, false);
+    let before = Connection::open(&path).unwrap();
+    let expected: Vec<_> = AMOUNT_PAIRS
+        .iter()
+        .map(|(table, col, _)| {
+            let mut stmt = before
+                .prepare(&format!("SELECT {col} FROM {table} ORDER BY 1"))
+                .unwrap();
+            let rows = stmt
+                .query_map([], |r| r.get::<_, i64>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            rows
+        })
+        .collect();
+    let guards = trigger_names(&before);
+    drop(before);
+    let mut repo = SqliteGovernanceRepository::open(&path).unwrap();
+    for ((table, col, legacy), values) in AMOUNT_PAIRS.iter().zip(expected) {
+        assert!(!table_has_column(&repo.conn, table, legacy).unwrap());
+        let mut stmt = repo
+            .conn
+            .prepare(&format!("SELECT {col} FROM {table} ORDER BY 1"))
+            .unwrap();
+        let actual = stmt
+            .query_map([], |r| r.get::<_, i64>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(actual, values, "{table}.{col}");
+        let not_null: i64 = repo
+            .conn
+            .query_row(
+                &format!("SELECT [notnull] FROM pragma_table_info('{table}') WHERE name=?1"),
+                [col],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(not_null, 1);
+    }
+    assert_eq!(trigger_names(&repo.conn), guards);
+    assert!(repo
+        .conn
+        .execute("UPDATE budget_balances SET amount_scale=2", [])
+        .is_err());
+    assert!(repo
+        .conn
+        .execute("UPDATE budget_holds SET amount=0", [])
+        .is_err());
+    assert!(repo
+        .conn
+        .execute("UPDATE budget_balances SET frozen_amount=-1", [])
+        .is_err());
+    assert!(repo
+        .conn
+        .execute("UPDATE budget_balances SET consumed_amount=0.5", [])
+        .is_err());
+    let settled = repo
+        .settle_executor_claim_transactionally(
+            &user_id(),
+            &fixture.in_flight_agent,
+            &fixture.in_flight.operation_key,
+            PaymentId::new(),
+            precise_settlement_receipt(31, 4),
+            Utc::now(),
+        )
+        .unwrap();
+    assert_eq!(settled.balance.consumed_amount, Amount::from_units(3100));
+    let rows = snapshot(&repo.conn);
+    drop(repo);
+    let reopened = SqliteGovernanceRepository::open(&path).unwrap();
+    assert_eq!(rows, snapshot(&reopened.conn));
+    assert!(backups(&path).is_empty());
+}
+
+#[test]
+fn invalid_micro_build_aborts_rebuild_and_restores_foreign_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("invalid.sqlite3");
+    database_fixture(&path, false);
+    let conn = Connection::open(&path).unwrap();
+    conn.execute("UPDATE budget_balances SET consumed_amount=NULL", [])
+        .unwrap();
+    let before = snapshot(&conn);
+    let guards = trigger_names(&conn);
+    let mut repo = SqliteGovernanceRepository { conn };
+    assert!(repo.migrate_canonical_amounts().is_err());
+    assert_eq!(snapshot(&repo.conn), before);
+    assert_eq!(trigger_names(&repo.conn), guards);
+    assert_eq!(
+        repo.conn
+            .pragma_query_value(None, "foreign_keys", |r| r.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert!(table_has_column(&repo.conn, "budget_versions", "amount_limit_cents").unwrap());
 }

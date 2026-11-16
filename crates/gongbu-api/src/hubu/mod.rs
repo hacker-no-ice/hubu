@@ -454,6 +454,7 @@ pub struct ExecutorSpendResponse {
     /// Hubu releases send only `amount_cents`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub amount: Option<ExactAmount>,
+    #[serde(default)]
     pub amount_cents: i64,
     pub currency: String,
     pub merchant: Option<String>,
@@ -555,10 +556,10 @@ pub struct BudgetHold {
     pub hold_id: String,
     pub budget_id: String,
     pub status: String,
-    pub amount_cents: i64,
-    pub consumed_amount_cents: i64,
-    pub frozen_amount_cents: i64,
-    pub remaining_amount_cents: i64,
+    pub amount: ExactAmount,
+    pub consumed_amount: ExactAmount,
+    pub frozen_amount: ExactAmount,
+    pub remaining_amount: ExactAmount,
 }
 
 #[cfg(test)]
@@ -676,8 +677,8 @@ mod tests {
             "expires_at":"2099-01-01T00:00:00Z",
             "budget_hold":{
                 "hold_id":"hold-1","budget_id":"budget-1","status":"frozen",
-                "amount_cents":100,"consumed_amount_cents":0,
-                "frozen_amount_cents":100,"remaining_amount_cents":0
+                "amount": {"units":"1000000","scale":6,"currency":"usd"},"consumed_amount": {"units":"0","scale":6,"currency":"usd"},
+                "frozen_amount": {"units":"1000000","scale":6,"currency":"usd"},"remaining_amount": {"units":"0","scale":6,"currency":"usd"}
             }
         }))]);
         let root = tempdir().unwrap();

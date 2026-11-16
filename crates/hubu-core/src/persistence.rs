@@ -1106,6 +1106,7 @@ impl SqliteGovernanceRepository {
         // after the spend phase has committed (with immutability restored)
         // and owns its immediate transaction.
         self.migrate_accounting_scale()?;
+        self.migrate_canonical_amounts()?;
         self.initialize_provider_accounting()?;
         self.in_init_transaction(Self::init_lifecycle_schema)?;
         Ok(())
@@ -1526,7 +1527,100 @@ impl SqliteGovernanceRepository {
         Ok(())
     }
 
+    /// Rebuild the dual-written µ schema without legacy projections. The copy
+    /// enforces constraints before any old table is dropped; failures roll back
+    /// the entire migration. Foreign keys are restored even on failure.
+    fn migrate_canonical_amounts(&mut self) -> Result<(), StorageError> {
+        self.conn.pragma_update(None, "foreign_keys", false)?;
+        let result = (|| {
+            let tx = self
+                .conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            if !table_has_column(&tx, "budget_versions", "amount_limit_cents")? {
+                return Ok(());
+            }
+            let objects = {
+                let mut stmt = tx.prepare(
+                    "SELECT name, type, sql FROM sqlite_master
+                    WHERE type IN ('index', 'trigger') AND sql IS NOT NULL
+                    AND tbl_name IN ('budget_versions', 'budget_balances', 'budget_holds',
+                                     'spending_targets', 'spend_executor_settlement_receipts')",
+                )?;
+                let collected = stmt
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                collected
+            };
+            tx.execute_batch(include_str!("persistence/canonical_amounts.sql"))?;
+            for table in [
+                "budget_versions",
+                "budget_balances",
+                "budget_holds",
+                "spending_targets",
+                "spend_executor_settlement_receipts",
+            ] {
+                let columns = {
+                    let mut stmt = tx.prepare(&format!("PRAGMA table_info({table}_v2)"))?;
+                    let collected = stmt
+                        .query_map([], |row| row.get::<_, String>(1))?
+                        .collect::<Result<Vec<_>, _>>()?
+                        .join(", ");
+                    collected
+                };
+                tx.execute_batch(&format!(
+                    "INSERT INTO {table}_v2 ({columns}) SELECT {columns} FROM {table};"
+                ))?;
+            }
+            for (name, kind, _) in &objects {
+                tx.execute_batch(&format!("DROP {kind} \"{name}\";"))?;
+            }
+            for table in [
+                "budget_holds",
+                "budget_balances",
+                "budget_versions",
+                "spending_targets",
+                "spend_executor_settlement_receipts",
+            ] {
+                tx.execute_batch(&format!(
+                    "DROP TABLE {table}; ALTER TABLE {table}_v2 RENAME TO {table};"
+                ))?;
+            }
+            for (_, _, sql) in objects {
+                tx.execute_batch(&sql)?;
+            }
+            if tx
+                .prepare("PRAGMA foreign_key_check")?
+                .query([])?
+                .next()?
+                .is_some()
+            {
+                return Err(StorageError::InvalidData(
+                    "canonical amount migration found a foreign-key violation".into(),
+                ));
+            }
+            tx.commit()?;
+            Ok(())
+        })();
+        let restore = self.conn.pragma_update(None, "foreign_keys", true);
+        result?;
+        restore?;
+        Ok(())
+    }
+
     fn migrate_precise_executor_settlement_receipts(&self) -> Result<(), StorageError> {
+        if !table_has_column(
+            &self.conn,
+            "spend_executor_settlement_receipts",
+            "authorized_max_cents",
+        )? {
+            return Ok(());
+        }
         // A previous successful open has installed the immutability triggers.
         // Remove them while filling only missing migration values, then init
         // recreates them immediately after this method returns.
@@ -4380,16 +4474,15 @@ impl BudgetVersionRepository for SqliteGovernanceRepository {
         let amount_limit = version.amount_limit;
         transaction.execute(
             "INSERT INTO budget_versions
-             (id, budget_id, revision, predecessor_version_id, amount_limit_cents,
+             (id, budget_id, revision, predecessor_version_id,
               effective_at, actor, source, reason, request_fingerprint, created_at,
               amount_limit, amount_scale)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 6)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 6)",
             params![
                 version.id.to_string(),
                 version.budget_id.to_string(),
                 sqlite_revision,
                 expected.id.to_string(),
-                legacy_limit_cents(amount_limit),
                 version.effective_at.to_rfc3339(),
                 version.actor,
                 version.source,
@@ -4480,12 +4573,11 @@ impl SpendingTargetRepository for SqliteGovernanceRepository {
     fn save_spending_target(&mut self, target: &SpendingTarget) -> Result<(), StorageError> {
         self.conn.execute(
             "INSERT INTO spending_targets
-             (id, owner_user_id, target_amount_cents, currency, starting_at,
+             (id, owner_user_id, currency, starting_at,
               ending_before, status, created_at, updated_at, target_amount, amount_scale)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 6)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 6)
              ON CONFLICT(id) DO UPDATE SET
                 owner_user_id = excluded.owner_user_id,
-                target_amount_cents = excluded.target_amount_cents,
                 target_amount = excluded.target_amount,
                 amount_scale = excluded.amount_scale,
                 currency = excluded.currency,
@@ -4496,7 +4588,6 @@ impl SpendingTargetRepository for SqliteGovernanceRepository {
             params![
                 target.id.to_string(),
                 target.owner_user_id.to_string(),
-                target.target_amount.legacy_cents_floor(),
                 target.currency.to_string(),
                 target.period.starting_at.to_rfc3339(),
                 target
@@ -4608,35 +4699,21 @@ fn save_executor_settlement_receipt(
     record: &PersistedSpendExecutorSettlementReceipt,
 ) -> Result<(), StorageError> {
     let price_model_snapshot_json = serde_json::to_string(&record.receipt.price_model_snapshot)?;
-    // Retained v4.3 columns continue to describe the authorization-bounded
-    // budget charge. Precise columns are authoritative, including for a human
-    // reconciliation whose already-incurred charge exceeds that authorization.
-    // Legacy cent columns are conservative projections that still satisfy the
-    // table's v4.3 CHECKs (released = authorized - actual, actual <= authorized).
-    let authorized_max_cents = record.authorized_max.legacy_cents_ceil();
-    let budget_charge_cents = record.budget_charge.legacy_cents_ceil();
-    let legacy_actual_vendor_cost_cents = budget_charge_cents.min(authorized_max_cents);
     conn.execute(
         "INSERT INTO spend_executor_settlement_receipts
-         (claim_id, settlement_id, authorized_max_cents, actual_vendor_cost_cents,
-          actual_vendor_cost_amount, actual_vendor_cost_scale, actual_vendor_cost_currency,
-          budget_charge_cents, released_amount_cents, overrun_amount_cents, currency,
+         (claim_id, settlement_id,
+          actual_vendor_cost_amount, actual_vendor_cost_scale, actual_vendor_cost_currency, currency,
           provider_request_id, price_model_snapshot_json,
           artifact_reference, created_at, authorized_max, budget_charge,
           released_amount, overrun_amount, amount_scale, cost_basis)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                 ?16, ?17, ?18, ?19, 6, ?20)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                 ?11, ?12, ?13, ?14, 6, ?15)",
         params![
             record.claim_id.to_string(),
             record.settlement_id.to_string(),
-            authorized_max_cents,
-            legacy_actual_vendor_cost_cents,
             record.receipt.actual_vendor_cost.amount,
             i64::from(record.receipt.actual_vendor_cost.scale),
             record.receipt.actual_vendor_cost.currency.to_string(),
-            budget_charge_cents,
-            authorized_max_cents - legacy_actual_vendor_cost_cents,
-            record.overrun_amount.legacy_cents_ceil(),
             record.currency.to_string(),
             record.receipt.provider_request_id,
             price_model_snapshot_json,
@@ -5267,13 +5344,10 @@ fn upsert_balance(conn: &Connection, balance: &BudgetBalance) -> Result<(), Stor
     let units = BalanceUnits::from_balance(balance)?;
     conn.execute(
         "INSERT INTO budget_balances
-         (budget_id, consumed_amount_cents, frozen_amount_cents, remaining_amount_cents, updated_at,
+         (budget_id, updated_at,
           consumed_amount, frozen_amount, remaining_amount, amount_scale)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 6)
+         VALUES (?1, ?2, ?3, ?4, ?5, 6)
          ON CONFLICT(budget_id) DO UPDATE SET
-            consumed_amount_cents = excluded.consumed_amount_cents,
-            frozen_amount_cents = excluded.frozen_amount_cents,
-            remaining_amount_cents = excluded.remaining_amount_cents,
             consumed_amount = excluded.consumed_amount,
             frozen_amount = excluded.frozen_amount,
             remaining_amount = excluded.remaining_amount,
@@ -5281,9 +5355,6 @@ fn upsert_balance(conn: &Connection, balance: &BudgetBalance) -> Result<(), Stor
             updated_at = excluded.updated_at",
         params![
             balance.budget_id.to_string(),
-            units.consumed.legacy_cents_ceil(),
-            units.frozen.legacy_cents_ceil(),
-            units.remaining.legacy_cents_floor(),
             Utc::now().to_rfc3339(),
             units.consumed.units(),
             units.frozen.units(),
@@ -5293,9 +5364,7 @@ fn upsert_balance(conn: &Connection, balance: &BudgetBalance) -> Result<(), Stor
     Ok(())
 }
 
-/// A balance at accounting scale. The authoritative columns hold these units;
-/// the legacy `*_cents` columns hold conservative projections (consumed and
-/// frozen rounded up, remaining rounded down).
+/// A balance in canonical accounting units.
 struct BalanceUnits {
     consumed: Amount,
     frozen: Amount,
@@ -5327,22 +5396,16 @@ fn compare_and_set_balance(
          SET consumed_amount = ?2,
              frozen_amount = ?3,
              remaining_amount = ?4,
-             consumed_amount_cents = ?5,
-             frozen_amount_cents = ?6,
-             remaining_amount_cents = ?7,
-             updated_at = ?8
+             updated_at = ?5
          WHERE budget_id = ?1
-           AND consumed_amount = ?9
-           AND frozen_amount = ?10
-           AND remaining_amount = ?11",
+           AND consumed_amount = ?6
+           AND frozen_amount = ?7
+           AND remaining_amount = ?8",
         params![
             updated.budget_id.to_string(),
             updated_units.consumed.units(),
             updated_units.frozen.units(),
             updated_units.remaining.units(),
-            updated_units.consumed.legacy_cents_ceil(),
-            updated_units.frozen.legacy_cents_ceil(),
-            updated_units.remaining.legacy_cents_floor(),
             updated_at,
             current_units.consumed.units(),
             current_units.frozen.units(),
@@ -5351,26 +5414,19 @@ fn compare_and_set_balance(
     )?)
 }
 
-/// Legacy limit projection: rounded down, but never below the 1-cent minimum
-/// that the legacy `amount_limit_cents > 0` CHECK requires.
-fn legacy_limit_cents(amount_limit: Amount) -> i64 {
-    amount_limit.legacy_cents_floor().max(1)
-}
-
 fn insert_budget_hold(conn: &Connection, hold: &BudgetHold) -> Result<(), StorageError> {
     let amount = hold.amount;
     conn.execute(
         "INSERT INTO budget_holds
-         (id, budget_id, budget_version_id, spend_decision_id, amount_cents,
+         (id, budget_id, budget_version_id, spend_decision_id,
           currency, status, executor_claim_id, created_at, updated_at, expires_at,
           amount, amount_scale, spend_asset, spend_exact_amount, spend_exact_scale)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 6, ?6, ?13, 6)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 6, ?5, ?12, 6)",
         params![
             hold.id.to_string(),
             hold.budget_id.to_string(),
             hold.budget_version_id.to_string(),
             hold.spend_decision_id.to_string(),
-            amount.legacy_cents_ceil(),
             hold.currency.to_string(),
             budget_hold_status(&hold.status),
             hold.executor_claim_id.as_ref().map(ToString::to_string),
@@ -5600,10 +5656,10 @@ fn persist_budget_records(
     let amount_limit = version.amount_limit;
     sqlite_tx.execute(
         "INSERT INTO budget_versions
-             (id, budget_id, revision, predecessor_version_id, amount_limit_cents,
+             (id, budget_id, revision, predecessor_version_id,
               effective_at, actor, source, reason, request_fingerprint, created_at,
               amount_limit, amount_scale)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 6)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 6)
              ON CONFLICT(id) DO NOTHING",
         params![
             version.id.to_string(),
@@ -5613,7 +5669,6 @@ fn persist_budget_records(
                 .predecessor_version_id
                 .as_ref()
                 .map(ToString::to_string),
-            legacy_limit_cents(amount_limit),
             version.effective_at.to_rfc3339(),
             version.actor,
             version.source,
@@ -5834,7 +5889,62 @@ fn load_budget_state_from(
 }
 
 #[cfg(test)]
+fn restore_micro_build_schema(conn: &Connection) {
+    // Produce a fixture with the prior build's exact schema and conservative
+    // projections, while retaining real IDs, lineage, claims and ledger rows.
+    conn.pragma_update(None, "foreign_keys", false).unwrap();
+    let tables = [
+        "budget_versions",
+        "budget_balances",
+        "budget_holds",
+        "spending_targets",
+        "spend_executor_settlement_receipts",
+    ];
+    let objects: Vec<(String, String, String)> = conn.prepare("SELECT name,type,sql FROM sqlite_master WHERE type IN ('index','trigger') AND sql IS NOT NULL AND tbl_name IN ('budget_versions','budget_balances','budget_holds','spending_targets','spend_executor_settlement_receipts')").unwrap().query_map([], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap().collect::<Result<_,_>>().unwrap();
+    conn.execute_batch(include_str!("persistence/micro_build_fixture.sql"))
+        .unwrap();
+    for table in tables {
+        let cols: Vec<String> = conn
+            .prepare(&format!("PRAGMA table_info({table}_micro_build)"))
+            .unwrap()
+            .query_map([], |r| r.get(1))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let values: Vec<String> = cols.iter().map(|col| match col.as_str() {
+            "actual_vendor_cost_cents" => "min((budget_charge+9999)/10000,(authorized_max+9999)/10000)".into(),
+            "released_amount_cents" if table == "spend_executor_settlement_receipts" => "(authorized_max+9999)/10000-min((budget_charge+9999)/10000,(authorized_max+9999)/10000)".into(),
+            "amount_limit_cents" => "max(amount_limit/10000,1)".into(),
+            "remaining_amount_cents" | "target_amount_cents" => format!("{}/10000", col.trim_end_matches("_cents")),
+            _ if col.ends_with("_cents") => format!("({}+9999)/10000", col.trim_end_matches("_cents")),
+            _ => col.clone(),
+        }).collect();
+        conn.execute_batch(&format!(
+            "INSERT INTO {table}_micro_build ({}) SELECT {} FROM {table};",
+            cols.join(","),
+            values.join(",")
+        ))
+        .unwrap();
+    }
+    for (name, kind, _) in &objects {
+        conn.execute_batch(&format!("DROP {kind} \"{name}\";"))
+            .unwrap();
+    }
+    for table in tables {
+        conn.execute_batch(&format!(
+            "DROP TABLE {table}; ALTER TABLE {table}_micro_build RENAME TO {table};"
+        ))
+        .unwrap();
+    }
+    for (_, _, sql) in objects {
+        conn.execute_batch(&sql).unwrap();
+    }
+    conn.pragma_update(None, "foreign_keys", true).unwrap();
+}
+
+#[cfg(test)]
 pub(crate) fn strip_accounting_scale_columns(conn: &Connection) {
+    restore_micro_build_schema(conn);
     for column in ACCOUNTING_SCALE_COLUMNS.iter().rev() {
         conn.execute_batch(&format!(
             "ALTER TABLE {} DROP COLUMN {};",
@@ -6910,11 +7020,22 @@ mod tests {
     fn precise_receipt_migration_backfills_legacy_rows_and_reopens_with_immutable_triggers() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("legacy-receipts.sqlite");
-        let claim_id = SpendExecutorClaimId::new();
+        let claim_id = {
+            let mut repo = SqliteGovernanceRepository::open(&path).unwrap();
+            let (claim, _, _) = persist_claimed_executor_spend_with_operation_key(
+                &mut repo,
+                Utc::now() + Duration::minutes(15),
+                "legacy-receipt",
+            );
+            claim.id
+        };
         let settlement_id = PaymentId::new();
         let created_at = Utc::now();
         {
             let conn = Connection::open(&path).unwrap();
+            strip_accounting_scale_columns(&conn);
+            conn.execute_batch("DROP TABLE spend_executor_settlement_receipts")
+                .unwrap();
             conn.execute_batch(
                 "CREATE TABLE spend_executor_settlement_receipts (
                     claim_id TEXT PRIMARY KEY,
@@ -6955,13 +7076,12 @@ mod tests {
 
         let first = SqliteGovernanceRepository::open(&path).unwrap();
         for column in [
-            "actual_vendor_cost_cents",
             "actual_vendor_cost_amount",
             "actual_vendor_cost_scale",
             "actual_vendor_cost_currency",
-            "budget_charge_cents",
-            "released_amount_cents",
-            "overrun_amount_cents",
+            "budget_charge",
+            "released_amount",
+            "overrun_amount",
         ] {
             assert!(
                 table_has_column(&first.conn, "spend_executor_settlement_receipts", column)
@@ -7756,8 +7876,7 @@ mod tests {
         repo.conn
             .execute(
                 "UPDATE budget_balances
-                 SET consumed_amount_cents = 1, remaining_amount_cents = 7499,
-                     consumed_amount = 10000, remaining_amount = 74990000
+                 SET consumed_amount = 10000, remaining_amount = 74990000
                  WHERE budget_id = ?1",
                 params![hold.budget_id.to_string()],
             )
@@ -9749,7 +9868,7 @@ mod tests {
         assert!(repo
             .conn
             .execute(
-                "UPDATE budget_versions SET amount_limit_cents = 1 WHERE id = ?1",
+                "UPDATE budget_versions SET amount_limit = 1 WHERE id = ?1",
                 params![first.version.id.to_string()],
             )
             .is_err());
@@ -9782,10 +9901,10 @@ mod tests {
         repo.conn
             .execute(
                 "INSERT INTO budget_versions
-                 (id, budget_id, revision, predecessor_version_id, amount_limit_cents,
-                  effective_at, actor, source, reason, request_fingerprint, created_at)
+                 (id, budget_id, revision, predecessor_version_id, amount_limit,
+                  effective_at, actor, source, reason, request_fingerprint, created_at, amount_scale)
                  VALUES (?1, ?2, 2, ?3, 12000, ?4, 'test:owner', 'constraint-test',
-                         NULL, 'sha256:successor', ?4)",
+                         NULL, 'sha256:successor', ?4, 6)",
                 params![
                     successor_id.to_string(),
                     first.budget.id.to_string(),
@@ -9798,10 +9917,10 @@ mod tests {
             .conn
             .execute(
                 "INSERT INTO budget_versions
-                 (id, budget_id, revision, predecessor_version_id, amount_limit_cents,
-                  effective_at, actor, source, reason, request_fingerprint, created_at)
+                 (id, budget_id, revision, predecessor_version_id, amount_limit,
+                  effective_at, actor, source, reason, request_fingerprint, created_at, amount_scale)
                  VALUES (?1, ?2, 3, ?3, 13000, ?4, 'test:owner', 'constraint-test',
-                         NULL, 'sha256:alternate-successor', ?4)",
+                         NULL, 'sha256:alternate-successor', ?4, 6)",
                 params![
                     hubu_common::ids::BudgetVersionId::new().to_string(),
                     first.budget.id.to_string(),
@@ -9814,10 +9933,10 @@ mod tests {
             .conn
             .execute(
                 "INSERT INTO budget_versions
-                 (id, budget_id, revision, predecessor_version_id, amount_limit_cents,
-                  effective_at, actor, source, reason, request_fingerprint, created_at)
+                 (id, budget_id, revision, predecessor_version_id, amount_limit,
+                  effective_at, actor, source, reason, request_fingerprint, created_at, amount_scale)
                  VALUES (?1, ?2, 1, NULL, 13000, ?3, 'test:owner', 'constraint-test',
-                         NULL, 'sha256:duplicate-revision', ?3)",
+                         NULL, 'sha256:duplicate-revision', ?3, 6)",
                 params![
                     hubu_common::ids::BudgetVersionId::new().to_string(),
                     first.budget.id.to_string(),
@@ -9904,6 +10023,10 @@ mod tests {
             )
             .unwrap();
             let exhausted_version_id = exhausted_version_id.as_ref().unwrap();
+            // The pre-versioned fixture must also contain the referenced spend decision.
+            conn.execute_batch("CREATE TABLE IF NOT EXISTS spend_decisions (id TEXT PRIMARY KEY, owner_user_id TEXT NOT NULL, agent_id TEXT NOT NULL, operation_key TEXT, request_fingerprint TEXT, request_json TEXT NOT NULL, evaluation_json TEXT NOT NULL, created_at TEXT NOT NULL)").unwrap();
+            let decision = spend_decision();
+            conn.execute("INSERT INTO spend_decisions(id,owner_user_id,agent_id,request_json,evaluation_json,created_at) VALUES(?1,?2,?3,?4,?5,?6)",params![decision.id.to_string(),decision.owner_user_id.to_string(),decision.request.agent_id.to_string(),serde_json::to_string(&decision.request).unwrap(),serde_json::to_string(&decision.evaluation).unwrap(),decision.created_at.to_rfc3339()]).unwrap();
             conn.execute(
                 "INSERT INTO budget_holds
                  (id, budget_id, budget_version_id, spend_decision_id, amount_cents,
@@ -9913,7 +10036,7 @@ mod tests {
                     BudgetHoldId::new().to_string(),
                     exhausted_budget_id.to_string(),
                     exhausted_version_id.to_string(),
-                    SpendDecisionId::new().to_string(),
+                    decision.id.to_string(),
                     updated_at.to_rfc3339(),
                     (updated_at + Duration::days(30)).to_rfc3339(),
                 ],

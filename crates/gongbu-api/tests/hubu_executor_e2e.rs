@@ -182,9 +182,15 @@ fn deterministic_hubu_to_gongbu_executor_contract() {
     );
 
     let budget_a = workspace.admin.budget_for(&agent_a.agent_id);
-    assert_eq!(budget_a["consumed_amount_cents"], ACTUAL_MINOR * 2);
-    assert_eq!(budget_a["frozen_amount_cents"], 0);
-    assert_eq!(budget_a["remaining_amount_cents"], 1_000 - ACTUAL_MINOR * 2);
+    assert_eq!(
+        whole_cent_fixture(&budget_a["consumed_amount"]),
+        ACTUAL_MINOR * 2
+    );
+    assert_eq!(whole_cent_fixture(&budget_a["frozen_amount"]), 0);
+    assert_eq!(
+        whole_cent_fixture(&budget_a["remaining_amount"]),
+        1_000 - ACTUAL_MINOR * 2
+    );
     let budget_b = workspace.admin.budget_for(&agent_b.agent_id);
     // Gongbu settles in the same micro-units Hubu charges.
     assert_eq!(
@@ -192,9 +198,15 @@ fn deterministic_hubu_to_gongbu_executor_contract() {
         success_b.settlement_units.unwrap().to_string()
     );
     assert_eq!(budget_b["consumed_amount"]["scale"], 6);
-    assert_eq!(budget_b["consumed_amount_cents"], ACTUAL_MINOR);
-    assert_eq!(budget_b["frozen_amount_cents"], 0);
-    assert_eq!(budget_b["remaining_amount_cents"], 1_000 - ACTUAL_MINOR);
+    assert_eq!(
+        whole_cent_fixture(&budget_b["consumed_amount"]),
+        ACTUAL_MINOR
+    );
+    assert_eq!(whole_cent_fixture(&budget_b["frozen_amount"]), 0);
+    assert_eq!(
+        whole_cent_fixture(&budget_b["remaining_amount"]),
+        1_000 - ACTUAL_MINOR
+    );
 
     let concurrent_a = workspace.admin.authorize(&agent_a, "hub-122:concurrent-a");
     let concurrent_b = workspace.admin.authorize(&agent_a, "hub-122:concurrent-b");
@@ -214,10 +226,16 @@ fn deterministic_hubu_to_gongbu_executor_contract() {
     );
     assert_ne!(admitted_a.execution_id, admitted_b.execution_id);
     let budget_a = workspace.admin.budget_for(&agent_a.agent_id);
-    assert_eq!(budget_a["consumed_amount_cents"], ACTUAL_MINOR * 2);
-    assert_eq!(budget_a["frozen_amount_cents"], AUTHORIZED_MINOR * 2);
     assert_eq!(
-        budget_a["remaining_amount_cents"],
+        whole_cent_fixture(&budget_a["consumed_amount"]),
+        ACTUAL_MINOR * 2
+    );
+    assert_eq!(
+        whole_cent_fixture(&budget_a["frozen_amount"]),
+        AUTHORIZED_MINOR * 2
+    );
+    assert_eq!(
+        whole_cent_fixture(&budget_a["remaining_amount"]),
         1_000 - ACTUAL_MINOR * 2 - AUTHORIZED_MINOR * 2
     );
 
@@ -894,7 +912,7 @@ impl HubuAdmin {
                 "/budgets",
                 json!({
                     "agent_id":agent.agent_id,
-                    "amount_cents":1_000,
+                    "amount":"10.00",
                     "ending_before":"2999-01-01T00:00:00Z"
                 }),
             );
@@ -927,7 +945,7 @@ impl HubuAdmin {
             json!({
                 "operation_key":operation_key,
                 "account_id":provisioned.account_id,
-                "amount_cents":AUTHORIZED_MINOR,
+                "amount":format!("{}.{:02}",AUTHORIZED_MINOR/100,AUTHORIZED_MINOR%100),
                 "task_id":task_id,
                 "reason":"Deterministic Gongbu executor test",
                 "lease_profile":"default",
@@ -1105,10 +1123,25 @@ fn assert_terminal_claim(
     assert!(claim.finalized_at.is_some());
     assert!(!claim.reconciliation_required);
     assert_eq!(claim.spend.budget_hold.status, status);
-    assert_eq!(claim.spend.budget_hold.frozen_amount_cents, 0);
     assert_eq!(
-        claim.spend.budget_hold.consumed_amount_cents,
-        expected_total_consumed
+        claim
+            .spend
+            .budget_hold
+            .frozen_amount
+            .units
+            .parse::<i64>()
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        claim
+            .spend
+            .budget_hold
+            .consumed_amount
+            .units
+            .parse::<i64>()
+            .unwrap(),
+        expected_total_consumed * 10000
     );
 }
 
@@ -1117,4 +1150,10 @@ fn string_at(value: &Value, field: &str) -> String {
         .as_str()
         .unwrap_or_else(|| panic!("missing string field {field}: {value}"))
         .to_string()
+}
+
+fn whole_cent_fixture(value: &Value) -> i64 {
+    let units = value["units"].as_str().unwrap().parse::<i64>().unwrap();
+    assert_eq!(units % 10000, 0);
+    units / 10000
 }

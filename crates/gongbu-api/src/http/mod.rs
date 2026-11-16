@@ -685,7 +685,13 @@ impl Api {
             || authorization.status != "available"
             || authorization_expires_at <= admission_time
             || authorization.budget_hold.status != "frozen"
-            || authorization.budget_hold.amount_cents != authorization.amount_cents
+            || authorization.budget_hold.amount.scale != crate::provider_contract::UNITS_SCALE
+            || authorization.budget_hold.amount.units.parse::<i64>().ok() != Some(authorized_units)
+            || !authorization
+                .budget_hold
+                .amount
+                .currency
+                .eq_ignore_ascii_case(&authorization.currency)
             || authorization.account_id.trim().is_empty()
             || authorization.decision_id.trim().is_empty()
             || !authorization
@@ -1609,10 +1615,10 @@ mod tests {
                     hold_id: "hold".into(),
                     budget_id: "budget".into(),
                     status: "frozen".into(),
-                    amount_cents: 100,
-                    consumed_amount_cents: 0,
-                    frozen_amount_cents: 100,
-                    remaining_amount_cents: 0,
+                    amount: crate::hubu::ExactAmount::from_units(1000000, "usd"),
+                    consumed_amount: crate::hubu::ExactAmount::from_units(0, "usd"),
+                    frozen_amount: crate::hubu::ExactAmount::from_units(1000000, "usd"),
+                    remaining_amount: crate::hubu::ExactAmount::from_units(0, "usd"),
                 },
             };
             let exact = |units: &str| crate::hubu::ExactAmount {
@@ -1637,15 +1643,19 @@ mod tests {
             } else if spend_auth_token_id.starts_with("expired") {
                 response.expires_at = "2026-08-05T19:00:00Z".into();
             } else if spend_auth_token_id.starts_with("aggregate-consumed") {
-                response.budget_hold.consumed_amount_cents = 100;
-                response.budget_hold.remaining_amount_cents = 800;
+                response.budget_hold.consumed_amount =
+                    crate::hubu::ExactAmount::from_units(1000000, "usd");
+                response.budget_hold.remaining_amount =
+                    crate::hubu::ExactAmount::from_units(8000000, "usd");
             } else if spend_auth_token_id.starts_with("aggregate-frozen") {
-                response.budget_hold.frozen_amount_cents = 200;
-                response.budget_hold.remaining_amount_cents = 800;
+                response.budget_hold.frozen_amount =
+                    crate::hubu::ExactAmount::from_units(2000000, "usd");
+                response.budget_hold.remaining_amount =
+                    crate::hubu::ExactAmount::from_units(8000000, "usd");
             } else if spend_auth_token_id.starts_with("hold-status-mismatch") {
                 response.budget_hold.status = "settled".into();
             } else if spend_auth_token_id.starts_with("hold-amount-mismatch") {
-                response.budget_hold.amount_cents += 1;
+                response.budget_hold.amount.units = "1000001".into();
             }
             if spend_auth_token_id.starts_with("flux-") {
                 response.execution_scope = for_target("flux", "flux2_api");
@@ -1659,8 +1669,10 @@ mod tests {
                     3
                 };
                 response.amount_cents = amount;
-                response.budget_hold.amount_cents = amount;
-                response.budget_hold.frozen_amount_cents = amount;
+                response.budget_hold.amount =
+                    crate::hubu::ExactAmount::from_units(response.amount_cents * 10000, "usd");
+                response.budget_hold.frozen_amount =
+                    crate::hubu::ExactAmount::from_units((amount) * 10000, "usd");
                 // The exact FLUX prices: 3, 4.5 and 7.5 cents. A caller that
                 // still authorizes whole cents sends the cent ceiling.
                 response.amount = Some(exact(if spend_auth_token_id.contains("below") {
@@ -1700,8 +1712,10 @@ mod tests {
             if spend_auth_token_id.starts_with("flux-managed-") {
                 response.amount = Some(exact("30000"));
                 response.amount_cents = 3;
-                response.budget_hold.amount_cents = 3;
-                response.budget_hold.frozen_amount_cents = 3;
+                response.budget_hold.amount =
+                    crate::hubu::ExactAmount::from_units(response.amount_cents * 10000, "usd");
+                response.budget_hold.frozen_amount =
+                    crate::hubu::ExactAmount::from_units(30000, "usd");
                 response.expires_at = "2026-08-28T21:00:00Z".into();
             }
             if spend_auth_token_id == "flux-managed-hub-172-attestation" {
@@ -1714,8 +1728,10 @@ mod tests {
                 // FLUX.2 [pro] v2: every 2k size bills 2 megapixels, 4.5¢.
                 response.execution_scope = for_target("flux", "flux2_api");
                 response.amount_cents = 5;
-                response.budget_hold.amount_cents = 5;
-                response.budget_hold.frozen_amount_cents = 5;
+                response.budget_hold.amount =
+                    crate::hubu::ExactAmount::from_units(response.amount_cents * 10000, "usd");
+                response.budget_hold.frozen_amount =
+                    crate::hubu::ExactAmount::from_units(50000, "usd");
                 response.amount = Some(exact("45000"));
             }
             if let Some(rest) = spend_auth_token_id.strip_prefix("megapixel-") {
@@ -1739,8 +1755,10 @@ mod tests {
                     (8, "75000")
                 };
                 response.amount_cents = cents;
-                response.budget_hold.amount_cents = cents;
-                response.budget_hold.frozen_amount_cents = cents;
+                response.budget_hold.amount =
+                    crate::hubu::ExactAmount::from_units(response.amount_cents * 10000, "usd");
+                response.budget_hold.frozen_amount =
+                    crate::hubu::ExactAmount::from_units((cents) * 10000, "usd");
                 response.amount = Some(exact(units));
             }
             if let Some(rest) = spend_auth_token_id.strip_prefix("gpro-") {
@@ -1761,8 +1779,10 @@ mod tests {
                     (14, "134000")
                 };
                 response.amount_cents = cents;
-                response.budget_hold.amount_cents = cents;
-                response.budget_hold.frozen_amount_cents = cents;
+                response.budget_hold.amount =
+                    crate::hubu::ExactAmount::from_units(response.amount_cents * 10000, "usd");
+                response.budget_hold.frozen_amount =
+                    crate::hubu::ExactAmount::from_units((cents) * 10000, "usd");
                 response.amount = Some(exact(units));
                 if rest.starts_with("pending") {
                     // Hubu has not recorded the human approval yet.
@@ -1778,8 +1798,10 @@ mod tests {
                         for_workload_target("image_edit", "google", "gemini_developer_image")
                     };
                     response.amount_cents = 7;
-                    response.budget_hold.amount_cents = 7;
-                    response.budget_hold.frozen_amount_cents = 7;
+                    response.budget_hold.amount =
+                        crate::hubu::ExactAmount::from_units(response.amount_cents * 10000, "usd");
+                    response.budget_hold.frozen_amount =
+                        crate::hubu::ExactAmount::from_units(70000, "usd");
                     // Two input images add another 0.056¢.
                     response.amount = Some(exact(if rest.starts_with("two-") {
                         "68120"
@@ -1794,6 +1816,9 @@ mod tests {
                     response.amount_cents * crate::provider_contract::UNITS_PER_MINOR,
                     &response.currency,
                 ));
+            }
+            if !spend_auth_token_id.starts_with("hold-amount-mismatch") {
+                response.budget_hold.amount = response.amount.clone().unwrap();
             }
             Ok(response)
         }

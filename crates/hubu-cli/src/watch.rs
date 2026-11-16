@@ -192,8 +192,7 @@ fn pad(value: &str, width: usize) -> String {
         " ".repeat(width.saturating_sub(display_width(value)))
     )
 }
-/// One amount from a row or event: its exact money object, or the legacy
-/// `*_cents` field from an older server.
+/// Read an exact money object from a row or event.
 fn money_of(value: &Value, key: &str) -> Option<money::Money> {
     money::money_field(value, key).ok()
 }
@@ -298,10 +297,10 @@ fn exact_cost(cost: &Value, currency: &Value) -> String {
 }
 
 fn event_status(event: &Value, single: bool) -> (&'static str, String) {
-    let reserved = if event["reserved_cents"].is_null() && event["reserved"].is_null() {
-        shown(event, "requested_cents")
+    let reserved = if event["reserved"].is_null() {
+        shown(event, "requested")
     } else {
-        shown(event, "reserved_cents")
+        shown(event, "reserved")
     };
     match event["status"].as_str() {
         Some("authorized" | "claimed") => ("◐", format!("reserved {reserved}")),
@@ -317,7 +316,7 @@ fn event_status(event: &Value, single: bool) -> (&'static str, String) {
             "‖",
             format!(
                 "{} {}",
-                shown(event, "requested_cents"),
+                shown(event, "requested"),
                 if single {
                     "awaiting approval"
                 } else {
@@ -325,7 +324,7 @@ fn event_status(event: &Value, single: bool) -> (&'static str, String) {
                 }
             ),
         ),
-        Some("denied") => ("✗", format!("{} blocked", shown(event, "requested_cents"))),
+        Some("denied") => ("✗", format!("{} blocked", shown(event, "requested"))),
         Some("released" | "expired") => ("○", format!("{reserved} released")),
         Some("reconciliation_required") => (
             "!",
@@ -420,11 +419,10 @@ fn render(
         .clamp(MIN_NAME, MAX_NAME)
         .min(content.saturating_sub(48).max(MIN_NAME));
     // Amounts read as columns: decimal points line up across agent rows.
-    let has_budget =
-        |row: &Value| !row["budget_id"].is_null() && money_of(row, "limit_cents").is_some();
+    let has_budget = |row: &Value| !row["budget_id"].is_null() && money_of(row, "limit").is_some();
     let used_of = |row: &Value| {
-        let used = money_of(row, "consumed_cents")
-            .zip(money_of(row, "frozen_cents"))
+        let used = money_of(row, "consumed")
+            .zip(money_of(row, "frozen"))
             .and_then(|(consumed, frozen)| {
                 consumed
                     .amount
@@ -440,7 +438,7 @@ fn render(
     let limit_column = money::align_decimals(
         &budgeted
             .iter()
-            .map(|row| shown(row, "limit_cents"))
+            .map(|row| shown(row, "limit"))
             .collect::<Vec<_>>(),
     );
     let mut budgeted_index = 0;
@@ -494,10 +492,10 @@ fn render(
                     "frozen",
                     "available",
                     "limit",
-                    "consumed_cents",
-                    "frozen_cents",
-                    "available_cents",
-                    "limit_cents",
+                    "consumed",
+                    "frozen",
+                    "available",
+                    "limit",
                 ]
                 .iter()
                 .any(|k| old[*k] != row[*k])
@@ -529,10 +527,10 @@ fn render(
             );
             continue;
         }
-        let consumed = micro_units(row, "consumed_cents");
-        let frozen = micro_units(row, "frozen_cents");
-        let available = micro_units(row, "available_cents");
-        let limit = micro_units(row, "limit_cents");
+        let consumed = micro_units(row, "consumed");
+        let frozen = micro_units(row, "frozen");
+        let available = micro_units(row, "available");
+        let limit = micro_units(row, "limit");
         let used = consumed + frozen;
         let pct = if limit > 0 {
             (used.max(0) * 100) / limit
@@ -585,9 +583,9 @@ fn render(
                 &[(
                     format!(
                         " consumed {}   frozen {}   free {}",
-                        shown(row, "consumed_cents"),
-                        shown(row, "frozen_cents"),
-                        shown(row, "available_cents")
+                        shown(row, "consumed"),
+                        shown(row, "frozen"),
+                        shown(row, "available")
                     ),
                     highlight,
                 )],
@@ -664,11 +662,15 @@ fn render(
 
 #[cfg(test)]
 mod tests {
+    fn test_money(cents: i64) -> serde_json::Value {
+        serde_json::json!({"units":cents.saturating_mul(10000).to_string(),"scale":6,"currency":"usd"})
+    }
+
     use chrono::TimeZone;
 
     #[test]
     fn admission_void_reason_is_visible_in_the_watch_event() {
-        let event = serde_json::json!({"created_at":"2026-10-13T12:00:00Z", "status":"released", "reserved_cents":500,
+        let event = serde_json::json!({"created_at":"2026-10-13T12:00:00Z", "status":"released", "reserved": test_money(500),
             "release_reason":"executor_rejected_before_claim", "rule_ids":["allow"]});
         let line = super::event_line(&event, true, 12, 100);
         assert!(line.contains("released"));
@@ -676,7 +678,7 @@ mod tests {
     }
     use super::*;
     fn snapshot() -> Value {
-        json!({"schema_version":"hubu-watch-v1","currency":"usd","observed_at":"2026-10-08T03:12:07Z","rows":[{"agent_id":"a","name":"image-agent","budget_id":"b","limit_cents":200,"consumed_cents":6,"frozen_cents":8,"available_cents":186}],"recent_events":[{"id":"d","agent_id":"a","agent_name":"image-agent","created_at":"2026-10-08T03:12:05Z","provider":{"id":"provider:black-forest-labs:flux","display_name":"untrusted"},"status":"settled","requested_cents":8,"reserved_cents":8,"settled_cost":{"amount":"58","scale":3},"budget_charge_cents":6,"rule_ids":["draft_images"]}]})
+        json!({"schema_version":"hubu-watch-v1","currency":"usd","observed_at":"2026-10-08T03:12:07Z","rows":[{"agent_id":"a","name":"image-agent","budget_id":"b","limit": test_money(200),"consumed": test_money(6),"frozen": test_money(8),"available": test_money(186)}],"recent_events":[{"id":"d","agent_id":"a","agent_name":"image-agent","created_at":"2026-10-08T03:12:05Z","provider":{"id":"provider:black-forest-labs:flux","display_name":"untrusted"},"status":"settled","requested": test_money(8),"reserved": test_money(8),"settled_cost":{"amount":"58","scale":3},"budget_charge": test_money(6),"rule_ids":["draft_images"]}]})
     }
     fn output(s: &Value, o: &Options) -> String {
         render(s, None, o, terminal::TerminalStyle::plain(), false, 100, 70).unwrap()
@@ -809,9 +811,9 @@ mod tests {
             }
         }
         let mut s = snapshot();
-        s["rows"][0]["consumed_cents"] = json!(240);
-        s["rows"][0]["frozen_cents"] = json!(0);
-        s["rows"][0]["available_cents"] = json!(0);
+        s["rows"][0]["consumed"] = test_money(240);
+        s["rows"][0]["frozen"] = test_money(0);
+        s["rows"][0]["available"] = test_money(0);
         assert!(output(&s, &options(vec![]).unwrap()).contains("$2.40 of $2.00 used · 120%"));
         s["rows"][0]["budget_id"] = Value::Null;
         assert!(output(&s, &options(vec![]).unwrap()).contains("no current budget"));
@@ -822,8 +824,7 @@ mod tests {
         let row = |id: &str, consumed: (&str, &str), limit: (&str, &str)| {
             json!({"agent_id": id, "name": id, "budget_id": format!("bgt-{id}"),
                 "consumed": money(consumed.0, consumed.1), "frozen": money("0", "0.00"),
-                "available": money("1", "0.000001"), "limit": money(limit.0, limit.1),
-                "consumed_cents": 1, "frozen_cents": 0, "available_cents": 0, "limit_cents": 1})
+                "available": money("1", "0.000001"), "limit": money(limit.0, limit.1)})
         };
         let mut s = snapshot();
         s["rows"] = json!([
@@ -849,9 +850,9 @@ mod tests {
     fn width_sanitization_exact_cost_and_stale_header() {
         let mut s = snapshot();
         s["rows"][0]["name"] = json!("evil\u{1b}[2J\nvery-long-name");
-        s["rows"][0]["consumed_cents"] = json!(i64::MAX);
-        s["rows"][0]["frozen_cents"] = json!(i64::MAX);
-        s["rows"][0]["limit_cents"] = json!(1);
+        s["rows"][0]["consumed"] = test_money(i64::MAX);
+        s["rows"][0]["frozen"] = test_money(i64::MAX);
+        s["rows"][0]["limit"] = test_money(1);
         s["recent_events"][0]["settled_cost"] = json!({"amount":"9223372036854775807","scale":18});
         s["recent_events"][0]["rule_ids"] = json!(["evil\u{1b}[2J\nlongrule"]);
         let o = options(vec![]).unwrap();
@@ -892,7 +893,7 @@ mod tests {
         let colored = terminal::TerminalStyle::colored();
         let same = render(&s, Some(&s), &o, colored, false, 100, 70).unwrap();
         let mut changed = s.clone();
-        changed["rows"][0]["frozen_cents"] = json!(9);
+        changed["rows"][0]["frozen"] = test_money(9);
         changed["recent_events"][0]["status"] = json!("claimed");
         let highlighted = render(&changed, Some(&s), &o, colored, false, 100, 70).unwrap();
         let stale = render(&s, None, &o, colored, true, 100, 70).unwrap();
