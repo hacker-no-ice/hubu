@@ -31,5 +31,11 @@ evidence makes it **not tested**, never a pass.
 python3 break-hubu/ep09-raise-own-budget/verify.py /absolute/path/to/episode-evidence
 ```
 
-**Boundary.** The normal bearer has administrative authority in this release; separating owner and agent credentials is planned. This experiment measures that known gap. The executor is a synthetic fixture; Gongbu and
+**Boundary.** From v0.3.0 the attack process holds the agent credential, which
+reaches only the agent allowlist; budget and policy changes answer
+`owner_authority_required`. Against earlier releases, which have one shared
+bearer with administrative authority, the attack holds that bearer and the
+experiment measures the known gap. `run.json` records `credential_split`. The
+synthetic executor's routes still use the owner bearer until the executor
+credential moves to its own model in v0.3.2; the attack does not use them. The executor is a synthetic fixture; Gongbu and
 actual billing are outside this experiment.

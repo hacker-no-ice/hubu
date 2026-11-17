@@ -65,5 +65,12 @@ different working directories. With an active profile handoff, the CLI instead
 uses that handoff's endpoint and credential files and ignores these ambient
 connection variables.
 
+The server also loads a separate agent credential from `HUBU_AGENT_TOKEN` or
+`HUBU_AGENT_TOKEN_FILE`, and otherwise creates `hubu.agent-token` beside the
+owner token file. The agent credential reaches only spend, status, and read
+routes; owner routes answer HTTP 403 with `error_code:
+owner_authority_required`. `hubu init codex` hands only this credential to the
+unified MCP.
+
 The local HTTP server and mock rail are development surfaces. They do not
 provide a production authentication, concurrency, payment, or threat model.

@@ -238,6 +238,7 @@ struct CredentialsSource {
 #[serde(deny_unknown_fields)]
 struct CredentialFiles {
     hubu_auth: Option<PathBuf>,
+    hubu_agent: Option<PathBuf>,
     hubu_approval: Option<PathBuf>,
     hubu_reconciliation: Option<PathBuf>,
     gongbu_caller: Option<PathBuf>,
@@ -246,6 +247,7 @@ struct CredentialFiles {
 #[derive(Clone, Debug)]
 struct ResolvedCredentialPaths {
     hubu_auth: PathBuf,
+    hubu_agent: PathBuf,
     hubu_approval: PathBuf,
     hubu_reconciliation: PathBuf,
     gongbu_caller: Option<PathBuf>,
@@ -333,6 +335,12 @@ fn resolve_credential_paths(
         &hubu_root.join("auth"),
         "credentials.toml:files.hubu_auth",
     )?;
+    let hubu_agent = resolve_credential_path(
+        files.and_then(|value| value.hubu_agent.as_deref()),
+        hubu_managed,
+        &hubu_root.join("agent"),
+        "credentials.toml:files.hubu_agent",
+    )?;
     let hubu_approval = resolve_credential_path(
         files.and_then(|value| value.hubu_approval.as_deref()),
         hubu_managed,
@@ -357,7 +365,12 @@ fn resolve_credential_paths(
     if gongbu_handoff_managed && gongbu_caller.as_deref() != Some(managed_gongbu_caller.as_path()) {
         bail!("managed Gongbu caller file overrides require explicit opaque bootstrap references");
     }
-    let mut paths = vec![&hubu_auth, &hubu_approval, &hubu_reconciliation];
+    let mut paths = vec![
+        &hubu_auth,
+        &hubu_agent,
+        &hubu_approval,
+        &hubu_reconciliation,
+    ];
     if let Some(path) = gongbu_caller.as_ref() {
         paths.push(path);
         paths.push(&gongbu_hubu);
@@ -371,6 +384,7 @@ fn resolve_credential_paths(
     }
     Ok(ResolvedCredentialPaths {
         hubu_auth,
+        hubu_agent,
         hubu_approval,
         hubu_reconciliation,
         gongbu_caller,
@@ -796,7 +810,12 @@ pub(crate) struct CodexHandoff {
     pub schema_version: u32,
     pub mcp_server: PathBuf,
     pub hubu_endpoint: String,
+    /// The owner credential. Never handed to the unified MCP.
     pub hubu_token_file: PathBuf,
+    /// The agent credential the unified MCP and agent clients hold (v0.3.0).
+    /// Absent in handoffs rendered before the credential split.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_token_file: Option<PathBuf>,
     pub approval_token_file: PathBuf,
     pub reconciliation_token_file: PathBuf,
     pub operation_state_path: PathBuf,
@@ -866,6 +885,19 @@ pub(crate) fn command(mut args: Vec<String>, hubu_home: &Path) -> Result<()> {
             Ok(())
         }
         _ => bail!("unknown stack command `{subcommand}`"),
+    }
+}
+
+impl CodexHandoff {
+    /// The agent credential for the unified MCP and other agent clients. A
+    /// handoff rendered before the owner/agent split has none; the profile
+    /// must be re-rendered rather than falling back to the owner credential.
+    pub(crate) fn agent_bearer_file(&self) -> Result<&Path> {
+        self.agent_token_file.as_deref().ok_or_else(|| {
+            anyhow!(
+                "this stack profile predates the agent credential; run `hubu stack start` to issue it"
+            )
+        })
     }
 }
 
@@ -1061,6 +1093,9 @@ fn active_credential_paths(
     Ok((
         ResolvedCredentialPaths {
             hubu_auth: handoff.hubu_token_file,
+            hubu_agent: handoff
+                .agent_token_file
+                .unwrap_or_else(|| managed_hubu_credential_root(profile).join("agent")),
             hubu_approval: handoff.approval_token_file,
             hubu_reconciliation: handoff.reconciliation_token_file,
             gongbu_caller: handoff.gongbu_token_file,
@@ -1714,6 +1749,7 @@ fn render_profile_with_renderer_outcome(profile: &Path, renderer: &Path) -> Resu
                 gongbu_server.as_deref(),
                 &unified_mcp,
                 &credential_paths.hubu_auth,
+                &credential_paths.hubu_agent,
                 &credential_paths.hubu_approval,
                 &credential_paths.hubu_reconciliation,
                 credential_paths.gongbu_caller.as_deref(),
@@ -1789,6 +1825,7 @@ fn render_profile_with_renderer_outcome(profile: &Path, renderer: &Path) -> Resu
                 gongbu_server.as_deref(),
                 &unified_mcp,
                 &credential_paths.hubu_auth,
+                &credential_paths.hubu_agent,
                 &credential_paths.hubu_approval,
                 &credential_paths.hubu_reconciliation,
                 credential_paths.gongbu_caller.as_deref(),
@@ -1833,6 +1870,7 @@ fn render_profile_with_renderer_outcome(profile: &Path, renderer: &Path) -> Resu
         gongbu_server.as_deref(),
         &unified_mcp,
         &credential_paths.hubu_auth,
+        &credential_paths.hubu_agent,
         &credential_paths.hubu_approval,
         &credential_paths.hubu_reconciliation,
         credential_paths.gongbu_caller.as_deref(),
@@ -1895,6 +1933,7 @@ fn render_generation(
     gongbu_server: Option<&Path>,
     unified_mcp: &Path,
     hubu_auth: &Path,
+    hubu_agent: &Path,
     hubu_approval: &Path,
     hubu_reconciliation: &Path,
     gongbu_caller_file: Option<&Path>,
@@ -1918,6 +1957,8 @@ fn render_generation(
             "log_file": hubu.log_file,
             "auth_token_file": hubu_auth,
             "auth_token_file_generated": credential_files.and_then(|files| files.hubu_auth.as_ref()).is_none(),
+            "agent_token_file": hubu_agent,
+            "agent_token_file_generated": credential_files.and_then(|files| files.hubu_agent.as_ref()).is_none(),
             "approval_token_file": hubu_approval,
             "approval_token_file_generated": credential_files.and_then(|files| files.hubu_approval.as_ref()).is_none(),
             "reconciliation_token_file": hubu_reconciliation,
@@ -2021,6 +2062,7 @@ fn render_generation(
         mcp_server: unified_mcp.to_path_buf(),
         hubu_endpoint: hubu_endpoint.clone(),
         hubu_token_file: hubu_auth.to_path_buf(),
+        agent_token_file: Some(hubu_agent.to_path_buf()),
         approval_token_file: hubu_approval.to_path_buf(),
         reconciliation_token_file: hubu_reconciliation.to_path_buf(),
         operation_state_path,
@@ -2104,6 +2146,7 @@ fn rederive_generation(
     gongbu_server: Option<&Path>,
     unified_mcp: &Path,
     hubu_auth: &Path,
+    hubu_agent: &Path,
     hubu_approval: &Path,
     hubu_reconciliation: &Path,
     gongbu_caller_file: Option<&Path>,
@@ -2125,6 +2168,7 @@ fn rederive_generation(
         gongbu_server,
         unified_mcp,
         hubu_auth,
+        hubu_agent,
         hubu_approval,
         hubu_reconciliation,
         gongbu_caller_file,
@@ -3061,6 +3105,11 @@ fn validate_credential_resource_separation(
             ManagedResourceKind::File,
         ),
         (
+            "Hubu agent credential",
+            paths.hubu_agent.as_path(),
+            ManagedResourceKind::File,
+        ),
+        (
             "Hubu approval credential",
             paths.hubu_approval.as_path(),
             ManagedResourceKind::File,
@@ -3345,6 +3394,10 @@ fn missing_fields(
         (
             files.and_then(|value| value.hubu_auth.as_ref()),
             "credentials.toml:files.hubu_auth",
+        ),
+        (
+            files.and_then(|value| value.hubu_agent.as_ref()),
+            "credentials.toml:files.hubu_agent",
         ),
         (
             files.and_then(|value| value.hubu_approval.as_ref()),
@@ -4210,6 +4263,7 @@ schema_version = 1
 # External/advanced service example:
 # [files]
 # hubu_auth = "/absolute/path/to/hubu.auth-token"
+# hubu_agent = "/absolute/path/to/hubu.agent-token"
 # hubu_approval = "/absolute/path/to/hubu.approval-token"
 # hubu_reconciliation = "/absolute/path/to/hubu.reconciliation-token"
 # gongbu_caller = "/absolute/path/to/gongbu.caller-token"
@@ -5828,7 +5882,13 @@ credential = "bfl"
         for name in ["hubu", "hubu-unified-mcp"] {
             write_fake_binary(&binaries.join(name), false);
         }
-        for name in ["auth", "approval", "reconciliation", "gongbu-caller"] {
+        for name in [
+            "auth",
+            "agent",
+            "approval",
+            "reconciliation",
+            "gongbu-caller",
+        ] {
             fs::write(credentials.join(name), format!("{name}-secret")).unwrap();
         }
         fs::write(
@@ -5857,11 +5917,13 @@ endpoint = "http://127.0.0.1:42002"
                 r#"schema_version = 1
 [files]
 hubu_auth = {}
+hubu_agent = {}
 hubu_approval = {}
 hubu_reconciliation = {}
 gongbu_caller = {}
 "#,
                 quote(credentials.join("auth").display().to_string()),
+                quote(credentials.join("agent").display().to_string()),
                 quote(credentials.join("approval").display().to_string()),
                 quote(credentials.join("reconciliation").display().to_string()),
                 quote(credentials.join("gongbu-caller").display().to_string()),
@@ -6048,7 +6110,13 @@ task_queue = "gongbu-local-executions"
         write_fake_gongbu_v3_binary(&binaries.join("gongbu-server"), false);
         let credentials = root.path().join("credentials");
         fs::create_dir(&credentials).unwrap();
-        for name in ["auth", "approval", "reconciliation", "gongbu-caller"] {
+        for name in [
+            "auth",
+            "agent",
+            "approval",
+            "reconciliation",
+            "gongbu-caller",
+        ] {
             fs::write(credentials.join(name), format!("{name}-secret")).unwrap();
         }
         fs::create_dir(&profile).unwrap();
@@ -6102,6 +6170,7 @@ task_queue = "gongbu-local"
                 r#"schema_version = 1
 [files]
 hubu_auth = {}
+hubu_agent = {}
 hubu_approval = {}
 hubu_reconciliation = {}
 gongbu_caller = {}
@@ -6113,6 +6182,7 @@ service = "hubu-test"
 account = "gongbu-caller"
 "#,
                 quote(credentials.join("auth").display().to_string()),
+                quote(credentials.join("agent").display().to_string()),
                 quote(credentials.join("approval").display().to_string()),
                 quote(credentials.join("reconciliation").display().to_string()),
                 quote(credentials.join("gongbu-caller").display().to_string()),
