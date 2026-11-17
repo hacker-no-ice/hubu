@@ -878,23 +878,16 @@ expiry when the transaction begins is rejected for reconciliation.
 
 ## Persistence Migration and V4 Compatibility
 
-The precise receipt extension does not merge Hubu and Gongbu persistence. Each
-process upgrades only its own SQLite database during repository open and within
-its own failure domain:
+Each process upgrades only its own SQLite database and preserves its failure
+domain. Fresh databases start with the canonical constrained µ schema. Existing
+released µ profiles get one atomic rebuild, which copies authoritative amounts
+and precise provider evidence unchanged while dropping legacy projections.
+Failed validation rolls the rebuild back. Pre-µ profiles must first upgrade
+through v0.2.4 or v0.2.5; this release rejects them before writes.
 
-- Hubu maps every legacy `actual_vendor_cost_cents` receipt to exact
-  `{amount: legacy_cents, scale: 2, currency: stored_currency}`. Its historical
-  consumed amount becomes `budget_charge` in µ units, its released amount is
-  preserved, `overrun_amount` is zero, and the stored price/model snapshot
-  JSON remains unchanged.
-- Gongbu maps legacy provider-attempt and receipt minor-unit amounts to exact
-  `{amount: legacy_minor, scale: 2, currency: stored_currency}`. For a legacy
-  receipt it persists the exact old retry evidence: `provider_request_id` is
-  the receipt ID and `price_model_snapshot` is the reduced v4.3 projection
-  reconstructed from the unchanged frozen execution snapshot. New receipts
-  persist the provider-reported reference and complete snapshot. Execution,
-  attempt, receipt, settlement, catalog-version, and frozen execution-snapshot
-  identity remain stable.
+This removes the old cents-to-µ backfill chain from the steady-state code.
+Historical scale-2 provider evidence and ledger metadata are still readable,
+and request compatibility for executor v4.4 remains until HUB-299.
 
 The migrations are idempotent: reopening an already upgraded database neither
 rewrites a precise receipt nor changes retry identity. Existing settlement IDs,

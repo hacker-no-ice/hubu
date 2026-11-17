@@ -1,4 +1,4 @@
-//! Upgrade drill for the micro-unit and canonical-column migrations on a real Gongbu
+//! Upgrade drill for the one-time canonical-column migration on a real Gongbu
 //! database. Opt-in; run with:
 //!
 //! ```text
@@ -33,7 +33,7 @@ fn private_copy(source: &Path, directory: &Path) -> PathBuf {
     copy
 }
 
-struct LegacyRow {
+struct MicroRow {
     execution_id: String,
     authorized_units: i64,
     pricing_snapshot: Value,
@@ -41,31 +41,15 @@ struct LegacyRow {
     receipt: Option<(i64, Value)>,
 }
 
-fn legacy_rows(path: &Path) -> Vec<LegacyRow> {
+fn micro_rows(path: &Path) -> Vec<MicroRow> {
     let connection = Connection::open(path).unwrap();
-    let has_units: bool = connection
-        .query_row(
-            "SELECT count(*)>0 FROM pragma_table_info('executions') WHERE name='authorized_units'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    let (authorized, snapshot, settlement) = if has_units {
-        ("e.authorized_units", "s.amount_units", "r.settlement_units")
-    } else {
-        (
-            "e.authorized_minor*10000",
-            "s.amount_minor*10000",
-            "r.settlement_minor*10000",
-        )
-    };
-    let mut statement=connection.prepare(&format!("SELECT e.execution_id,{authorized},e.pricing_snapshot_json,{snapshot},{settlement},r.pricing_snapshot_json FROM executions e LEFT JOIN hubu_authorization_snapshots s ON s.execution_id=e.execution_id LEFT JOIN receipts r ON r.execution_id=e.execution_id ORDER BY e.execution_id")).unwrap();
+    let mut statement=connection.prepare("SELECT e.execution_id,e.authorized_units,e.pricing_snapshot_json,s.amount_units,r.settlement_units,r.pricing_snapshot_json FROM executions e LEFT JOIN hubu_authorization_snapshots s ON s.execution_id=e.execution_id LEFT JOIN receipts r ON r.execution_id=e.execution_id ORDER BY e.execution_id").expect("upgrade the source through the micro-unit release first");
     let rows = statement
         .query_map([], |row| {
             let pricing: String = row.get(2)?;
             let receipt_units: Option<i64> = row.get(4)?;
             let receipt_snapshot: Option<String> = row.get(5)?;
-            Ok(LegacyRow {
+            Ok(MicroRow {
                 execution_id: row.get(0)?,
                 authorized_units: row.get(1)?,
                 pricing_snapshot: serde_json::from_str(&pricing).unwrap(),
@@ -85,7 +69,7 @@ fn legacy_rows(path: &Path) -> Vec<LegacyRow> {
     rows
 }
 
-fn verify(repository: &Repository, rows: &[LegacyRow]) {
+fn verify(repository: &Repository, rows: &[MicroRow]) {
     for row in rows {
         let execution = repository.get_execution(&row.execution_id).unwrap();
         assert_eq!(
@@ -105,11 +89,11 @@ fn verify(repository: &Repository, rows: &[LegacyRow]) {
             Err(PersistenceError::NotFound) => assert!(row.snapshot_units.is_none()),
             Err(error) => panic!("{}: {error}", row.execution_id),
         }
-        if let Some((minor, settlement_snapshot)) = &row.receipt {
+        if let Some((units, settlement_snapshot)) = &row.receipt {
             let receipt = repository
                 .get_receipt_for_execution(&row.execution_id)
                 .unwrap();
-            assert_eq!(receipt.settlement_units, *minor);
+            assert_eq!(receipt.settlement_units, *units);
             // The settlement retry payload never changes.
             assert_eq!(&receipt.price_model_snapshot, settlement_snapshot);
         }
@@ -124,7 +108,7 @@ fn accounting_units_upgrade_drill_on_a_copy() {
     );
     let directory = tempfile::tempdir().unwrap();
     let path = private_copy(&source, directory.path());
-    let rows = legacy_rows(&path);
+    let rows = micro_rows(&path);
     assert!(!rows.is_empty(), "the drill copy has no executions");
     for open in ["migrate", "reopen"] {
         let repository = Repository::open(&path, Redactor::default()).unwrap();

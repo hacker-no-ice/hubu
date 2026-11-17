@@ -1,5 +1,5 @@
 -- HUB-284: µ columns are the only accounting representation.
-CREATE TABLE budget_versions_v2 (
+CREATE TABLE IF NOT EXISTS budget_versions (
     id TEXT PRIMARY KEY,
     budget_id TEXT NOT NULL,
     revision INTEGER NOT NULL,
@@ -24,7 +24,7 @@ CREATE TABLE budget_versions_v2 (
     REFERENCES budget_versions(budget_id, id)
 );
 
-CREATE TABLE budget_balances_v2 (
+CREATE TABLE IF NOT EXISTS budget_balances (
     budget_id TEXT PRIMARY KEY,
     updated_at TEXT NOT NULL,
     consumed_amount INTEGER NOT NULL CHECK(typeof(consumed_amount) = 'integer' AND consumed_amount >= 0),
@@ -34,7 +34,7 @@ CREATE TABLE budget_balances_v2 (
     FOREIGN KEY(budget_id) REFERENCES budgets(id)
 );
 
-CREATE TABLE budget_holds_v2 (
+CREATE TABLE IF NOT EXISTS budget_holds (
     id TEXT PRIMARY KEY,
     budget_id TEXT NOT NULL,
     budget_version_id TEXT NOT NULL,
@@ -57,7 +57,7 @@ CREATE TABLE budget_holds_v2 (
     FOREIGN KEY(spend_decision_id) REFERENCES spend_decisions(id)
 );
 
-CREATE TABLE spending_targets_v2 (
+CREATE TABLE IF NOT EXISTS spending_targets (
     id TEXT PRIMARY KEY,
     owner_user_id TEXT NOT NULL,
     currency TEXT NOT NULL,
@@ -70,7 +70,7 @@ CREATE TABLE spending_targets_v2 (
     amount_scale INTEGER NOT NULL CHECK(amount_scale = 6)
 );
 
-CREATE TABLE spend_executor_settlement_receipts_v2 (
+CREATE TABLE IF NOT EXISTS spend_executor_settlement_receipts (
     claim_id TEXT PRIMARY KEY,
     settlement_id TEXT NOT NULL UNIQUE,
     actual_vendor_cost_amount INTEGER NOT NULL,

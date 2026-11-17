@@ -48,13 +48,17 @@ manifests remain readable. CLI `--round cents` remains an explicit display optio
 
 ## Persistence and compatibility
 
-On first open, Hubu and Gongbu atomically rebuild their dual-written µ tables,
+Fresh databases use the final constrained µ schema directly. On the first
+open of an existing v0.2.4/v0.2.5 µ profile, Hubu and Gongbu atomically rebuild
+their dual-written µ tables,
 copying authoritative µ values unchanged and dropping legacy budget `*_cents`
 and executor `*_minor` columns. Database constraints require integer µ values,
 scale 6, positive budget limits and holds, and nonnegative consumed/frozen
 amounts. Remaining budget may be negative after a confirmed overrun. Invalid
 rows abort the rebuild; the original tables remain intact. No live profile
-migration is needed during development or validation.
+migration is needed during development or validation. Pre-µ profiles are
+rejected before writes and must first upgrade through v0.2.4 or v0.2.5; the
+older cents-to-µ migration chain is retired.
 
 Stored policy `MoneyCents` payloads remain supported so hashed revisions do not
 change. Legacy ledger metadata remains readable. Executor v4.4 wire

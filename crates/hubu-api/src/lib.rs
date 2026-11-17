@@ -10361,107 +10361,27 @@ lease_profiles:
         assert_eq!(settlement.status, "settled");
         assert_eq!(settlement.spend.budget_hold.status, "settled");
         assert_eq!(
-            settlement
-                .spend
-                .budget_hold
-                .consumed_amount
-                .units
-                .parse::<i64>()
-                .unwrap(),
-            3_991_000
+            settlement.spend.budget_hold.consumed_amount.units,
+            "3991000"
         );
+        assert_eq!(settlement.spend.budget_hold.frozen_amount.units, "0");
         assert_eq!(
-            settlement
-                .spend
-                .budget_hold
-                .frozen_amount
-                .units
-                .parse::<i64>()
-                .unwrap(),
-            0
+            settlement.spend.budget_hold.remaining_amount.units,
+            "1009000"
         );
-        assert_eq!(
-            settlement
-                .spend
-                .budget_hold
-                .remaining_amount
-                .units
-                .parse::<i64>()
-                .unwrap(),
-            1_009_000
-        );
-        assert_eq!(
-            settlement
-                .receipt
-                .authorized_max
-                .units
-                .parse::<i64>()
-                .unwrap(),
-            5000000
-        );
+        assert_eq!(settlement.receipt.authorized_max.units, "5000000");
         assert_eq!(settlement.receipt.actual_vendor_cost.amount, 3_991);
         assert_eq!(settlement.receipt.actual_vendor_cost.scale, 3);
-        assert_eq!(
-            settlement
-                .receipt
-                .budget_charge
-                .units
-                .parse::<i64>()
-                .unwrap(),
-            3_991_000
-        );
-        assert_eq!(
-            settlement
-                .receipt
-                .budget_charge
-                .units
-                .parse::<i64>()
-                .unwrap(),
-            3_991_000
-        );
-        assert_eq!(
-            settlement
-                .receipt
-                .released_amount
-                .units
-                .parse::<i64>()
-                .unwrap(),
-            1_009_000
-        );
-        assert_eq!(
-            settlement
-                .receipt
-                .overrun_amount
-                .units
-                .parse::<i64>()
-                .unwrap(),
-            0
-        );
+        assert_eq!(settlement.receipt.budget_charge.units, "3991000");
+        assert_eq!(settlement.receipt.released_amount.units, "1009000");
+        assert_eq!(settlement.receipt.overrun_amount.units, "0");
 
         let replay = settle_executor_spend(finalize.to_string(), &state)
             .expect("identical executor settlement should replay");
         assert_eq!(replay.settlement_id, settlement.settlement_id);
         assert_eq!(replay.status, "settled");
-        assert_eq!(
-            replay
-                .spend
-                .budget_hold
-                .consumed_amount
-                .units
-                .parse::<i64>()
-                .unwrap(),
-            3_991_000
-        );
-        assert_eq!(
-            replay
-                .spend
-                .budget_hold
-                .frozen_amount
-                .units
-                .parse::<i64>()
-                .unwrap(),
-            0
-        );
+        assert_eq!(replay.spend.budget_hold.consumed_amount.units, "3991000");
+        assert_eq!(replay.spend.budget_hold.frozen_amount.units, "0");
 
         let claim_replay = claim_executor_spend(request.to_string(), &state)
             .expect("claim retry should return the stored terminal authorization record state");

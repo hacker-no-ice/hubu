@@ -1,51 +1,91 @@
--- Money is integer minor units; timestamps are UTC RFC 3339. Every JSON value
+-- Accounting is integer micro-units; timestamps are UTC RFC 3339. Every JSON value
 -- has a positive format version. Lifecycle/outcome/provider fields are nullable.
 CREATE TABLE IF NOT EXISTS executions(
- execution_id TEXT PRIMARY KEY, account_id TEXT NOT NULL CHECK(trim(account_id)<>''), operation_key TEXT NOT NULL CHECK(trim(operation_key)<>''),
- -- Deprecated v1 compatibility columns. Both store the same opaque spend-auth token ID.
- hubu_authorization_id TEXT NOT NULL, hubu_claim_id TEXT, hubu_token_reference TEXT NOT NULL CHECK(length(hubu_token_reference) BETWEEN 1 AND 255),
- authorized_minor INTEGER NOT NULL CHECK(authorized_minor>=0), authorization_currency TEXT NOT NULL CHECK(length(authorization_currency)=3),
- normalized_input_json TEXT NOT NULL CHECK(json_valid(normalized_input_json)), input_hash TEXT NOT NULL, input_schema_version INTEGER NOT NULL CHECK(input_schema_version>0),
- target TEXT NOT NULL, config_version TEXT NOT NULL, provider_config_digest TEXT NOT NULL CHECK(provider_config_digest GLOB 'sha256:*' AND length(provider_config_digest)=71), pricing_snapshot_json TEXT NOT NULL CHECK(json_valid(pricing_snapshot_json)), pricing_schema_version INTEGER NOT NULL CHECK(pricing_schema_version>0),
- execution_scope_json TEXT CHECK(execution_scope_json IS NULL OR json_valid(execution_scope_json)),
- status TEXT NOT NULL CHECK(status IN ('pending','preflighting','claimed','executing','settling','succeeded','released','failed','reconciliation_required')), outcome TEXT,
- provider_outcome TEXT, artifact_outcome TEXT, settlement_outcome TEXT,
- failure_code TEXT, failure_message_redacted TEXT,
- created_at TEXT NOT NULL, updated_at TEXT NOT NULL, started_at TEXT, completed_at TEXT, release_transmission_started_at TEXT, version INTEGER NOT NULL DEFAULT 0 CHECK(version>=0), UNIQUE(account_id,operation_key));
+    execution_id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL CHECK(trim(account_id)<>''),
+    operation_key TEXT NOT NULL CHECK(trim(operation_key)<>''),
+    hubu_authorization_id TEXT NOT NULL,
+    hubu_claim_id TEXT,
+    hubu_token_reference TEXT NOT NULL CHECK(length(hubu_token_reference) BETWEEN 1 AND 255),
+    authorization_currency TEXT NOT NULL CHECK(length(authorization_currency)=3),
+    normalized_input_json TEXT NOT NULL CHECK(json_valid(normalized_input_json)),
+    input_hash TEXT NOT NULL,
+    input_schema_version INTEGER NOT NULL CHECK(input_schema_version>0),
+    target TEXT NOT NULL,
+    config_version TEXT NOT NULL,
+    provider_config_digest TEXT NOT NULL CHECK(provider_config_digest='legacy-unresolved' OR (provider_config_digest GLOB 'sha256:*' AND length(provider_config_digest)=71)),
+    pricing_snapshot_json TEXT NOT NULL CHECK(json_valid(pricing_snapshot_json)),
+    pricing_schema_version INTEGER NOT NULL CHECK(pricing_schema_version>0),
+    execution_scope_json TEXT CHECK(execution_scope_json IS NULL OR json_valid(execution_scope_json)),
+    status TEXT NOT NULL CHECK(status IN ('pending','preflighting','claimed','executing','settling','succeeded','released','failed','reconciliation_required')),
+    outcome TEXT,
+    provider_outcome TEXT,
+    artifact_outcome TEXT,
+    settlement_outcome TEXT,
+    failure_code TEXT,
+    failure_message_redacted TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT,
+    release_transmission_started_at TEXT,
+    version INTEGER NOT NULL DEFAULT 0 CHECK(version>=0),
+    workload_type TEXT NOT NULL DEFAULT 'legacy-unresolved' CHECK(trim(workload_type)<>''),
+    provider TEXT NOT NULL DEFAULT 'legacy-unresolved' CHECK(trim(provider)<>''),
+    adapter TEXT NOT NULL DEFAULT 'legacy-unresolved' CHECK(trim(adapter)<>''),
+    model TEXT NOT NULL DEFAULT 'legacy-unresolved' CHECK(trim(model)<>''),
+    provider_config_version TEXT NOT NULL DEFAULT 'legacy-unresolved' CHECK(trim(provider_config_version)<>''),
+    authorized_units INTEGER NOT NULL CHECK(typeof(authorized_units)='integer' AND authorized_units>=0),
+    units_scale INTEGER NOT NULL CHECK(units_scale=6),
+    UNIQUE(account_id,operation_key)
+);
 CREATE INDEX IF NOT EXISTS executions_status_created ON executions(status,created_at);
 CREATE INDEX IF NOT EXISTS executions_claim ON executions(hubu_claim_id) WHERE hubu_claim_id IS NOT NULL;
 CREATE TABLE IF NOT EXISTS hubu_authorization_snapshots(
- execution_id TEXT PRIMARY KEY REFERENCES executions(execution_id) ON DELETE CASCADE,
- account_id TEXT NOT NULL, agent_id TEXT NOT NULL, operation_key TEXT NOT NULL,
- decision_id TEXT NOT NULL, spend_auth_token_id TEXT NOT NULL,
- amount_minor INTEGER NOT NULL CHECK(amount_minor>=0), currency TEXT NOT NULL CHECK(length(currency)=3),
- execution_scope_json TEXT NOT NULL CHECK(json_valid(execution_scope_json)),
- lease_profile TEXT NOT NULL, expires_at TEXT NOT NULL, authorization_status TEXT NOT NULL,
- task_id TEXT, reason TEXT NOT NULL);
+    execution_id TEXT PRIMARY KEY REFERENCES executions(execution_id) ON DELETE CASCADE,
+    account_id TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
+    operation_key TEXT NOT NULL,
+    decision_id TEXT NOT NULL,
+    spend_auth_token_id TEXT NOT NULL,
+    currency TEXT NOT NULL CHECK(length(currency)=3),
+    execution_scope_json TEXT NOT NULL CHECK(json_valid(execution_scope_json)),
+    lease_profile TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    authorization_status TEXT NOT NULL,
+    task_id TEXT,
+    reason TEXT NOT NULL,
+    amount_units INTEGER NOT NULL CHECK(typeof(amount_units)='integer' AND amount_units>=0),
+    units_scale INTEGER NOT NULL CHECK(units_scale=6)
+);
 CREATE UNIQUE INDEX IF NOT EXISTS hubu_authorization_token
  ON hubu_authorization_snapshots(spend_auth_token_id);
 CREATE TABLE IF NOT EXISTS provider_attempts(
- provider_attempt_id TEXT PRIMARY KEY, execution_id TEXT NOT NULL REFERENCES executions ON DELETE CASCADE, provider TEXT NOT NULL,
- provider_request_id TEXT, provider_operation_id TEXT,
- -- Safe asynchronous resume checkpoint. The raw polling URL is never stored;
- -- adapters persist only its validated host and reconstruct the documented path.
- provider_polling_host TEXT, provider_deadline_unix_ms INTEGER CHECK(provider_deadline_unix_ms IS NULL OR provider_deadline_unix_ms>0),
- provider_recovery_context_json TEXT CHECK(provider_recovery_context_json IS NULL OR json_valid(provider_recovery_context_json)),
- operation_checkpointed_at TEXT,
- -- Monotonic provider-boundary call evidence. These counters are advanced
- -- durably before Gongbu enters the corresponding transport call.
- provider_poll_count INTEGER NOT NULL DEFAULT 0 CHECK(provider_poll_count>=0),
- artifact_fetch_count INTEGER NOT NULL DEFAULT 0 CHECK(artifact_fetch_count>=0),
- outcome TEXT NOT NULL CHECK(outcome IN ('started','succeeded','failed','ambiguous','canceled')),
- usage_json TEXT CHECK(usage_json IS NULL OR json_valid(usage_json)), usage_schema_version INTEGER CHECK(usage_schema_version IS NULL OR usage_schema_version>0),
- -- v4 compatibility projection. The exact amount below is authoritative.
- provider_amount_minor INTEGER CHECK(provider_amount_minor IS NULL OR provider_amount_minor>=0), provider_currency TEXT,
- actual_vendor_cost_amount INTEGER CHECK(actual_vendor_cost_amount IS NULL OR actual_vendor_cost_amount>=0),
- actual_vendor_cost_scale INTEGER CHECK(actual_vendor_cost_scale IS NULL OR actual_vendor_cost_scale BETWEEN 0 AND 18),
- actual_vendor_cost_currency TEXT,
- failure_code TEXT, failure_message_redacted TEXT,
- started_at TEXT NOT NULL, transmission_started_at TEXT, completed_at TEXT, CHECK((usage_json IS NULL)=(usage_schema_version IS NULL)), CHECK((provider_amount_minor IS NULL)=(provider_currency IS NULL)),
- CHECK((actual_vendor_cost_amount IS NULL)=(actual_vendor_cost_scale IS NULL) AND (actual_vendor_cost_amount IS NULL)=(actual_vendor_cost_currency IS NULL)));
+    provider_attempt_id TEXT PRIMARY KEY,
+    execution_id TEXT NOT NULL REFERENCES executions ON DELETE CASCADE,
+    provider TEXT NOT NULL,
+    provider_request_id TEXT,
+    provider_operation_id TEXT,
+    provider_polling_host TEXT,
+    provider_deadline_unix_ms INTEGER CHECK(provider_deadline_unix_ms IS NULL OR provider_deadline_unix_ms>0),
+    provider_recovery_context_json TEXT CHECK(provider_recovery_context_json IS NULL OR json_valid(provider_recovery_context_json)),
+    operation_checkpointed_at TEXT,
+    provider_poll_count INTEGER NOT NULL DEFAULT 0 CHECK(provider_poll_count>=0),
+    artifact_fetch_count INTEGER NOT NULL DEFAULT 0 CHECK(artifact_fetch_count>=0),
+    outcome TEXT NOT NULL CHECK(outcome IN ('started','succeeded','failed','ambiguous','canceled')),
+    usage_json TEXT CHECK(usage_json IS NULL OR json_valid(usage_json)),
+    usage_schema_version INTEGER CHECK(usage_schema_version IS NULL OR usage_schema_version>0),
+    actual_vendor_cost_amount INTEGER CHECK(actual_vendor_cost_amount IS NULL OR actual_vendor_cost_amount>=0),
+    actual_vendor_cost_scale INTEGER CHECK(actual_vendor_cost_scale IS NULL OR actual_vendor_cost_scale BETWEEN 0 AND 18),
+    actual_vendor_cost_currency TEXT,
+    failure_code TEXT,
+    failure_message_redacted TEXT,
+    started_at TEXT NOT NULL,
+    transmission_started_at TEXT,
+    completed_at TEXT,
+    CHECK((usage_json IS NULL)=(usage_schema_version IS NULL)),
+    CHECK((actual_vendor_cost_amount IS NULL)=(actual_vendor_cost_scale IS NULL) AND (actual_vendor_cost_amount IS NULL)=(actual_vendor_cost_currency IS NULL))
+);
 CREATE INDEX IF NOT EXISTS attempts_execution_started ON provider_attempts(execution_id,started_at);
 CREATE UNIQUE INDEX IF NOT EXISTS attempts_provider_request ON provider_attempts(provider,provider_request_id) WHERE provider_request_id IS NOT NULL;
 CREATE TABLE IF NOT EXISTS staged_provider_artifacts(
@@ -58,15 +98,24 @@ CREATE TABLE IF NOT EXISTS artifacts(
  metadata_json TEXT NOT NULL CHECK(json_valid(metadata_json)), metadata_schema_version INTEGER NOT NULL CHECK(metadata_schema_version>0), created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS artifacts_execution_created ON artifacts(execution_id,created_at);
 CREATE TABLE IF NOT EXISTS receipts(
- receipt_id TEXT PRIMARY KEY, execution_id TEXT NOT NULL UNIQUE REFERENCES executions ON DELETE RESTRICT,
- provider_attempt_id TEXT NOT NULL UNIQUE REFERENCES provider_attempts ON DELETE RESTRICT, settlement_minor INTEGER NOT NULL CHECK(settlement_minor>=0),
- currency TEXT NOT NULL CHECK(length(currency)=3), pricing_catalog_version TEXT NOT NULL,
- actual_vendor_cost_amount INTEGER NOT NULL CHECK(actual_vendor_cost_amount>=0),
- actual_vendor_cost_scale INTEGER NOT NULL CHECK(actual_vendor_cost_scale BETWEEN 0 AND 18),
- actual_vendor_cost_currency TEXT NOT NULL CHECK(length(actual_vendor_cost_currency)=3),
- provider_request_id TEXT NOT NULL CHECK(trim(provider_request_id)<>''),
- pricing_snapshot_json TEXT NOT NULL CHECK(json_valid(pricing_snapshot_json)),
- created_at TEXT NOT NULL, transmission_started_at TEXT, settled_at TEXT, hubu_settlement_id TEXT UNIQUE);
+    receipt_id TEXT PRIMARY KEY,
+    execution_id TEXT NOT NULL UNIQUE REFERENCES executions ON DELETE RESTRICT,
+    provider_attempt_id TEXT NOT NULL UNIQUE REFERENCES provider_attempts ON DELETE RESTRICT,
+    currency TEXT NOT NULL CHECK(length(currency)=3),
+    pricing_catalog_version TEXT NOT NULL,
+    actual_vendor_cost_amount INTEGER NOT NULL CHECK(actual_vendor_cost_amount>=0),
+    actual_vendor_cost_scale INTEGER NOT NULL CHECK(actual_vendor_cost_scale BETWEEN 0 AND 18),
+    actual_vendor_cost_currency TEXT NOT NULL CHECK(length(actual_vendor_cost_currency)=3),
+    provider_request_id TEXT NOT NULL CHECK(trim(provider_request_id)<>''),
+    pricing_snapshot_json TEXT NOT NULL CHECK(json_valid(pricing_snapshot_json)),
+    created_at TEXT NOT NULL,
+    transmission_started_at TEXT,
+    settled_at TEXT,
+    hubu_settlement_id TEXT UNIQUE,
+    settlement_units INTEGER NOT NULL CHECK(typeof(settlement_units)='integer' AND settlement_units>=0),
+    units_scale INTEGER NOT NULL CHECK(units_scale=6),
+    cost_basis TEXT NOT NULL DEFAULT 'legacy_unspecified'
+);
 CREATE INDEX IF NOT EXISTS receipts_settlement ON receipts(hubu_settlement_id) WHERE hubu_settlement_id IS NOT NULL;
 CREATE TABLE IF NOT EXISTS reconciliation_records(
  execution_id TEXT PRIMARY KEY REFERENCES executions ON DELETE CASCADE,

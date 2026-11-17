@@ -234,7 +234,6 @@ fn linked_context<'a>(
 fn transaction(
     record: &TransactionRecord,
     data: &HistorySnapshot,
-    _chain_totals: &ChainChargeTotals,
     state: &ServerState,
 ) -> Result<Value> {
     let meta = record.metadata.as_ref();
@@ -354,7 +353,7 @@ pub(super) fn ledger(request: &HttpRequest, state: &ServerState) -> Result<Value
     let selected = selection(&query, &user, state)?;
     let data = snapshot(state, &user.user_id)?;
     validate_budget(&selected, &data)?;
-    let chain_totals = chain_charge_totals(&data)?;
+    validate_charge_chains(&data)?;
     let now = Utc::now();
     let matching: Vec<_> = data
         .transactions
@@ -421,7 +420,7 @@ pub(super) fn ledger(request: &HttpRequest, state: &ServerState) -> Result<Value
     };
     let records = matching
         .into_iter()
-        .map(|t| transaction(t, &data, &chain_totals, state))
+        .map(|t| transaction(t, &data, state))
         .collect::<Result<Vec<_>>>()?;
     let (transactions, next_cursor) = page(records, &query, &user.user_id, "ledger")?;
     Ok(json!({"schema_version":VERSION,
@@ -771,15 +770,11 @@ fn authorization_record(
         "raw_evidence_redacted":true}))
 }
 
-/// Cumulative recorded budget charge (µ units) of each posting's correction
-/// chain, up to and including that posting.
-type ChainChargeTotals = HashMap<hubu_common::ids::LedgerTransactionId, i64>;
-
-/// Computes every chain total once per request: an id index plus memoized
-/// prefixes, so long correction chains stay linear in the number of postings.
-fn chain_charge_totals(data: &HistorySnapshot) -> Result<ChainChargeTotals> {
+/// Reject corrupted correction cycles and per-chain charge overflow. The
+/// totals are validation state only; history returns each recorded exact delta.
+fn validate_charge_chains(data: &HistorySnapshot) -> Result<()> {
     let by_id: HashMap<_, _> = data.transactions.iter().map(|t| (&t.id, t)).collect();
-    let mut totals = ChainChargeTotals::new();
+    let mut totals = HashMap::new();
     for record in &data.transactions {
         // Walk back to the first posting whose total is known (or the root),
         // then fill the totals forward.
@@ -799,7 +794,7 @@ fn chain_charge_totals(data: &HistorySnapshot) -> Result<ChainChargeTotals> {
                 .and_then(|meta| meta.previous_transaction_id.as_ref())
                 .and_then(|id| by_id.get(id).copied());
         }
-        let mut running = current.map_or(0, |known| totals[&known.id]);
+        let mut running: i64 = current.map_or(0, |known| totals[&known.id]);
         for posting in path.into_iter().rev() {
             let own = posting
                 .metadata
@@ -814,7 +809,7 @@ fn chain_charge_totals(data: &HistorySnapshot) -> Result<ChainChargeTotals> {
             totals.insert(posting.id.clone(), running);
         }
     }
-    Ok(totals)
+    Ok(())
 }
 
 /// An exact money object for history responses (see `MoneyHttpResponse`).
