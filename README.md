@@ -145,7 +145,9 @@ it can register identities, apply policies, and create budgets in step 4; Codex
 still asks for your confirmation before each of those calls. To do that
 administration from the terminal instead, pass `--no-trust-client-approval` and
 follow the [CLI administration reference](docs/cli.md). Restart Codex
-afterwards.
+afterwards. Codex in your terminal can also run the `hubu` CLI, so this
+choice isn't a security boundary; the [threat model](docs/threat-model.md)
+explains what does bind an agent.
 
 ### 4. Set up governance from Codex
 
