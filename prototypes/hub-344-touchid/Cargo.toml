@@ -1,0 +1,18 @@
+# THROWAWAY PROTOTYPE for HUB-344. Not part of the Hubu workspace, not shipped,
+# must not be merged. The empty [workspace] table keeps it out of the root
+# workspace so the root Cargo.lock, CI and release packaging are untouched.
+[package]
+name = "hub-344-touchid"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.89"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace]
+
+[dependencies]
+block2 = "0.6"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSError", "NSString"] }
+objc2-local-authentication = { version = "0.3", default-features = false, features = ["std", "block2", "LAContext", "LAError", "LABiometryType"] }
