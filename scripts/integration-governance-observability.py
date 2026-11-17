@@ -404,7 +404,7 @@ class Qualification:
                 "usdc_settlement": {"receipt": settled["receipt"], "budget": usdc_after,
                                     "usd_budget_unchanged": usd_after == usd_before},
                 "gongbu_precision_qualification": "covered separately by existing Gongbu/Amount Precision suites",
-                "component_proofs_reused": ["governance_query_tests", "coverage_inventory tests", "accounting_scale_tests", "financial_lifecycle_tests"],
+                "component_proofs_reused": ["governance_query_tests", "coverage_inventory tests", "canonical_amount_tests", "financial_lifecycle_tests"],
                 "read_calls": len(self.read_outputs)}
 
 

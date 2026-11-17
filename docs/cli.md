@@ -130,8 +130,7 @@ with a message that says how to fix the value.
 Amounts print exactly, with 2 to 6 decimal places and never rounded: `$10.00`,
 `$0.035`, `$0.000001`, and `-$0.0031` for the negative remainder a reconciled
 overrun leaves. USDC amounts print as `0.005 USDC`. The CLI reads the exact
-money objects in Hubu responses and falls back to the legacy `*_cents` fields
-from older servers.
+money objects in Hubu responses.
 
 The global `--round cents` option shows whole cents instead and marks every
 value it changed with `≈`. It rounds conservatively: consumed, frozen and
@@ -143,8 +142,8 @@ hubu --round cents budget list
 
 To record a vendor-billed reconciliation, pass the exact provider cost as a
 decimal: `hubu spend reconcile billed … --actual-vendor-cost 0.0031`. The
-`--actual-vendor-cost-cents` and `--unit-price-cents` flags remain as
-deprecated aliases.
+`--actual-vendor-cost-cents` and `--unit-price-cents` flags have been removed;
+use `--actual-vendor-cost` and `--unit-price`.
 
 ## Ledger and authorization record history
 
@@ -201,7 +200,7 @@ included.
 
 The authenticated `GET /watch?currency=usd` endpoint returns `hubu-watch-v1`, an
 owner-scoped consistent budget/version/decision/hold/receipt snapshot. Rows
-include the exact `limit` money object (and the legacy `limit_cents`) from the
+include the exact `limit` money object from the
 current selected budget version; `recent_events`
 is newest first and capped at ten across the owner's agents in that currency.
 Denied decisions are included while authorization-history discovery retains

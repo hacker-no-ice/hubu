@@ -303,7 +303,7 @@ def provision(hubu: HubuServer) -> dict:
     check(status == 200, f"agent registration failed: {agent}")
     status, body = http(hubu.base, "POST", "/policies", {"policy_yaml": POLICY})
     check(status == 200, f"policy failed: {body}")
-    status, budget = http(hubu.base, "POST", "/budgets", {"agent_id": agent["agent_id"], "amount_cents": 5000, "ending_before": "2999-01-01T00:00:00Z"})
+    status, budget = http(hubu.base, "POST", "/budgets", {"agent_id": agent["agent_id"], "amount": "50.00", "ending_before": "2999-01-01T00:00:00Z"})
     check(status == 200, f"budget failed: {budget}")
     return {"agent_id": agent["agent_id"], "account_id": agent["account_id"], "budget_id": budget["budget"]["budget_id"]}
 
@@ -316,7 +316,7 @@ def budget(hubu: HubuServer, agent_id: str) -> dict:
 def authorize(mcp: UnifiedMcp, ids: dict, amount: int, call_id: str, lease_profile: str = "default") -> dict:
     return mcp.call(
         "hubu_authorize_spend",
-        {"account_id": ids["account_id"], "amount_cents": amount, "reason": f"standalone {call_id}", "execution_scope": SCOPE, "lease_profile": lease_profile},
+        {"account_id": ids["account_id"], "amount": f"{amount // 100}.{amount % 100:02d}", "reason": f"standalone {call_id}", "execution_scope": SCOPE, "lease_profile": lease_profile},
         call_id=call_id,
     )
 
@@ -352,17 +352,17 @@ def run(hubu_bin: Path, mcp_bin: Path, root: Path) -> None:
         token = continuation(allowed)
         replay = authorize(mcp, ids, 400, "standalone-allow")
         check(replay["operation_handle"] == handle and continuation(replay) == token, "exact redelivery changed the operation")
-        check(budget(hubu, ids["agent_id"])["frozen_amount_cents"] == 400, "redelivery created a second hold")
+        check(budget(hubu, ids["agent_id"])["frozen_amount"]["units"] == "4000000", "redelivery created a second hold")
         expect_status(mcp, handle, "authorized", False, True)
         claim = executor.claim(token)
         expect_status(mcp, handle, "executing", False, False)
         executor.settle(claim["claim_id"])
         settled = expect_status(mcp, handle, "settled", True, False)
-        check(settled.get("settlement", {}).get("budget_charge_cents") == 351, f"settlement summary: {settled}")
+        check(settled.get("settlement", {}).get("budget_charge", {}).get("units") == "3500001", f"settlement summary: {settled}")
         check(settled["result"] == {"code": "executor_settled"}, f"settled result: {settled}")
         ledger = http(hubu.base, "GET", f"/ledger/transactions?agent_id={ids['agent_id']}&budget_id={ids['budget_id']}")[1]
         check(len(ledger["transactions"]) == 1, "settlement must post exactly once")
-        check(budget(hubu, ids["agent_id"])["consumed_amount_cents"] == 351, "settlement consumed once")
+        check(budget(hubu, ids["agent_id"])["consumed_amount"]["units"] == "3500001", "settlement consumed once")
 
         # deny is terminal and never reserves
         denied = authorize(mcp, ids, 950, "standalone-deny")

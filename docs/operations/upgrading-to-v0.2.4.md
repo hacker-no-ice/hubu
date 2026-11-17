@@ -1,5 +1,9 @@
 # Upgrading to v0.2.4: exact amounts
 
+This page describes the historical first µ release. Later canonical-schema
+releases require an existing µ profile: upgrade pre-µ profiles through v0.2.4
+or v0.2.5 first. See [current amount compatibility](../api-amounts.md#persistence-and-compatibility).
+
 v0.2.4 moves every budget, hold, settlement and Gongbu quote from whole cents
 to micro-units: 10⁻⁶ of the budget currency. A USD 0.001 call now consumes
 exactly 0.001 of its budget instead of a whole cent, so 1,000 such calls fit a

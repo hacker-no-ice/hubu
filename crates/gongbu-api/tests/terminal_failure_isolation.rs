@@ -623,10 +623,10 @@ impl SpendAuthorizationResolver for ScenarioHubu {
                 hold_id: "hold".into(),
                 budget_id: "budget".into(),
                 status: "frozen".into(),
-                amount_cents: 100,
-                consumed_amount_cents: 0,
-                frozen_amount_cents: 100,
-                remaining_amount_cents: 0,
+                amount: gongbu_api::hubu::ExactAmount::from_units(1000000, "usd"),
+                consumed_amount: gongbu_api::hubu::ExactAmount::from_units(0, "usd"),
+                frozen_amount: gongbu_api::hubu::ExactAmount::from_units(1000000, "usd"),
+                remaining_amount: gongbu_api::hubu::ExactAmount::from_units(0, "usd"),
             },
         })
     }

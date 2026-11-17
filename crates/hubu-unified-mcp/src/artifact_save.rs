@@ -378,7 +378,7 @@ fn save(
         "billing_status": billing_status,
         "cost_semantics": COST_SEMANTICS,
         "operation_artifact_count": artifacts.len(),
-        "budget_charge_cents": budget_charge,
+        "budget_charge": budget_charge,
     });
     let (path, receipt_path, already_saved) = write_files(folder, &filename, &bytes, &receipt)?;
     Ok(json!({

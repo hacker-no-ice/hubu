@@ -380,15 +380,12 @@ use the shared [live provider operations](operations/live-providers.md) guide.
 
 The implementation lives in [`crates/gongbu-api`](../crates/gongbu-api).
 
-On repository open, Gongbu adds micro-unit columns (`authorized_units`,
-`amount_units`, `settlement_units`, `units_scale` 6) next to the whole-cent
-`*_minor` columns and backfills them exactly (×10⁴) in one verified
-transaction ([`0002_accounting_units.sql`](../crates/gongbu-api/migrations/0002_accounting_units.sql)).
-It refuses to migrate an amount too large to convert, and reopening is
-idempotent. The `*_minor` columns remain as whole-cent projections rounded
-up. Pricing snapshots frozen before the upgrade keep schema 2 and their
-whole-cent estimate byte for byte. Gongbu also migrates legacy v4.3
-minor-unit attempt and receipt amounts to exact amounts with scale 2, keeping a
-lost-response retry immutable and idempotent; neither Hubu nor Gongbu opens or
-migrates the other's state. The exact mapping is defined in
+Fresh Gongbu databases use the constrained micro-unit schema directly
+([`0001_execution_core.sql`](../crates/gongbu-api/migrations/0001_execution_core.sql)).
+Existing µ profiles from v0.2.4 or v0.2.5 get one atomic table rebuild that
+copies `authorized_units`, `amount_units`, `settlement_units` and exact provider
+evidence unchanged, drops the old `*_minor` projections, and adds constraints.
+Subsequent opens skip the rebuild. Pre-µ profiles must first upgrade through a
+µ release; they are rejected before schema writes. Hubu and Gongbu upgrade
+only their own databases, keeping separate failure domains. See
 [persistence migration and v4 compatibility](spend-executor-contract.md#persistence-migration-and-v4-compatibility).

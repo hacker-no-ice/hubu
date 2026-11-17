@@ -344,10 +344,10 @@ mod rejection_tests {
     #[test]
     fn hubu_conformance_retry_decisions_map_to_gongbu_activity_classes() {
         let corpus: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../../fixtures/hubu-executor-conformance-v4.4.json"
+            "../../../../fixtures/hubu-executor-conformance-v4.5.json"
         ))
         .expect("parse Hubu executor conformance corpus");
-        assert_eq!(corpus["protocol_version"], "hubu-spend-executor-v4.4");
+        assert_eq!(corpus["protocol_version"], "hubu-spend-executor-v4.5");
         let decisions = corpus["retry_decisions"]
             .as_object()
             .expect("retry decision table");
@@ -454,6 +454,7 @@ pub struct ExecutorSpendResponse {
     /// Hubu releases send only `amount_cents`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub amount: Option<ExactAmount>,
+    #[serde(default)]
     pub amount_cents: i64,
     pub currency: String,
     pub merchant: Option<String>,
@@ -555,10 +556,10 @@ pub struct BudgetHold {
     pub hold_id: String,
     pub budget_id: String,
     pub status: String,
-    pub amount_cents: i64,
-    pub consumed_amount_cents: i64,
-    pub frozen_amount_cents: i64,
-    pub remaining_amount_cents: i64,
+    pub amount: ExactAmount,
+    pub consumed_amount: ExactAmount,
+    pub frozen_amount: ExactAmount,
+    pub remaining_amount: ExactAmount,
 }
 
 #[cfg(test)]
@@ -676,8 +677,8 @@ mod tests {
             "expires_at":"2099-01-01T00:00:00Z",
             "budget_hold":{
                 "hold_id":"hold-1","budget_id":"budget-1","status":"frozen",
-                "amount_cents":100,"consumed_amount_cents":0,
-                "frozen_amount_cents":100,"remaining_amount_cents":0
+                "amount": {"units":"1000000","scale":6,"currency":"usd"},"consumed_amount": {"units":"0","scale":6,"currency":"usd"},
+                "frozen_amount": {"units":"1000000","scale":6,"currency":"usd"},"remaining_amount": {"units":"0","scale":6,"currency":"usd"}
             }
         }))]);
         let root = tempdir().unwrap();
@@ -697,18 +698,11 @@ mod tests {
         let path = root.path().join("legacy-lost-response.sqlite3");
         let legacy = rusqlite::Connection::open(&path).unwrap();
         legacy
-            .execute_batch(include_str!(
-                "../../../../fixtures/gongbu-pre-authorization-snapshot.sql"
-            ))
+            .execute_batch(&crate::execution::micro_build_schema())
             .unwrap();
-        legacy
-            .execute(
-                "UPDATE executions SET hubu_claim_id='legacy-claim' WHERE execution_id='legacy-reconciliation'",
-                [],
-            )
-            .unwrap();
-        legacy.execute("INSERT INTO provider_attempts(provider_attempt_id,execution_id,provider,provider_request_id,outcome,usage_json,usage_schema_version,provider_amount_minor,provider_currency,started_at,transmission_started_at,completed_at) VALUES('legacy-attempt','legacy-reconciliation','example','provider-before-upgrade','succeeded','{\"images\":1}',1,7,'usd','2026-08-05T20:00:10Z','2026-08-05T20:00:10Z','2026-08-05T20:00:20Z')", []).unwrap();
-        legacy.execute("INSERT INTO receipts(receipt_id,execution_id,provider_attempt_id,settlement_minor,currency,pricing_catalog_version,created_at,transmission_started_at) VALUES('legacy-receipt','legacy-reconciliation','legacy-attempt',7,'usd','prices-v2','2026-08-05T20:00:30Z','2026-08-05T20:00:31Z')", []).unwrap();
+        legacy.execute_batch("INSERT INTO executions(execution_id,account_id,operation_key,hubu_authorization_id,hubu_claim_id,hubu_token_reference,authorized_minor,authorized_units,units_scale,authorization_currency,normalized_input_json,input_hash,input_schema_version,target,config_version,provider_config_digest,pricing_snapshot_json,pricing_schema_version,status,created_at,updated_at) VALUES('legacy-reconciliation','account-a','legacy-operation','legacy-token','legacy-claim','legacy-token',100,1000000,6,'USD','{}','hash',1,'image_generation/example/fixture/image-v1','config','legacy-unresolved','{}',1,'reconciliation_required','now','now');
+            INSERT INTO provider_attempts(provider_attempt_id,execution_id,provider,provider_request_id,outcome,usage_json,usage_schema_version,provider_amount_minor,provider_currency,actual_vendor_cost_amount,actual_vendor_cost_scale,actual_vendor_cost_currency,started_at,transmission_started_at,completed_at) VALUES('legacy-attempt','legacy-reconciliation','example','provider-before-upgrade','succeeded','{\"images\":1}',1,7,'usd',7,2,'USD','2026-08-05T20:00:10Z','2026-08-05T20:00:10Z','2026-08-05T20:00:20Z');
+            INSERT INTO receipts(receipt_id,execution_id,provider_attempt_id,settlement_minor,settlement_units,units_scale,currency,pricing_catalog_version,actual_vendor_cost_amount,actual_vendor_cost_scale,actual_vendor_cost_currency,provider_request_id,pricing_snapshot_json,created_at,transmission_started_at) VALUES('legacy-receipt','legacy-reconciliation','legacy-attempt',7,70000,6,'usd','prices-v2',7,2,'USD','legacy-receipt','{\"provider\":\"example\",\"model\":\"image-v1\",\"unit_price_cents\":100,\"pricing_unit\":\"execution\",\"currency\":\"usd\"}','2026-08-05T20:00:30Z','2026-08-05T20:00:31Z');").unwrap();
         drop(legacy);
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -729,7 +723,7 @@ mod tests {
         let activities =
             ProductionHubuActivities::new(HubuClient::new(format!("http://{address}")), repository);
         activities
-            // The 7-cent legacy receipt was backfilled to 70,000 micro-units.
+            // The µ-profile already stores the historical 7-cent receipt as 70,000µ.
             .settle(&execution, "legacy-receipt", 70_000)
             .expect_err("the fixture drops the retried settlement response");
         let wire = server.join().unwrap();
