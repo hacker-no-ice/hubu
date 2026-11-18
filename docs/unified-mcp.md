@@ -320,7 +320,7 @@ trusted harness identity and a newly allocated private operation key.
 ### Versioned budget tools
 
 `hubu_update_budget` is approval-gated and idempotent. Its strict input requires
-`budget_id`, `expected_revision >= 1`, and `amount_limit_cents >= 1`, with an
+`budget_id`, `expected_revision >= 1`, and a positive decimal `amount_limit`, with an
 optional `reason`. The amount is the budget's new cumulative total cap, not an
 increment. The router validates the public budget ID, places it only in
 `/budgets/{budget_id}/versions`, and forwards only the revision, amount, and

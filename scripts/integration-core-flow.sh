@@ -310,7 +310,7 @@ assert transaction["kind"] == "wallet_payment"
 assert transaction["agent_id"] == agent
 assert transaction["account_id"] == account
 assert transaction["budget_id"] == budget
-assert transaction["budget_charge_delta_cents"] == 2000
+assert transaction["budget_charge_delta"] == {"units": "20000000", "scale": 6}
 assert transaction["source_reference"]["redacted"] is True
 assert transaction["source_reference"]["digest"].startswith("sha256:")
 entries = transaction["entries"]
@@ -322,9 +322,9 @@ for entry in entries:
     assert amount["currency"].upper() == "USD"
     assert int(amount["amount"]) * 10 ** (18 - amount["scale"]) == 20 * 10 ** 18
 assert scoped["transactions"] == ledger["transactions"]
-assert scoped["coverage"]["consumed_amount_cents"] == 2000
-assert scoped["coverage"]["recorded_budget_charges_cents"] == 2000
-assert scoped["coverage"]["unaccounted_consumption_cents"] == 0
+assert scoped["coverage"]["consumed_amount"]["units"] == "20000000"
+assert scoped["coverage"]["recorded_budget_charges"]["units"] == "20000000"
+assert scoped["coverage"]["unaccounted_consumption"]["units"] == "0"
 assert scoped["next_cursor"] is None
 # The compatibility route retains wallet identity, owner and rail provenance.
 assert len(legacy["transactions"]) == 1
@@ -334,7 +334,7 @@ assert old["owner_user_id"] == owner
 assert old["owner_user_name"] == "Alice Example"
 assert "via fiat_mock" in old["description"]
 assert {entry["id"] for entry in old["entries"]} == {entry["id"] for entry in entries}
-assert all(entry["amount_cents"] == 2000 and entry["owner_user_id"] == owner for entry in old["entries"])
+assert all(entry["amount"]["units"] == "20000000" and entry["owner_user_id"] == owner for entry in old["entries"])
 PYTHON
 
 printf 'integration-core-flow passed\n'

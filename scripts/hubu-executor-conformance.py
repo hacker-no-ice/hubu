@@ -586,7 +586,7 @@ class Runner:
             bearer=self.auth,
             body={
                 "agent_id": agent["agent_id"],
-                "amount_cents": scenario["setup"]["budget_cents"],
+                "amount": f'{scenario["setup"]["budget_cents"] // 100}.{scenario["setup"]["budget_cents"] % 100:02d}',
                 "ending_before": self.corpus["setup"]["budget_ending_before"],
             },
         )
@@ -806,6 +806,37 @@ class Runner:
 # Corpus validation
 
 
+def load_corpus(path: Path) -> dict[str, Any]:
+    corpus = json.loads(path.read_text())
+    if corpus.get("schema") != "hubu-executor-conformance-v4.4-variant-v1":
+        return corpus
+    # Share scenario setup, assertions and fault injection. Only executor
+    # amount encoding differs; v4.5's sub-cent wire scenario is not applicable.
+    description = corpus["description"]
+    base = corpus["base_corpus"]
+    if base != "hubu-executor-conformance-v4.5.json":
+        raise ConformanceFailure("v4.4 variant requires the canonical v4.5 corpus")
+    corpus = json.loads(path.with_name(base).read_text().replace("conformance:v4.5:", "conformance:v4.4:"))
+    validate_corpus(corpus)
+    if corpus["protocol_version"] != "hubu-spend-executor-v4.5":
+        raise ConformanceFailure("v4.4 variant requires v4.5 executor definitions")
+    corpus["protocol_version"] = "hubu-spend-executor-v4.4"
+    corpus["description"] = description
+    corpus["scenarios"] = [scenario for scenario in corpus["scenarios"] if scenario["id"] != "S13"]
+    for scenario in corpus["scenarios"]:
+        for step in scenario["steps"]:
+            body = step.get("body", {})
+            if not isinstance(body, dict) or body.get("contract_version") != "hubu-spend-executor-v4.5":
+                continue
+            amount = body.pop("amount")
+            units = int(amount["units"])
+            if amount["scale"] != 6 or amount["currency"] != "usd" or units % 10_000:
+                raise ConformanceFailure("shared v4.4 requests require whole-cent USD amounts")
+            del body["contract_version"]
+            body["amount_cents"] = units // 10_000
+    return corpus
+
+
 def validate_corpus(corpus: dict[str, Any]) -> None:
     if corpus.get("schema") != CORPUS_SCHEMA:
         raise ConformanceFailure(f"unsupported corpus schema {corpus.get('schema')!r}")
@@ -866,7 +897,7 @@ def main() -> int:
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
-    corpus = json.loads(args.corpus.read_text())
+    corpus = load_corpus(args.corpus)
     validate_corpus(corpus)
     if args.list:
         for scenario in corpus["scenarios"]:

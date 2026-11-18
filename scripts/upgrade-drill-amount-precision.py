@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Upgrade drill for the v0.2.4 micro-unit migration on a COPY of a real Hubu DB.
+"""Upgrade drill from a released µ profile to the canonical schema on a COPY of a real Hubu DB.
 
 The drill never writes to the database you name. It opens ``--source-db``
 read-only, copies it with SQLite's online backup into a private temporary
@@ -13,12 +13,12 @@ stack database; it is never migrated or modified.
 
 Phases:
 
-1. The old server records the pre-upgrade budgets and ledger coverage, then
+1. The released µ server (v0.2.4 or v0.2.5) records the pre-upgrade budgets and ledger coverage, then
    creates in-flight state in a fresh drill agent: a claimed hold, a claim
    whose short lease expires into reconciliation, a budget update and a spend
    authorization whose requests are kept for replay.
-2. The new server migrates the copy. The drill checks the backup, exact
-   ×10^4 conversion, unchanged coverage, settles the in-flight hold with a
+2. The new server migrates the copy. The drill checks exact µ preservation,
+   unchanged coverage, settles the in-flight hold with a
    sub-cent actual, reconciles the expired claim, and replays the pre-upgrade
    budget update and authorization.
 3. The new server reopens the copy; the drill checks that nothing changed.
@@ -213,9 +213,9 @@ def main() -> int:
         budget = old.ok(
             "POST",
             "/budgets",
-            {"agent_id": agent["agent_id"], "amount_cents": 1000, "ending_before": "2999-01-01T00:00:00Z"},
+            {"agent_id": agent["agent_id"], "amount": "10.00", "ending_before": "2999-01-01T00:00:00Z"},
         )["budget"]
-        update = {"amount_limit_cents": 1200, "expected_revision": budget["current_revision"], "reason": "upgrade drill"}
+        update = {"amount_limit": "12.00", "expected_revision": budget["current_revision"], "reason": "upgrade drill"}
         old.ok("POST", f"/budgets/{budget['budget_id']}/versions", update)
 
         def authorize(server: Server, key: str, cents: int, lease: str = "default") -> dict[str, Any]:
@@ -225,7 +225,7 @@ def main() -> int:
                 {
                     "operation_key": key,
                     "account_id": agent["account_id"],
-                    "amount_cents": cents,
+                    "amount": f"{cents // 100}.{cents % 100:02d}",
                     "reason": "upgrade drill",
                     "lease_profile": lease,
                     "execution_scope": SCOPE,
@@ -264,24 +264,19 @@ def main() -> int:
     new = Server(args.new_server_bin, database, workdir, "new")
     try:
         report["new_version"] = new.ok("GET", "/version")
-        backup = Path(f"{database}.pre-accounting-scale.bak")
-        check(backup.exists(), f"missing migration backup {backup}")
-        report["backup"] = {"path": str(backup), "bytes": backup.stat().st_size}
         after = new.ok("GET", "/budgets?all=true")["budgets"]
         by_id = {b["budget_id"]: b for b in after}
         for previous in before:
             current = by_id[previous["budget_id"]]
             for field in ("amount_limit", "consumed_amount", "frozen_amount", "remaining_amount"):
-                check(
-                    int(current[field]["units"]) == previous[f"{field}_cents"] * 10_000,
-                    f"{previous['budget_id']} {field}: {previous[f'{field}_cents']}c -> {current[field]}",
-                )
-                check(current[f"{field}_cents"] == previous[f"{field}_cents"], f"{field}_cents changed")
+                previous_units = int(previous[field]["units"])
+                check(int(current[field]["units"]) == previous_units, f"{previous['budget_id']} {field} changed")
+                check(f"{field}_cents" not in current, f"{field}_cents was not removed")
         coverage_after = coverage(new, before)
         for budget_id, prior in report["before_coverage"].items():
-            for field in ("consumed_amount_cents", "recorded_budget_charges_cents", "unaccounted_consumption_cents"):
-                check(coverage_after[budget_id][field] == prior[field], f"coverage {budget_id} {field} changed")
-            check(coverage_after[budget_id]["unaccounted_consumption"]["units"] == str(prior["unaccounted_consumption_cents"] * 10_000), "coverage units")
+            for field in ("consumed_amount", "recorded_budget_charges", "unaccounted_consumption"):
+                previous_units = int(prior[field]["units"])
+                check(int(coverage_after[budget_id][field]["units"]) == previous_units, f"coverage {budget_id} {field} changed")
         report["after_coverage"] = coverage_after
 
         receipt = {
@@ -318,7 +313,7 @@ def main() -> int:
         status, recreated = new.request(
             "POST",
             "/budgets",
-            {"agent_id": agent["agent_id"], "amount_cents": 1000, "ending_before": "2999-01-01T00:00:00Z"},
+            {"agent_id": agent["agent_id"], "amount": "10.00", "ending_before": "2999-01-01T00:00:00Z"},
         )
         report["cross_version_replay"] = {
             "budget_update": {"status": update_status, "idempotent_replay": replayed_update["idempotent_replay"]},
@@ -333,19 +328,17 @@ def main() -> int:
     fingerprint = amounts(database)
 
     # -- Phase 3: reopen is idempotent ------------------------------------
-    backup_bytes = Path(f"{database}.pre-accounting-scale.bak").stat().st_size
     again = Server(args.new_server_bin, database, workdir, "reopen")
     try:
         check(again.ok("GET", "/budgets?all=true")["budgets"] is not None, "budgets after reopen")
     finally:
         again.stop()
     check(amounts(database) == fingerprint, "reopening changed stored amounts")
-    check(Path(f"{database}.pre-accounting-scale.bak").stat().st_size == backup_bytes, "reopen rewrote the backup")
     report["reopen_idempotent"] = True
 
     if args.report:
         args.report.write_text(json.dumps(report, indent=2, default=str) + "\n")
-    print(json.dumps({k: report[k] for k in ("backup", "cross_version_replay", "reopen_idempotent")}, indent=2, default=str))
+    print(json.dumps({k: report[k] for k in ("cross_version_replay", "reopen_idempotent")}, indent=2, default=str))
     print("upgrade drill passed")
     return 0
 

@@ -519,7 +519,7 @@ def governed_arguments(label):
     return {
         "authorization": {
             "account_id": account_id,
-            "amount_cents": 2,
+            "amount": "0.02",
             "reason": f"local stack approval acceptance {label}",
             "execution_scope": {
                 "schema_version": 1,
@@ -829,9 +829,9 @@ agent_b_attribution="$(sqlite3 "${workspace}/gongbu.sqlite3" "SELECT agent_id ||
 budgets="$(curl --fail --silent \
   -H "Authorization: Bearer $(tr -d '\r\n' <"${hubu_auth}")" \
   "${hubu_endpoint}/budgets")"
-jq -e --arg agent "${agent_a_id}" '.budgets[] | select(.agent_id == $agent) | .consumed_amount_cents == 1 and .frozen_amount_cents == 0 and .remaining_amount_cents == 99' <<<"${budgets}" >/dev/null || fail "Agent A budget did not settle independently"
-jq -e --arg agent "${agent_b_id}" '.budgets[] | select(.agent_id == $agent) | .consumed_amount_cents == 1 and .frozen_amount_cents == 0 and .remaining_amount_cents == 99' <<<"${budgets}" >/dev/null || fail "Agent B budget did not settle independently"
-jq -e --arg agent "${approval_agent_id}" '.budgets[] | select(.agent_id == $agent) | .consumed_amount_cents == 2 and .frozen_amount_cents == 0 and .remaining_amount_cents == 98' <<<"${budgets}" >/dev/null || fail "approval resume did not settle the fixture's authoritative two-cent 2k provider cost"
+jq -e --arg agent "${agent_a_id}" '.budgets[] | select(.agent_id == $agent) | .consumed_amount.units == "10000" and .frozen_amount.units == "0" and .remaining_amount.units == "990000"' <<<"${budgets}" >/dev/null || fail "Agent A budget did not settle independently"
+jq -e --arg agent "${agent_b_id}" '.budgets[] | select(.agent_id == $agent) | .consumed_amount.units == "10000" and .frozen_amount.units == "0" and .remaining_amount.units == "990000"' <<<"${budgets}" >/dev/null || fail "Agent B budget did not settle independently"
+jq -e --arg agent "${approval_agent_id}" '.budgets[] | select(.agent_id == $agent) | .consumed_amount.units == "20000" and .frozen_amount.units == "0" and .remaining_amount.units == "980000"' <<<"${budgets}" >/dev/null || fail "approval resume did not settle the fixture's authoritative two-cent 2k provider cost"
 
 agent_a_artifact_record="$(retrieve_artifact "${agent_a_execution_id}" "${workspace}/agent-a.png")"
 agent_b_artifact_record="$(retrieve_artifact "${agent_b_execution_id}" "${workspace}/agent-b.png")"
