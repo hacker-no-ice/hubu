@@ -75,7 +75,7 @@ impl Fixture {
         let cost = json!({"amount":"1","scale":3,"currency":"usd"});
         let identity = json!({"id":provider_id,"display_name":provider});
         let record = json!({"authorization_id":"decision-1","status":"settled","agent_id":"agt_fixture","account_id":"aga_fixture",
-            "provider":identity,"ledger_transaction_ids":["ledger-1"],"receipt":{"settlement_id":"settlement-1","actual_vendor_cost":cost,"budget_charge_cents":1}});
+            "provider":identity,"ledger_transaction_ids":["ledger-1"],"receipt":{"settlement_id":"settlement-1","actual_vendor_cost":cost,"budget_charge":{"units":"1000","scale":6,"currency":"usd","display":"0.001"}}});
         let transaction = json!({"id":"ledger-1","authorization_id":"decision-1","settlement_id":"settlement-1","provider":identity,"effective_cost":cost,"cost_semantics":"original_total"});
         let mut artifacts = vec![
             json!({"artifact_id":"image-1","execution_id":"execution-1","kind":"image","media_type":media_type,"size_bytes":bytes.len(),"sha256":digest,
@@ -140,6 +140,19 @@ impl Fixture {
                 let (media, response) = if path.starts_with("/spend/authorizations/show?") {
                     authorization_reads += 1;
                     let mut current = record.clone();
+                    match fault {
+                        "charge-scale" => current["receipt"]["budget_charge"]["scale"] = json!(2),
+                        "charge-negative" => {
+                            current["receipt"]["budget_charge"]["units"] = json!("-1")
+                        }
+                        "charge-missing" => {
+                            current["receipt"]
+                                .as_object_mut()
+                                .unwrap()
+                                .remove("budget_charge");
+                        }
+                        _ => {}
+                    }
                     if fault == "quote" {
                         current["receipt"]["cost_basis"] = json!("frozen_quote");
                         current["receipt"]["provider_actual_cost"] = Value::Null;
@@ -312,7 +325,8 @@ fn native_fetch_multi_megabyte_images_both_providers_and_replay() {
                     receipt["settled_cost"],
                     json!({"amount":"1","scale":3,"currency":"usd"})
                 );
-                assert_eq!(receipt["budget_charge_cents"], 1);
+                assert_eq!(receipt["budget_charge"]["units"], "1000");
+                assert!(receipt.get("budget_charge_cents").is_none());
                 assert_eq!(
                     (receipt["width"].clone(), receipt["height"].clone()),
                     (json!(2048), json!(2048))
@@ -556,7 +570,7 @@ fn native_save_pending_billing_then_refreshes_exact_reconciled_cost_without_chan
         "settled_cost",
         "settlement_id",
         "ledger_transaction_id",
-        "budget_charge_cents",
+        "budget_charge",
     ] {
         assert!(receipt[key].is_null(), "{key}: {receipt}");
     }
@@ -623,4 +637,19 @@ fn native_save_quote_receipt_distinguishes_settlement_from_provider_actual() {
     assert_eq!(receipt["settlement_amount"], receipt["settled_cost"]);
     assert_eq!(receipt["billing_status"], "settled");
     assert!(receipt["provider_actual_cost"].is_null());
+}
+
+#[test]
+fn native_exports_refuse_invalid_canonical_budget_charge_without_writing() {
+    for fault in ["charge-scale", "charge-negative", "charge-missing"] {
+        let fixture = Fixture::with_fault("flux", false, false, fault);
+        let result = fixture.command(HANDLE, "2k");
+        assert!(!result.status.success(), "{fault}");
+        assert!(!fixture.root.path().join("gallery").exists());
+        let brand = fixture.root.path().join("brand");
+        std::fs::create_dir(&brand).unwrap();
+        let result = fixture.save(&["--folder", "brand"]);
+        assert!(!result.status.success(), "{fault}");
+        assert_eq!(std::fs::read_dir(brand).unwrap().count(), 0);
+    }
 }

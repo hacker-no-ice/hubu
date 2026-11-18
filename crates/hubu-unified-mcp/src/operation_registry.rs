@@ -2983,7 +2983,7 @@ mod tests {
         json!({
             "authorization": {
                 "account_id": "account-1",
-                "amount_cents": 100,
+                "amount": "1.00",
                 "reason": "generate one image"
             },
             "execution": {
@@ -3988,7 +3988,7 @@ mod tests {
     #[test]
     fn approval_sync_is_correlated_monotonic_and_projects_resume_required() {
         let mut registry = OperationRegistry::open_in_memory().unwrap();
-        let arguments = json!({"account_id":"account-1","amount_cents":100,"reason":"test"});
+        let arguments = json!({"account_id":"account-1","amount": "1.00","reason":"test"});
         let operation = pending_approval(
             &mut registry,
             "approval-sync",
@@ -4100,7 +4100,7 @@ mod tests {
     #[test]
     fn prepare_resume_rebuilds_each_origin_from_only_canonical_persisted_intent() {
         let mut registry = OperationRegistry::open_in_memory().unwrap();
-        let direct_arguments = json!({"account_id":"account-1","amount_cents":100,"reason":"test"});
+        let direct_arguments = json!({"account_id":"account-1","amount": "1.00","reason":"test"});
         for (call_id, tool_name, expected_origin, approval_id) in [
             (
                 "resume-authorize",
@@ -4287,7 +4287,7 @@ mod tests {
     #[test]
     fn expired_authorize_resume_clears_the_continuation_and_is_replacement_safe() {
         let mut registry = OperationRegistry::open_in_memory().unwrap();
-        let request = json!({"account_id":"account-1","amount_cents":100,"reason":"test"});
+        let request = json!({"account_id":"account-1","amount": "1.00","reason":"test"});
         let operation = pending_approval(
             &mut registry,
             "expired-authorize-resume",
@@ -4419,7 +4419,7 @@ mod tests {
     #[test]
     fn direct_resume_only_becomes_terminal_after_exact_route_result() {
         let mut registry = OperationRegistry::open_in_memory().unwrap();
-        let arguments = json!({"account_id":"account-1","amount_cents":100,"reason":"test"});
+        let arguments = json!({"account_id":"account-1","amount": "1.00","reason":"test"});
         for (call_id, tool_name, approval_id, expected_state, result) in [
             (
                 "complete-authorize",
@@ -4483,7 +4483,7 @@ mod tests {
     #[test]
     fn successful_submit_resume_canonicalizes_legacy_approval_decision() {
         let mut registry = OperationRegistry::open_in_memory().unwrap();
-        let arguments = json!({"account_id":"account-1","amount_cents":100,"reason":"test"});
+        let arguments = json!({"account_id":"account-1","amount": "1.00","reason":"test"});
         let operation = pending_approval(
             &mut registry,
             "legacy-approved-submit",
@@ -4581,7 +4581,7 @@ mod tests {
     #[test]
     fn failed_submit_resume_canonicalizes_legacy_approval_decision_and_replays() {
         let mut registry = OperationRegistry::open_in_memory().unwrap();
-        let arguments = json!({"account_id":"account-1","amount_cents":100,"reason":"test"});
+        let arguments = json!({"account_id":"account-1","amount": "1.00","reason":"test"});
         let operation = pending_approval(
             &mut registry,
             "legacy-failed-submit",
@@ -4681,7 +4681,7 @@ mod tests {
     #[test]
     fn late_terminal_submit_receipt_supersedes_only_pre_execution_expiry() {
         let mut registry = OperationRegistry::open_in_memory().unwrap();
-        let arguments = json!({"account_id":"account-1","amount_cents":100,"reason":"test"});
+        let arguments = json!({"account_id":"account-1","amount": "1.00","reason":"test"});
         let operation = pending_approval(
             &mut registry,
             "late-success-after-expiry",
@@ -4779,7 +4779,7 @@ mod tests {
 
     #[test]
     fn submit_resume_rejects_allow_without_valid_terminal_payment_receipt() {
-        let arguments = json!({"account_id":"account-1","amount_cents":100,"reason":"test"});
+        let arguments = json!({"account_id":"account-1","amount": "1.00","reason":"test"});
         for (suffix, payment) in [
             ("malformed", json!("not-an-object")),
             (
@@ -4840,7 +4840,7 @@ mod tests {
     #[test]
     fn submit_resume_requires_approved_status_and_a_consistent_terminal_decision() {
         let mut registry = OperationRegistry::open_in_memory().unwrap();
-        let arguments = json!({"account_id":"account-1","amount_cents":100,"reason":"test"});
+        let arguments = json!({"account_id":"account-1","amount": "1.00","reason":"test"});
         let operation = pending_approval(
             &mut registry,
             "submit-success-guards",
@@ -4919,7 +4919,7 @@ mod tests {
 
     #[test]
     fn submit_resume_does_not_canonicalize_pending_or_denied_without_payment() {
-        let arguments = json!({"account_id":"account-1","amount_cents":100,"reason":"test"});
+        let arguments = json!({"account_id":"account-1","amount": "1.00","reason":"test"});
 
         let mut pending_registry = OperationRegistry::open_in_memory().unwrap();
         let pending = pending_approval(

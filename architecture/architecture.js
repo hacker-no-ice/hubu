@@ -279,7 +279,7 @@ const components = {
       ["Hubu governs money", "Hubu resolves the trusted scope, evaluates policy, reserves budget, then settles or releases it. A definitive admission rejection lets the router void its unclaimed authorization and return the full hold; ambiguous dispatch retains the hold. It holds no provider credentials."],
       ["Gongbu does the work", "Gongbu runs provider calls, retries, artifacts, and recovery in its own process, database, and credential store."],
       ["Separate failure domains", "Hubu and Gongbu share source and releases, but never a process, database, credential, or backend client."],
-      ["Exact, replay-safe accounting", "Gongbu reports the exact cost and Hubu charges within the authorized maximum. Retries return stored state; overruns go to a human."],
+      ["Exact, replay-safe accounting", "HTTP and MCP accept exact decimal amounts and return money objects. Each backend stores constrained integer micro-units at scale 6, with no dual-written cent columns. Gongbu reports exact costs; retries return stored state and overruns go to a human."],
       ["Provider contracts", "Each provider target is a frozen, versioned contract covering model, pricing, retries, and polling. Agents select it only by opaque ID."],
       ["Two supported stack modes", "Sandbox and live run Hubu, Gongbu, and Temporal together. Sandbox uses a non-billable fixture; live uses approved real providers. Decisions-only is deferred and unsupported."],
     ],

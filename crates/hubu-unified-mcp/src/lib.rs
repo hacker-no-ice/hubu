@@ -1759,7 +1759,6 @@ fn standalone_authorization_status_result(
             projection["settlement"] = json!({
                 "actual_vendor_cost": receipt.get("actual_vendor_cost"),
                 "budget_charge": receipt.get("budget_charge"),
-                "budget_charge_cents": receipt.get("budget_charge_cents"),
                 "currency": receipt.get("currency"),
             });
         }
@@ -2061,7 +2060,7 @@ mod tests {
                 "receipt": {
                     "actual_vendor_cost": {"amount": "3500001", "scale": 6, "currency": "usd"},
                     "budget_charge": {"units": "3500001", "scale": 6, "currency": "usd", "display": "3.500001"},
-                    "budget_charge_cents": 351,
+
                     "currency": "usd",
                     "provider_request_reference": {"digest": "sha256:private", "redacted": true},
                     "artifact_reference": {"digest": "sha256:artifact", "redacted": true}
@@ -2142,7 +2141,7 @@ mod tests {
             json!({
                 "actual_vendor_cost": {"amount": "3500001", "scale": 6, "currency": "usd"},
                 "budget_charge": {"units": "3500001", "scale": 6, "currency": "usd", "display": "3.500001"},
-                "budget_charge_cents": 351,
+
                 "currency": "usd"
             })
         );

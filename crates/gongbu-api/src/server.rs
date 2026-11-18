@@ -1850,37 +1850,15 @@ mod tests {
             .unwrap();
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("executions.sqlite");
-        // Match the historical schema used by the repository migration tests:
-        // resolved target fields existed, but configuration digests did not.
-        let legacy_schema = include_str!("../migrations/0001_execution_core.sql")
-            .replace(
-                ", provider_config_digest TEXT NOT NULL CHECK(provider_config_digest GLOB 'sha256:*' AND length(provider_config_digest)=71)",
-                "",
-            )
-            .replace(
-                " execution_scope_json TEXT CHECK(execution_scope_json IS NULL OR json_valid(execution_scope_json)),\n",
-                "",
-            );
-        assert!(!legacy_schema.contains("provider_config_digest"));
+        // A µ-profile can retain unresolved digests from its earlier history.
+        // Startup must block unfinished work, while ignoring completed rows.
         let connection = rusqlite::Connection::open(&path).unwrap();
-        connection.execute_batch(&legacy_schema).unwrap();
-        for column in [
-            "workload_type",
-            "provider",
-            "adapter",
-            "model",
-            "provider_config_version",
-        ] {
-            connection
-                .execute(
-                    &format!("ALTER TABLE executions ADD COLUMN {column} TEXT NOT NULL DEFAULT 'legacy-unresolved' CHECK(trim({column})<>'')"),
-                    [],
-                )
-                .unwrap();
-        }
+        connection
+            .execute_batch(&crate::execution::micro_build_schema())
+            .unwrap();
         connection
             .execute(
-                "INSERT INTO executions(execution_id,account_id,operation_key,hubu_authorization_id,hubu_token_reference,authorized_minor,authorization_currency,normalized_input_json,input_hash,input_schema_version,target,config_version,workload_type,provider,adapter,model,provider_config_version,pricing_snapshot_json,pricing_schema_version,status,created_at,updated_at,version) VALUES('legacy-execution','account','legacy-unresolved','legacy-token','legacy-token',100,'USD',?7,'hash',1,?1,?2,?3,?4,?5,?6,?2,?8,3,'pending','now','now',0)",
+                "INSERT INTO executions(execution_id,account_id,operation_key,hubu_authorization_id,hubu_token_reference,authorized_minor,authorized_units,units_scale,authorization_currency,normalized_input_json,input_hash,input_schema_version,target,config_version,workload_type,provider,adapter,model,provider_config_version,provider_config_digest,pricing_snapshot_json,pricing_schema_version,status,created_at,updated_at,version) VALUES('legacy-execution','account','legacy-unresolved','legacy-token','legacy-token',100,1000000,6,'USD',?7,'hash',1,?1,?2,?3,?4,?5,?6,?2,'legacy-unresolved',?8,3,'pending','now','now',0)",
                 rusqlite::params![
                     target.target_key().canonical_name(),
                     target.provider_config_version,
@@ -1894,8 +1872,7 @@ mod tests {
             )
             .unwrap();
         drop(connection);
-        // Opening through Repository performs the real migration, supplying
-        // the historical unresolved marker without bypassing current checks.
+        // Opening performs the µ-only table rebuild without changing the marker.
         let repository = Repository::open(&path, Redactor::default()).unwrap();
         let create = |operation: &str, digest: &str| {
             repository

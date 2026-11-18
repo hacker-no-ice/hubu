@@ -279,7 +279,7 @@ fn cases() -> Vec<GoldenCase> {
             arguments: json!({
                 "budget_id":"bgt_0123456789ab",
                 "expected_revision":1,
-                "amount_limit_cents":5_000,
+                "amount_limit": "50.00",
                 "reason":"golden total cap update"
             }),
             meta: None,
@@ -345,7 +345,7 @@ fn cases() -> Vec<GoldenCase> {
             owner: hubu,
             method: "POST",
             path: "/spend",
-            arguments: json!({"account_id":"account-107","amount_cents":0,"reason":"no-spend parity fixture"}),
+            arguments: json!({"account_id":"account-107","amount": "0.00","reason":"no-spend parity fixture"}),
             meta: Some(platform_meta("submit-107")),
         },
     ]
@@ -485,7 +485,7 @@ fn success_body(case: &GoldenCase) -> Value {
                 "operation_key":"fixture-private-approval-operation",
                 "account_id":"account-107",
                 "agent_id":"agent-107",
-                "amount_cents":0,
+                "amount": "0.00",
                 "currency":"USD",
                 "merchant":null,
                 "execution_scope":null,
@@ -513,7 +513,7 @@ fn success_body(case: &GoldenCase) -> Value {
                 "revision": 2,
                 "predecessor_version_id": "bgv_0123456789ab",
                 "predecessor_revision": 1,
-                "amount_limit_cents": 5_000,
+                "amount_limit": "50.00",
                 "effective_at": "2026-08-28T00:00:00Z",
                 "actor": "usr_0123456789ab",
                 "source": "hubu-api:update-budget-limit",
@@ -526,7 +526,7 @@ fn success_body(case: &GoldenCase) -> Value {
                 "agent_id": "agt_0123456789ab",
                 "current_version_id": "bgv_0123456789ac",
                 "current_revision": 2,
-                "amount_limit_cents": 5_000,
+                "amount_limit": "50.00",
                 "currency": "USD",
                 "starting_at": "2026-08-01T00:00:00Z",
                 "ending_before": "2026-09-01T00:00:00Z",
@@ -544,7 +544,7 @@ fn success_body(case: &GoldenCase) -> Value {
                 "agent_id": "agt_0123456789ab",
                 "current_version_id": "bgv_0123456789ac",
                 "current_revision": 2,
-                "amount_limit_cents": 5_000,
+                "amount_limit": "50.00",
                 "currency": "USD",
                 "starting_at": "2026-08-01T00:00:00Z",
                 "ending_before": "2026-09-01T00:00:00Z",
@@ -559,7 +559,7 @@ fn success_body(case: &GoldenCase) -> Value {
                     "revision": 1,
                     "predecessor_version_id": null,
                     "predecessor_revision": null,
-                    "amount_limit_cents": 4_000,
+                    "amount_limit": "40.00",
                     "effective_at": "2026-08-01T00:00:00Z",
                     "actor": "usr_0123456789ab",
                     "source": "hubu-api:create-budget",
@@ -572,7 +572,7 @@ fn success_body(case: &GoldenCase) -> Value {
                     "revision": 2,
                     "predecessor_version_id": "bgv_0123456789ab",
                     "predecessor_revision": 1,
-                    "amount_limit_cents": 5_000,
+                    "amount_limit": "50.00",
                     "effective_at": "2026-08-28T00:00:00Z",
                     "actor": "usr_0123456789ab",
                     "source": "hubu-api:update-budget-limit",
@@ -716,7 +716,7 @@ fn all_mapped_tools_have_unified_owned_golden_routing_coverage() {
             assert_eq!(
                 body,
                 json!({
-                    "amount_limit_cents": 5_000,
+                    "amount_limit": "50.00",
                     "expected_revision": 1,
                     "reason": "golden total cap update"
                 })

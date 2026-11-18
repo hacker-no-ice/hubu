@@ -2053,9 +2053,9 @@ fn budget_update(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
     }
     let current_revision = u64_at(current, "current_revision")?;
     let pinned_revision = expected_revision.unwrap_or(current_revision);
-    let current_total = money::money_field(current, "amount_limit_cents")?;
-    let consumed = money::money_field(current, "consumed_amount_cents")?;
-    let frozen = money::money_field(current, "frozen_amount_cents")?;
+    let current_total = money::money_field(current, "amount_limit")?;
+    let consumed = money::money_field(current, "consumed_amount")?;
+    let frozen = money::money_field(current, "frozen_amount")?;
     let currency = current_total.currency;
     let projected_remaining = amount_limit
         .checked_sub(consumed.amount)
@@ -2557,20 +2557,11 @@ fn spend_reconcile_resolve(
                         "pricing_unit": pricing_unit,
                         "currency": currency,
                     });
-                    if let Some(unit_price) = take_value(&mut args, "--unit-price") {
-                        let (coefficient, scale) =
-                            money::parse_exact_cost(&unit_price, "--unit-price")?;
-                        snapshot["unit_price"] = json!({
-                            "amount": coefficient,
-                            "scale": scale,
-                            "currency": currency,
-                        });
-                    } else {
-                        snapshot["unit_price_cents"] =
-                            json!(take_required(&mut args, "--unit-price-cents")?
-                                .parse::<i64>()
-                                .context("--unit-price-cents must be an integer")?);
-                    }
+                    let unit_price = take_required(&mut args, "--unit-price")?;
+                    let (coefficient, scale) =
+                        money::parse_exact_cost(&unit_price, "--unit-price")?;
+                    snapshot["unit_price"] =
+                        json!({"amount": coefficient, "scale": scale, "currency": currency});
                     snapshot
                 }
             };
@@ -2609,27 +2600,7 @@ fn spend_reconcile_resolve(
                 "artifact_reference": artifact_reference,
             }))
         } else {
-            let actual_vendor_cost_cents = take_required(&mut args, "--actual-vendor-cost-cents")?
-                .parse::<i64>()
-                .context("--actual-vendor-cost-cents must be an integer")?;
-            let provider = take_required(&mut args, "--provider")?;
-            let model = take_required(&mut args, "--model")?;
-            let unit_price_cents = take_required(&mut args, "--unit-price-cents")?
-                .parse::<i64>()
-                .context("--unit-price-cents must be an integer")?;
-            let pricing_unit = take_required(&mut args, "--pricing-unit")?;
-            Some(json!({
-                "actual_vendor_cost_cents": actual_vendor_cost_cents,
-                "provider_request_id": provider_request_id,
-                "price_model_snapshot": {
-                    "provider": provider,
-                    "model": model,
-                    "unit_price_cents": unit_price_cents,
-                    "pricing_unit": pricing_unit,
-                    "currency": "usd",
-                },
-                "artifact_reference": artifact_reference,
-            }))
+            bail!("vendor billing requires --actual-vendor-cost or --actual-vendor-cost-amount with --actual-vendor-cost-scale");
         }
     } else {
         None
@@ -2701,7 +2672,7 @@ fn print_executor_claim(claim: &Value) -> Result<()> {
         .ok_or_else(|| anyhow!("server response missing `spend`"))?;
     println!("  account_id: {}", string_at(spend, "account_id")?);
     println!("  agent_id: {}", string_at(spend, "agent_id")?);
-    println!("  amount: {}", money_at(spend, "amount_cents")?);
+    println!("  amount: {}", money_at(spend, "amount")?);
     if let Some(merchant) = spend.get("merchant").and_then(Value::as_str) {
         println!("  merchant: {merchant}");
     }
@@ -2713,10 +2684,7 @@ fn print_executor_claim(claim: &Value) -> Result<()> {
         "  hold_status: {}",
         style.semantic(string_at(hold, "status")?)
     );
-    println!(
-        "  frozen_amount: {}",
-        money_at(hold, "frozen_amount_cents")?
-    );
+    println!("  frozen_amount: {}", money_at(hold, "frozen_amount")?);
     Ok(())
 }
 
@@ -2861,10 +2829,10 @@ fn print_spend_response(response: &Value) -> Result<()> {
         println!("  status: {}", style.semantic(string_at(hold, "status")?));
         println!("  hold_id: {}", string_at(hold, "hold_id")?);
         println!("  budget_id: {}", string_at(hold, "budget_id")?);
-        println!("  amount: {}", money_at(hold, "amount_cents")?);
-        println!("  consumed: {}", money_at(hold, "consumed_amount_cents")?);
-        println!("  frozen: {}", money_at(hold, "frozen_amount_cents")?);
-        println!("  remaining: {}", money_at(hold, "remaining_amount_cents")?);
+        println!("  amount: {}", money_at(hold, "amount")?);
+        println!("  consumed: {}", money_at(hold, "consumed_amount")?);
+        println!("  frozen: {}", money_at(hold, "frozen_amount")?);
+        println!("  remaining: {}", money_at(hold, "remaining_amount")?);
     }
     Ok(())
 }
@@ -2886,7 +2854,7 @@ fn print_spend_approval_response(approval: &Value) -> Result<()> {
     println!("  operation_key: {}", string_at(review, "operation_key")?);
     println!("  account_id: {}", string_at(review, "account_id")?);
     println!("  agent_id: {}", string_at(review, "agent_id")?);
-    println!("  amount: {}", money_at(review, "amount_cents")?);
+    println!("  amount: {}", money_at(review, "amount")?);
     println!("  lease_profile: {}", string_at(review, "lease_profile")?);
     println!("  reason: {}", string_at(review, "reason")?);
     println!("  policy_summary: {}", string_at(review, "policy_summary")?);
@@ -3039,10 +3007,10 @@ fn print_budget(budget: &Value) -> Result<()> {
     );
     println!(
         "    limit: {}  consumed: {}  frozen: {}  remaining: {}",
-        money_at(budget, "amount_limit_cents")?,
-        money_at(budget, "consumed_amount_cents")?,
-        money_at(budget, "frozen_amount_cents")?,
-        money_at(budget, "remaining_amount_cents")?
+        money_at(budget, "amount_limit")?,
+        money_at(budget, "consumed_amount")?,
+        money_at(budget, "frozen_amount")?,
+        money_at(budget, "remaining_amount")?
     );
     println!(
         "    current_version_id: {}  current_revision: {}",
@@ -3134,7 +3102,7 @@ fn print_budget_version(version: &Value, marker: Option<&str>) -> Result<()> {
     );
     println!(
         "    total_limit: {}  effective_at: {}  created_at: {}",
-        money_at(version, "amount_limit_cents")?,
+        money_at(version, "amount_limit")?,
         local_timestamp(string_at(version, "effective_at")?),
         local_timestamp(string_at(version, "created_at")?)
     );
@@ -3164,9 +3132,9 @@ fn print_spending_target(target: &Value) -> Result<()> {
     );
     println!(
         "    target: {}  allocated: {}  exceeded by: {}",
-        money_at(target, "target_amount_cents")?,
-        money_at(target, "allocated_amount_cents")?,
-        money_at(target, "exceeded_by_cents")?
+        money_at(target, "target_amount")?,
+        money_at(target, "allocated_amount")?,
+        money_at(target, "exceeded_by")?
     );
     let starting_at = local_timestamp(string_at(target, "starting_at")?);
     let ending_before = target
@@ -3192,9 +3160,9 @@ fn print_spending_target_warnings(response: &Value) -> Result<()> {
         println!("  target_id: {}", string_at(warning, "target_id")?);
         println!(
             "  target: {}  allocated: {}  exceeded by: {}",
-            money_at(warning, "target_amount_cents")?,
-            money_at(warning, "allocated_amount_cents")?,
-            money_at(warning, "exceeded_by_cents")?
+            money_at(warning, "target_amount")?,
+            money_at(warning, "allocated_amount")?,
+            money_at(warning, "exceeded_by")?
         );
         println!("  {}", string_at(warning, "message")?);
     }
@@ -3325,7 +3293,7 @@ fn post_budget_update_with_retry(
         if string_at(&response["current_budget"], "budget_id")? != budget_id
             || applied.get("predecessor_revision").and_then(Value::as_u64)
                 != Some(u64_at(body, "expected_revision")?)
-            || money::money_field(applied, "amount_limit_cents")?.amount
+            || money::money_field(applied, "amount_limit")?.amount
                 != money::parse_amount(string_at(body, "amount_limit")?, "amount_limit")?
             || applied_reason != requested_reason
         {
@@ -3380,7 +3348,7 @@ fn validate_budget_update_response(response: &Value) -> Result<()> {
         .ok_or_else(|| anyhow!("server response missing `applied_version`"))?;
     let _ = string_at(applied, "version_id")?;
     let _ = u64_at(applied, "revision")?;
-    let _ = money::money_field(applied, "amount_limit_cents")?;
+    let _ = money::money_field(applied, "amount_limit")?;
     let _ = string_at(applied, "effective_at")?;
     let _ = string_at(applied, "actor")?;
     let _ = string_at(applied, "source")?;
@@ -3414,10 +3382,10 @@ fn validate_budget_update_response(response: &Value) -> Result<()> {
         let _ = string_at(current, field)?;
     }
     for field in [
-        "amount_limit_cents",
-        "consumed_amount_cents",
-        "frozen_amount_cents",
-        "remaining_amount_cents",
+        "amount_limit",
+        "consumed_amount",
+        "frozen_amount",
+        "remaining_amount",
     ] {
         let _ = money::money_field(current, field)?;
     }
@@ -3441,11 +3409,7 @@ fn validate_budget_update_response(response: &Value) -> Result<()> {
     for warning in warnings {
         let _ = string_at(warning, "target_id")?;
         let _ = string_at(warning, "message")?;
-        for field in [
-            "target_amount_cents",
-            "allocated_amount_cents",
-            "exceeded_by_cents",
-        ] {
+        for field in ["target_amount", "allocated_amount", "exceeded_by"] {
             let _ = money::money_field(warning, field)?;
         }
     }
@@ -3714,7 +3678,7 @@ fn u64_at(value: &Value, key: &str) -> Result<u64> {
         .ok_or_else(|| anyhow!("server response missing `{key}`"))
 }
 
-/// Show the amount at `key` (a legacy `*_cents` field name): the exact money
+/// Show the exact money object at `key`:
 /// object when the server sent one, otherwise the cent field.
 fn money_at(value: &Value, key: &str) -> Result<String> {
     Ok(money::format_money(
@@ -4231,7 +4195,7 @@ Usage:
   hubu spend reconcile billed --claim-id ID --provider-reference REF --evidence TEXT --actual-vendor-cost-amount INTEGER --actual-vendor-cost-scale SCALE [--currency USD] --price-model-snapshot-json JSON --provider-request-id ID --artifact-reference REF
   hubu spend reconcile not-billed --claim-id ID --provider-reference REF --evidence TEXT
 
---actual-vendor-cost takes the exact provider cost as a decimal, such as 0.0031 (up to 18 decimal places, never rounded). The deprecated --actual-vendor-cost-cents CENTS and --unit-price-cents CENTS flags still work in place of --actual-vendor-cost and --unit-price.
+--actual-vendor-cost takes the exact provider cost as a decimal, such as 0.0031 (up to 18 decimal places, never rounded).
 
 The provider reference and evidence are stored with the atomic settlement or release. A billed resolution also records the exact integer vendor-cost coefficient, decimal scale, ISO currency, full frozen pricing snapshot, provider request id, and artifact reference. Hubu rounds budget consumption up only beyond six decimal places (micro-units); a human-confirmed overrun is recorded rather than discarded. Do not include vendor credentials or sensitive payloads."
     );
@@ -4254,6 +4218,10 @@ Example:
 
 #[cfg(test)]
 mod tests {
+    fn test_money(cents: i64) -> serde_json::Value {
+        serde_json::json!({"units":(i128::from(cents)*10000).to_string(),"scale":6,"currency":"usd"})
+    }
+
     use super::*;
 
     fn no_ask() -> Result<bool> {
@@ -5003,10 +4971,10 @@ mod tests {
             "budget_id": "bgt_0123456789ab",
             "agent_id": "agt_0123456789ab",
             "status": status,
-            "amount_limit_cents": total,
-            "consumed_amount_cents": consumed,
-            "frozen_amount_cents": frozen,
-            "remaining_amount_cents": total - consumed - frozen,
+            "amount_limit": test_money(total),
+            "consumed_amount": test_money(consumed),
+            "frozen_amount": test_money(frozen),
+            "remaining_amount": test_money(total - consumed - frozen),
             "current_version_id": format!("bgv_{revision:012}"),
             "current_revision": revision,
             "starting_at": "2026-08-28T00:00:00+00:00",
@@ -5020,7 +4988,7 @@ mod tests {
             "revision": revision,
             "predecessor_version_id": format!("bgv_{predecessor_revision:012}"),
             "predecessor_revision": predecessor_revision,
-            "amount_limit_cents": total,
+            "amount_limit": test_money(total),
             "effective_at": "2026-08-28T00:00:00+00:00",
             "actor": "usr_0123456789ab",
             "source": "hubu-api:update-budget-limit",
@@ -5035,28 +5003,23 @@ mod tests {
         assert_eq!(
             money_at(
                 &json!({
-                    "remaining_amount": {"units": "-1", "scale": 6, "currency": "usd", "display": "-0.000001"},
-                    "remaining_amount_cents": -1
+                    "remaining_amount": {"units": "-1", "scale": 6, "currency": "usd", "display": "-0.000001"}
                 }),
-                "remaining_amount_cents"
+                "remaining_amount"
             )
             .unwrap(),
             "-$0.000001"
         );
         assert_eq!(
             money_at(
-                &json!({ "remaining_amount_cents": -1 }),
-                "remaining_amount_cents"
+                &json!({ "remaining_amount": test_money(-1) }),
+                "remaining_amount"
             )
             .unwrap(),
             "-$0.01"
         );
         // Legacy cents beyond the micro-unit range are reported, not wrapped.
-        assert!(money_at(
-            &json!({ "remaining_amount_cents": i64::MIN }),
-            "remaining_amount_cents"
-        )
-        .is_err());
+        assert!(money_at(&json!({ "remaining_amount": i64::MIN }), "remaining_amount").is_err());
     }
 
     #[test]

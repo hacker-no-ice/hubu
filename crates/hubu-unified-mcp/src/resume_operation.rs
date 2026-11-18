@@ -238,7 +238,7 @@ mod tests {
                 .resolve_or_allocate(
                     &identity,
                     "hubu_submit_spend",
-                    &json!({"account_id":"account-1","amount_cents":100,"reason":"test"}),
+                    &json!({"account_id":"account-1","amount": "1.00","reason":"test"}),
                 )
                 .unwrap();
             registry

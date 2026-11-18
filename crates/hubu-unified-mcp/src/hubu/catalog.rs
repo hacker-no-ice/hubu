@@ -89,10 +89,6 @@ fn all_tool_definitions() -> Vec<Value> {
             "Create a budget owned by one agent. Budgets are per currency: spend only counts against a budget in its own currency. Requires a human click.",
             json_schema(json!({
                 "amount": spend_amount_input_schema(),
-                "amount_cents": {
-                    "type": "integer",
-                    "description": "Deprecated whole-cent limit; send `amount` instead, never both."
-                },
                 "currency": { "type": "string", "enum": ["usd", "usdc"] },
                 "agent_id": { "type": "string" },
                 "starting_at": { "type": "string" },
@@ -113,13 +109,8 @@ fn all_tool_definitions() -> Vec<Value> {
                 "budget_id": { "type": "string", "minLength": 1 },
                 "expected_revision": { "type": "integer", "minimum": 1 },
                 "amount_limit": spend_amount_input_schema(),
-                "amount_limit_cents": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": "Deprecated whole-cent cap; send `amount_limit` instead, never both."
-                },
                 "reason": { "type": "string" }
-            }), &["budget_id", "expected_revision"]),
+            }), &["budget_id", "expected_revision", "amount_limit"]),
         ),
         read_tool(
             "hubu_budget_history",
@@ -133,10 +124,6 @@ fn all_tool_definitions() -> Vec<Value> {
             "Set an advisory spending target for the active Hubu user. Requires a human click.",
             json_schema(json!({
                 "amount": spend_amount_input_schema(),
-                "amount_cents": {
-                    "type": "integer",
-                    "description": "Deprecated whole-cent amount; send `amount` instead, never both."
-                },
                 "starting_at": { "type": "string" },
                 "ending_before": { "type": "string" }
             })),
@@ -161,16 +148,12 @@ fn all_tool_definitions() -> Vec<Value> {
             json_schema_required(json!({
                 "account_id": { "type": "string" },
                 "amount": spend_amount_input_schema(),
-                "amount_cents": {
-                    "type": "integer",
-                    "description": "Deprecated whole-cent amount; send `amount` instead, never both."
-                },
                 "currency": spend_currency_input_schema(),
                 "reason": { "type": "string" },
                 "merchant": { "type": "string" },
                 "execution_scope": execution_scope_input_schema(),
                 "lease_profile": { "type": "string" }
-            }), &["account_id", "reason"]),
+            }), &["account_id", "amount", "reason"]),
         ),
         write_tool(
             "hubu_authorize_spend",
@@ -178,16 +161,12 @@ fn all_tool_definitions() -> Vec<Value> {
             json_schema_required(json!({
                 "account_id": { "type": "string" },
                 "amount": spend_amount_input_schema(),
-                "amount_cents": {
-                    "type": "integer",
-                    "description": "Deprecated whole-cent amount; send `amount` instead, never both."
-                },
                 "currency": spend_currency_input_schema(),
                 "reason": { "type": "string" },
                 "merchant": { "type": "string" },
                 "execution_scope": execution_scope_input_schema(),
                 "lease_profile": { "type": "string" }
-            }), &["account_id", "reason"]),
+            }), &["account_id", "amount", "reason"]),
         ),
         read_tool(
             "hubu_get_spend_approval",
@@ -288,7 +267,7 @@ fn all_tool_definitions() -> Vec<Value> {
                             },
                             "required": ["amount", "scale", "currency"]
                         },
-                        "actual_vendor_cost_cents": { "type": "integer", "minimum": 0 },
+
                         "provider_request_id": { "type": "string" },
                         "price_model_snapshot": {
                             "type": "object",
@@ -296,11 +275,7 @@ fn all_tool_definitions() -> Vec<Value> {
                         },
                         "artifact_reference": { "type": "string" }
                     },
-                    "required": ["provider_request_id", "price_model_snapshot", "artifact_reference"],
-                    "oneOf": [
-                        { "required": ["actual_vendor_cost"], "not": { "required": ["actual_vendor_cost_cents"] } },
-                        { "required": ["actual_vendor_cost_cents"], "not": { "required": ["actual_vendor_cost"] } }
-                    ]
+                    "required": ["actual_vendor_cost", "provider_request_id", "price_model_snapshot", "artifact_reference"]
                 }
             }), &["claim_id", "provider_reference", "evidence", "receipt"]),
         ),
@@ -358,7 +333,7 @@ pub(crate) fn spend_amount_input_schema() -> Value {
     json!({
         "type": "string",
         "pattern": "^\\d+(\\.\\d{1,6})?$",
-        "description": "Exact decimal amount in the spend currency, at most 6 decimal places (for example \"0.005\"). Provide `amount` or the deprecated `amount_cents`, not both."
+        "description": "Exact decimal amount in the spend currency, at most 6 decimal places (for example \"0.005\")."
     })
 }
 

@@ -1026,6 +1026,7 @@ dependencies = [
  "anyhow",
  "base64",
  "chrono",
+ "hubu-common",
  "hubu-feedback",
  "libc",
  "reqwest",
