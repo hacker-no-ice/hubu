@@ -122,6 +122,16 @@ jobs:
           [[ -n "${toolchain}" ]]
           rustup toolchain install "${toolchain}" --profile minimal
 
+      - name: Prepare evidence encryption
+        run: |
+          set -euo pipefail
+          openssl="$(brew --prefix openssl@3)/bin/openssl"
+          if [[ ! -x "${openssl}" ]]; then
+            brew install openssl@3
+          fi
+          "${openssl}" x509 -in break-hubu/archive-recipient.pem -noout -checkend 0
+          echo "EVIDENCE_OPENSSL=${openssl}" >> "${GITHUB_ENV}"
+
       - name: Run every proof kit
         id: kits
         env:
@@ -130,8 +140,12 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           set +e -uo pipefail
-          ./break-hubu/run-all.sh --release "${RELEASE}" --kits "${KITS}" --output "${RUNNER_TEMP}/evidence" --cache "${RUNNER_TEMP}/build-cache"
+          umask 077
+          ./break-hubu/run-all.sh --release "${RELEASE}" --kits "${KITS}" --output "${RUNNER_TEMP}/evidence" --cache "${RUNNER_TEMP}/build-cache" > "${RUNNER_TEMP}/proof-kit.log" 2>&1
           code=$?
+          set -e
+          mkdir -p "${RUNNER_TEMP}/evidence"
+          mv "${RUNNER_TEMP}/proof-kit.log" "${RUNNER_TEMP}/evidence/run-all.log"
           # 1 = a claim does not hold, 2 = a claim was not tested. Both are
           # results to publish; anything else is a harness failure.
           if [[ "${code}" -gt 2 ]]; then
@@ -140,13 +154,24 @@ jobs:
           fi
           echo "exit=${code}" >> "${GITHUB_OUTPUT}"
 
-      - name: Keep the raw public evidence
-        if: always()
+      - name: Encrypt the evidence on the runner
+        id: encrypt
+        if: ${{ !cancelled() && steps.kits.outcome != 'skipped' }}
+        run: |
+          set -euo pipefail
+          umask 077
+          tar -C "${RUNNER_TEMP}" -czf - evidence |
+            "${EVIDENCE_OPENSSL}" cms -encrypt -binary -aes-256-gcm -outform DER \
+              -recip break-hubu/archive-recipient.pem -keyopt rsa_padding_mode:oaep -keyopt rsa_oaep_md:sha256 \
+              -out "${RUNNER_TEMP}/proof-kit-evidence.cms"
+
+      - name: Retain the encrypted evidence
+        if: ${{ !cancelled() && steps.encrypt.outcome == 'success' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: proof-kit-evidence-${{ needs.resolve.outputs.release }}
-          path: ${{ runner.temp }}/evidence
-          if-no-files-found: warn
+          name: encrypted-proof-kit-evidence-${{ needs.resolve.outputs.release }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/proof-kit-evidence.cms
+          if-no-files-found: error
           retention-days: 30
 
       - name: Render the card
@@ -181,7 +206,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "${RUNNER_TEMP}/card"
-          git add -A break-hubu/cards site/app/releases "site/evidence/${RELEASE}"
+          git add -A "break-hubu/cards/${RELEASE}.md" "break-hubu/cards/${RELEASE}.json" "site/app/releases/${RELEASE}"
           git diff --cached --binary > "${RUNNER_TEMP}/card/card.patch"
           cp "break-hubu/cards/${RELEASE}.json" "${RUNNER_TEMP}/card/verdicts.json"
           if git status --porcelain --untracked-files=all | grep -qv '^[AM] '; then
@@ -251,7 +276,7 @@ jobs:
           body="$(printf '%s\n\n%s\n\n%s\n\n%s\n' \
             "The System card workflow ran the public proof kits (${MODE} run) against the published \`${RELEASE}\` tag on macOS and rendered its system card. Run: ${RUN_URL}" \
             "${table}" \
-            "**Human review required** (see break-hubu/release-checklist.md): inspect every result, including incomplete or contradicted claims; check the caveats and known limits still describe this release; and decide whether to publish a disclosed failure or fix it first. Do not alter acceptance criteria to manufacture a pass." \
-            "PRs opened with GITHUB_TOKEN do not start other workflows. This run already linted and tested the site with the card. To run the required checks here, push a commit to this branch or close and reopen the PR. After merging, attach \`site/evidence/${RELEASE}/evidence.zip\` to the GitHub release.")"
+            "**Human review required** (see break-hubu/release-checklist.md): move the encrypted evidence artifact into private storage and inspect every result, including incomplete or contradicted claims; check the caveats and known limits still describe this release; and decide whether to publish a disclosed failure or fix it first. Do not alter acceptance criteria to manufacture a pass." \
+            "PRs opened with GITHUB_TOKEN do not start other workflows. This run already linted and tested the site with the card. To run the required checks here, push a commit to this branch or close and reopen the PR.")"
           gh pr create --repo "${GITHUB_REPOSITORY}" --base "${BASE_BRANCH}" --head "${branch}" \
             --title "${subject}" --body "${body}"

@@ -200,7 +200,7 @@ The implementation is intentionally inspectable: scenario steps live in each
 and [verification.py](verification.py). Those four shared files total about
 650 lines, in addition to scenario code and episode assertions; the shared work
 is not hidden from episode-size accounting. The separate
-[report renderer](render-report.py) only turns captured public evidence into
-website data and a plain ZIP; it is not part of the attack runtime. Run verifiers with ordinary Python,
+[report renderer](render-report.py) turns captured results into the public analysis and plain-text card.
+Keep raw outputs in a private archive. Run verifiers with ordinary Python,
 without `-O`, `-OO` or `PYTHONOPTIMIZE`; optimized mode cannot produce a passing verdict.
 There is no automatic PR proof-kit job or custom replay viewer.
