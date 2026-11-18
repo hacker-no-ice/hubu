@@ -123,8 +123,10 @@ pub(super) fn route_tool_call_v1(
             {
                 bail!("hubu_apply_policy requires explicit policy_yaml");
             }
-            if arguments.get("daily_limit_cents").is_some() {
-                bail!("hubu_apply_policy does not accept daily_limit_cents; provide explicit policy_yaml");
+            if arguments.get("daily_limit_cents").is_some()
+                || arguments.get("daily_limit").is_some()
+            {
+                bail!("hubu_apply_policy does not accept daily_limit or daily_limit_cents; provide explicit policy_yaml");
             }
             let mut arguments = arguments;
             arguments["source"] = json!("mcp");
@@ -297,6 +299,12 @@ pub(super) fn route_tool_call_v1(
         }
         "hubu_reconcile_vendor_billed_claim" => {
             require_trusted_client_approval(config, name)?;
+            if arguments
+                .get("receipt")
+                .is_some_and(|receipt| receipt.get("actual_vendor_cost_cents").is_some())
+            {
+                bail!("actual_vendor_cost_cents has been removed; provide actual_vendor_cost");
+            }
             post_request_with(
                 "/spend/executor/settle",
                 arguments,
@@ -388,8 +396,8 @@ pub(crate) fn validate_model_spend_arguments(arguments: &Value) -> Result<()> {
             );
         }
     }
-    if arguments.contains_key("amount") && arguments.contains_key("amount_cents") {
-        bail!("provide amount or the deprecated amount_cents, not both");
+    if arguments.contains_key("amount_cents") {
+        bail!("amount_cents has been removed; provide amount as a decimal string");
     }
     Ok(())
 }
@@ -653,15 +661,11 @@ fn budget_update_request(arguments: Value) -> Result<(String, Value)> {
         || arguments.keys().any(|key| {
             !matches!(
                 key.as_str(),
-                "budget_id"
-                    | "expected_revision"
-                    | "amount_limit"
-                    | "amount_limit_cents"
-                    | "reason"
+                "budget_id" | "expected_revision" | "amount_limit" | "reason"
             )
         })
     {
-        bail!("hubu_update_budget accepts only budget_id, expected_revision, amount_limit (or the deprecated amount_limit_cents), and optional reason");
+        bail!("hubu_update_budget accepts only budget_id, expected_revision, amount_limit, and optional reason");
     }
     let budget_id = public_budget_id_argument(arguments, "hubu_update_budget")?;
     let expected_revision = arguments
@@ -669,28 +673,14 @@ fn budget_update_request(arguments: Value) -> Result<(String, Value)> {
         .and_then(Value::as_u64)
         .filter(|revision| *revision >= 1)
         .ok_or_else(|| anyhow!("hubu_update_budget requires expected_revision >= 1"))?;
-    let amount_field = match (
-        arguments.get("amount_limit"),
-        arguments.get("amount_limit_cents"),
-    ) {
-        (Some(_), Some(_)) => bail!(
-            "hubu_update_budget accepts amount_limit or the deprecated amount_limit_cents, not both"
-        ),
-        (Some(decimal), None) => {
-            let decimal = decimal.as_str().ok_or_else(|| {
-                anyhow!("hubu_update_budget amount_limit must be a decimal string")
-            })?;
-            ("amount_limit", json!(decimal))
-        }
-        (None, Some(cents)) => {
-            let cents = cents
-                .as_i64()
-                .filter(|amount| *amount >= 1)
-                .ok_or_else(|| anyhow!("hubu_update_budget requires amount_limit_cents >= 1"))?;
-            ("amount_limit_cents", json!(cents))
-        }
-        (None, None) => bail!("hubu_update_budget requires amount_limit"),
-    };
+    let amount = arguments
+        .get("amount_limit")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("hubu_update_budget requires amount_limit as a decimal string"))?;
+    let parsed_amount = amount.parse::<hubu_common::money::Amount>()?;
+    if parsed_amount.units() <= 0 {
+        bail!("hubu_update_budget amount_limit must be positive");
+    }
     let reason = arguments
         .get("reason")
         .map(|reason| {
@@ -701,7 +691,7 @@ fn budget_update_request(arguments: Value) -> Result<(String, Value)> {
         })
         .transpose()?;
     let mut body = json!({ "expected_revision": expected_revision });
-    body[amount_field.0] = amount_field.1;
+    body["amount_limit"] = json!(amount);
     if let Some(reason) = reason {
         body["reason"] = json!(reason);
     }

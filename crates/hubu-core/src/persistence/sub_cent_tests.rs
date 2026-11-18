@@ -346,15 +346,12 @@ fn e11_limit_update_compares_committed_usage_exactly() {
     let legacy_limit: i64 = repo
         .conn
         .query_row(
-            "SELECT amount_limit_cents FROM budget_versions WHERE id = ?1",
+            "SELECT amount_limit FROM budget_versions WHERE id = ?1",
             params![updated.current.version.id.to_string()],
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(
-        legacy_limit, 1,
-        "sub-cent limits project to the 1-cent minimum"
-    );
+    assert_eq!(legacy_limit, 3100, "sub-cent limits retain exact units");
 }
 
 #[test]
@@ -393,12 +390,12 @@ fn e14_expired_sub_cent_hold_returns_its_exact_amount() {
     let frozen_cents: i64 = repo
         .conn
         .query_row(
-            "SELECT frozen_amount_cents FROM budget_balances WHERE budget_id = ?1",
+            "SELECT frozen_amount FROM budget_balances WHERE budget_id = ?1",
             params![created.budget.id.to_string()],
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(frozen_cents, 1, "frozen projects up to whole cents");
+    assert_eq!(frozen_cents, 3500, "frozen retains exact units");
 
     let later = Utc::now() + Duration::seconds(5);
     repo.expire_overdue_budget_holds(later).unwrap();

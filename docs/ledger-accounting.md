@@ -50,9 +50,8 @@ budget_charge × 10^(18 − charge scale) = signed expense delta at scale 18 + r
 
 The ledger history API exposes the recorded charge as
 `budget_charge_delta: {units, scale}`, so this invariant can be checked per
-row. Its `budget_charge_delta_cents` is a compatibility projection: the change
-in the rounded-up cent total of the row's correction chain, so the rows of a
-chain always sum to the coverage report's cent projection.
+row. Coverage reports carry exact money objects; cent projections have been
+removed. Legacy scale-2 ledger metadata is still read at its recorded scale.
 
 The original exact receipt, provider request ID, pricing snapshot, artifact
 reference and human reconciliation evidence remain attached to provider

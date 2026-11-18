@@ -35,7 +35,11 @@ struct Entry {
     settled_cost: Value,
     sha256: String,
     cost_semantics: String,
-    budget_charge_cents: i64,
+    #[serde(
+        alias = "budget_charge_cents",
+        deserialize_with = "deserialize_budget_charge"
+    )]
+    budget_charge: Value,
     sequence: u64,
     filename: String,
 }
@@ -239,12 +243,50 @@ pub(crate) fn ledger_rows(client: &BackendClient, record: &Value) -> Result<Vec<
     bail!("ledger pagination limit exceeded")
 }
 
+/// Validate the canonical accounting amount separately from the exact provider
+/// cost, whose scale can differ. Recompute display from integer units.
+fn canonical_budget_charge(money: &Value) -> Result<Value> {
+    ensure!(
+        money["scale"] == 6 && money["currency"] == "usd",
+        "invalid settled budget charge scale/currency"
+    );
+    let units = string(money, "units")?;
+    ensure!(
+        !units.is_empty() && units.bytes().all(|b| b.is_ascii_digit()),
+        "invalid settled budget charge units"
+    );
+    let units = units
+        .parse::<i64>()
+        .map_err(|_| anyhow!("invalid settled budget charge range"))?;
+    Ok(
+        json!({"units":units.to_string(),"scale":6,"currency":"usd","display":hubu_common::money::Amount::from_units(units).display()}),
+    )
+}
+
+/// Existing on-disk gallery manifests remain readable. New manifests and
+/// receipts only serialize the canonical money object.
+fn deserialize_budget_charge<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Value, D::Error> {
+    let value = Value::deserialize(deserializer)?;
+    let value = if let Some(cents) = value.as_i64() {
+        let units = cents
+            .checked_mul(10000)
+            .filter(|units| *units >= 0)
+            .ok_or_else(|| serde::de::Error::custom("invalid legacy gallery charge"))?;
+        json!({"units":units.to_string(),"scale":6,"currency":"usd"})
+    } else {
+        value
+    };
+    canonical_budget_charge(&value).map_err(serde::de::Error::custom)
+}
+
 pub(crate) fn validate_accounting(
     record: &Value,
     fresh: &Value,
     rows: &[Value],
     authorization_id: &str,
-) -> Result<(Value, String, String, i64)> {
+) -> Result<(Value, String, String, Value)> {
     for field in [
         "authorization_id",
         "status",
@@ -292,9 +334,7 @@ pub(crate) fn validate_accounting(
         "ledger provider identity mismatch"
     );
     exact_cents(&row["effective_cost"])?;
-    let budget_charge = receipt["budget_charge_cents"]
-        .as_i64()
-        .ok_or_else(|| anyhow!("invalid settled budget charge"))?;
+    let budget_charge = canonical_budget_charge(&receipt["budget_charge"])?;
     Ok((
         row["effective_cost"].clone(),
         transaction_id.into(),
@@ -455,7 +495,7 @@ fn export(config: Config, options: Options) -> Result<Value> {
             settled_cost: cost.clone(),
             sha256: string(&artifact, "sha256")?.into(),
             cost_semantics: "operation_total_at_export_not_per_image".into(),
-            budget_charge_cents: budget_charge,
+            budget_charge: budget_charge.clone(),
             sequence: 0,
             filename: String::new(),
         };
@@ -621,7 +661,7 @@ mod tests {
             settled_cost: json!({"amount":"6","scale":2,"currency":"usd"}),
             sha256: format!("{:x}", Sha256::digest(bytes)),
             cost_semantics: "operation_total_at_export_not_per_image".into(),
-            budget_charge_cents: 6,
+            budget_charge: json!({"units":"60000","scale":6,"currency":"usd","display":"0.06"}),
             sequence: 1,
             filename: "01-flux-2k-draft-6c.png".into(),
         };
@@ -649,5 +689,28 @@ mod tests {
         let link = root.path().join("link");
         std::os::unix::fs::symlink(root.path(), &link).unwrap();
         assert!(reject_symlink(&link).is_err());
+    }
+    #[test]
+    fn stored_legacy_charge_is_read_as_exact_money_without_reemitting_cents() {
+        #[derive(Deserialize, Serialize)]
+        struct Stored {
+            #[serde(
+                alias = "budget_charge_cents",
+                deserialize_with = "deserialize_budget_charge"
+            )]
+            budget_charge: Value,
+        }
+        let stored: Stored = serde_json::from_value(json!({"budget_charge_cents":6})).unwrap();
+        let value = serde_json::to_value(stored).unwrap();
+        assert_eq!(value["budget_charge"]["units"], "60000");
+        assert!(value.get("budget_charge_cents").is_none());
+        for money in [
+            json!({"units":"-1","scale":6,"currency":"usd"}),
+            json!({"units":"1000","scale":2,"currency":"usd"}),
+            json!({"units":1000,"scale":6,"currency":"usd"}),
+            json!({"units":"9223372036854775808","scale":6,"currency":"usd"}),
+        ] {
+            assert!(canonical_budget_charge(&money).is_err());
+        }
     }
 }

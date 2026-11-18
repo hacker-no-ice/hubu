@@ -305,7 +305,7 @@ fn watch_once_uses_selected_profile_without_human_capabilities() {
                 break;
             }
         }
-        let body = serde_json::to_string(&json!({"schema_version":"hubu-watch-v1", "observed_at":"2026-10-08T03:12:07Z", "currency":"usd", "rows":[{"agent_id":"agt_watch", "name":"image-agent", "currency":"usd", "budget_count":1,"budget_id":"bgt_watch", "limit_cents":200,"available_cents":192,"frozen_cents":8,"consumed_cents":0}],"recent_events":[{"id":"decision", "created_at":"2026-10-08T03:12:05Z", "agent_id":"agt_watch", "agent_name":"image-agent", "provider":{"id":"provider:black-forest-labs:flux","display_name":"Black Forest Labs FLUX"},"rule_ids":["draft_images"],"status":"claimed", "reserved_cents":8}]})).unwrap();
+        let body = serde_json::to_string(&json!({"schema_version":"hubu-watch-v1", "observed_at":"2026-10-08T03:12:07Z", "currency":"usd", "rows":[{"agent_id":"agt_watch", "name":"image-agent", "currency":"usd", "budget_count":1,"budget_id":"bgt_watch", "limit":{"units":"2000000","scale":6,"currency":"usd"},"available":{"units":"1920000","scale":6,"currency":"usd"},"frozen":{"units":"80000","scale":6,"currency":"usd"},"consumed":{"units":"0","scale":6,"currency":"usd"}}],"recent_events":[{"id":"decision", "created_at":"2026-10-08T03:12:05Z", "agent_id":"agt_watch", "agent_name":"image-agent", "provider":{"id":"provider:black-forest-labs:flux","display_name":"Black Forest Labs FLUX"},"rule_ids":["draft_images"],"status":"claimed", "reserved":{"units":"80000","scale":6,"currency":"usd"}}]})).unwrap();
         write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
         String::from_utf8(request).unwrap()
     });
