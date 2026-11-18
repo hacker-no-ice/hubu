@@ -1340,10 +1340,10 @@ impl SpendAuthorizationResolver for MockHubu {
                 hold_id: format!("hold-{spend_auth_token_id}"),
                 budget_id: "sandbox-budget".into(),
                 status: "frozen".into(),
-                amount_cents: 1,
-                consumed_amount_cents: 0,
-                frozen_amount_cents: 1,
-                remaining_amount_cents: 0,
+                amount: crate::hubu::ExactAmount::from_units(10000, "usd"),
+                consumed_amount: crate::hubu::ExactAmount::from_units(0, "usd"),
+                frozen_amount: crate::hubu::ExactAmount::from_units(10000, "usd"),
+                remaining_amount: crate::hubu::ExactAmount::from_units(0, "usd"),
             },
         })
     }

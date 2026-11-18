@@ -13,8 +13,10 @@ The suite has three parts:
   responses, error codes, and retry decisions, including exact sub-cent
   amounts and malformed v4.5 amounts that Hubu must reject.
 - [`fixtures/hubu-executor-conformance-v4.4.json`](../fixtures/hubu-executor-conformance-v4.4.json):
-  the legacy corpus for executors that still send whole cents. Select it with
-  `--corpus`. A target passes the contract check when its guidance lists the
+  a small legacy variant descriptor for executors that still send whole cents.
+  The runner reuses scenarios S01–S12, setup and assertions from the v4.5
+  corpus and converts only executor amount encoding and scenario identity
+  prefixes. Select it with `--corpus`. A target passes the contract check when its guidance lists the
   corpus version in `supported_protocol_versions`.
 - [`scripts/hubu-executor-conformance.py`](../scripts/hubu-executor-conformance.py):
   a runner that needs only the Python standard library. It replays the corpus

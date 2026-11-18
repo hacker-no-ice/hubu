@@ -40,9 +40,9 @@ fn admission_void_restores_budget_replays_and_is_visible_without_a_posting() {
     assert_eq!(record["ledger_transaction_ids"], json!([]));
     assert!(record["claim"].is_null());
     let watch = read(&state, "/watch");
-    assert_eq!(watch["rows"][0]["available_cents"], 500);
-    assert_eq!(watch["rows"][0]["frozen_cents"], 0);
-    assert_eq!(watch["rows"][0]["consumed_cents"], 0);
+    assert_eq!(test_amount_units(&watch["rows"][0]["available"]), 5000000);
+    assert_eq!(test_amount_units(&watch["rows"][0]["frozen"]), 0);
+    assert_eq!(test_amount_units(&watch["rows"][0]["consumed"]), 0);
     assert_eq!(
         watch["recent_events"][0]["release_reason"],
         "executor_rejected_before_claim"
@@ -76,8 +76,8 @@ fn claimed_authorization_cannot_be_voided_or_credited() {
     );
     let snapshot = get_executor_claim(Some(&claim.claim_id), &state).unwrap();
     assert_eq!(snapshot.status, "claimed");
-    assert_eq!(snapshot.spend.budget_hold.frozen_amount_cents, 500);
-    assert_eq!(snapshot.spend.budget_hold.remaining_amount_cents, 0);
+    assert_eq!(snapshot.spend.budget_hold.frozen_amount.whole_cents(), 500);
+    assert_eq!(snapshot.spend.budget_hold.remaining_amount.whole_cents(), 0);
     std::fs::remove_file(path).ok();
 }
 

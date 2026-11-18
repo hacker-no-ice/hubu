@@ -2,7 +2,7 @@
 //!
 //! Hubu responses carry exact money objects (`{units, scale, currency,
 //! display}`) beside legacy `*_cents` projections. The CLI reads the exact
-//! object and falls back to the cent field from older servers. By default it
+//! object. By default it
 //! shows the exact adaptive form (`$0.005`, `$10.00`); `--round cents` shows
 //! cent-rounded values instead, marked with `≈` when rounding changed them.
 
@@ -88,30 +88,12 @@ impl Money {
     }
 }
 
-/// Read one amount from a response object: the exact money object named by
-/// `legacy_field` without its `_cents` suffix, or the legacy cent field from
-/// an older server.
-pub(crate) fn money_field(value: &Value, legacy_field: &str) -> Result<Money> {
-    let exact_field = legacy_field
-        .strip_suffix("_cents")
-        .ok_or_else(|| anyhow!("`{legacy_field}` is not a cent field"))?;
-    let currency = value
-        .get("currency")
-        .and_then(Value::as_str)
-        .and_then(|currency| currency.to_ascii_lowercase().parse().ok());
-    if let Some(exact) = value.get(exact_field).filter(|exact| exact.is_object()) {
-        return money_object(exact)
-            .map(|money| Money {
-                currency: money.currency.or(currency),
-                ..money
-            })
-            .with_context(|| format!("server response has an invalid `{exact_field}`"));
-    }
-    let cents = value
-        .get(legacy_field)
-        .and_then(Value::as_i64)
-        .ok_or_else(|| anyhow!("server response missing `{legacy_field}`"))?;
-    Ok(Money::new(Amount::from_legacy_cents(cents)?, currency))
+/// Read one canonical money object from a response.
+pub(crate) fn money_field(value: &Value, field: &str) -> Result<Money> {
+    let exact = value
+        .get(field)
+        .ok_or_else(|| anyhow!("server response missing `{field}`"))?;
+    money_object(exact).with_context(|| format!("server response has an invalid `{field}`"))
 }
 
 /// Parse an exact money object `{units, scale, currency}`.
@@ -300,24 +282,21 @@ mod tests {
     }
 
     #[test]
-    fn reads_exact_objects_and_falls_back_to_legacy_cents() {
+    fn reads_only_exact_money_objects() {
         let current = json!({
             "consumed_amount": {"units": "3100", "scale": 6, "currency": "usdc", "display": "0.0031"},
             "consumed_amount_cents": 1
         });
         assert_eq!(
-            money_field(&current, "consumed_amount_cents").unwrap(),
+            money_field(&current, "consumed_amount").unwrap(),
             Money::new("0.0031".parse().unwrap(), Some(Currency::Usdc))
         );
-        let older = json!({"consumed_amount_cents": 125, "currency": "usd"});
-        assert_eq!(
-            money_field(&older, "consumed_amount_cents").unwrap(),
-            usd("1.25")
-        );
+        let older = json!({"consumed_amount_cents":125,"currency":"usd"});
+        assert!(money_field(&older, "consumed_amount").is_err());
         assert!(money_field(&json!({}), "consumed_amount_cents").is_err());
         assert!(money_field(
             &json!({"consumed_amount": {"units": "1", "scale": 2, "currency": "usd"}}),
-            "consumed_amount_cents"
+            "consumed_amount"
         )
         .is_err());
     }
