@@ -4,7 +4,7 @@
 
 [advisories]
 ignore = [
-    # Owner: Yizheng Zhang. Review by 2027-02-18. Remove when HUB-383 replaces
+    # Owner: hacker-no-ice. Review by 2027-02-18. Remove when HUB-383 replaces
     # direct chrono use and Temporal no longer pulls chrono through prost-wkt.
     # See docs/operations/repository-security.md.
     { id = "RUSTSEC-2026-0543", reason = "unmaintained chrono (no known vulnerability, no safe upgrade); direct workspace use plus temporalio 0.6 via prost-wkt; replacement tracked in HUB-383" },
