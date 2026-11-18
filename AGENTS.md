@@ -143,3 +143,13 @@ alone. Resolve a review thread only after its change is
 verified, committed, pushed, and described in a reply that includes the fix
 commit and verification. Leave ambiguous, conflicting, optional, or
 out-of-scope requests unresolved with concise technical reasoning.
+
+## Owner identity
+
+Refer to the repository owner by the GitHub handle `hacker-no-ice`, never by
+their legal name. This applies to specs, documentation, runbooks, code
+comments, and owner fields in configuration, such as the owners of
+`deny.toml` exceptions.
+
+Leave the existing copyright line in `LICENSE-MIT` and recorded evidence,
+such as committed transcripts, as they are.
