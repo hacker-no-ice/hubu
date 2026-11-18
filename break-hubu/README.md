@@ -31,6 +31,9 @@ verified** when some do, **Unverified** when none have been shown, and **Does
 not hold** when any challenge fails. Out-of-scope challenges are not counted;
 planned, blocked and untested ones count as not holding.
 
+The adversary these claims are measured against, and what is out of scope,
+are described in the [threat model](../docs/threat-model.md).
+
 Each stable release gets a card in [cards/](cards/), starting with
 [v0.2.4](cards/v0.2.4.md), that ties measured outcomes to their exact scripts,
 environment and evidence. Targets in the episode READMEs are assertions to test,

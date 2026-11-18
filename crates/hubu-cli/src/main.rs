@@ -595,6 +595,7 @@ fn prompt_trust_client_approval() -> Result<bool> {
     println!("Let Codex use Hubu setup and admin tools?");
     println!("  These let Codex register agents, apply policies, change budgets and spending");
     println!("  targets, and reconcile claims. Codex asks you to approve each call.");
+    println!("  Not a security boundary if Codex can run the hubu CLI: see docs/threat-model.md.");
     println!("  Change later with --trust-client-approval or --no-trust-client-approval.");
     print!("Enable? [y/N]: ");
     std::io::stdout().flush().context("flush prompt")?;
@@ -3990,6 +3991,7 @@ Notes:
   Omit --operation-key-db until a guarded workflow requires the key-redacted preallocation bridge. The option configures only a non-secret path and never creates or reads a key.
   The command writes the only supported agent-facing surface, hubu-unified-mcp.
   Setup/admin tools (register agents, apply policies, change budgets and spending targets, reconcile claims) are not needed for normal agent spend workflows.
+  Disabling them is not a security boundary for an agent that can run the hubu CLI with this profile's credentials; see docs/threat-model.md.
   On first interactive setup the command asks once whether to enable them (default: no). Re-runs keep the choice stored in the managed Codex config block.
   --trust-client-approval and --no-trust-client-approval override the stored choice. Without a terminal, or with --dry-run, nothing is asked and the stored choice (or off) is used.
   Start hubu-server with the same HUBU_AUTH_TOKEN_FILE, HUBU_APPROVAL_TOKEN_FILE, and HUBU_RECONCILIATION_TOKEN_FILE shown by this command.
