@@ -5,19 +5,17 @@ Offline presentation only: no server calls, verdict changes, database access or 
 The kits and the claims they measure come from site/app/releases/claims.json; the
 release and source commit come from the captured run provenance. The release notes
 page (site/app/releases/<release>/page.tsx) must already exist. This writes its report
-data, its analysis page wrapper, an evidence bundle and archive, and a plain-text card.
+data, its analysis page wrapper, and a plain-text card.
 
 Usage:
   python3 break-hubu/render-report.py EVIDENCE_DIR
   python3 break-hubu/render-report.py --supplement EVIDENCE_DIR   # add kits the release's card lacks
 """
 import argparse
-from datetime import datetime
-import io
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import re
-import zipfile
 
 from verification import Evidence
 
@@ -34,21 +32,10 @@ export default function ReleaseAnalysisPage() {
   return <ReleaseAnalysis report={report} />;
 }
 '''
-BUNDLE_SCHEMA = 'hubu-proof-evidence-bundle-v1'
-ZIP_TIME = (1980, 1, 1, 0, 0, 0)
-BASE = None  # Set per release in main(): /break-hubu/evidence/<release>
 
 
 def read(path):
     return json.loads(path.read_text())
-
-
-def public_summary(path, release):
-    summary = read(path)
-    # These are runner annotations, not Hubu protocol evidence or measured outcomes.
-    summary['documentary_identity_gap'] = f'Does not hold in {release}: runtime/thread-bound account authority is a known gap that will be addressed in future releases.'
-    summary['authority_boundary'] = 'Normal bearer has broad administrative authority; configuration stays fixed. More narrowly scoped executor authority is planned for future releases.'
-    return summary
 
 
 def micros(value):
@@ -64,10 +51,6 @@ def usd(value):
     return f'{sign}${whole}.{str(fraction).zfill(6).rstrip("0").ljust(2, "0")}'
 
 
-def link(episode, name, label):
-    return {'label': label, 'href': f'{BASE}/{episode}/{name}'}
-
-
 def outcomes(records):
     # Retries belong to their original logical attempt. Unresolved outcomes are never denials.
     latest = {r['label']: r for r in records if r.get('route') == '/spend/authorize'}
@@ -76,8 +59,9 @@ def outcomes(records):
     return allowed, denied, len(latest) - allowed - denied
 
 
+
 def observations(episode, evidence, records):
-    initial, final = evidence.snapshot('initial'), evidence.snapshot('final')
+    final = evidence.snapshot('final')
     budget = final['budget']
     consumed, remaining = (micros(budget[key]) for key in ('consumed_amount', 'remaining_amount'))
     allowed, denied, errors = outcomes(records)
@@ -85,68 +69,25 @@ def observations(episode, evidence, records):
     metrics = [{'label': 'Ledger postings', 'value': str(postings)},
                {'label': 'Consumed', 'value': usd(consumed)},
                {'label': 'Remaining', 'value': usd(remaining)}]
-    trace = link(episode, 'requests.jsonl', 'Captured request trace')
     if episode == 'ep01-runaway':
-        points = [{'attempt': 0, 'consumedMicrousd': micros(initial['budget']['consumed_amount'])}]
-        seen, settled = set(), set()
-        for record in records:
-            if record.get('route') == '/spend/authorize':
-                seen.add(record['label'])
-            body = record.get('body') or {}
-            settlement = body.get('settlement_id')
-            if record.get('route') == '/spend/executor/settle' and record.get('status') == 200 and settlement not in settled:
-                points.append({'attempt': len(seen), 'consumedMicrousd': micros(body['spend']['budget_hold']['consumed_amount'])})
-                settled.add(settlement)
-        if points[-1]['attempt'] != len(seen):
-            points.append({'attempt': len(seen), 'consumedMicrousd': consumed})
-        visual = dict(kind='consumption', budgetMicrousd=micros(initial['budget']['amount_limit']), points=points, denied=denied, source=trace)
         summary = f'{postings} ledger postings consumed {usd(consumed)}. {denied} authorization attempts were denied; {errors} remained unresolved.'
     elif episode == 'ep02-last-cent':
         if len(final['authorizations']) != 1:
             raise ValueError('Cost comparison requires exactly one public authorization')
         receipt = final['authorizations'][0]['receipt']
         authorized, recorded, overrun = (micros(receipt[key]) for key in ('authorized_max', 'budget_charge', 'overrun_amount'))
-        visual = dict(kind='costs', authorizedMicrousd=authorized, recordedMicrousd=recorded, overrunMicrousd=overrun,
-                      reconciled=final['authorizations'][0]['claim']['reconciliation_outcome'] == 'vendor_billed',
-                      source=link(episode, 'snapshots/final/authorizations-001.json', 'Public authorization and receipt'))
         summary = f'{usd(recorded)} recorded against {usd(authorized)} authorized; {usd(overrun)} overrun visible. {denied} new requests were denied.'
-        if visual['reconciled']:
+        if final['authorizations'][0]['claim']['reconciliation_outcome'] == 'vendor_billed':
             summary += ' The public claim records owner reconciliation.'
     elif episode == 'ep03-crash-recovery':
-        claim = evidence.snapshot('before-crash')['authorizations'][0]['claim']
-        start = datetime.fromisoformat(claim['claimed_at'])
-        events = [(claim['claimed_at'], 'Claim confirmed', 'Public claim state before the crash.')]
-        for event in evidence.jsonl('process-events.jsonl'):
-            if datetime.fromisoformat(event['at']) < start:
-                continue
-            if event['event'] == 'kill':
-                detail = f'{event["signal"]}; process exit {event["exit_code"]}.'
-            elif event['event'] == 'fixture_saved':
-                detail = 'Durable synthetic receipt; no provider call.'
-            else:
-                detail = 'Same released binary and database.'
-            events.append((event['at'], {'kill': 'Hubu process killed', 'restart': 'Hubu restarted', 'fixture_saved': 'Fixture saved'}[event['event']], detail))
-        for record in records:
-            if record['label'] in ('snapshot-after-restart-budgets', 'snapshot-expired-budgets', 'snapshot-final-budgets'):
-                state = record['body']['budgets'][0]
-                detail = f'Frozen {usd(micros(state["frozen_amount"]))}; consumed {usd(micros(state["consumed_amount"]))}.'
-                events.append((record['ended_at'], {'snapshot-after-restart-budgets': 'Public state after restart', 'snapshot-expired-budgets': 'Public state after lease expiry', 'snapshot-final-budgets': 'Final public state'}[record['label']], detail))
-            elif record['type'] == 'owner_cli':
-                events.append((record['at'], 'Owner reconciliation' if record['label'] == 'owner-first' else 'Identical owner retry', f'CLI exit {record["exit_code"]}.'))
-        visual = dict(kind='timeline', events=[dict(label=label, elapsedSeconds=(datetime.fromisoformat(at) - start).total_seconds(), detail=detail) for at, label, detail in sorted(events)],
-                      source={'label': 'Process events and public state exports (ZIP)', 'href': BASE + '/evidence.zip'})
         frozen = micros(evidence.snapshot('after-restart')['budget']['frozen_amount'])
         summary = f'{usd(frozen)} remained frozen after restart. Final accounting contains {postings} posting totaling {usd(consumed)}, with owner and retry checks recorded separately.'
     elif episode == 'ep04-many-clients':
         frozen = micros(evidence.snapshot('burst')['budget']['frozen_amount'])
-        visual = dict(kind='burst', allowed=allowed, denied=denied, errors=errors, reservedMicrousd=frozen,
-                      consumedMicrousd=consumed, remainingMicrousd=remaining, source=trace)
         summary = f'{allowed} allowed, {denied} denied, {errors} unresolved. {usd(frozen)} reserved during the burst; {usd(consumed)} consumed after settlement.'
     else:
-        return None, metrics, None
-    return summary, metrics, visual
-
-
+        return None, metrics
+    return summary, metrics
 
 
 def load_catalog(root):
@@ -189,82 +130,25 @@ def episode_report(directory, episode, caveat):
     if verdict not in ('holds', 'holds-with-caveat', 'does-not-hold', 'not-tested'):
         raise ValueError('Unknown claim verdict')
     row = dict(verdict=verdict, execution=result.get('execution', 'incomplete'), caveat=caveat,
-               summary='', metrics=[], visual=None, terminal=None, evidence=[])
+               summary='', metrics=[])
     checks = result.get('checks', [])
-    failures = [check['name'] for check in checks if check['status'] != 'supported']
+    failures = sum(check['status'] != 'supported' for check in checks)
     try:
-        summary, row['metrics'], row['visual'] = observations(episode, evidence, evidence.jsonl('requests.jsonl'))
+        summary, row['metrics'] = observations(episode, evidence, evidence.jsonl('requests.jsonl'))
         if summary is None:
-            held = len(checks) - len(failures)
+            held = len(checks) - failures
             summary = f'{held} of {len(checks)} checks held.'
             row['metrics'] = [{'label': 'Checks held', 'value': f'{held} / {len(checks)}'}]
         row['summary'] = summary
-    except (OSError, ValueError, KeyError, IndexError, TypeError) as error:
-        row['summary'] = 'Report observations incomplete: ' + str(error) + '.'
+    except (OSError, ValueError, KeyError, IndexError, TypeError):
+        row['summary'] = 'The captured observations were incomplete.'
         row['execution'] = 'incomplete'
         if verdict != 'does-not-hold':
             row['verdict'] = 'not-tested'
     if failures:
-        # Check names state the property; label them so a failure never reads as a pass.
-        label = 'Failed checks' if verdict == 'does-not-hold' else 'Unconfirmed checks'
-        row['summary'] = f'{label}: ' + '; '.join(name[0].lower() + name[1:] for name in failures[:2]) + '. ' + row['summary']
-    transcript = directory / 'transcript.txt'
-    if transcript.exists():
-        excerpts = re.findall(r'^\[[^\]]+\] \$ [^\n]+ budget list\n.*?^CLI exit=\d+\n', transcript.read_text(), re.M | re.S)
-        row['terminal'] = excerpts[-1] if excerpts else None
-    for name, label in [('transcript.txt', 'Full transcript'), ('requests.jsonl', 'Request trace'), ('result.json', 'Verification result'),
-                        ('snapshots/final/ledger-001.json', 'Final ledger (page 1)'), ('snapshots/final/budgets.json', 'Final budget'), ('run.json', 'Run provenance')]:
-        if (directory / name).exists():
-            row['evidence'].append(link(episode, name, label))
+        label = 'Failed' if verdict == 'does-not-hold' else 'Unconfirmed'
+        row['summary'] = f'{label} checks: {failures}. ' + row['summary']
     return row
-
-
-def public_files(directory):
-    # Never recurse/copy a runtime wholesale. Private database/config/credential files are excluded.
-    names = ('run.json', 'result.json', 'verification.txt', 'transcript.txt', 'requests.jsonl', 'process-events.jsonl',
-             'executor-guidance.json', 'clients.jsonl', 'workload.json', 'victim.json')
-    paths = [directory / name for name in names if (directory / name).is_file()]
-    paths += [path for path in (directory / 'snapshots').glob('*/*') if re.fullmatch(r'(?:budgets\.json|budget\.txt|policy\.txt|(?:ledger|authorizations)-\d{3}\.json)', path.name)]
-    paths += list((directory / 'fixtures').glob('*.json'))
-    for path in paths:
-        if path.is_symlink() or not path.is_file():
-            raise ValueError('Evidence must be ordinary files: ' + str(path))
-    return paths
-
-
-def read_bundle(path):
-    if not path.exists():
-        return {}
-    bundle = read(path)
-    if bundle.get('schema') != BUNDLE_SCHEMA:
-        raise ValueError('Unsupported evidence bundle schema')
-    return bundle['files']
-
-
-def write_store(store, release, files):
-    # One text bundle the site build unpacks to the public evidence URLs, and one
-    # deterministic archive for download. Neither duplicates the other in git history.
-    store.mkdir(parents=True, exist_ok=True)
-    ordered = dict(sorted(files.items()))
-    (store / 'bundle.json').write_text(json.dumps({'schema': BUNDLE_SCHEMA, 'release': release, 'files': ordered},
-                                                  ensure_ascii=False, indent=1) + '\n')
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as archive:
-        for name, text in ordered.items():
-            info = zipfile.ZipInfo(name, ZIP_TIME); info.compress_type = zipfile.ZIP_DEFLATED; info.external_attr = 0o644 << 16
-            archive.writestr(info, text)
-    (store / 'evidence.zip').write_bytes(buffer.getvalue())
-
-
-def collect(evidence_dir, episode):
-    directory = evidence_dir / episode
-    files = {}
-    for source in public_files(directory):
-        try:
-            files[f'{episode}/{source.relative_to(directory).as_posix()}'] = source.read_text(encoding='utf-8')
-        except UnicodeDecodeError as error:
-            raise ValueError(f'Evidence must be UTF-8 text: {source}') from error
-    return files
 
 
 def claims_section(catalog, report, documented):
@@ -299,8 +183,7 @@ def plain_card(report, catalog, documented=None):
              f'| Release | `{report["release"]}` |',
              f'| Released source | `{report["sourceCommit"]}` |',
              f'| Kits revisions | {", ".join(f"`{r}`" for r in revisions)} |',
-             f'| Recorded | {report["recordedAt"]} |',
-             f'| Host | `{report["host"]}` |', '']
+             f'| Recorded | {report["recordedAt"]} |', '']
     lines += claims_section(catalog, report, documented or {})
     lines += ['## Experiments', '', '| Experiment | Verdict | Observed |', '| --- | --- | --- |']
     for episode in kits:
@@ -312,9 +195,15 @@ def plain_card(report, catalog, documented=None):
               '- Fixture receipts control cost and timing. They do not establish real invoices, truthful',
               '  executors, provider-side exactly-once execution or task quality. Gongbu, Temporal, MCP',
               '  transport, provider adapters and actual provider billing are outside these kits.', '',
-              '## Reproduce', '', '```sh', 'git clone https://github.com/hacker-no-ice/hubu.git', 'cd hubu',
-              f'git checkout {revisions[-1]}', f'./break-hubu/run-all.sh --release {report["release"]}', '```', '',
-              f'Evidence: `site/evidence/{report["release"]}/` in the repository and `{BASE}/evidence.zip` on hubustack.dev.', '']
+              '## Reproduce', '', 'Follow the [proof-kit prerequisites](../README.md).', '',
+              '```sh', 'git clone https://github.com/hacker-no-ice/hubu.git', 'cd hubu', '```', '']
+    lines += ['```sh', f'git checkout {report["kitsCommit"]}',
+              f'./break-hubu/run-all.sh --release {report["release"]}', '```', '']
+    for supplement in report.get('supplements', []):
+        selection = ','.join(supplement['episodes'])
+        lines += ['```sh', f'git checkout {supplement["kitsCommit"]}',
+                  f'./break-hubu/run-all.sh --release {report["release"]} --kits {selection}', '```', '']
+    lines += ['Each kit runs its verifier. The kit README explains how to verify saved output again.', '']
     return '\n'.join(lines)
 
 
@@ -327,7 +216,6 @@ def load_report(path):
 
 
 def main():
-    global BASE
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('evidence', type=Path)
     parser.add_argument('--supplement', action='store_true',
@@ -352,7 +240,6 @@ def main():
         parser.error('Captured CLI and server versions must match the released source')
     if len({run['kits_commit'] for run in runs}) != 1 or not re.fullmatch('[0-9a-f]{40}', runs[0]['kits_commit']):
         parser.error('All included episodes must use one exact kits commit')
-    BASE = '/break-hubu/evidence/' + RELEASE
     release_dir = root / 'site/app/releases' / RELEASE
     if not (release_dir / 'page.tsx').is_file():
         parser.error(f'Write the {RELEASE} release notes page first: {release_dir / "page.tsx"}')
@@ -361,10 +248,9 @@ def main():
         existing = load_report(report_path) if report_path.exists() else None
     except ValueError:
         parser.error(f'{report_path} already holds a measured report that this renderer cannot read; preserve prior publication')
-    store = root / 'site/evidence' / RELEASE
     card_path = root / 'break-hubu/cards' / (RELEASE + '.md')
-    recorded = min(run['started_at'] for run in runs).split('T')[0] + ' UTC'
-    host = ', '.join(sorted({run['platform'] for run in runs}))
+    recorded = min(datetime.fromisoformat(run['started_at'].replace('Z', '+00:00')) for run in runs)
+    recorded = recorded.astimezone(timezone.utc).date().isoformat() + ' UTC'
     if args.supplement:
         if existing is None:
             parser.error(f'{RELEASE} has no measured card to supplement; render without --supplement')
@@ -374,30 +260,19 @@ def main():
         if overlap:
             parser.error('Supplements never replace published results; already measured: ' + ', '.join(overlap))
         report = existing
-        report.setdefault('supplements', []).append(dict(kitsCommit=runs[0]['kits_commit'], recordedAt=recorded, host=host, episodes=present))
-        files = read_bundle(store / 'bundle.json')
+        report.setdefault('supplements', []).append(dict(kitsCommit=runs[0]['kits_commit'], recordedAt=recorded, episodes=present))
     else:
         if existing is not None:
             parser.error(f'{report_path} already holds a measured report; use --supplement to add kits it lacks')
-        if card_path.exists() or store.exists():
-            parser.error(f'{RELEASE} already has a published card or evidence; preserve prior publication')
-        report = dict(release=RELEASE, sourceCommit=SOURCE, kitsCommit=runs[0]['kits_commit'], recordedAt=recorded, host=host,
-                      evidenceBundle={'label': 'Download all evidence (ZIP)', 'href': BASE + '/evidence.zip'}, episodes={})
-        files = {}
+        if card_path.exists():
+            parser.error(f'{RELEASE} already has a published card; preserve prior publication')
+        report = dict(release=RELEASE, sourceCommit=SOURCE, kitsCommit=runs[0]['kits_commit'],
+                      recordedAt=recorded, episodes={})
     for episode in present:
         report['episodes'][episode] = episode_report(args.evidence / episode, episode, catalog['kits'][episode]['boundary'])
-        additions = collect(args.evidence, episode)
-        if set(additions) & set(files):
-            parser.error(f'Evidence for {episode} already exists in the {RELEASE} bundle')
-        files.update(additions)
-    summary = args.evidence / 'summary.json'
-    if summary.exists():
-        name = 'summary.json' if not args.supplement else f'summary-{runs[0]["kits_commit"][:12]}.json'
-        files[name] = json.dumps(public_summary(summary, RELEASE), indent=2) + '\n'
     report['episodes'] = {episode: report['episodes'][episode] for episode in catalog['kits'] if episode in report['episodes']}
-    write_store(store, RELEASE, files)
-    source = 'import type { ReleaseReport } from "../report-types";\nexport type { EpisodeId, EpisodeResult, EvidenceVisual, Verdict } from "../report-types";\n\n'
-    source += '// Generated from captured public evidence by break-hubu/render-report.py.\n'
+    source = 'import type { ReleaseReport } from "../report-types";\nexport type { EpisodeId, EpisodeResult, Verdict } from "../report-types";\n\n'
+    source += '// Generated from proof-kit results by break-hubu/render-report.py.\n'
     source += REPORT_PREFIX + json.dumps(report, ensure_ascii=False, indent=2) + ';\n'
     report_path.write_text(source)
     wrapper = release_dir / 'report/page.tsx'
@@ -410,7 +285,7 @@ def main():
             'claims': {claim['id']: claim_tier(claim['id'], catalog, report, documented) for claim in catalog['claims']},
             'verdicts': {episode: row['verdict'] for episode, row in report['episodes'].items()}}
     (root / 'break-hubu/cards' / (RELEASE + '.json')).write_text(json.dumps(card, indent=2) + '\n')
-    print(('Supplemented' if args.supplement else 'Prepared') + ' website report and evidence:', store)
+    print(('Supplemented' if args.supplement else 'Prepared') + ' website report:', report_path)
 
 
 if __name__ == '__main__':
