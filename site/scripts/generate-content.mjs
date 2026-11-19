@@ -36,6 +36,8 @@ const unpublishedSources = new Set([
   "docs/operations/gongbu-sandbox.md", // developer manual-test sandbox
   "docs/operations/live-provider-testing.md", // superseded; the site redirects to live-providers
   "docs/operations/publishing-releases.md", // maintainer release publication runbook
+  "docs/specs/README.md", // index of internal release tech specs
+  "docs/specs/v0.3.0-owner-agent-separation.md", // internal v0.3.0 tech spec
 ]);
 
 const repoRelative = (file) => path.relative(repoRoot, file).split(path.sep).join("/");
