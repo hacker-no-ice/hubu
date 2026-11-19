@@ -1,45 +1,99 @@
-# Manual release-card checklist
+# Release-card checklist
 
-Use this after selecting a stable release's exact final source and before
-promoting its claims. These experiments are a manual release activity, not a PR
-CI job or required gate. Product regression tests remain in normal bug-fix PRs.
+Every stable release gets a measured system card. The
+[System card workflow](../.github/workflows/system-card.yml) does the
+measurement; a human reviews and publishes it. These experiments are a release
+activity, not a PR CI gate. Product regression tests remain in normal bug-fix
+PRs.
 
-1. Confirm the published tag, full source commit, lockfile, pinned toolchain and
-   binary version outputs. When qualifying a new release, review the four claims
-   and public contract, update the explicit release pin in
-   [bootstrap.py](bootstrap.py), and commit the reviewed kits revision first.
-   The current scripts accept only v0.2.4; changing `--release` alone is insufficient.
-2. Start from a clean checkout of that kits revision and follow the
-   [prerequisites](README.md). Run every kit against the unchanged release:
+## Before publishing the release
+
+1. Write the release notes page, `site/app/releases/vX.Y.Z/page.tsx`, with a
+   `report.ts` beside it that exports `report = null as ReleaseReport | null`.
+   The page's system card uses `MeasuredClaims`, so until the measured report
+   lands no challenge counts as holding: claims show **Unverified**, or **Does
+   not hold** for challenges the page marks as documented known gaps. Add the release to
+   `/releases` and point the navbar version badge at it.
+2. Review the four claims, caveats and known limits against the new release.
+   If the public contract the kits exercise changed (for example a new
+   executor contract), update the kits first; `bootstrap.py` refuses a release
+   whose binaries report a contract the kits do not support, and every claim
+   then stays **not tested**.
+
+## After the stable release is published
+
+3. The Release workflow's completion starts the System card workflow. It
+   resolves the newest stable release (drafts and prereleases never count),
+   skips it if a card already exists or a card PR is open, and otherwise:
+   - builds the exact published tag on macOS with its pinned toolchain,
+     verifying the tag commit against the published release notes;
+   - runs every kit from a clean checkout of `main` and uploads the evidence
+     as an encrypted workflow artifact;
+   - renders `site/app/releases/vX.Y.Z/report.ts`, the
+     `/releases/vX.Y.Z/report` analysis page and `cards/vX.Y.Z.md` with
+     claim tiers and reproduction instructions;
+   - lints and tests the site, then opens a `system-card/vX.Y.Z` PR.
+
+   When the catalog gains kits after a release was measured, the workflow
+   runs only the missing kits and renders with `--supplement`, which adds
+   their results without changing any published one.
+
+   To measure a release by hand, dispatch the workflow with its tag, or run
+   the kits locally, then move the output directories to private storage:
 
    ```sh
-   ./break-hubu/run-all.sh --release v0.2.4 --output /tmp/new-release-card-evidence
+   ./break-hubu/run-all.sh --release vX.Y.Z --output /tmp/vX.Y.Z-card-evidence
+   python3 break-hubu/render-report.py /tmp/vX.Y.Z-card-evidence
+   # later, for kits the published card lacks:
+   ./break-hubu/run-all.sh --release vX.Y.Z --kits ep05-denied-operation --output /tmp/vX.Y.Z-more
+   python3 break-hubu/render-report.py --supplement /tmp/vX.Y.Z-more
    ```
 
-3. Inspect every result, including incomplete or contradicted assertions. Check
-   raw public ledger/authorization pages, budget coverage, request outcomes,
-   operator interventions, exact arithmetic, tool/host metadata and cleanup.
-   Reuse earlier evidence only if tested source and configuration match exactly;
-   otherwise rerun. Never carry a stale verified label forward.
-4. Write the versioned repository card and website release page: a concise
-   summary of the repository changelog, claims and system card, with a link to
-   the full analysis. Add the release to `/releases`, linked from the landing
-   page, and update the version badge beside the small navbar logo to link to
-   the corresponding native release page. Start with v0.2.4; earlier releases are
-   not backfilled. Record release
-   source and kits commit separately. Keep failures, known identity and
-   bearer limitations, shortened leases, mock execution and untested surfaces
-   visible. Link genuine product failures to engineering issues; preserve the
-   original release's result when a later release fixes them.
-5. Run the repository documentation/site checks and review the PR. A human
-   decides whether to release with a disclosed failure or fix it first. A broken
-   experiment stays **not tested**. Do not alter acceptance criteria to manufacture
-   a pass.
-6. After approved source/site changes merge, verify the live report, attach the
-   plain evidence archive to the corresponding GitHub release, and add its card
-   and reproduction links to the release notes. Preserve existing release assets
-   and notes. Check downloads from an unauthenticated browser. Promotion follows
-   publication; videos are optional. Posting or messaging needs separate authorization.
+4. Review the PR. Save its run’s encrypted artifact to private storage before
+   the 30-day Actions expiry. Inspect every result, including incomplete or
+   contradicted assertions. Review ledger and authorization pages, budget coverage,
+   request outcomes, operator interventions, exact arithmetic, tool and host
+   metadata. Check that the caveats and known limits (identity, bearer
+   authority, serial request handling, shortened leases, mock execution,
+   untested surfaces) still describe this release, and edit the copy if not.
+   Link genuine product failures to engineering issues. A human decides
+   whether to publish a disclosed failure or fix it first. A broken experiment
+   stays **not tested**; never alter acceptance criteria to manufacture a pass,
+   and never carry an earlier release's verdict forward.
 
-The v0.2.4 card is a follow-up to an existing stable release. Publication remains
-pending until its source/site PR has merged and the live links are checked.
+   PRs opened with `GITHUB_TOKEN` do not start other workflows. The System
+   card run already tested the site; push a commit or close and reopen the PR
+   to run the required checks.
+
+5. After the PR merges and the site deploys, verify the live methodology and
+   reproduction commands. Link the analysis and proof kits in the release notes.
+   Keep captured logs, request traces, state exports, and archives out of the
+   website, public repository, and GitHub release attachments.
+
+## Private evidence archive
+
+The workflow uses [the public archive recipient certificate](archive-recipient.pem)
+to encrypt the compressed run directory. It saves its console output inside
+that encrypted archive. Keep the corresponding private key in owner-only
+storage and keep a secure backup. Preserve old keys for archives that still
+need them when rotating the recipient certificate.
+
+Download the encrypted artifact from its workflow run. Extract the GitHub
+artifact ZIP to obtain `proof-kit-evidence.cms`. Use OpenSSL 3 and the matching
+private key to decrypt it in a private directory.
+
+```sh
+umask 077
+openssl cms -decrypt -binary -inform DER -in proof-kit-evidence.cms \
+  -recip /path/to/archive-recipient.pem -inkey /path/to/archive-key.pem \
+  -out evidence.tar.gz
+tar -xzf evidence.tar.gz
+```
+
+Label each saved archive with the release and run ID. Review and sanitize any
+copy before sharing it on request, then rerun the verifier on the sanitized
+copy to check that it remains usable.
+
+The workflow needs the repository setting that allows GitHub Actions to create
+pull requests. The renderer refuses to replace an existing measured report or
+card.

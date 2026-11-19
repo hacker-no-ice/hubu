@@ -247,7 +247,7 @@ fn preallocated_operation_key_mismatch_stops_before_backend_traffic() {
         json!({
             "authorization": {
                 "account_id": "account-offline",
-                "amount_cents": 3,
+                "amount": "0.03",
                 "reason": "fixed offline fixture"
             },
             "execution": {
@@ -292,7 +292,7 @@ fn preallocated_operation_key_flows_once_through_governed_execution_and_restarts
     let arguments = json!({
         "authorization": {
             "account_id": "account-offline",
-            "amount_cents": 3,
+            "amount": "0.03",
             "reason": "fixed offline fixture"
         },
         "execution": {
@@ -414,7 +414,7 @@ fn prebound_crash_gap_recovers_once_without_duplicate_backend_mutation() {
     let arguments = json!({
         "authorization": {
             "account_id": "account-offline",
-            "amount_cents": 3,
+            "amount": "0.03",
             "reason": "fixed prebound crash-gap fixture"
         },
         "execution": {
@@ -647,7 +647,7 @@ fn durable_operations_cover_codex_claude_and_safe_transient_replay() {
     let codex = mcp.call_with_meta(
         20,
         "hubu_authorize_spend",
-        json!({"account_id":"account-93","amount_cents":25,"reason":"codex durable"}),
+        json!({"account_id":"account-93","amount": "0.25","reason":"codex durable"}),
         json!({"callId":"codex-durable-call"}),
     );
     let codex_handle = codex["result"]["structuredContent"]["operation_handle"]
@@ -692,7 +692,7 @@ fn durable_operations_cover_codex_claude_and_safe_transient_replay() {
     let claude = mcp.call_with_meta(
         22,
         "hubu_authorize_spend",
-        json!({"account_id":"account-93","amount_cents":25,"reason":"claude durable"}),
+        json!({"account_id":"account-93","amount": "0.25","reason":"claude durable"}),
         json!({"claudecode/toolUseId":"toolu_durable_claude"}),
     );
     let claude_handle = claude["result"]["structuredContent"]["operation_handle"]
@@ -746,7 +746,7 @@ fn ambiguous_provider_outcome_reconciles_then_fails_without_replacement_permissi
     let authorized = mcp.call_with_meta(
         30,
         "hubu_authorize_spend",
-        json!({"account_id":"account-93","amount_cents":25,"reason":"ambiguous provider"}),
+        json!({"account_id":"account-93","amount": "0.25","reason":"ambiguous provider"}),
         json!({"callId":"ambiguous-provider-call"}),
     );
     let handle = authorized["result"]["structuredContent"]["operation_handle"]
@@ -788,7 +788,7 @@ fn transient_dispatch_exhaustion_reaches_safe_terminal_failure() {
     let authorized = mcp.call_with_meta(
         40,
         "hubu_authorize_spend",
-        json!({"account_id":"account-93","amount_cents":25,"reason":"retry exhaustion"}),
+        json!({"account_id":"account-93","amount": "0.25","reason":"retry exhaustion"}),
         json!({"callId":"dispatch-exhaustion-call"}),
     );
     let handle = authorized["result"]["structuredContent"]["operation_handle"]
@@ -823,7 +823,7 @@ fn malformed_successful_create_response_replays_exact_request() {
     let authorized = mcp.call_with_meta(
         45,
         "hubu_authorize_spend",
-        json!({"account_id":"account-93","amount_cents":25,"reason":"ambiguous create response"}),
+        json!({"account_id":"account-93","amount": "0.25","reason":"ambiguous create response"}),
         json!({"callId":"malformed-create-response-call"}),
     );
     let handle = authorized["result"]["structuredContent"]["operation_handle"]
@@ -870,7 +870,7 @@ fn invalid_successful_observations_retry_without_create_replay() {
     let authorized = mcp.call_with_meta(
         47,
         "hubu_authorize_spend",
-        json!({"account_id":"account-93","amount_cents":25,"reason":"invalid observation recovery"}),
+        json!({"account_id":"account-93","amount": "0.25","reason":"invalid observation recovery"}),
         json!({"callId":"invalid-observation-recovery-call"}),
     );
     let handle = authorized["result"]["structuredContent"]["operation_handle"]
@@ -935,7 +935,7 @@ fn invalid_observation_exhaustion_is_terminal_without_create_replay() {
     let authorized = mcp.call_with_meta(
         49,
         "hubu_authorize_spend",
-        json!({"account_id":"account-93","amount_cents":25,"reason":"invalid observation exhaustion"}),
+        json!({"account_id":"account-93","amount": "0.25","reason":"invalid observation exhaustion"}),
         json!({"callId":"invalid-observation-exhaustion-call"}),
     );
     let handle = authorized["result"]["structuredContent"]["operation_handle"]
@@ -981,7 +981,7 @@ fn unreadable_permanent_http_error_is_not_retried() {
     let authorized = mcp.call_with_meta(
         51,
         "hubu_authorize_spend",
-        json!({"account_id":"account-93","amount_cents":25,"reason":"unreadable permanent error"}),
+        json!({"account_id":"account-93","amount": "0.25","reason":"unreadable permanent error"}),
         json!({"callId":"unreadable-permanent-error-call"}),
     );
     let handle = authorized["result"]["structuredContent"]["operation_handle"]
@@ -1018,7 +1018,7 @@ fn permanent_dispatch_failure_is_terminal_without_retry() {
     let authorized = mcp.call_with_meta(
         50,
         "hubu_authorize_spend",
-        json!({"account_id":"account-93","amount_cents":25,"reason":"permanent failure"}),
+        json!({"account_id":"account-93","amount": "0.25","reason":"permanent failure"}),
         json!({"callId":"permanent-failure-call"}),
     );
     let handle = authorized["result"]["structuredContent"]["operation_handle"]
@@ -1079,7 +1079,7 @@ fn durable_admission_diagnostic_survives_replay_and_restart() {
     let authorized = first.call_with_meta(
         53,
         "hubu_authorize_spend",
-        json!({"account_id":"account-93","amount_cents":25,"reason":"durable admission diagnostic"}),
+        json!({"account_id":"account-93","amount": "0.25","reason":"durable admission diagnostic"}),
         json!({"callId":"durable-admission-diagnostic-call"}),
     );
     let handle = authorized["result"]["structuredContent"]["operation_handle"]
@@ -1291,7 +1291,7 @@ fn normalized_spend_wire_lifecycle_survives_redelivery_collision_and_restart() {
     );
     let arguments = json!({
         "account_id":"account-125",
-        "amount_cents":25,
+        "amount": "0.25",
         "reason":"HUB-125 wire lifecycle"
     });
 
@@ -1332,7 +1332,7 @@ fn normalized_spend_wire_lifecycle_survives_redelivery_collision_and_restart() {
     let collision = first.call_with_meta(
         12,
         "hubu_authorize_spend",
-        json!({"account_id":"account-125","amount_cents":30,"reason":"changed"}),
+        json!({"account_id":"account-125","amount": "0.30","reason":"changed"}),
         json!({"callId":"codex-call-125"}),
     );
     assert!(collision["error"]["message"]
@@ -1411,7 +1411,7 @@ fn normalized_spend_wire_lifecycle_survives_redelivery_collision_and_restart() {
     let claude_collision = first.call_with_meta(
         19,
         "hubu_submit_spend",
-        json!({"account_id":"account-125","amount_cents":30,"reason":"changed"}),
+        json!({"account_id":"account-125","amount": "0.30","reason":"changed"}),
         json!({"claudecode/toolUseId":"toolu_hub_125"}),
     );
     assert!(claude_collision["error"]["message"]
@@ -1483,7 +1483,7 @@ fn private_gongbu_continuation_binds_replays_restarts_and_redacts_recursively() 
     let authorized = first.call_with_meta(
         3,
         "hubu_authorize_spend",
-        json!({"account_id":"account-93","amount_cents":25,"reason":"HUB-126 binding"}),
+        json!({"account_id":"account-93","amount": "0.25","reason":"HUB-126 binding"}),
         json!({"callId":"hub-126-authorization"}),
     );
     let public_handle = authorized["result"]["structuredContent"]["operation_handle"]
@@ -1651,7 +1651,7 @@ fn exact_hub_88_catalog_and_representative_governed_artifact_flow() {
     let authorized = mcp.call_with_meta(
         5,
         "hubu_authorize_spend",
-        json!({"account_id":"account-93","amount_cents":25,"reason":"HUB-96 no-spend canary"}),
+        json!({"account_id":"account-93","amount": "0.25","reason":"HUB-96 no-spend canary"}),
         json!({"hubu.dev/platform-invocation":{
             "platform":"codex",
             "invocation_id":"invocation-96",
@@ -2099,7 +2099,7 @@ fn governed_hubu_to_gongbu_execution_fails_closed_without_hubu() {
     let listed = mcp.list_tools();
     assert_eq!(
         tool_names(&listed).len(),
-        43,
+        44,
         "unexpected catalog {listed}; Hubu requests: {:?}; Gongbu requests: {:?}",
         hubu.requests(),
         gongbu.requests()
@@ -2108,7 +2108,7 @@ fn governed_hubu_to_gongbu_execution_fails_closed_without_hubu() {
     let authorized = mcp.call_with_meta(
         3,
         "hubu_authorize_spend",
-        json!({"account_id":"account-93","amount_cents":25,"reason":"HUB-93 governed fixture"}),
+        json!({"account_id":"account-93","amount": "0.25","reason":"HUB-93 governed fixture"}),
         json!({"hubu.dev/platform-invocation":{
             "platform":"codex",
             "invocation_id":"invocation-93",

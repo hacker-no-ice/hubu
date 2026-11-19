@@ -1,4 +1,4 @@
-//! Upgrade drill for the v0.2.4 micro-unit migration on a real Gongbu
+//! Upgrade drill for the one-time canonical-column migration on a real Gongbu
 //! database. Opt-in; run with:
 //!
 //! ```text
@@ -33,37 +33,28 @@ fn private_copy(source: &Path, directory: &Path) -> PathBuf {
     copy
 }
 
-struct LegacyRow {
+struct MicroRow {
     execution_id: String,
-    authorized_minor: i64,
+    authorized_units: i64,
     pricing_snapshot: Value,
-    snapshot_minor: Option<i64>,
+    snapshot_units: Option<i64>,
     receipt: Option<(i64, Value)>,
 }
 
-fn legacy_rows(path: &Path) -> Vec<LegacyRow> {
+fn micro_rows(path: &Path) -> Vec<MicroRow> {
     let connection = Connection::open(path).unwrap();
-    let mut statement = connection
-        .prepare(
-            "SELECT e.execution_id, e.authorized_minor, e.pricing_snapshot_json,
-                    s.amount_minor, r.settlement_minor, r.pricing_snapshot_json
-             FROM executions e
-             LEFT JOIN hubu_authorization_snapshots s ON s.execution_id = e.execution_id
-             LEFT JOIN receipts r ON r.execution_id = e.execution_id
-             ORDER BY e.execution_id",
-        )
-        .unwrap();
+    let mut statement=connection.prepare("SELECT e.execution_id,e.authorized_units,e.pricing_snapshot_json,s.amount_units,r.settlement_units,r.pricing_snapshot_json FROM executions e LEFT JOIN hubu_authorization_snapshots s ON s.execution_id=e.execution_id LEFT JOIN receipts r ON r.execution_id=e.execution_id ORDER BY e.execution_id").expect("upgrade the source through the micro-unit release first");
     let rows = statement
         .query_map([], |row| {
             let pricing: String = row.get(2)?;
-            let receipt_minor: Option<i64> = row.get(4)?;
+            let receipt_units: Option<i64> = row.get(4)?;
             let receipt_snapshot: Option<String> = row.get(5)?;
-            Ok(LegacyRow {
+            Ok(MicroRow {
                 execution_id: row.get(0)?,
-                authorized_minor: row.get(1)?,
+                authorized_units: row.get(1)?,
                 pricing_snapshot: serde_json::from_str(&pricing).unwrap(),
-                snapshot_minor: row.get(3)?,
-                receipt: receipt_minor.map(|minor| {
+                snapshot_units: row.get(3)?,
+                receipt: receipt_units.map(|minor| {
                     (
                         minor,
                         serde_json::from_str(&receipt_snapshot.unwrap_or_default())
@@ -78,12 +69,11 @@ fn legacy_rows(path: &Path) -> Vec<LegacyRow> {
     rows
 }
 
-fn verify(repository: &Repository, rows: &[LegacyRow]) {
+fn verify(repository: &Repository, rows: &[MicroRow]) {
     for row in rows {
         let execution = repository.get_execution(&row.execution_id).unwrap();
         assert_eq!(
-            execution.authorized_units,
-            row.authorized_minor * 10_000,
+            execution.authorized_units, row.authorized_units,
             "{}",
             row.execution_id
         );
@@ -95,18 +85,15 @@ fn verify(repository: &Repository, rows: &[LegacyRow]) {
             row.pricing_snapshot
         );
         match repository.get_hubu_authorization_snapshot(&row.execution_id) {
-            Ok(authorization) => assert_eq!(
-                Some(authorization.amount_units),
-                row.snapshot_minor.map(|minor| minor * 10_000)
-            ),
-            Err(PersistenceError::NotFound) => assert!(row.snapshot_minor.is_none()),
+            Ok(authorization) => assert_eq!(Some(authorization.amount_units), row.snapshot_units),
+            Err(PersistenceError::NotFound) => assert!(row.snapshot_units.is_none()),
             Err(error) => panic!("{}: {error}", row.execution_id),
         }
-        if let Some((minor, settlement_snapshot)) = &row.receipt {
+        if let Some((units, settlement_snapshot)) = &row.receipt {
             let receipt = repository
                 .get_receipt_for_execution(&row.execution_id)
                 .unwrap();
-            assert_eq!(receipt.settlement_units, minor * 10_000);
+            assert_eq!(receipt.settlement_units, *units);
             // The settlement retry payload never changes.
             assert_eq!(&receipt.price_model_snapshot, settlement_snapshot);
         }
@@ -121,7 +108,7 @@ fn accounting_units_upgrade_drill_on_a_copy() {
     );
     let directory = tempfile::tempdir().unwrap();
     let path = private_copy(&source, directory.path());
-    let rows = legacy_rows(&path);
+    let rows = micro_rows(&path);
     assert!(!rows.is_empty(), "the drill copy has no executions");
     for open in ["migrate", "reopen"] {
         let repository = Repository::open(&path, Redactor::default()).unwrap();

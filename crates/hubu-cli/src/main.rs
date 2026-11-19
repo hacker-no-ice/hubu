@@ -27,12 +27,16 @@ mod money;
 mod save_folders;
 mod stack;
 mod terminal;
+mod ui;
 mod watch;
 
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:8787";
 const AUTH_TOKEN_ENV: &str = "HUBU_AUTH_TOKEN";
 const AUTH_TOKEN_FILE_ENV: &str = "HUBU_AUTH_TOKEN_FILE";
 const DEFAULT_AUTH_TOKEN_FILE: &str = "hubu.auth-token";
+const AGENT_TOKEN_ENV: &str = "HUBU_AGENT_TOKEN";
+const AGENT_TOKEN_FILE_ENV: &str = "HUBU_AGENT_TOKEN_FILE";
+const DEFAULT_AGENT_TOKEN_FILE: &str = "hubu.agent-token";
 const APPROVAL_TOKEN_ENV: &str = "HUBU_APPROVAL_TOKEN";
 const APPROVAL_TOKEN_FILE_ENV: &str = "HUBU_APPROVAL_TOKEN_FILE";
 const DEFAULT_APPROVAL_TOKEN_FILE: &str = "hubu.approval-token";
@@ -280,6 +284,7 @@ fn run() -> Result<()> {
         "gallery" => gallery::command(&client, args),
         "artifact" => artifact::command(&client, args),
         "folders" => save_folders::command(&hubu_home, args),
+        "ui" => ui::command(&client, &hubu_home, args),
         "version" | "--version" | "-V" => version(),
         "-h" | "--help" | "help" => {
             print_help();
@@ -329,6 +334,7 @@ fn init_codex(base_url: &str, explicit_base_url: bool, mut args: Vec<String>) ->
     let manual_gongbu_endpoint = take_value(&mut args, "--gongbu-endpoint");
     let manual_gongbu_token_file = take_value(&mut args, "--gongbu-token-file").map(PathBuf::from);
     let manual_token_file = take_value(&mut args, "--token-file").map(PathBuf::from);
+    let manual_agent_token_file = take_value(&mut args, "--agent-token-file").map(PathBuf::from);
     let manual_approval_token_file =
         take_value(&mut args, "--approval-token-file").map(PathBuf::from);
     let manual_reconciliation_token_file =
@@ -340,6 +346,7 @@ fn init_codex(base_url: &str, explicit_base_url: bool, mut args: Vec<String>) ->
             || manual_gongbu_endpoint.is_some()
             || manual_gongbu_token_file.is_some()
             || manual_token_file.is_some()
+            || manual_agent_token_file.is_some()
             || manual_approval_token_file.is_some()
             || manual_reconciliation_token_file.is_some()
             || manual_operation_state_path.is_some()
@@ -374,6 +381,13 @@ fn init_codex(base_url: &str, explicit_base_url: bool, mut args: Vec<String>) ->
         .map(|value| value.hubu_token_file.clone())
         .or(manual_token_file)
         .unwrap_or_else(default_codex_token_file_path);
+    // The unified MCP holds only the agent credential; the owner credential
+    // stays with the server and the owner's CLI.
+    let agent_token_file = match handoff.as_ref() {
+        Some(value) => value.agent_bearer_file()?.to_path_buf(),
+        None => manual_agent_token_file
+            .unwrap_or_else(|| default_codex_agent_token_file_path(&token_file)),
+    };
     let approval_token_file = handoff
         .as_ref()
         .map(|value| value.approval_token_file.clone())
@@ -409,6 +423,21 @@ fn init_codex(base_url: &str, explicit_base_url: bool, mut args: Vec<String>) ->
         ensure_auth_token_file(&token_file)
             .with_context(|| format!("prepare Hubu auth token file `{}`", token_file.display()))?
     };
+    let agent_token_file = if dry_run {
+        absolute_path(&agent_token_file)?
+    } else if handoff.is_some() {
+        absolute_existing_file_path(&agent_token_file)?
+    } else {
+        ensure_agent_token_file(&agent_token_file).with_context(|| {
+            format!(
+                "prepare Hubu agent token file `{}`",
+                agent_token_file.display()
+            )
+        })?
+    };
+    if !dry_run && agent_token_file == token_file {
+        bail!("the agent token file must differ from the owner token file");
+    }
     let reconciliation_token_file = if dry_run {
         absolute_path(&reconciliation_token_file)?
     } else if handoff.is_some() {
@@ -474,7 +503,7 @@ fn init_codex(base_url: &str, explicit_base_url: bool, mut args: Vec<String>) ->
     let block = codex_mcp::unified_block(codex_mcp::UnifiedConfig {
         mcp_server: &mcp_server,
         hubu_endpoint,
-        hubu_token_file: &token_file,
+        hubu_token_file: &agent_token_file,
         approval_token_file: &approval_token_file,
         reconciliation_token_file: &reconciliation_token_file,
         operation_state_path: &operation_state_path,
@@ -496,7 +525,7 @@ fn init_codex(base_url: &str, explicit_base_url: bool, mut args: Vec<String>) ->
     println!("  config: {}", config_path.display());
     println!("  mcp_server: {}", mcp_server.display());
     println!("  hubu_url: {hubu_endpoint}");
-    println!("  token_file: {}", token_file.display());
+    println!("  agent_token_file: {}", agent_token_file.display());
     println!("  approval_token_file: {}", approval_token_file.display());
     println!(
         "  reconciliation_token_file: {}",
@@ -514,8 +543,9 @@ fn init_codex(base_url: &str, explicit_base_url: bool, mut args: Vec<String>) ->
     println!("  next: restart Codex, then use /mcp or ask Codex to list Hubu tools");
     if stack_profile.is_none() {
         println!(
-            "  server: start hubu-server with {AUTH_TOKEN_FILE_ENV}={} {APPROVAL_TOKEN_FILE_ENV}={} {RECONCILIATION_TOKEN_FILE_ENV}={}",
+            "  server: start hubu-server with {AUTH_TOKEN_FILE_ENV}={} {AGENT_TOKEN_FILE_ENV}={} {APPROVAL_TOKEN_FILE_ENV}={} {RECONCILIATION_TOKEN_FILE_ENV}={}",
             token_file.display(),
+            agent_token_file.display(),
             approval_token_file.display(),
             reconciliation_token_file.display()
         );
@@ -593,6 +623,7 @@ fn prompt_trust_client_approval() -> Result<bool> {
     println!("Let Codex use Hubu setup and admin tools?");
     println!("  These let Codex register agents, apply policies, change budgets and spending");
     println!("  targets, and reconcile claims. Codex asks you to approve each call.");
+    println!("  Not a security boundary if Codex can run the hubu CLI: see docs/threat-model.md.");
     println!("  Change later with --trust-client-approval or --no-trust-client-approval.");
     print!("Enable? [y/N]: ");
     std::io::stdout().flush().context("flush prompt")?;
@@ -624,6 +655,17 @@ fn default_codex_token_file_path() -> PathBuf {
     }
 
     hubu_home().join(DEFAULT_AUTH_TOKEN_FILE)
+}
+
+fn default_codex_agent_token_file_path(auth_token_file: &Path) -> PathBuf {
+    if let Ok(path) = env::var(AGENT_TOKEN_FILE_ENV) {
+        return PathBuf::from(path);
+    }
+    auth_token_file
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .join(DEFAULT_AGENT_TOKEN_FILE)
 }
 
 fn default_codex_reconciliation_token_file_path(auth_token_file: &Path) -> PathBuf {
@@ -731,6 +773,10 @@ fn ensure_auth_token_file(path: &Path) -> Result<PathBuf> {
     ensure_token_file(path, AUTH_TOKEN_ENV, generate_local_auth_token)
 }
 
+fn ensure_agent_token_file(path: &Path) -> Result<PathBuf> {
+    ensure_token_file(path, AGENT_TOKEN_ENV, generate_local_agent_token)
+}
+
 fn ensure_reconciliation_token_file(path: &Path) -> Result<PathBuf> {
     ensure_token_file(
         path,
@@ -781,6 +827,10 @@ fn generate_local_auth_token() -> String {
 
 fn generate_local_reconciliation_token() -> String {
     format!("hubu_reconcile_{}", Uuid::new_v4().simple())
+}
+
+fn generate_local_agent_token() -> String {
+    format!("hubu_agent_{}", Uuid::new_v4().simple())
 }
 
 fn generate_local_approval_token() -> String {
@@ -2051,9 +2101,9 @@ fn budget_update(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
     }
     let current_revision = u64_at(current, "current_revision")?;
     let pinned_revision = expected_revision.unwrap_or(current_revision);
-    let current_total = money::money_field(current, "amount_limit_cents")?;
-    let consumed = money::money_field(current, "consumed_amount_cents")?;
-    let frozen = money::money_field(current, "frozen_amount_cents")?;
+    let current_total = money::money_field(current, "amount_limit")?;
+    let consumed = money::money_field(current, "consumed_amount")?;
+    let frozen = money::money_field(current, "frozen_amount")?;
     let currency = current_total.currency;
     let projected_remaining = amount_limit
         .checked_sub(consumed.amount)
@@ -2555,20 +2605,11 @@ fn spend_reconcile_resolve(
                         "pricing_unit": pricing_unit,
                         "currency": currency,
                     });
-                    if let Some(unit_price) = take_value(&mut args, "--unit-price") {
-                        let (coefficient, scale) =
-                            money::parse_exact_cost(&unit_price, "--unit-price")?;
-                        snapshot["unit_price"] = json!({
-                            "amount": coefficient,
-                            "scale": scale,
-                            "currency": currency,
-                        });
-                    } else {
-                        snapshot["unit_price_cents"] =
-                            json!(take_required(&mut args, "--unit-price-cents")?
-                                .parse::<i64>()
-                                .context("--unit-price-cents must be an integer")?);
-                    }
+                    let unit_price = take_required(&mut args, "--unit-price")?;
+                    let (coefficient, scale) =
+                        money::parse_exact_cost(&unit_price, "--unit-price")?;
+                    snapshot["unit_price"] =
+                        json!({"amount": coefficient, "scale": scale, "currency": currency});
                     snapshot
                 }
             };
@@ -2607,27 +2648,7 @@ fn spend_reconcile_resolve(
                 "artifact_reference": artifact_reference,
             }))
         } else {
-            let actual_vendor_cost_cents = take_required(&mut args, "--actual-vendor-cost-cents")?
-                .parse::<i64>()
-                .context("--actual-vendor-cost-cents must be an integer")?;
-            let provider = take_required(&mut args, "--provider")?;
-            let model = take_required(&mut args, "--model")?;
-            let unit_price_cents = take_required(&mut args, "--unit-price-cents")?
-                .parse::<i64>()
-                .context("--unit-price-cents must be an integer")?;
-            let pricing_unit = take_required(&mut args, "--pricing-unit")?;
-            Some(json!({
-                "actual_vendor_cost_cents": actual_vendor_cost_cents,
-                "provider_request_id": provider_request_id,
-                "price_model_snapshot": {
-                    "provider": provider,
-                    "model": model,
-                    "unit_price_cents": unit_price_cents,
-                    "pricing_unit": pricing_unit,
-                    "currency": "usd",
-                },
-                "artifact_reference": artifact_reference,
-            }))
+            bail!("vendor billing requires --actual-vendor-cost or --actual-vendor-cost-amount with --actual-vendor-cost-scale");
         }
     } else {
         None
@@ -2699,7 +2720,7 @@ fn print_executor_claim(claim: &Value) -> Result<()> {
         .ok_or_else(|| anyhow!("server response missing `spend`"))?;
     println!("  account_id: {}", string_at(spend, "account_id")?);
     println!("  agent_id: {}", string_at(spend, "agent_id")?);
-    println!("  amount: {}", money_at(spend, "amount_cents")?);
+    println!("  amount: {}", money_at(spend, "amount")?);
     if let Some(merchant) = spend.get("merchant").and_then(Value::as_str) {
         println!("  merchant: {merchant}");
     }
@@ -2711,10 +2732,7 @@ fn print_executor_claim(claim: &Value) -> Result<()> {
         "  hold_status: {}",
         style.semantic(string_at(hold, "status")?)
     );
-    println!(
-        "  frozen_amount: {}",
-        money_at(hold, "frozen_amount_cents")?
-    );
+    println!("  frozen_amount: {}", money_at(hold, "frozen_amount")?);
     Ok(())
 }
 
@@ -2859,10 +2877,10 @@ fn print_spend_response(response: &Value) -> Result<()> {
         println!("  status: {}", style.semantic(string_at(hold, "status")?));
         println!("  hold_id: {}", string_at(hold, "hold_id")?);
         println!("  budget_id: {}", string_at(hold, "budget_id")?);
-        println!("  amount: {}", money_at(hold, "amount_cents")?);
-        println!("  consumed: {}", money_at(hold, "consumed_amount_cents")?);
-        println!("  frozen: {}", money_at(hold, "frozen_amount_cents")?);
-        println!("  remaining: {}", money_at(hold, "remaining_amount_cents")?);
+        println!("  amount: {}", money_at(hold, "amount")?);
+        println!("  consumed: {}", money_at(hold, "consumed_amount")?);
+        println!("  frozen: {}", money_at(hold, "frozen_amount")?);
+        println!("  remaining: {}", money_at(hold, "remaining_amount")?);
     }
     Ok(())
 }
@@ -2884,7 +2902,7 @@ fn print_spend_approval_response(approval: &Value) -> Result<()> {
     println!("  operation_key: {}", string_at(review, "operation_key")?);
     println!("  account_id: {}", string_at(review, "account_id")?);
     println!("  agent_id: {}", string_at(review, "agent_id")?);
-    println!("  amount: {}", money_at(review, "amount_cents")?);
+    println!("  amount: {}", money_at(review, "amount")?);
     println!("  lease_profile: {}", string_at(review, "lease_profile")?);
     println!("  reason: {}", string_at(review, "reason")?);
     println!("  policy_summary: {}", string_at(review, "policy_summary")?);
@@ -3037,10 +3055,10 @@ fn print_budget(budget: &Value) -> Result<()> {
     );
     println!(
         "    limit: {}  consumed: {}  frozen: {}  remaining: {}",
-        money_at(budget, "amount_limit_cents")?,
-        money_at(budget, "consumed_amount_cents")?,
-        money_at(budget, "frozen_amount_cents")?,
-        money_at(budget, "remaining_amount_cents")?
+        money_at(budget, "amount_limit")?,
+        money_at(budget, "consumed_amount")?,
+        money_at(budget, "frozen_amount")?,
+        money_at(budget, "remaining_amount")?
     );
     println!(
         "    current_version_id: {}  current_revision: {}",
@@ -3132,7 +3150,7 @@ fn print_budget_version(version: &Value, marker: Option<&str>) -> Result<()> {
     );
     println!(
         "    total_limit: {}  effective_at: {}  created_at: {}",
-        money_at(version, "amount_limit_cents")?,
+        money_at(version, "amount_limit")?,
         local_timestamp(string_at(version, "effective_at")?),
         local_timestamp(string_at(version, "created_at")?)
     );
@@ -3162,9 +3180,9 @@ fn print_spending_target(target: &Value) -> Result<()> {
     );
     println!(
         "    target: {}  allocated: {}  exceeded by: {}",
-        money_at(target, "target_amount_cents")?,
-        money_at(target, "allocated_amount_cents")?,
-        money_at(target, "exceeded_by_cents")?
+        money_at(target, "target_amount")?,
+        money_at(target, "allocated_amount")?,
+        money_at(target, "exceeded_by")?
     );
     let starting_at = local_timestamp(string_at(target, "starting_at")?);
     let ending_before = target
@@ -3190,9 +3208,9 @@ fn print_spending_target_warnings(response: &Value) -> Result<()> {
         println!("  target_id: {}", string_at(warning, "target_id")?);
         println!(
             "  target: {}  allocated: {}  exceeded by: {}",
-            money_at(warning, "target_amount_cents")?,
-            money_at(warning, "allocated_amount_cents")?,
-            money_at(warning, "exceeded_by_cents")?
+            money_at(warning, "target_amount")?,
+            money_at(warning, "allocated_amount")?,
+            money_at(warning, "exceeded_by")?
         );
         println!("  {}", string_at(warning, "message")?);
     }
@@ -3223,6 +3241,31 @@ fn request_json(
     include_approval_capability: bool,
     include_reconciliation_capability: bool,
 ) -> Result<Value> {
+    let (status, json) = request_json_status(
+        client,
+        method,
+        path,
+        body,
+        include_approval_capability,
+        include_reconciliation_capability,
+    )?;
+    if !(200..300).contains(&status) {
+        return Err(HttpApplicationError { status, body: json }.into());
+    }
+    Ok(json)
+}
+
+/// Send one request to the Hubu server and return its status and JSON body
+/// without turning application errors into `Err`, so callers such as the
+/// admin UI proxy can relay structured rejections unchanged.
+fn request_json_status(
+    client: &CliContext,
+    method: &str,
+    path: &str,
+    body: Option<Value>,
+    include_approval_capability: bool,
+    include_reconciliation_capability: bool,
+) -> Result<(u16, Value)> {
     let target = client.target()?;
     let (host, port) = parse_base_url(&target.base_url)?;
     let body_text = body.map(|body| body.to_string()).unwrap_or_default();
@@ -3264,12 +3307,7 @@ fn request_json(
     let (status, response_body) = parse_http_response(&raw)?;
     let json: Value = serde_json::from_str(response_body)
         .with_context(|| format!("parse server response body `{response_body}`"))?;
-
-    if !(200..300).contains(&status) {
-        return Err(HttpApplicationError { status, body: json }.into());
-    }
-
-    Ok(json)
+    Ok((status, json))
 }
 
 fn get_json(client: &CliContext, path: &str) -> Result<Value> {
@@ -3303,7 +3341,7 @@ fn post_budget_update_with_retry(
         if string_at(&response["current_budget"], "budget_id")? != budget_id
             || applied.get("predecessor_revision").and_then(Value::as_u64)
                 != Some(u64_at(body, "expected_revision")?)
-            || money::money_field(applied, "amount_limit_cents")?.amount
+            || money::money_field(applied, "amount_limit")?.amount
                 != money::parse_amount(string_at(body, "amount_limit")?, "amount_limit")?
             || applied_reason != requested_reason
         {
@@ -3358,7 +3396,7 @@ fn validate_budget_update_response(response: &Value) -> Result<()> {
         .ok_or_else(|| anyhow!("server response missing `applied_version`"))?;
     let _ = string_at(applied, "version_id")?;
     let _ = u64_at(applied, "revision")?;
-    let _ = money::money_field(applied, "amount_limit_cents")?;
+    let _ = money::money_field(applied, "amount_limit")?;
     let _ = string_at(applied, "effective_at")?;
     let _ = string_at(applied, "actor")?;
     let _ = string_at(applied, "source")?;
@@ -3392,10 +3430,10 @@ fn validate_budget_update_response(response: &Value) -> Result<()> {
         let _ = string_at(current, field)?;
     }
     for field in [
-        "amount_limit_cents",
-        "consumed_amount_cents",
-        "frozen_amount_cents",
-        "remaining_amount_cents",
+        "amount_limit",
+        "consumed_amount",
+        "frozen_amount",
+        "remaining_amount",
     ] {
         let _ = money::money_field(current, field)?;
     }
@@ -3419,11 +3457,7 @@ fn validate_budget_update_response(response: &Value) -> Result<()> {
     for warning in warnings {
         let _ = string_at(warning, "target_id")?;
         let _ = string_at(warning, "message")?;
-        for field in [
-            "target_amount_cents",
-            "allocated_amount_cents",
-            "exceeded_by_cents",
-        ] {
+        for field in ["target_amount", "allocated_amount", "exceeded_by"] {
             let _ = money::money_field(warning, field)?;
         }
     }
@@ -3692,7 +3726,7 @@ fn u64_at(value: &Value, key: &str) -> Result<u64> {
         .ok_or_else(|| anyhow!("server response missing `{key}`"))
 }
 
-/// Show the amount at `key` (a legacy `*_cents` field name): the exact money
+/// Show the exact money object at `key`:
 /// object when the server sent one, otherwise the cent field.
 fn money_at(value: &Value, key: &str) -> Result<String> {
     Ok(money::format_money(
@@ -3729,6 +3763,7 @@ Commands:
   gallery    Export completed images to a local directory
   feedback   Send feedback: guidance and local report preview (hubu feedback --help)
   health     Check the Hubu server
+  ui         Run the local admin web UI (hubu ui --help)
   version    Print product, source, and executor-contract versions
 
 Global options:
@@ -3956,7 +3991,7 @@ fn print_init_help() {
 
 Usage:
   hubu init [--policy FILE] [--force]
-  hubu init codex [--stack-profile ABSOLUTE_DIR] [--config FILE] [--mcp-server FILE] [--token-file FILE] [--approval-token-file FILE] [--reconciliation-token-file FILE] [--mcp-state-file FILE] [--operation-key-db FILE] [--gongbu-endpoint URL --gongbu-token-file FILE] [--force] [--dry-run]
+  hubu init codex [--stack-profile ABSOLUTE_DIR] [--config FILE] [--mcp-server FILE] [--token-file FILE] [--agent-token-file FILE] [--approval-token-file FILE] [--reconciliation-token-file FILE] [--mcp-state-file FILE] [--operation-key-db FILE] [--gongbu-endpoint URL --gongbu-token-file FILE] [--force] [--dry-run]
 
 Options:
   --policy FILE   Policy template path (default: policy.yaml)
@@ -3977,13 +4012,14 @@ fn print_init_codex_help() {
         "Configure Codex to discover Hubu MCP tools
 
 Usage:
-  hubu init codex [--stack-profile ABSOLUTE_DIR] [--config FILE] [--mcp-server FILE] [--token-file FILE] [--approval-token-file FILE] [--reconciliation-token-file FILE] [--mcp-state-file FILE] [--operation-key-db FILE] [--gongbu-endpoint URL --gongbu-token-file FILE] [--force] [--dry-run] [--trust-client-approval | --no-trust-client-approval]
+  hubu init codex [--stack-profile ABSOLUTE_DIR] [--config FILE] [--mcp-server FILE] [--token-file FILE] [--agent-token-file FILE] [--approval-token-file FILE] [--reconciliation-token-file FILE] [--mcp-state-file FILE] [--operation-key-db FILE] [--gongbu-endpoint URL --gongbu-token-file FILE] [--force] [--dry-run] [--trust-client-approval | --no-trust-client-approval]
 
 Options:
   --config FILE             Codex config path (default: $CODEX_HOME/config.toml or ~/.codex/config.toml)
   --stack-profile DIR       Read MCP binary, backend endpoints, and token files from an active rendered stack profile
   --mcp-server FILE         Selected MCP executable (default: hubu-unified-mcp sibling, then PATH)
-  --token-file FILE         Hubu auth token file (default: $HUBU_AUTH_TOKEN_FILE, ./hubu.auth-token, or ~/.hubu/hubu.auth-token)
+  --token-file FILE         Hubu owner credential file for the server; never given to the MCP (default: $HUBU_AUTH_TOKEN_FILE, ./hubu.auth-token, or ~/.hubu/hubu.auth-token)
+  --agent-token-file FILE   Hubu agent credential file the MCP holds (default: $HUBU_AGENT_TOKEN_FILE or hubu.agent-token beside --token-file)
   --approval-token-file FILE
                              Separate human approval capability file (default: beside --token-file)
   --reconciliation-token-file FILE
@@ -4003,9 +4039,11 @@ Notes:
   Omit --operation-key-db until a guarded workflow requires the key-redacted preallocation bridge. The option configures only a non-secret path and never creates or reads a key.
   The command writes the only supported agent-facing surface, hubu-unified-mcp.
   Setup/admin tools (register agents, apply policies, change budgets and spending targets, reconcile claims) are not needed for normal agent spend workflows.
+  Disabling them is not a security boundary for an agent that can run the hubu CLI with this profile's credentials; see docs/threat-model.md.
   On first interactive setup the command asks once whether to enable them (default: no). Re-runs keep the choice stored in the managed Codex config block.
   --trust-client-approval and --no-trust-client-approval override the stored choice. Without a terminal, or with --dry-run, nothing is asked and the stored choice (or off) is used.
-  Start hubu-server with the same HUBU_AUTH_TOKEN_FILE, HUBU_APPROVAL_TOKEN_FILE, and HUBU_RECONCILIATION_TOKEN_FILE shown by this command.
+  The MCP holds only the agent credential, which reaches spend, status, and read routes; owner routes answer owner_authority_required.
+  Start hubu-server with the same HUBU_AUTH_TOKEN_FILE, HUBU_AGENT_TOKEN_FILE, HUBU_APPROVAL_TOKEN_FILE, and HUBU_RECONCILIATION_TOKEN_FILE shown by this command.
 
 Examples:
   hubu init codex --token-file ~/.hubu/hubu.auth-token
@@ -4208,7 +4246,7 @@ Usage:
   hubu spend reconcile billed --claim-id ID --provider-reference REF --evidence TEXT --actual-vendor-cost-amount INTEGER --actual-vendor-cost-scale SCALE [--currency USD] --price-model-snapshot-json JSON --provider-request-id ID --artifact-reference REF
   hubu spend reconcile not-billed --claim-id ID --provider-reference REF --evidence TEXT
 
---actual-vendor-cost takes the exact provider cost as a decimal, such as 0.0031 (up to 18 decimal places, never rounded). The deprecated --actual-vendor-cost-cents CENTS and --unit-price-cents CENTS flags still work in place of --actual-vendor-cost and --unit-price.
+--actual-vendor-cost takes the exact provider cost as a decimal, such as 0.0031 (up to 18 decimal places, never rounded).
 
 The provider reference and evidence are stored with the atomic settlement or release. A billed resolution also records the exact integer vendor-cost coefficient, decimal scale, ISO currency, full frozen pricing snapshot, provider request id, and artifact reference. Hubu rounds budget consumption up only beyond six decimal places (micro-units); a human-confirmed overrun is recorded rather than discarded. Do not include vendor credentials or sensitive payloads."
     );
@@ -4231,6 +4269,10 @@ Example:
 
 #[cfg(test)]
 mod tests {
+    fn test_money(cents: i64) -> serde_json::Value {
+        serde_json::json!({"units":(i128::from(cents)*10000).to_string(),"scale":6,"currency":"usd"})
+    }
+
     use super::*;
 
     fn no_ask() -> Result<bool> {
@@ -4980,10 +5022,10 @@ mod tests {
             "budget_id": "bgt_0123456789ab",
             "agent_id": "agt_0123456789ab",
             "status": status,
-            "amount_limit_cents": total,
-            "consumed_amount_cents": consumed,
-            "frozen_amount_cents": frozen,
-            "remaining_amount_cents": total - consumed - frozen,
+            "amount_limit": test_money(total),
+            "consumed_amount": test_money(consumed),
+            "frozen_amount": test_money(frozen),
+            "remaining_amount": test_money(total - consumed - frozen),
             "current_version_id": format!("bgv_{revision:012}"),
             "current_revision": revision,
             "starting_at": "2026-08-28T00:00:00+00:00",
@@ -4997,7 +5039,7 @@ mod tests {
             "revision": revision,
             "predecessor_version_id": format!("bgv_{predecessor_revision:012}"),
             "predecessor_revision": predecessor_revision,
-            "amount_limit_cents": total,
+            "amount_limit": test_money(total),
             "effective_at": "2026-08-28T00:00:00+00:00",
             "actor": "usr_0123456789ab",
             "source": "hubu-api:update-budget-limit",
@@ -5012,28 +5054,23 @@ mod tests {
         assert_eq!(
             money_at(
                 &json!({
-                    "remaining_amount": {"units": "-1", "scale": 6, "currency": "usd", "display": "-0.000001"},
-                    "remaining_amount_cents": -1
+                    "remaining_amount": {"units": "-1", "scale": 6, "currency": "usd", "display": "-0.000001"}
                 }),
-                "remaining_amount_cents"
+                "remaining_amount"
             )
             .unwrap(),
             "-$0.000001"
         );
         assert_eq!(
             money_at(
-                &json!({ "remaining_amount_cents": -1 }),
-                "remaining_amount_cents"
+                &json!({ "remaining_amount": test_money(-1) }),
+                "remaining_amount"
             )
             .unwrap(),
             "-$0.01"
         );
         // Legacy cents beyond the micro-unit range are reported, not wrapped.
-        assert!(money_at(
-            &json!({ "remaining_amount_cents": i64::MIN }),
-            "remaining_amount_cents"
-        )
-        .is_err());
+        assert!(money_at(&json!({ "remaining_amount": i64::MIN }), "remaining_amount").is_err());
     }
 
     #[test]

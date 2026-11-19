@@ -234,7 +234,6 @@ fn linked_context<'a>(
 fn transaction(
     record: &TransactionRecord,
     data: &HistorySnapshot,
-    chain_totals: &ChainChargeTotals,
     state: &ServerState,
 ) -> Result<Value> {
     let meta = record.metadata.as_ref();
@@ -270,7 +269,6 @@ fn transaction(
     if let Some(metadata) = meta {
         metadata.effective_cost.scaled()?;
     }
-    let charge_delta_cents = legacy_budget_charge_delta_cents(record, chain_totals)?;
     // The charge exactly as recorded: µ units for new postings, whole cents
     // for legacy ones. `rounding_delta_amount` is measured against this.
     let recorded_charge = meta.and_then(|m| {
@@ -332,7 +330,7 @@ fn transaction(
         "cost_semantics":meta.map(|m|if m.kind==hubu_core::ledger::TransactionKind::Adjustment {"corrected_total"} else {"original_total"}),
         "purpose_reference":reference(meta.and_then(|m|m.purpose.as_deref())),
         "budget_charge_delta":recorded_charge,
-        "budget_charge_delta_cents":charge_delta_cents,
+
         "rounding_delta_amount":rounding,
         "original_transaction_id":meta.and_then(|m|m.original_transaction_id.as_ref()).filter(owned_transaction),
         "previous_transaction_id":meta.and_then(|m|m.previous_transaction_id.as_ref()).filter(owned_transaction),
@@ -355,7 +353,7 @@ pub(super) fn ledger(request: &HttpRequest, state: &ServerState) -> Result<Value
     let selected = selection(&query, &user, state)?;
     let data = snapshot(state, &user.user_id)?;
     validate_budget(&selected, &data)?;
-    let chain_totals = chain_charge_totals(&data)?;
+    validate_charge_chains(&data)?;
     let now = Utc::now();
     let matching: Vec<_> = data
         .transactions
@@ -411,9 +409,9 @@ pub(super) fn ledger(request: &HttpRequest, state: &ServerState) -> Result<Value
         "consumed_amount":money(balance.consumed_amount,budget.currency),
         "recorded_budget_charges":money(total,budget.currency),
         "unaccounted_consumption":money(unaccounted,budget.currency),
-        "consumed_amount_cents":balance.consumed_amount.legacy_cents_ceil(),
-        "recorded_budget_charges_cents":total.legacy_cents_ceil(),
-        "unaccounted_consumption_cents":unaccounted.legacy_cents_ceil(),
+
+
+
         "pending_hold_count":data.holds.iter().filter(|h|&h.budget_id==id && (matches!(h.status,BudgetHoldStatus::Claimed) || (matches!(h.status,BudgetHoldStatus::Frozen) && h.expires_at>now))).count(),
         "owner_transactions_without_budget_context":data.transactions.iter().filter(|t|linked_context(t,&data).is_none()).count(),
         "historical_wallet_reconciliation_complete":false})
@@ -422,13 +420,209 @@ pub(super) fn ledger(request: &HttpRequest, state: &ServerState) -> Result<Value
     };
     let records = matching
         .into_iter()
-        .map(|t| transaction(t, &data, &chain_totals, state))
+        .map(|t| transaction(t, &data, state))
         .collect::<Result<Vec<_>>>()?;
     let (transactions, next_cursor) = page(records, &query, &user.user_id, "ledger")?;
     Ok(json!({"schema_version":VERSION,
         "transactions":transactions,
         "coverage":coverage,
         "next_cursor":next_cursor}))
+}
+
+/// The trusted catalog entry a governed posting was authorized against.
+fn trusted_scope(
+    context: Option<&hubu_core::ledger::GovernedSpendContext>,
+    data: &HistorySnapshot,
+) -> Option<ExecutionScope> {
+    let id = &context?.spend_decision_id;
+    let decision = data.decisions.iter().find(|d| &d.id == id)?;
+    let scope = decision.request.execution_scope.as_ref()?;
+    trusted_execution_scope_catalog()
+        .into_iter()
+        .find(|s| s.same_catalog_entry(scope))
+}
+
+/// An exact sum of scale-18 units, trimmed to at least two fractional digits.
+fn exact_sum(units: i128, currency: &str) -> Value {
+    let (mut amount, mut scale) = (units, 18_u32);
+    while scale > 2 && amount % 10 == 0 {
+        amount /= 10;
+        scale -= 1;
+    }
+    let magnitude = amount.unsigned_abs();
+    let per_major = 10_u128.pow(scale);
+    let sign = if amount < 0 { "-" } else { "" };
+    let display = format!(
+        "{sign}{}.{:0width$}",
+        magnitude / per_major,
+        magnitude % per_major,
+        width = scale as usize
+    );
+    json!({"amount":amount.to_string(),"scale":scale,"currency":currency,"display":display})
+}
+
+#[derive(Default)]
+struct SpendTotal {
+    units: i128,
+    postings: u64,
+}
+impl SpendTotal {
+    fn add(&mut self, units: i128) -> Result<()> {
+        self.units = self
+            .units
+            .checked_add(units)
+            .ok_or_else(|| anyhow!("spend summary overflow"))?;
+        self.postings += 1;
+        Ok(())
+    }
+}
+
+/// Read-only spend totals over the owner's ledger. Each correction chain counts
+/// once, at its latest corrected total, and is attributed (agent, billing
+/// merchant, day) by its original posting. Sums stay exact and per currency.
+pub(super) fn spend_summary(request: &HttpRequest, state: &ServerState) -> Result<Value> {
+    let query = query(request, &["agent_id", "account_id", "days"])?;
+    let days = query
+        .get("days")
+        .map(|v| v.parse::<i64>())
+        .transpose()?
+        .unwrap_or(30);
+    if !(1..=366).contains(&days) {
+        return Err(anyhow!("spend summary days must be between 1 and 366"));
+    }
+    let user = authenticated_user_context(state)?;
+    let selected = selection(&query, &user, state)?;
+    let data = snapshot(state, &user.user_id)?;
+    let by_id: HashMap<_, _> = data.transactions.iter().map(|t| (&t.id, t)).collect();
+    let superseded: std::collections::HashSet<_> = data
+        .transactions
+        .iter()
+        .filter_map(|t| t.metadata.as_ref()?.previous_transaction_id.as_ref())
+        .collect();
+    let mut heads: HashMap<&hubu_common::ids::LedgerTransactionId, &TransactionRecord> =
+        HashMap::new();
+    for posting in &data.transactions {
+        if superseded.contains(&posting.id) {
+            continue;
+        }
+        let root = posting
+            .metadata
+            .as_ref()
+            .and_then(|m| m.original_transaction_id.as_ref())
+            .filter(|id| by_id.contains_key(id))
+            .unwrap_or(&posting.id);
+        let later = |a: &TransactionRecord, b: &TransactionRecord| {
+            (a.created_at, a.id.to_string()) > (b.created_at, b.id.to_string())
+        };
+        heads
+            .entry(root)
+            .and_modify(|head| {
+                if later(posting, head) {
+                    *head = posting;
+                }
+            })
+            .or_insert(posting);
+    }
+    let today = Utc::now().date_naive();
+    let first_day = today - chrono::Duration::days(days - 1);
+    let mut totals: BTreeMap<String, SpendTotal> = BTreeMap::new();
+    let mut merchants: BTreeMap<(String, Option<String>), (Option<String>, SpendTotal)> =
+        BTreeMap::new();
+    let mut agents: BTreeMap<(String, Option<String>), SpendTotal> = BTreeMap::new();
+    let mut daily: BTreeMap<(String, String), SpendTotal> = BTreeMap::new();
+    let mut public_agents: HashMap<AgentId, String> = HashMap::new();
+    let mut unpriced = 0_u64;
+    for (root_id, head) in heads {
+        let root = by_id[root_id];
+        let root_meta = owned_metadata(root, &data);
+        let agent = root_meta.and_then(|m| m.agent_id.as_ref());
+        let account = root_meta.and_then(|m| m.agent_account_id.as_ref());
+        if selected.agent.as_ref().is_some_and(|a| agent != Some(a))
+            || selected
+                .account
+                .as_ref()
+                .is_some_and(|a| account != Some(a))
+        {
+            continue;
+        }
+        let Some(cost) = owned_metadata(head, &data).map(|m| &m.effective_cost) else {
+            unpriced += 1;
+            continue;
+        };
+        let units = cost.scaled()?;
+        let currency = cost.currency.to_string();
+        totals.entry(currency.clone()).or_default().add(units)?;
+        let scope = trusted_scope(linked_context(root, &data), &data);
+        let merchant = merchants
+            .entry((
+                currency.clone(),
+                scope.as_ref().map(|s| s.billing_merchant.id.clone()),
+            ))
+            .or_insert_with(|| {
+                (
+                    scope
+                        .as_ref()
+                        .map(|s| s.billing_merchant.display_name.clone()),
+                    SpendTotal::default(),
+                )
+            });
+        merchant.1.add(units)?;
+        let public_agent = match (agent, account) {
+            (Some(agent), Some(account)) => Some(match public_agents.get(agent) {
+                Some(id) => id.clone(),
+                None => {
+                    let id = public_ids_for_agent_account(agent, account, state)?.1;
+                    public_agents.insert(agent.clone(), id.clone());
+                    id
+                }
+            }),
+            _ => None,
+        };
+        agents
+            .entry((currency.clone(), public_agent))
+            .or_default()
+            .add(units)?;
+        let day = root.created_at.date_naive();
+        if day >= first_day {
+            daily
+                .entry((day.to_string(), currency))
+                .or_default()
+                .add(units)?;
+        }
+    }
+    let by_amount = |a: &Value, b: &Value| {
+        let units = |v: &Value| {
+            v["amount"]["amount"]
+                .as_str()
+                .and_then(|s| s.parse::<i128>().ok())
+                .zip(v["amount"]["scale"].as_u64())
+                .map(|(n, s)| n * 10_i128.pow(18 - s as u32))
+                .unwrap_or_default()
+        };
+        a["amount"]["currency"]
+            .as_str()
+            .cmp(&b["amount"]["currency"].as_str())
+            .then(units(b).cmp(&units(a)))
+    };
+    let mut by_merchant: Vec<Value> = merchants
+        .into_iter()
+        .map(|((currency, id), (name, t))| json!({"billing_merchant_id":id,"billing_merchant":name,"amount":exact_sum(t.units,&currency),"chain_count":t.postings}))
+        .collect();
+    by_merchant.sort_by(by_amount);
+    let mut by_agent: Vec<Value> = agents
+        .into_iter()
+        .map(|((currency, agent), t)| json!({"agent_id":agent,"amount":exact_sum(t.units,&currency),"chain_count":t.postings}))
+        .collect();
+    by_agent.sort_by(by_amount);
+    Ok(json!({"schema_version":VERSION,
+        "filters":{"agent_id":query.get("agent_id"),"account_id":query.get("account_id")},
+        "basis":"latest_corrected_total_per_chain",
+        "totals":totals.into_iter().map(|(currency,t)|json!({"amount":exact_sum(t.units,&currency),"chain_count":t.postings})).collect::<Vec<_>>(),
+        "by_billing_merchant":by_merchant,
+        "by_agent":by_agent,
+        "daily":{"days":days,"from":first_day.to_string(),"through":today.to_string(),
+            "buckets":daily.into_iter().map(|((date,currency),t)|json!({"date":date,"amount":exact_sum(t.units,&currency),"chain_count":t.postings})).collect::<Vec<_>>()},
+        "unpriced_chain_count":unpriced}))
 }
 
 fn effective_hold_status(hold: &BudgetHold, now: DateTime<Utc>) -> &'static str {
@@ -510,19 +704,25 @@ fn authorization_record(
         .map(|t| t.id.to_string())
         .collect();
     let receipt = receipt.map(|r| {
+        let settlement_amount = json!({"amount":r.receipt.actual_vendor_cost.amount.to_string(), "scale":r.receipt.actual_vendor_cost.scale, "currency":r.receipt.actual_vendor_cost.currency.to_string()});
+        let provider_actual_cost = (r.receipt.cost_basis == hubu_core::spend::SettlementCostBasis::ProviderReported)
+            .then_some(settlement_amount.clone());
         json!({"settlement_id":r.settlement_id,
         "created_at":r.created_at.to_rfc3339(),
         "authorized_max":money(r.authorized_max,r.currency),
         "budget_charge":money(r.budget_charge,r.currency),
         "released_amount":money(r.released_amount,r.currency),
         "overrun_amount":money(r.overrun_amount,r.currency),
-        "authorized_max_cents":r.authorized_max.legacy_cents_ceil(),
+
+        "cost_basis":r.receipt.cost_basis,
+        "settlement_amount":settlement_amount,
+        "provider_actual_cost":provider_actual_cost,
         "actual_vendor_cost":{"amount":r.receipt.actual_vendor_cost.amount.to_string(),
         "scale":r.receipt.actual_vendor_cost.scale,
         "currency":r.receipt.actual_vendor_cost.currency.to_string()},
-        "budget_charge_cents":r.budget_charge.legacy_cents_ceil(),
-        "released_amount_cents":r.released_amount.legacy_cents_floor(),
-        "overrun_amount_cents":r.overrun_amount.legacy_cents_ceil(),
+
+
+
         "currency":r.currency.to_string(),
         "provider_request_reference":reference(Some(&r.receipt.provider_request_id)),
         "artifact_reference":reference(Some(&r.receipt.artifact_reference)),
@@ -540,7 +740,7 @@ fn authorization_record(
         "status":status,
         "release_reason":data.void_reasons.get(&decision.id),
         "authorized_max":money(decision.request.amount,decision.request.currency),
-        "authorized_max_cents":decision.request.amount.legacy_cents_ceil(),
+
         "currency":decision.request.currency.to_string(),
         "provider":provider.as_ref().map(|p|&p["provider"]),
         "billing_merchant":provider.as_ref().map(|p|&p["billing_merchant"]),
@@ -548,7 +748,7 @@ fn authorization_record(
         "budget_id":public_budget_id(&h.budget_id),
         "budget_version_id":public_budget_version_id(&h.budget_version_id),
         "amount":money(h.amount,h.currency),
-        "amount_cents":h.amount.legacy_cents_ceil(),
+
         "currency":h.currency.to_string(),
         "status":effective_hold_status(h,now),
         "expires_at":h.expires_at.to_rfc3339()})),
@@ -570,15 +770,11 @@ fn authorization_record(
         "raw_evidence_redacted":true}))
 }
 
-/// Cumulative recorded budget charge (µ units) of each posting's correction
-/// chain, up to and including that posting.
-type ChainChargeTotals = HashMap<hubu_common::ids::LedgerTransactionId, i64>;
-
-/// Computes every chain total once per request: an id index plus memoized
-/// prefixes, so long correction chains stay linear in the number of postings.
-fn chain_charge_totals(data: &HistorySnapshot) -> Result<ChainChargeTotals> {
+/// Reject corrupted correction cycles and per-chain charge overflow. The
+/// totals are validation state only; history returns each recorded exact delta.
+fn validate_charge_chains(data: &HistorySnapshot) -> Result<()> {
     let by_id: HashMap<_, _> = data.transactions.iter().map(|t| (&t.id, t)).collect();
-    let mut totals = ChainChargeTotals::new();
+    let mut totals = HashMap::new();
     for record in &data.transactions {
         // Walk back to the first posting whose total is known (or the root),
         // then fill the totals forward.
@@ -598,7 +794,7 @@ fn chain_charge_totals(data: &HistorySnapshot) -> Result<ChainChargeTotals> {
                 .and_then(|meta| meta.previous_transaction_id.as_ref())
                 .and_then(|id| by_id.get(id).copied());
         }
-        let mut running = current.map_or(0, |known| totals[&known.id]);
+        let mut running: i64 = current.map_or(0, |known| totals[&known.id]);
         for posting in path.into_iter().rev() {
             let own = posting
                 .metadata
@@ -613,42 +809,12 @@ fn chain_charge_totals(data: &HistorySnapshot) -> Result<ChainChargeTotals> {
             totals.insert(posting.id.clone(), running);
         }
     }
-    Ok(totals)
+    Ok(())
 }
 
-/// Cent projection of one posting's budget charge: the change in the
-/// rounded-up cent projection of its correction chain's cumulative recorded
-/// charge. Summing the rows of a chain therefore always equals the cent
-/// projection of its total, whether the chain mixes legacy cent postings and
-/// µ corrections or reverses a sub-cent charge.
 /// An exact money object for history responses (see `MoneyHttpResponse`).
 fn money(amount: Amount, currency: Currency) -> Value {
     to_json(MoneyHttpResponse::new(amount, currency))
-}
-
-fn legacy_budget_charge_delta_cents(
-    record: &TransactionRecord,
-    chain_totals: &ChainChargeTotals,
-) -> Result<Option<i64>> {
-    let Some(own) = record
-        .metadata
-        .as_ref()
-        .map(|m| m.budget_charge_units())
-        .transpose()?
-        .flatten()
-    else {
-        return Ok(None);
-    };
-    let cumulative = *chain_totals
-        .get(&record.id)
-        .ok_or_else(|| anyhow!("ledger posting is missing its chain total"))?;
-    let previous = cumulative
-        .checked_sub(own)
-        .ok_or_else(|| anyhow!("budget charge total overflow"))?;
-    Ok(Some(
-        Amount::from_units(cumulative).legacy_cents_ceil()
-            - Amount::from_units(previous).legacy_cents_ceil(),
-    ))
 }
 
 pub(super) fn authorization_records(
@@ -847,7 +1013,7 @@ pub(super) fn watch(request: &HttpRequest, state: &ServerState) -> Result<Value>
         let selected = operation_budget.or_else(|| {
             budgets
                 .iter()
-                .min_by_key(|(b, v)| (v.remaining_amount.legacy_cents_floor(), b.id.to_string()))
+                .min_by_key(|(b, v)| (v.remaining_amount, b.id.to_string()))
         });
         let blocked = newest.is_some_and(|d| {
             data.authorization_outcomes.get(&d.id) == Some(&SpendAuthorizationDecision::Denied)
@@ -864,10 +1030,10 @@ pub(super) fn watch(request: &HttpRequest, state: &ServerState) -> Result<Value>
             "available":selected.map(|(b,v)|money(v.remaining_amount,b.currency)),
             "frozen":selected.map(|(b,v)|money(v.frozen_amount,b.currency)),
             "consumed":selected.map(|(b,v)|money(v.consumed_amount,b.currency)),
-            "limit_cents":selected.and_then(|(b,_)|data.current_budget_versions.iter().find(|v|v.id==b.current_version_id).map(|v|v.amount_limit.legacy_cents_floor())),
-            "available_cents":selected.map(|(_,v)|v.remaining_amount.legacy_cents_floor()),
-            "frozen_cents":selected.map(|(_,v)|v.frozen_amount.legacy_cents_ceil()),
-            "consumed_cents":selected.map(|(_,v)|v.consumed_amount.legacy_cents_ceil()),
+
+
+
+
             "state":if pending {"APPROVAL"} else if blocked || selected.is_none() || agent.status != "active" || agent.account_status != "active" {"BLOCKED"} else {"ALLOW"}}));
     }
     rows.sort_by_key(|row| row["agent_id"].as_str().unwrap_or_default().to_owned());
@@ -897,10 +1063,11 @@ pub(super) fn watch(request: &HttpRequest, state: &ServerState) -> Result<Value>
             "reserved":record["budget_hold"]["amount"],
             "requested":money(d.request.amount,d.request.currency),
             "budget_charge":record["receipt"]["budget_charge"],
-            "reserved_cents":record["budget_hold"]["amount_cents"],
-            "requested_cents":d.request.amount.legacy_cents_ceil(),
-            "settled_cost":record["receipt"]["actual_vendor_cost"],
-            "budget_charge_cents":record["receipt"]["budget_charge_cents"]}));
+
+
+            "settled_cost":record["receipt"]["settlement_amount"],
+            "cost_basis":record["receipt"]["cost_basis"],
+            "provider_actual_cost":record["receipt"]["provider_actual_cost"]}));
     }
     sort_watch_events(&mut recent_events);
     Ok(

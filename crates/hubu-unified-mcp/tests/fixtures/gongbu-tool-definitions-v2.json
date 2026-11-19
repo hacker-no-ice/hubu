@@ -89,5 +89,20 @@
         }
       }
     }
+  },
+  {
+    "name": "gongbu_list_reference_images",
+    "description": "List the operator's reference images, local files an image edit may send without generating them first. Each carries a reference token pinned to the file's SHA-256: put it in an edit's input_images beside artifact IDs. A file that changes after approval is never sent. Listing is free and never contacts a provider.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {}
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
   }
 ]

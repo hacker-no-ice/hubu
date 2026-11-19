@@ -21,6 +21,7 @@ use crate::{
         registry::{ExecutionTarget, ValidatedProviderCatalog},
     },
     provider_targets::{Error as TargetError, ProviderConfigVersion, TargetKey},
+    reference::{EditInputImages, ReferenceLibrary},
     temporal::{ExecutionScheduler, ScheduleError},
     workflow::{OperatorReconciliationRequest, ReconciliationAction},
 };
@@ -117,6 +118,10 @@ pub struct ExecutionResponse {
     /// unified MCP router verifies it against the continuation it bound.
     pub spend_auth_token_id: String,
     pub status: ExecutionStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_outcome: Option<crate::execution::LifecycleOutcome>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settlement_outcome: Option<crate::execution::LifecycleOutcome>,
     pub outcome: Option<String>,
     pub failure: Option<FailureResponse>,
     pub authorization: Money,
@@ -315,6 +320,7 @@ pub struct Api {
     maximum_spend_minor: i64,
     authorization_resolver: Option<Arc<dyn SpendAuthorizationResolver + Send + Sync>>,
     redaction_attestor: Option<RedactionAttestor>,
+    reference_images: Option<ReferenceLibrary>,
 }
 
 impl Api {
@@ -345,6 +351,7 @@ impl Api {
             maximum_spend_minor,
             authorization_resolver: None,
             redaction_attestor: None,
+            reference_images: None,
         }
     }
 
@@ -366,6 +373,7 @@ impl Api {
             maximum_spend_minor,
             authorization_resolver: Some(authorization_resolver),
             redaction_attestor: None,
+            reference_images: None,
         }
     }
 
@@ -381,6 +389,13 @@ impl Api {
             self.providers.clone(),
             secrets,
         ));
+        self
+    }
+
+    /// Let edits send the operator's reference images by pinned token, and
+    /// list them for discovery.
+    pub fn with_reference_images(mut self, references: Option<ReferenceLibrary>) -> Self {
+        self.reference_images = references;
         self
     }
 
@@ -419,6 +434,7 @@ impl Api {
                         self.get_artifact(caller, artifact_id)
                     }
                     ("GET", ["v1", "provider-catalog"]) => self.provider_catalog(caller),
+                    ("GET", ["v1", "reference-images"]) => self.reference_images(caller),
                     _ => Err(ApiError::not_found()),
                 }
             });
@@ -436,6 +452,23 @@ impl Api {
             &ProviderCatalogResponse {
                 schema_version: 1,
                 contracts: self.providers.provider_contracts().to_vec(),
+            },
+        ))
+    }
+
+    /// The operator's reference images, each with the pinned token an edit
+    /// sends in `input_images`. Paths outside the folder are never shown.
+    fn reference_images(&self, _caller: &AuthenticatedCaller) -> Result<HttpResponse, ApiError> {
+        Ok(json_response(
+            200,
+            &ReferenceImagesResponse {
+                schema_version: 1,
+                configured: self.reference_images.is_some(),
+                images: self
+                    .reference_images
+                    .as_ref()
+                    .map(ReferenceLibrary::list)
+                    .unwrap_or_default(),
             },
         ))
     }
@@ -613,7 +646,10 @@ impl Api {
         // An edit names its input images by artifact ID: each must be one
         // this account's earlier governed executions delivered.
         if let Some(pack) = pack {
-            let images = self.artifacts.input_images(&authorization.account_id);
+            let images = EditInputImages {
+                artifacts: self.artifacts.input_images(&authorization.account_id),
+                references: self.reference_images.as_ref(),
+            };
             if pack
                 .input_artifact_ids(&normalized_input)
                 .iter()
@@ -649,7 +685,13 @@ impl Api {
             || authorization.status != "available"
             || authorization_expires_at <= admission_time
             || authorization.budget_hold.status != "frozen"
-            || authorization.budget_hold.amount_cents != authorization.amount_cents
+            || authorization.budget_hold.amount.scale != crate::provider_contract::UNITS_SCALE
+            || authorization.budget_hold.amount.units.parse::<i64>().ok() != Some(authorized_units)
+            || !authorization
+                .budget_hold
+                .amount
+                .currency
+                .eq_ignore_ascii_case(&authorization.currency)
             || authorization.account_id.trim().is_empty()
             || authorization.decision_id.trim().is_empty()
             || !authorization
@@ -1280,6 +1322,8 @@ fn execution_response(
         execution_id: execution.execution_id,
         spend_auth_token_id: execution.hubu_token_reference.as_str().to_owned(),
         status,
+        artifact_outcome: execution.artifact_outcome,
+        settlement_outcome: execution.settlement_outcome,
         outcome: execution.outcome,
         failure,
         authorization: Money::from_units(
@@ -1416,6 +1460,13 @@ fn map_pricing_error(error: ContractError) -> ApiError {
         }
         _ => ApiError::internal(),
     }
+}
+
+#[derive(Serialize)]
+struct ReferenceImagesResponse {
+    schema_version: u32,
+    configured: bool,
+    images: Vec<crate::reference::ReferenceImage>,
 }
 
 fn json_response(status: u16, body: &impl Serialize) -> HttpResponse {
@@ -1564,10 +1615,10 @@ mod tests {
                     hold_id: "hold".into(),
                     budget_id: "budget".into(),
                     status: "frozen".into(),
-                    amount_cents: 100,
-                    consumed_amount_cents: 0,
-                    frozen_amount_cents: 100,
-                    remaining_amount_cents: 0,
+                    amount: crate::hubu::ExactAmount::from_units(1000000, "usd"),
+                    consumed_amount: crate::hubu::ExactAmount::from_units(0, "usd"),
+                    frozen_amount: crate::hubu::ExactAmount::from_units(1000000, "usd"),
+                    remaining_amount: crate::hubu::ExactAmount::from_units(0, "usd"),
                 },
             };
             let exact = |units: &str| crate::hubu::ExactAmount {
@@ -1592,15 +1643,19 @@ mod tests {
             } else if spend_auth_token_id.starts_with("expired") {
                 response.expires_at = "2026-08-05T19:00:00Z".into();
             } else if spend_auth_token_id.starts_with("aggregate-consumed") {
-                response.budget_hold.consumed_amount_cents = 100;
-                response.budget_hold.remaining_amount_cents = 800;
+                response.budget_hold.consumed_amount =
+                    crate::hubu::ExactAmount::from_units(1000000, "usd");
+                response.budget_hold.remaining_amount =
+                    crate::hubu::ExactAmount::from_units(8000000, "usd");
             } else if spend_auth_token_id.starts_with("aggregate-frozen") {
-                response.budget_hold.frozen_amount_cents = 200;
-                response.budget_hold.remaining_amount_cents = 800;
+                response.budget_hold.frozen_amount =
+                    crate::hubu::ExactAmount::from_units(2000000, "usd");
+                response.budget_hold.remaining_amount =
+                    crate::hubu::ExactAmount::from_units(8000000, "usd");
             } else if spend_auth_token_id.starts_with("hold-status-mismatch") {
                 response.budget_hold.status = "settled".into();
             } else if spend_auth_token_id.starts_with("hold-amount-mismatch") {
-                response.budget_hold.amount_cents += 1;
+                response.budget_hold.amount.units = "1000001".into();
             }
             if spend_auth_token_id.starts_with("flux-") {
                 response.execution_scope = for_target("flux", "flux2_api");
@@ -1614,8 +1669,10 @@ mod tests {
                     3
                 };
                 response.amount_cents = amount;
-                response.budget_hold.amount_cents = amount;
-                response.budget_hold.frozen_amount_cents = amount;
+                response.budget_hold.amount =
+                    crate::hubu::ExactAmount::from_units(response.amount_cents * 10000, "usd");
+                response.budget_hold.frozen_amount =
+                    crate::hubu::ExactAmount::from_units((amount) * 10000, "usd");
                 // The exact FLUX prices: 3, 4.5 and 7.5 cents. A caller that
                 // still authorizes whole cents sends the cent ceiling.
                 response.amount = Some(exact(if spend_auth_token_id.contains("below") {
@@ -1655,8 +1712,10 @@ mod tests {
             if spend_auth_token_id.starts_with("flux-managed-") {
                 response.amount = Some(exact("30000"));
                 response.amount_cents = 3;
-                response.budget_hold.amount_cents = 3;
-                response.budget_hold.frozen_amount_cents = 3;
+                response.budget_hold.amount =
+                    crate::hubu::ExactAmount::from_units(response.amount_cents * 10000, "usd");
+                response.budget_hold.frozen_amount =
+                    crate::hubu::ExactAmount::from_units(30000, "usd");
                 response.expires_at = "2026-08-28T21:00:00Z".into();
             }
             if spend_auth_token_id == "flux-managed-hub-172-attestation" {
@@ -1669,8 +1728,10 @@ mod tests {
                 // FLUX.2 [pro] v2: every 2k size bills 2 megapixels, 4.5¢.
                 response.execution_scope = for_target("flux", "flux2_api");
                 response.amount_cents = 5;
-                response.budget_hold.amount_cents = 5;
-                response.budget_hold.frozen_amount_cents = 5;
+                response.budget_hold.amount =
+                    crate::hubu::ExactAmount::from_units(response.amount_cents * 10000, "usd");
+                response.budget_hold.frozen_amount =
+                    crate::hubu::ExactAmount::from_units(50000, "usd");
                 response.amount = Some(exact("45000"));
             }
             if let Some(rest) = spend_auth_token_id.strip_prefix("megapixel-") {
@@ -1694,8 +1755,10 @@ mod tests {
                     (8, "75000")
                 };
                 response.amount_cents = cents;
-                response.budget_hold.amount_cents = cents;
-                response.budget_hold.frozen_amount_cents = cents;
+                response.budget_hold.amount =
+                    crate::hubu::ExactAmount::from_units(response.amount_cents * 10000, "usd");
+                response.budget_hold.frozen_amount =
+                    crate::hubu::ExactAmount::from_units((cents) * 10000, "usd");
                 response.amount = Some(exact(units));
             }
             if let Some(rest) = spend_auth_token_id.strip_prefix("gpro-") {
@@ -1716,8 +1779,10 @@ mod tests {
                     (14, "134000")
                 };
                 response.amount_cents = cents;
-                response.budget_hold.amount_cents = cents;
-                response.budget_hold.frozen_amount_cents = cents;
+                response.budget_hold.amount =
+                    crate::hubu::ExactAmount::from_units(response.amount_cents * 10000, "usd");
+                response.budget_hold.frozen_amount =
+                    crate::hubu::ExactAmount::from_units((cents) * 10000, "usd");
                 response.amount = Some(exact(units));
                 if rest.starts_with("pending") {
                     // Hubu has not recorded the human approval yet.
@@ -1733,9 +1798,16 @@ mod tests {
                         for_workload_target("image_edit", "google", "gemini_developer_image")
                     };
                     response.amount_cents = 7;
-                    response.budget_hold.amount_cents = 7;
-                    response.budget_hold.frozen_amount_cents = 7;
-                    response.amount = Some(exact("67560"));
+                    response.budget_hold.amount =
+                        crate::hubu::ExactAmount::from_units(response.amount_cents * 10000, "usd");
+                    response.budget_hold.frozen_amount =
+                        crate::hubu::ExactAmount::from_units(70000, "usd");
+                    // Two input images add another 0.056¢.
+                    response.amount = Some(exact(if rest.starts_with("two-") {
+                        "68120"
+                    } else {
+                        "67560"
+                    }));
                 }
             }
             // A v4.5 Hubu reports the exact authorization beside its cents.
@@ -1744,6 +1816,9 @@ mod tests {
                     response.amount_cents * crate::provider_contract::UNITS_PER_MINOR,
                     &response.currency,
                 ));
+            }
+            if !spend_auth_token_id.starts_with("hold-amount-mismatch") {
+                response.budget_hold.amount = response.amount.clone().unwrap();
             }
             Ok(response)
         }
@@ -2457,12 +2532,19 @@ mod tests {
         assert_eq!(
             ids,
             std::collections::BTreeSet::from([
+                "hubu.flux-2-flex.image-edit/v1",
                 "hubu.flux-2-flex.text-to-image/v1",
+                "hubu.flux-2-klein-4b.image-edit/v1",
                 "hubu.flux-2-klein-4b.text-to-image/v1",
+                "hubu.flux-2-klein-9b.image-edit/v1",
                 "hubu.flux-2-klein-9b.text-to-image/v1",
+                "hubu.flux-2-max.image-edit/v1",
                 "hubu.flux-2-max.text-to-image/v1",
+                "hubu.flux-2-pro.image-edit/v1",
                 "hubu.flux-2-pro.text-to-image/v1",
+                "hubu.flux-3-image-klein.image-edit/v1",
                 "hubu.flux-3-image-klein.text-to-image/v1",
+                "hubu.flux-3-image.image-edit/v1",
                 "hubu.flux-3-image.text-to-image/v1",
                 "hubu.gemini-3-pro-image.image-edit/v1",
                 "hubu.gemini-3-pro-image.text-to-image/v1",
@@ -2967,6 +3049,87 @@ mod tests {
             )
             .status,
             400
+        );
+
+        // Without a reference folder, a reference token is refused and the
+        // listing says none is configured.
+        let mascot_bytes = {
+            let mut bytes = Vec::new();
+            image::DynamicImage::ImageRgba8(image::RgbaImage::new(3, 2))
+                .write_to(
+                    &mut std::io::Cursor::new(&mut bytes),
+                    image::ImageFormat::Png,
+                )
+                .unwrap();
+            bytes
+        };
+        let listing = |fixture: &Fixture| -> Value {
+            let response =
+                fixture
+                    .api
+                    .handle("GET", "/v1/reference-images", Some(&fixture.caller), b"");
+            assert_eq!(response.status, 200);
+            serde_json::from_slice(&response.body).unwrap()
+        };
+        assert_eq!(
+            listing(&fixture),
+            json!({"schema_version": 1, "configured": false, "images": []})
+        );
+        let digest = format!("{:x}", sha2::Sha256::digest(&mascot_bytes));
+        let token = format!("reference:hubu mascot.png@sha256:{digest}");
+        let refused = call_create(&fixture, &edit("edit-reference-unconfigured", &token));
+        assert_eq!(
+            error(&refused).error.reason_code.as_deref(),
+            Some("input_artifact_unavailable")
+        );
+
+        // With the operator's folder, the listing shows the exact token, and
+        // an edit mixes it with a generated artifact.
+        let folder = tempfile::tempdir().unwrap();
+        let mascot = folder.path().join("hubu mascot.png");
+        std::fs::write(&mascot, &mascot_bytes).unwrap();
+        fixture.api = fixture.api.clone().with_reference_images(Some(
+            crate::reference::ReferenceLibrary::open(folder.path(), ArtifactLimits::default())
+                .unwrap(),
+        ));
+        let listed = listing(&fixture);
+        assert_eq!(listed["configured"], true);
+        assert_eq!(listed["images"][0]["reference"], token.as_str());
+        assert_eq!(listed["images"][0]["width"], 3);
+        assert!(
+            !String::from_utf8_lossy(&serde_json::to_vec(&listed).unwrap())
+                .contains(&folder.path().display().to_string())
+        );
+        let mixed = json!({
+            "schema_version": 2,
+            "spend_auth_token_id": "edit-two-mixed",
+            "input": {"prompt": "put the mascot in the draft", "image_size": "1k",
+                      "input_images": [token, artifact.artifact_id]},
+            "input_schema_version": 1,
+            "target_id": target_id,
+        });
+        let created = call_create(&fixture, &mixed);
+        assert_eq!(
+            created.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&created.body)
+        );
+        assert_eq!(
+            fixture
+                .repository
+                .get_execution(&execution(&created).execution_id)
+                .unwrap()
+                .authorized_units,
+            68_120
+        );
+        // A reference whose file changed no longer matches its pinned digest.
+        std::fs::write(&mascot, b"changed").unwrap();
+        let changed = call_create(&fixture, &edit("edit-reference-changed", &token));
+        assert_eq!(changed.status, 400);
+        assert_eq!(
+            error(&changed).error.reason_code.as_deref(),
+            Some("input_artifact_unavailable")
         );
     }
 

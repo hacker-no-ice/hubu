@@ -17,6 +17,7 @@ pub(super) fn tool_definitions() -> Vec<Value> {
         json!({"name":"gongbu_get_execution","description":"Get coarse status and redacted outcome for an execution.","inputSchema":id_schema("execution_id")}),
         json!({"name":"gongbu_list_artifacts","description":"List portable metadata for an execution's artifacts.","inputSchema":id_schema("execution_id")}),
         json!({"name":"gongbu_get_artifact","description":"Get portable base64 image content and safe metadata for an artifact.","inputSchema":id_schema("artifact_id")}),
+        json!({"name":"gongbu_list_reference_images","description":"List the operator's reference images, local files an image edit may send without generating them first. Each carries a reference token pinned to the file's SHA-256: put it in an edit's input_images beside artifact IDs. A file that changes after approval is never sent. Listing is free and never contacts a provider.","inputSchema":{"type":"object","additionalProperties":false,"properties":{}},"annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}}),
     ]
 }
 

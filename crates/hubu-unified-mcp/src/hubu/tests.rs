@@ -210,15 +210,15 @@ fn configured_catalog_matches_the_owned_hubu_contract() {
         .unwrap();
     assert_eq!(
         update["inputSchema"]["required"],
-        json!(["budget_id", "expected_revision"])
+        json!(["budget_id", "expected_revision", "amount_limit"])
     );
     assert_eq!(
         update["inputSchema"]["properties"]["expected_revision"]["minimum"],
         1
     );
     assert_eq!(
-        update["inputSchema"]["properties"]["amount_limit_cents"]["minimum"],
-        1
+        update["inputSchema"]["properties"]["amount_limit"]["type"],
+        "string"
     );
     assert_eq!(update["inputSchema"]["additionalProperties"], false);
     assert_eq!(update["annotations"]["idempotentHint"], true);
@@ -279,7 +279,7 @@ fn spend_and_budget_tools_accept_exact_amounts_and_currency() {
         let schema = &tool(name)["inputSchema"];
         assert_eq!(
             schema["required"],
-            json!(["account_id", "reason"]),
+            json!(["account_id", "amount", "reason"]),
             "{name}"
         );
         assert_eq!(schema["properties"]["amount"]["type"], "string", "{name}");
@@ -287,7 +287,7 @@ fn spend_and_budget_tools_accept_exact_amounts_and_currency() {
             schema["properties"]["amount"]["pattern"], "^\\d+(\\.\\d{1,6})?$",
             "{name}"
         );
-        assert!(schema["properties"]["amount_cents"].is_object(), "{name}");
+        assert!(schema["properties"].get("amount_cents").is_none(), "{name}");
         assert_eq!(
             schema["properties"]["currency"]["enum"],
             json!(["usd", "usdc"]),
@@ -301,7 +301,7 @@ fn spend_and_budget_tools_accept_exact_amounts_and_currency() {
 }
 
 #[test]
-fn billed_reconciliation_schema_exposes_exact_cost_and_legacy_cents() {
+fn billed_reconciliation_schema_requires_only_exact_cost() {
     let tool = super::catalog::tool_definitions()
         .into_iter()
         .find(|tool| tool["name"] == "hubu_reconcile_vendor_billed_claim")
@@ -315,8 +315,14 @@ fn billed_reconciliation_schema_exposes_exact_cost_and_legacy_cents() {
         exact["properties"]["currency"]["enum"],
         json!(["usd", "usdc"])
     );
-    assert!(receipt["properties"]["actual_vendor_cost_cents"].is_object());
-    assert_eq!(receipt["oneOf"].as_array().map(Vec::len), Some(2));
+    assert!(receipt["properties"]
+        .get("actual_vendor_cost_cents")
+        .is_none());
+    assert!(receipt.get("oneOf").is_none());
+    assert!(receipt["required"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("actual_vendor_cost")));
     assert_eq!(
         receipt["properties"]["price_model_snapshot"]["type"],
         "object"
@@ -332,7 +338,7 @@ fn combined_catalog_exposes_both_approved_sets_under_readiness_gates() {
         None,
     );
     let tools = server.list_tools_for_snapshot();
-    assert_eq!(tools.len(), 42);
+    assert_eq!(tools.len(), 43);
     assert!(tools.contains(&gongbu::operation_status_definition()));
     for definition in super::catalog::tool_definitions()
         .into_iter()
@@ -350,7 +356,7 @@ fn combined_catalog_exposes_both_approved_sets_under_readiness_gates() {
         snapshot.gongbu.reason_code = Some("backend_not_ready");
     }
     let degraded = server.list_tools_for_snapshot();
-    assert_eq!(degraded.len(), 40);
+    assert_eq!(degraded.len(), 41);
     assert!(!degraded
         .iter()
         .any(|tool| tool["name"] == "gongbu_create_execution"));
@@ -372,7 +378,7 @@ fn combined_catalog_exposes_both_approved_sets_under_readiness_gates() {
         snapshot.hubu.reason_code = Some("health_unavailable");
     }
     let hubu_down = server.list_tools_for_snapshot();
-    assert_eq!(hubu_down.len(), 8);
+    assert_eq!(hubu_down.len(), 9);
     assert!(!hubu_down
         .iter()
         .any(|tool| tool["name"]
@@ -393,7 +399,7 @@ fn combined_catalog_exposes_both_approved_sets_under_readiness_gates() {
 #[test]
 fn approved_hubu_routes_prepare_exact_static_requests() {
     let empty = json!({});
-    let spend = json!({"account_id":"account-1","amount_cents":25,"reason":"test"});
+    let spend = json!({"account_id":"account-1","amount": "0.25","reason":"test"});
     let approval_request_id = "11111111-1111-4111-8111-111111111111";
     let reconciliation = json!({
         "claim_id":"claim-1",
@@ -483,7 +489,7 @@ fn approved_hubu_routes_prepare_exact_static_requests() {
             json!({
                 "budget_id":"bgt_0123456789ab",
                 "expected_revision":1,
-                "amount_limit_cents":5_000,
+                "amount_limit": "50.00",
                 "reason":"raise total cap"
             }),
             "POST",
@@ -677,7 +683,7 @@ fn approved_hubu_routes_prepare_exact_static_requests() {
                 request.body.as_ref().unwrap(),
                 &json!({
                     "expected_revision": 1,
-                    "amount_limit_cents": 5_000,
+                    "amount_limit": "50.00",
                     "reason": "raise total cap"
                 })
             );
@@ -750,28 +756,28 @@ fn budget_version_arguments_and_transport_paths_fail_closed() {
     for (name, arguments, expected) in [
         (
             "hubu_update_budget",
-            json!({"budget_id":"bgt_0123456789ab","expected_revision":0,"amount_limit_cents":1}),
+            json!({"budget_id":"bgt_0123456789ab","expected_revision":0,"amount_limit": "0.01"}),
             "expected_revision >= 1",
         ),
         (
             "hubu_update_budget",
-            json!({"budget_id":"bgt_0123456789ab","expected_revision":1,"amount_limit_cents":0}),
-            "amount_limit_cents >= 1",
+            json!({"budget_id":"bgt_0123456789ab","expected_revision":1,"amount_limit": "0.00"}),
+            "amount_limit must be positive",
         ),
         (
             "hubu_update_budget",
-            json!({"budget_id":"bgt_0123456789ab/versions","expected_revision":1,"amount_limit_cents":1}),
+            json!({"budget_id":"bgt_0123456789ab/versions","expected_revision":1,"amount_limit": "0.01"}),
             "safe public identifier",
         ),
         (
             "hubu_update_budget",
-            json!({"budget_id":"bgt_0123456789ab","expected_revision":1,"amount_limit_cents":1,"extra":true}),
+            json!({"budget_id":"bgt_0123456789ab","expected_revision":1,"amount_limit": "0.01","extra":true}),
             "accepts only",
         ),
         (
             "hubu_update_budget",
             json!({"budget_id":"bgt_0123456789ab","expected_revision":1,"amount_limit":"1","amount_limit_cents":100}),
-            "not both",
+            "accepts only",
         ),
         (
             "hubu_update_budget",
@@ -867,7 +873,7 @@ fn budget_application_errors_are_typed_tool_results_and_recursively_redacted() {
         json!({
             "budget_id":"bgt_0123456789ab",
             "expected_revision":1,
-            "amount_limit_cents":5_000,
+            "amount_limit": "50.00",
             "reason":"raise cap"
         }),
         None,
@@ -879,7 +885,7 @@ fn budget_application_errors_are_typed_tool_results_and_recursively_redacted() {
     let forwarded: Value = serde_json::from_str(raw.split("\r\n\r\n").nth(1).unwrap()).unwrap();
     assert!(forwarded.get("budget_id").is_none());
     assert_eq!(forwarded["expected_revision"], 1);
-    assert_eq!(forwarded["amount_limit_cents"], 5_000);
+    assert_eq!(forwarded["amount_limit"], "50.00");
     assert_eq!(response["result"]["isError"], true);
     let structured = &response["result"]["structuredContent"];
     assert_eq!(structured["http_status"], 409);
@@ -947,7 +953,7 @@ fn routed_success_preserves_metadata_auth_and_spend_result_shape() {
     let (endpoint, request, handle) =
         one_shot_http_server(200, r#"{"decision":"needs_approval","payment":null}"#);
     let server = server_with_backends(&endpoint, None, false, None);
-    let arguments = json!({"account_id":"account-1","amount_cents":25,"reason":"review"});
+    let arguments = json!({"account_id":"account-1","amount": "0.25","reason":"review"});
     let meta = json!({"hubu.dev/platform-invocation":{
         "platform":"codex-controlled",
         "invocation_id":"invocation-1",
@@ -1010,7 +1016,7 @@ fn resolved_spend_dispatch_uses_supplied_identity_without_registry_persistence()
     let response = super::dispatch_resolved_spend(
         &server,
         "hubu_authorize_spend",
-        json!({"account_id":"account-1","amount_cents":25,"reason":"resume"}),
+        json!({"account_id":"account-1","amount": "0.25","reason":"resume"}),
         &operation,
     )
     .unwrap();
@@ -1051,7 +1057,7 @@ fn resumed_spend_expiry_requires_the_machine_readable_backend_code() {
         let error = super::dispatch_resolved_spend(
             &server,
             "hubu_submit_spend",
-            json!({"account_id":"account-1","amount_cents":25,"reason":"resume"}),
+            json!({"account_id":"account-1","amount": "0.25","reason":"resume"}),
             &resolved_operation(),
         )
         .unwrap_err();
@@ -1362,7 +1368,7 @@ fn denied_spend_redelivery_recovers_terminal_result_without_backend_reuse_guidan
     let server = server_with_backends(&endpoint, None, false, None);
     let arguments = json!({
         "account_id":"account-1",
-        "amount_cents":25,
+        "amount": "0.25",
         "reason":"denied"
     });
     let meta = Some(json!({"callId":"denied-call-148"}));
@@ -1405,7 +1411,7 @@ fn denied_spend_redelivery_recovers_terminal_result_without_backend_reuse_guidan
     let collision = tool_call(
         &server,
         "hubu_authorize_spend",
-        json!({"account_id":"account-1","amount_cents":20,"reason":"corrected"}),
+        json!({"account_id":"account-1","amount": "0.20","reason":"corrected"}),
         meta,
     );
     assert!(collision["error"]["message"]
@@ -1425,7 +1431,7 @@ fn spend_identity_collision_fails_before_a_second_backend_request() {
     let first = tool_call(
         &server,
         "hubu_submit_spend",
-        json!({"account_id":"account-1","amount_cents":25,"reason":"first"}),
+        json!({"account_id":"account-1","amount": "0.25","reason":"first"}),
         meta.clone(),
     );
     assert!(first.get("error").is_none());
@@ -1435,7 +1441,7 @@ fn spend_identity_collision_fails_before_a_second_backend_request() {
     let collision = tool_call(
         &server,
         "hubu_submit_spend",
-        json!({"account_id":"account-1","amount_cents":30,"reason":"changed"}),
+        json!({"account_id":"account-1","amount": "0.30","reason":"changed"}),
         meta,
     );
     assert_eq!(collision["error"]["code"], -32000);
@@ -1452,7 +1458,7 @@ fn ambiguous_spend_result_returns_safe_handle_and_exact_redelivery_guidance() {
     let response = tool_call(
         &server,
         "hubu_authorize_spend",
-        json!({"account_id":"account-1","amount_cents":25,"reason":"ambiguous"}),
+        json!({"account_id":"account-1","amount": "0.25","reason":"ambiguous"}),
         Some(json!({"callId":"ambiguous-call-125"})),
     );
     let raw = request.recv_timeout(Duration::from_secs(2)).unwrap();
@@ -1511,7 +1517,7 @@ fn unavailable_registry_hides_and_rejects_only_billable_hubu_tools() {
     let rejected = tool_call(
         &server,
         "hubu_submit_spend",
-        json!({"account_id":"account-1","amount_cents":25,"reason":"blocked"}),
+        json!({"account_id":"account-1","amount": "0.25","reason":"blocked"}),
         Some(json!({"callId":"call-without-registry"})),
     );
     assert!(rejected["error"]["message"]
@@ -2040,8 +2046,8 @@ fn canonical_apply_requires_yaml_and_preserves_assignment_and_cas() {
         json!({}),
         json!({"policy_yaml":null}),
         json!({"policy_yaml":" "}),
-        json!({"daily_limit_cents":100}),
-        json!({"policy_yaml":"version: 1","daily_limit_cents":100}),
+        json!({"daily_limit": "1.00"}),
+        json!({"policy_yaml":"version: 1","daily_limit": "1.00"}),
     ] {
         assert!(route_tool_call_v1(
             json!({"name":"hubu_apply_policy","arguments":arguments}),
@@ -2528,7 +2534,7 @@ fn save_artifact_tool_is_listed_only_for_human_allowlisted_folders() {
         ),
         (
             json!({"operation_handle":handle,"folder":"brand"}),
-            "not yet succeeded",
+            "not a bound governed execution",
         ),
     ] {
         let response = tool_call(&server, artifact_save::TOOL_NAME, arguments, None);

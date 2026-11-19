@@ -94,9 +94,9 @@ verify_package() {
     (cd "${package_dir}" && shasum -a 256 -c SHA256SUMS >/dev/null)
   fi
 
-  grep -F 'Package: libsqlite3-sys v0.30.1' \
+  grep -F 'Package: libsqlite3-sys v0.39.1' \
     "${package_dir}/THIRD-PARTY-LICENSES.txt" >/dev/null
-  grep -F 'Package: rusqlite v0.32.1' \
+  grep -F 'Package: rusqlite v0.41.1' \
     "${package_dir}/THIRD-PARTY-LICENSES.txt" >/dev/null
   grep -F 'Permission is hereby granted, free of charge' \
     "${package_dir}/THIRD-PARTY-LICENSES.txt" >/dev/null

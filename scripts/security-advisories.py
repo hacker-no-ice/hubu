@@ -277,7 +277,7 @@ def msrv_allowed(value, msrv):
     return parts + (0,) * (3 - len(parts)) <= msrv
 
 
-def candidate_versions(advisories, versions, msrv=(1, 88, 0)):
+def candidate_versions(advisories, versions, msrv=(1, 89, 0)):
     current = Version.parse(advisories[0]["version"])
     checks = []
     for advisory in advisories:
@@ -359,7 +359,7 @@ def remediate(scan, cwd, fetch=fetch_versions, run=subprocess.run):
                 blockers.append(package + "@" + old + ": " + str(error))
                 continue
             if not candidates:
-                blockers.append(package + "@" + old + ": no non-yanked stable semver-compatible fix supports Rust 1.88")
+                blockers.append(package + "@" + old + ": no non-yanked stable semver-compatible fix supports Rust 1.89")
                 continue
             failure = ""
             updated = False

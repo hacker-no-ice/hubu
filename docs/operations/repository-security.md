@@ -16,6 +16,13 @@ Every third-party `uses:` reference in GitHub Actions is pinned to a full
 comment. Before accepting an update, verify the commit against the publisher's
 release and review its changes.
 
+Ordinary CI restores a Rust dependency cache keyed on `Cargo.lock` and the
+toolchain to avoid cold compiles. Only trusted `main` pushes save that cache;
+pull requests and dispatches restore it read-only, workspace crates are always
+rebuilt, and every Cargo command stays `--locked`. The release workflow and the
+advisory monitor remain uncached. Superseded pull request runs are cancelled;
+`main` pushes and remediation dispatches always run to completion.
+
 ## Proactive advisory remediation
 
 The `Security advisory maintenance` workflow checks the default branch every
@@ -26,7 +33,7 @@ blocking; scheduled detection does not replace it.
 For an end-to-end detection and repair exercise, dispatch the workflow with
 `exercise` enabled. It creates an isolated temporary Rust project locked to the
 known vulnerable `rustls 0.23.45`, detects its real RustSec advisories, prepares a
-compatible fixed lockfile, and checks policy, Rust 1.88, and a TLS-provider test.
+compatible fixed lockfile, and checks policy, Rust 1.89, and a TLS-provider test.
 The fixture does not change the workspace or publish vulnerable dependencies.
 Ordinary PR tests use deterministic diagnostic and GitHub API fixtures so a
 historical vulnerable-version exercise cannot become a new global CI blocker.
@@ -34,7 +41,7 @@ historical vulnerable-version exercise cannot become a new global CI blocker.
 The monitor scans the committed `Cargo.lock` against RustSec with the same
 all-feature advisory policy used in CI. When a compatible fix is available, it
 attempts only the smallest targeted dependency updates and validates the result
-with the exact Rust 1.88 MSRV check, locked workspace tests and Clippy, the full
+with the exact Rust 1.89 MSRV check, locked workspace tests and Clippy, the full
 advisory/license/source policy, and builds of all four production binaries.
 It publishes the verified lockfile change to one reusable
 `codex/security-advisories` branch and PR. It never changes manifests, raises the
@@ -119,9 +126,14 @@ Use structured cargo-deny entries with reasons. Verify upstream license text
 before adding a license exception, and never broadly allow an unreviewed Git
 dependency source.
 
-There are currently no advisory exceptions. RUSTSEC-2024-0449 (unmaintained
-`unsafe-libyaml`) was ignored briefly and removed when HUB-270 replaced
-`serde_yaml_ng` with `serde-saphyr`.
+Current advisory exceptions:
+
+| Advisory | Scope and justification | Owner | Review by | Removal condition |
+| --- | --- | --- | --- | --- |
+| RUSTSEC-2026-0543 | `chrono` 0.4.45 is **unmaintained**; there is no known vulnerability and no safe upgrade. Every workspace crate uses it directly for UTC timestamps, RFC 3339 formatting and durations. `gongbu-api` also reaches it through `temporalio-*` 0.6.0 → `temporalio-common-wasm` → `prost-wkt-types`/`prost-wkt`, which temporalio 1.2.0 still keeps. Compensating controls: Hubu uses chrono only for UTC timestamps, duration arithmetic, fixed-offset RFC 3339 parsing and `%Y-%m-%d` date parsing; it does not use local time or IANA time zone lookups in production code, and malformed input fails as a parse error. The ignore names this single advisory ID; other `chrono` advisories still fail CI. | hacker-no-ice | 2027-02-18 | [HUB-383](https://linear.app/hubu/issue/HUB-383/replace-unmaintained-chrono-with-jiff-rustsec-2026-0543) replaces direct chrono use with `jiff` and narrows the ignore to the Temporal path; remove it once Temporal drops chrono. |
+
+RUSTSEC-2024-0449 (unmaintained `unsafe-libyaml`) was ignored briefly and
+removed when HUB-270 replaced `serde_yaml_ng` with `serde-saphyr`.
 
 The current exact-version license exceptions are documented with their owners,
 review dates, and removal conditions in `deny.toml`. Release packaging must
@@ -133,7 +145,9 @@ The default branch must use an enforced ruleset with:
 
 - pull requests required;
 - strict, up-to-date required checks;
-- `Test workspace`, exact Rust 1.88 MSRV, and `Security policy` required;
+- `Test workspace`, exact Rust 1.89 MSRV, and `Security policy` required
+  (`Test workspace` aggregates the parallel lint, test, and push-only
+  release-build jobs and fails unless each one succeeded);
 - deletion and non-fast-forward updates prohibited; and
 - no unreviewed bypass actor.
 

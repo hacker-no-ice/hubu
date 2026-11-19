@@ -174,6 +174,7 @@ async fn serve_started(config: &SandboxConfig, run: &mut SandboxRun) -> Result<(
         worker_drain_timeout: Duration::from_secs(30),
         authenticator: Arc::new(SandboxAuthenticator { token }),
         now,
+        reference_images: None,
     };
     let result = application::serve(listener, dependencies, async {
         let _ = tokio::signal::ctrl_c().await;

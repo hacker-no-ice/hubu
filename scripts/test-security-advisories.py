@@ -180,7 +180,7 @@ class CandidateTests(unittest.TestCase):
     def test_lowest_stable_unyanked_msrv_compatible_fix(self):
         advisory = scanned(WEBPKI)["advisories"]
         versions = [index_version("webpki-roots", version) for version in ("1.0.11", "1.0.10", "1.0.9", "1.1.0-beta.1", "2.0.0")]
-        versions += [index_version("webpki-roots", "1.0.12", yanked=True), index_version("webpki-roots", "1.0.13", rust_version="1.89")]
+        versions += [index_version("webpki-roots", "1.0.12", yanked=True), index_version("webpki-roots", "1.0.13", rust_version="1.90")]
         self.assertEqual(SECURITY.candidate_versions(advisory, versions), ["1.0.10", "1.0.11"])
 
     def test_actual_prerelease_bounded_disjunction(self):
@@ -205,8 +205,8 @@ class CandidateTests(unittest.TestCase):
             self.assertEqual(SECURITY.compatible(SECURITY.Version.parse(old), SECURITY.Version.parse(new)), expected)
 
     def test_msrv_partial_and_full_versions(self):
-        for version, expected in (("1.88", True), ("1.88.0", True), ("1.88.1", False), ("1.89", False), (None, True), ("nightly", False)):
-            self.assertEqual(SECURITY.msrv_allowed(version, (1, 88, 0)), expected)
+        for version, expected in (("1.88", True), ("1.89", True), ("1.89.0", True), ("1.89.1", False), ("1.90", False), (None, True), ("nightly", False)):
+            self.assertEqual(SECURITY.msrv_allowed(version, (1, 89, 0)), expected)
 
     def test_semver_prerelease_order_and_metadata(self):
         values = ["1.0.0-alpha.2", "1.0.0-alpha.11", "1.0.0-beta", "1.0.0"]

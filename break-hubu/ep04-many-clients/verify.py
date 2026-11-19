@@ -130,7 +130,7 @@ def verify(output):
     e.check('Every admitted claim matches its public burst authorization and hold', claim_mapping)
     e.check('Every normal settlement response matches its public final settlement', settlement_mapping)
     e.check('Operator configuration remained fixed', lambda: e.fixed())
-    return e.result('v0.2.4 serializes TCP request handling. This tests competing network demand, not simultaneous SQLite writers, throughput or fairness.')
+    return e.result('The released server serializes TCP request handling. This tests competing network demand, not simultaneous SQLite writers, throughput or fairness.')
 
 
 if __name__ == '__main__':

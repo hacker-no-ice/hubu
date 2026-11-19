@@ -487,3 +487,105 @@ fn flux_3_resolution_tiers_are_listed_and_unknown_sizes_refused() {
     );
     assert_eq!(list(unknown)["isError"], true);
 }
+
+#[test]
+fn flux_edit_targets_publish_how_input_megapixels_are_counted() {
+    const CATALOG: &str = r#"{"schema_version":2,"targets":[{"target_id":"gongbu:target:v1:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","workload_type":"image_edit","provider":"flux","model":"flux-2-pro","execution_scope":{"schema_version":1,"provider":"provider:flux:bfl","executor":"executor:gongbu:image","capability":"capability:image:edit","billing_merchant":"merchant:black-forest-labs"},"image_sizes":[],"pricing":[{"rule_id":"edit-mp","currency":"USD","components":[{"unit":"image","rate_numerator_minor":3,"rate_denominator":1},{"unit":"additional_megapixel","rate_numerator_minor":3,"rate_denominator":2},{"unit":"input_megapixel","rate_numerator_minor":3,"rate_denominator":2}]}],"output_sizes":[{"when":{"aspect_ratio":"1:1","image_size":"1k"},"width":1024,"height":1024}],"megapixels":{"rounding":"ceil","pixels_per_megapixel":1048576,"minimum":1},"input_images":{"parameter":"input_images","min":1,"max":4},"input_megapixels":{"single_image_ceiling":4,"per_image_when_several":1}}]}"#;
+    let (endpoint, _) = mock_server(vec![("200 OK", "application/json", CATALOG)]);
+    let result = call_tool(
+        &client(&endpoint, "secret"),
+        "gongbu_list_execution_targets",
+        json!({}),
+        None,
+    )
+    .result;
+    assert_eq!(result["isError"], false, "{result}");
+    let target = &result["structuredContent"]["targets"][0];
+    assert_eq!(
+        target["pricing"][0]["components"][2]["unit"],
+        "input_megapixel"
+    );
+    assert_eq!(target["input_megapixels"]["single_image_ceiling"], 4);
+    assert_eq!(target["input_megapixels"]["per_image_when_several"], 1);
+
+    // A counting rule an agent can't apply, or one without input images, is
+    // not a usable target.
+    for broken in [
+        CATALOG.replace(r#""single_image_ceiling":4"#, r#""single_image_ceiling":0"#),
+        CATALOG.replace(
+            r#""input_images":{"parameter":"input_images","min":1,"max":4},"#,
+            "",
+        ),
+    ] {
+        let broken: &'static str = Box::leak(broken.into_boxed_str());
+        let (endpoint, _) = mock_server(vec![("200 OK", "application/json", broken)]);
+        let result = call_tool(
+            &client(&endpoint, "secret"),
+            "gongbu_list_execution_targets",
+            json!({}),
+            None,
+        )
+        .result;
+        assert_eq!(result["isError"], true, "{result}");
+    }
+}
+
+#[test]
+fn reference_images_list_only_pinned_tokens_an_edit_can_send() {
+    const DIGEST: &str = "4a5b6c7d8e9f00112233445566778899aabbccddeeff00112233445566778899";
+    let listing = |images: &str| -> String {
+        format!(r#"{{"schema_version":1,"configured":true,"images":[{images}]}}"#)
+    };
+    let image = |name: &str, reference: &str| -> String {
+        format!(
+            r#"{{"name":"{name}","reference":"{reference}","sha256":"{DIGEST}","media_type":"image/png","size_bytes":1200,"width":512,"height":512}}"#
+        )
+    };
+    let call = |body: String| {
+        let body: &'static str = Box::leak(body.into_boxed_str());
+        let (endpoint, requests) = mock_server(vec![("200 OK", "application/json", body)]);
+        let result = call_tool(
+            &client(&endpoint, "secret"),
+            "gongbu_list_reference_images",
+            json!({}),
+            None,
+        )
+        .result;
+        (result, requests)
+    };
+    let mascot = image(
+        "hubu mascot.png",
+        &format!("reference:hubu mascot.png@sha256:{DIGEST}"),
+    );
+    let (result, requests) = call(listing(&mascot));
+    assert_eq!(result["isError"], false, "{result}");
+    assert_eq!(
+        result["structuredContent"]["images"][0]["reference"],
+        format!("reference:hubu mascot.png@sha256:{DIGEST}")
+    );
+    assert!(requests.lock().unwrap()[0].starts_with("GET /v1/reference-images "));
+
+    for broken in [
+        // A token that doesn't pin this image's name and digest.
+        listing(&image(
+            "hubu mascot.png",
+            &format!("reference:other.png@sha256:{DIGEST}"),
+        )),
+        // Paths that leave the folder, or hidden entries.
+        listing(&image(
+            "../x.png",
+            &format!("reference:../x.png@sha256:{DIGEST}"),
+        )),
+        listing(&image(
+            ".x.png",
+            &format!("reference:.x.png@sha256:{DIGEST}"),
+        )),
+        // An unconfigured folder lists nothing.
+        listing(&mascot).replace(r#""configured":true"#, r#""configured":false"#),
+        // A name listed twice.
+        listing(&format!("{mascot},{mascot}")),
+    ] {
+        let (result, _) = call(broken);
+        assert_eq!(result["isError"], true, "{result}");
+    }
+}

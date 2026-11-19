@@ -4,8 +4,8 @@ use crate::redaction::Redactor;
 use crate::{
     execution_scope::{for_execution, ExecutionScope},
     provider_contract::{
-        polling_deadline_allows_reinspect, units_to_minor_ceil, ActualVendorCost,
-        AsyncProviderOperation, NormalizedUsage, PollingRecoveryContext, PricingSnapshot,
+        polling_deadline_allows_reinspect, ActualVendorCost, AsyncProviderOperation,
+        NormalizedUsage, PollingRecoveryContext, PricingSnapshot,
         POLLING_RECOVERY_MIN_REINSPECT_WINDOW_MS, PRICING_SNAPSHOT_SCHEMA_VERSION, UNITS_SCALE,
     },
 };
@@ -20,7 +20,6 @@ use thiserror::Error;
 use uuid::Uuid;
 
 const MIGRATION: &str = include_str!("../../migrations/0001_execution_core.sql");
-const ACCOUNTING_UNITS_MIGRATION: &str = include_str!("../../migrations/0002_accounting_units.sql");
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("database: {0}")]
@@ -156,7 +155,8 @@ pub struct ExecutionSnapshot<'a> {
     pub pricing_snapshot: &'a Value,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum LifecycleOutcome {
     Succeeded,
     Failed,
@@ -303,6 +303,7 @@ pub struct CreateReceiptParams {
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct Receipt {
+    pub cost_basis: crate::provider_contract::SettlementCostBasis,
     pub receipt_id: String,
     pub execution_id: String,
     pub provider_attempt_id: String,
@@ -350,17 +351,24 @@ impl Repository {
         Self::init(Connection::open_in_memory()?, Arc::new(redactor))
     }
     fn init(c: Connection, redactor: Arc<Redactor>) -> Result<Self> {
-        c.pragma_update(None, "foreign_keys", "ON")?;
         c.pragma_update(None, "busy_timeout", 5000)?;
-        c.execute_batch(MIGRATION)?;
-        migrate_legacy_authorization_aliases(&c)?;
-        migrate_artifact_storage_columns(&c)?;
-        migrate_resolved_target_columns(&c)?;
-        migrate_execution_scope_column(&c)?;
-        migrate_precise_vendor_cost_columns(&c)?;
-        migrate_provider_operation_checkpoint_columns(&c)?;
-        migrate_provider_transport_counter_columns(&c)?;
-        migrate_accounting_units(&c)?;
+        // Serialize schema discovery and the one-time µ table rebuild together.
+        // Otherwise another opener could query legacy columns after the rebuild.
+        c.pragma_update(None, "foreign_keys", false)?;
+        c.execute_batch("BEGIN IMMEDIATE")?;
+        let migration: Result<()> = (|| {
+            require_micro_profile(&c)?;
+            c.execute_batch(MIGRATION)?;
+            migrate_canonical_amounts(&c)?;
+            c.execute_batch("COMMIT")?;
+            Ok(())
+        })();
+        if migration.is_err() && !c.is_autocommit() {
+            c.execute_batch("ROLLBACK")?;
+        }
+        let restore = c.pragma_update(None, "foreign_keys", true);
+        migration?;
+        restore?;
         Ok(Self(Arc::new(Mutex::new(c)), redactor))
     }
     pub fn create_execution(&self, n: &CreateExecutionParams) -> Result<Execution> {
@@ -442,7 +450,31 @@ impl Repository {
                 Err(error) => return Err(error),
             }
         }
-        let inserted = tx.execute("INSERT OR IGNORE INTO executions(execution_id,account_id,operation_key,hubu_authorization_id,hubu_claim_id,hubu_token_reference,authorized_minor,authorization_currency,normalized_input_json,input_hash,input_schema_version,target,config_version,workload_type,provider,adapter,model,provider_config_version,provider_config_digest,pricing_snapshot_json,pricing_schema_version,execution_scope_json,status,created_at,updated_at,version,authorized_units,units_scale) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,'pending',?23,?23,0,?24,6)",params![id,n.account_id,n.operation_key,n.hubu_authorization_id,n.hubu_claim_id,n.hubu_token_reference.0,units_to_minor_ceil(n.authorized_units),n.authorization_currency,j(&n.normalized_input),n.input_hash,n.input_schema_version,n.target,n.config_version,n.workload_type,n.provider,n.adapter,n.model,n.provider_config_version,n.provider_config_digest,j(&n.pricing_snapshot),n.pricing_schema_version,execution_scope,n.created_at,n.authorized_units])?;
+        let inserted = tx.execute("INSERT OR IGNORE INTO executions(execution_id,account_id,operation_key,hubu_authorization_id,hubu_claim_id,hubu_token_reference,authorization_currency,normalized_input_json,input_hash,input_schema_version,target,config_version,workload_type,provider,adapter,model,provider_config_version,provider_config_digest,pricing_snapshot_json,pricing_schema_version,execution_scope_json,status,created_at,updated_at,version,authorized_units,units_scale) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,'pending',?22,?22,0,?23,6)",params![
+            id,
+            n.account_id,
+            n.operation_key,
+            n.hubu_authorization_id,
+            n.hubu_claim_id,
+            n.hubu_token_reference.0,
+            n.authorization_currency,
+            j(&n.normalized_input),
+            n.input_hash,
+            n.input_schema_version,
+            n.target,
+            n.config_version,
+            n.workload_type,
+            n.provider,
+            n.adapter,
+            n.model,
+            n.provider_config_version,
+            n.provider_config_digest,
+            j(&n.pricing_snapshot),
+            n.pricing_schema_version,
+            execution_scope,
+            n.created_at,
+            n.authorized_units,
+        ])?;
         let e = if inserted == 1 {
             query_id(&tx, &id)?
         } else {
@@ -451,8 +483,23 @@ impl Repository {
         if let Some(authorization) = authorization {
             if e.execution_id == id {
                 tx.execute(
-                    "INSERT INTO hubu_authorization_snapshots(execution_id,account_id,agent_id,operation_key,decision_id,spend_auth_token_id,amount_minor,currency,execution_scope_json,lease_profile,expires_at,authorization_status,task_id,reason,amount_units,units_scale) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,6)",
-                    params![e.execution_id,authorization.account_id,authorization.agent_id,authorization.operation_key,authorization.decision_id,authorization.spend_auth_token_id,units_to_minor_ceil(authorization.amount_units),authorization.currency,serde_json::to_string(&authorization.execution_scope).expect("execution scope serializes"),authorization.lease_profile,authorization.expires_at,authorization.authorization_status,authorization.task_id,authorization.reason,authorization.amount_units],
+                    "INSERT INTO hubu_authorization_snapshots(execution_id,account_id,agent_id,operation_key,decision_id,spend_auth_token_id,currency,execution_scope_json,lease_profile,expires_at,authorization_status,task_id,reason,amount_units,units_scale) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,6)",
+                    params![
+            e.execution_id,
+            authorization.account_id,
+            authorization.agent_id,
+            authorization.operation_key,
+            authorization.decision_id,
+            authorization.spend_auth_token_id,
+            authorization.currency,
+            serde_json::to_string(&authorization.execution_scope).expect("execution scope serializes"),
+            authorization.lease_profile,
+            authorization.expires_at,
+            authorization.authorization_status,
+            authorization.task_id,
+            authorization.reason,
+            authorization.amount_units,
+        ],
                 )?;
             }
         }
@@ -973,16 +1020,20 @@ impl Repository {
             r.provider_operation_id.as_deref().unwrap_or(""),
             id,
         ])?;
-        let compatibility_minor = r
-            .actual_vendor_cost
-            .as_ref()
-            .map(|cost| {
-                cost.to_budget_units(&cost.currency)
-                    .map(units_to_minor_ceil)
-            })
-            .transpose()
-            .map_err(|_| Error::Invalid("attempt result"))?;
-        let n=self.0.lock().unwrap().execute("UPDATE provider_attempts SET outcome=?1,completed_at=?2,usage_json=?3,usage_schema_version=?4,provider_amount_minor=?5,provider_currency=?6,actual_vendor_cost_amount=?7,actual_vendor_cost_scale=?8,actual_vendor_cost_currency=?9,failure_code=?10,failure_message_redacted=?11,provider_request_id=?12,provider_operation_id=?13 WHERE provider_attempt_id=?14 AND completed_at IS NULL AND transmission_started_at IS NOT NULL",params![r.outcome,r.completed_at,j(&r.usage),r.usage_schema_version,compatibility_minor,r.actual_vendor_cost.as_ref().map(|cost| &cost.currency),r.actual_vendor_cost.as_ref().map(|cost| cost.amount),r.actual_vendor_cost.as_ref().map(|cost| cost.scale),r.actual_vendor_cost.as_ref().map(|cost| &cost.currency),r.failure_code,failure,r.provider_request_id,r.provider_operation_id,id])?;
+        let n=self.0.lock().unwrap().execute("UPDATE provider_attempts SET outcome=?1,completed_at=?2,usage_json=?3,usage_schema_version=?4,actual_vendor_cost_amount=?5,actual_vendor_cost_scale=?6,actual_vendor_cost_currency=?7,failure_code=?8,failure_message_redacted=?9,provider_request_id=?10,provider_operation_id=?11 WHERE provider_attempt_id=?12 AND completed_at IS NULL AND transmission_started_at IS NOT NULL",params![
+            r.outcome,
+            r.completed_at,
+            j(&r.usage),
+            r.usage_schema_version,
+            r.actual_vendor_cost.as_ref().map(|cost| cost.amount),
+            r.actual_vendor_cost.as_ref().map(|cost| cost.scale),
+            r.actual_vendor_cost.as_ref().map(|cost| &cost.currency),
+            r.failure_code,
+            failure,
+            r.provider_request_id,
+            r.provider_operation_id,
+            id,
+        ])?;
         if n == 1 {
             Ok(())
         } else {
@@ -1000,6 +1051,12 @@ impl Repository {
         }
         safe_usage_json(&r.usage)?;
         if r.outcome != "succeeded"
+            || r.failure_code.as_deref().is_some_and(|code| {
+                !matches!(
+                    code,
+                    "pack_response_cost_missing" | "pack_response_cost_invalid"
+                ) || r.actual_vendor_cost.is_some()
+            })
             || r.usage_schema_version < 1
             || r.actual_vendor_cost
                 .as_ref()
@@ -1025,6 +1082,7 @@ impl Repository {
         self.reject_registered_json([&r.usage])?;
         self.reject_registered_secrets([
             r.outcome.as_str(),
+            r.failure_code.as_deref().unwrap_or(""),
             r.completed_at.as_str(),
             usage.as_str(),
             r.actual_vendor_cost
@@ -1037,18 +1095,21 @@ impl Repository {
         ])?;
         let mut connection = self.0.lock().unwrap();
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let compatibility_minor = r
-            .actual_vendor_cost
-            .as_ref()
-            .map(|cost| {
-                cost.to_budget_units(&cost.currency)
-                    .map(units_to_minor_ceil)
-            })
-            .transpose()
-            .map_err(|_| Error::Invalid("attempt result"))?;
         let changed = transaction.execute(
-            "UPDATE provider_attempts SET outcome=?1,completed_at=?2,usage_json=?3,usage_schema_version=?4,provider_amount_minor=?5,provider_currency=?6,actual_vendor_cost_amount=?7,actual_vendor_cost_scale=?8,actual_vendor_cost_currency=?9,failure_code=NULL,failure_message_redacted=NULL,provider_request_id=?10,provider_operation_id=?11 WHERE provider_attempt_id=?12 AND completed_at IS NULL AND transmission_started_at IS NOT NULL",
-            params![r.outcome,r.completed_at,usage,r.usage_schema_version,compatibility_minor,r.actual_vendor_cost.as_ref().map(|cost| &cost.currency),r.actual_vendor_cost.as_ref().map(|cost| cost.amount),r.actual_vendor_cost.as_ref().map(|cost| cost.scale),r.actual_vendor_cost.as_ref().map(|cost| &cost.currency),r.provider_request_id,r.provider_operation_id,id],
+            "UPDATE provider_attempts SET outcome=?1,completed_at=?2,usage_json=?3,usage_schema_version=?4,actual_vendor_cost_amount=?5,actual_vendor_cost_scale=?6,actual_vendor_cost_currency=?7,failure_code=?11,failure_message_redacted=NULL,provider_request_id=?8,provider_operation_id=?9 WHERE provider_attempt_id=?10 AND completed_at IS NULL AND transmission_started_at IS NOT NULL",
+            params![
+            r.outcome,
+            r.completed_at,
+            usage,
+            r.usage_schema_version,
+            r.actual_vendor_cost.as_ref().map(|cost| cost.amount),
+            r.actual_vendor_cost.as_ref().map(|cost| cost.scale),
+            r.actual_vendor_cost.as_ref().map(|cost| &cost.currency),
+            r.provider_request_id,
+            r.provider_operation_id,
+            id,
+            r.failure_code,
+        ],
         )?;
         if changed != 1 {
             return Err(Error::NotFound);
@@ -1366,14 +1427,15 @@ impl Repository {
                 .ok_or(Error::Invalid("receipt requires provider usage"))?,
         )
         .map_err(|_| Error::Invalid("provider usage"))?;
-        let expected = snapshot
-            .settle_precise(&usage, attempt.actual_vendor_cost.as_ref(), auth.0)
-            .map_err(|error| match error {
-                crate::provider_contract::ContractError::SettlementOverage => {
-                    Error::OverAuthorization
-                }
-                _ => Error::Invalid("precise settlement"),
-            })?;
+        let calculated = match attempt.failure_code.as_deref() {
+            Some("pack_response_cost_missing") => snapshot.settle_from_quote(&usage, auth.0),
+            Some(_) => return Err(Error::Invalid("receipt has unresolved billing evidence")),
+            None => snapshot.settle_precise(&usage, attempt.actual_vendor_cost.as_ref(), auth.0),
+        };
+        let expected = calculated.map_err(|error| match error {
+            crate::provider_contract::ContractError::SettlementOverage => Error::OverAuthorization,
+            _ => Error::Invalid("precise settlement"),
+        })?;
         if expected.budget_units != n.settlement_units
             || expected.actual_vendor_cost != n.actual_vendor_cost
             || !n.currency.eq_ignore_ascii_case(&auth.1)
@@ -1387,27 +1449,32 @@ impl Repository {
             .or(attempt.provider_operation_id.clone())
             .ok_or(Error::Invalid("receipt requires provider evidence"))?;
         let pricing_snapshot_json = auth.2;
+        let cost_basis = crate::provider_contract::SettlementCostBasis::for_provider_outcome(
+            attempt.actual_vendor_cost.as_ref(),
+            attempt.failure_code.as_deref(),
+        );
         c.execute(
-            "INSERT INTO receipts(receipt_id,execution_id,provider_attempt_id,settlement_minor,currency,pricing_catalog_version,actual_vendor_cost_amount,actual_vendor_cost_scale,actual_vendor_cost_currency,provider_request_id,pricing_snapshot_json,created_at,settled_at,hubu_settlement_id,settlement_units,units_scale) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,6)",
+            "INSERT INTO receipts(receipt_id,execution_id,provider_attempt_id,currency,pricing_catalog_version,actual_vendor_cost_amount,actual_vendor_cost_scale,actual_vendor_cost_currency,provider_request_id,pricing_snapshot_json,created_at,settled_at,hubu_settlement_id,settlement_units,units_scale,cost_basis) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,6,?15)",
             params![
-                n.receipt_id,
-                n.execution_id,
-                n.provider_attempt_id,
-                units_to_minor_ceil(n.settlement_units),
-                n.currency,
-                n.pricing_catalog_version,
-                n.actual_vendor_cost.amount,
-                n.actual_vendor_cost.scale,
-                n.actual_vendor_cost.currency,
-                provider_request_id,
-                pricing_snapshot_json,
-                n.created_at,
-                n.settled_at,
-                n.hubu_settlement_id,
-                n.settlement_units
-            ],
+            n.receipt_id,
+            n.execution_id,
+            n.provider_attempt_id,
+            n.currency,
+            n.pricing_catalog_version,
+            n.actual_vendor_cost.amount,
+            n.actual_vendor_cost.scale,
+            n.actual_vendor_cost.currency,
+            provider_request_id,
+            pricing_snapshot_json,
+            n.created_at,
+            n.settled_at,
+            n.hubu_settlement_id,
+            n.settlement_units,
+            serde_json::to_value(cost_basis).unwrap().as_str().unwrap(),
+        ],
         )?;
         Ok(Receipt {
+            cost_basis,
             receipt_id: n.receipt_id.clone(),
             execution_id: n.execution_id.clone(),
             provider_attempt_id: n.provider_attempt_id.clone(),
@@ -1424,10 +1491,12 @@ impl Repository {
         })
     }
     pub fn get_receipt_for_execution(&self, execution_id: &str) -> Result<Receipt> {
-        self.0.lock().unwrap().query_row("SELECT receipt_id,execution_id,provider_attempt_id,settlement_units,currency,pricing_catalog_version,actual_vendor_cost_amount,actual_vendor_cost_scale,actual_vendor_cost_currency,provider_request_id,pricing_snapshot_json,created_at,transmission_started_at,settled_at,hubu_settlement_id FROM receipts WHERE execution_id=?1",[execution_id],|r| {
+        self.0.lock().unwrap().query_row("SELECT receipt_id,execution_id,provider_attempt_id,settlement_units,currency,pricing_catalog_version,actual_vendor_cost_amount,actual_vendor_cost_scale,actual_vendor_cost_currency,provider_request_id,pricing_snapshot_json,created_at,transmission_started_at,settled_at,hubu_settlement_id,cost_basis FROM receipts WHERE execution_id=?1",[execution_id],|r| {
             let pricing_snapshot_json:String=r.get(10)?;
             let price_model_snapshot=serde_json::from_str(&pricing_snapshot_json).map_err(|error| rusqlite::Error::FromSqlConversionFailure(pricing_snapshot_json.len(),rusqlite::types::Type::Text,Box::new(error)))?;
-            Ok(Receipt { receipt_id:r.get(0)?,execution_id:r.get(1)?,provider_attempt_id:r.get(2)?,settlement_units:r.get(3)?,currency:r.get(4)?,pricing_catalog_version:r.get(5)?,actual_vendor_cost:actual_vendor_cost_from_row(r,6,7,8)?.ok_or_else(|| rusqlite::Error::InvalidColumnType(6,"actual_vendor_cost_amount".into(),rusqlite::types::Type::Null))?,provider_request_id:r.get(9)?,price_model_snapshot,created_at:r.get(11)?,transmission_started_at:r.get(12)?,settled_at:r.get(13)?,hubu_settlement_id:r.get(14)? })
+            let cost_basis = serde_json::from_value(serde_json::Value::String(r.get(15)?))
+                .map_err(|error| rusqlite::Error::FromSqlConversionFailure(15, rusqlite::types::Type::Text, Box::new(error)))?;
+            Ok(Receipt { cost_basis, receipt_id:r.get(0)?,execution_id:r.get(1)?,provider_attempt_id:r.get(2)?,settlement_units:r.get(3)?,currency:r.get(4)?,pricing_catalog_version:r.get(5)?,actual_vendor_cost:actual_vendor_cost_from_row(r,6,7,8)?.ok_or_else(|| rusqlite::Error::InvalidColumnType(6,"actual_vendor_cost_amount".into(),rusqlite::types::Type::Null))?,provider_request_id:r.get(9)?,price_model_snapshot,created_at:r.get(11)?,transmission_started_at:r.get(12)?,settled_at:r.get(13)?,hubu_settlement_id:r.get(14)? })
         }).optional()?.ok_or(Error::NotFound)
     }
     pub fn begin_settlement_transmission(&self, receipt_id: &str, at: &str) -> Result<()> {
@@ -1619,280 +1688,119 @@ impl Repository {
         }
     }
 }
-fn migrate_artifact_storage_columns(c: &Connection) -> rusqlite::Result<()> {
-    let artifact_columns = || -> rusqlite::Result<std::collections::BTreeSet<String>> {
-        let mut statement = c.prepare("PRAGMA table_info(artifacts)")?;
-        let columns = statement
-            .query_map([], |row| row.get(1))?
-            .collect::<rusqlite::Result<_>>()?;
-        Ok(columns)
-    };
+fn has_column(c: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
+    c.query_row(
+        "SELECT count(*)>0 FROM pragma_table_info(?1) WHERE name=?2",
+        [table, column],
+        |row| row.get(0),
+    )
+}
 
-    let mut existing = artifact_columns()?;
-    if !existing.contains("storage_backend") {
-        c.execute(
-            "ALTER TABLE artifacts ADD COLUMN storage_backend TEXT NOT NULL DEFAULT 'local_fs'",
-            [],
-        )?;
-        existing.insert("storage_backend".to_string());
+/// Only complete released µ profiles can be rebuilt. Checking before DDL
+/// prevents a partial/older schema from discarding its only monetary evidence.
+fn require_micro_profile(c: &Connection) -> Result<()> {
+    let has_accounting: bool=c.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name IN ('executions','hubu_authorization_snapshots','provider_attempts','receipts'))",[],|row|row.get(0))?;
+    if !has_accounting {
+        return Ok(());
     }
-    if existing.contains("byte_size") && !existing.contains("size_bytes") {
-        c.execute(
-            "ALTER TABLE artifacts RENAME COLUMN byte_size TO size_bytes",
-            [],
-        )?;
-    }
-    Ok(())
-}
-fn migrate_legacy_authorization_aliases(c: &Connection) -> rusqlite::Result<()> {
-    // These original v1 columns both meant the opaque Hubu spend-auth token
-    // identifier. A short-lived pre-HUB-70 build wrote decision IDs into the
-    // misleadingly named column; the separately persisted snapshot remains the
-    // sole authoritative decision-ID record.
-    c.execute(
-        "UPDATE executions SET hubu_authorization_id=hubu_token_reference WHERE hubu_authorization_id<>hubu_token_reference",
-        [],
-    )?;
-    Ok(())
-}
-fn migrate_resolved_target_columns(c: &Connection) -> rusqlite::Result<()> {
-    let mut statement = c.prepare("PRAGMA table_info(executions)")?;
-    let existing: std::collections::BTreeSet<String> = statement
-        .query_map([], |row| row.get(1))?
-        .collect::<rusqlite::Result<_>>()?;
-    for column in [
-        "workload_type",
-        "provider",
-        "adapter",
-        "model",
-        "provider_config_version",
-        "provider_config_digest",
+    for (table, fields) in [
+        ("executions", "authorized_units,units_scale,pricing_snapshot_json,provider_config_digest,execution_scope_json,workload_type,provider,adapter,model,provider_config_version"),
+        ("hubu_authorization_snapshots", "amount_units,units_scale,execution_scope_json"),
+        ("provider_attempts", "actual_vendor_cost_amount,actual_vendor_cost_scale,actual_vendor_cost_currency"),
+        ("receipts", "settlement_units,units_scale,actual_vendor_cost_amount,actual_vendor_cost_scale,actual_vendor_cost_currency,provider_request_id,pricing_snapshot_json"),
     ] {
-        if !existing.contains(column) {
-            c.execute(
-                &format!("ALTER TABLE executions ADD COLUMN {column} TEXT NOT NULL DEFAULT 'legacy-unresolved' CHECK(trim({column})<>'')"),
-                [],
-            )?;
+        for column in fields.split(',') {
+            if !has_column(c, table, column)? {
+                return Err(Error::Invalid("incomplete/pre-micro database: upgrade with Hubu v0.2.4 before opening this release"));
+            }
         }
     }
-    Ok(())
-}
-fn migrate_execution_scope_column(c: &Connection) -> rusqlite::Result<()> {
-    let mut statement = c.prepare("PRAGMA table_info(executions)")?;
-    let existing: std::collections::BTreeSet<String> = statement
-        .query_map([], |row| row.get(1))?
-        .collect::<rusqlite::Result<_>>()?;
-    if !existing.contains("execution_scope_json") {
-        c.execute(
-            "ALTER TABLE executions ADD COLUMN execution_scope_json TEXT CHECK(execution_scope_json IS NULL OR json_valid(execution_scope_json))",
-            [],
-        )?;
+    if has_column(c,"provider_attempts","provider_amount_minor")? && c.query_row("SELECT EXISTS(SELECT 1 FROM provider_attempts WHERE provider_amount_minor IS NOT NULL AND actual_vendor_cost_amount IS NULL)",[],|row|row.get::<_,bool>(0))? {
+        return Err(Error::Invalid("incomplete micro provider evidence: upgrade with Hubu v0.2.4 before opening this release"));
     }
     Ok(())
 }
-fn migrate_precise_vendor_cost_columns(c: &Connection) -> rusqlite::Result<()> {
-    fn columns(
-        c: &Connection,
-        table: &str,
-    ) -> rusqlite::Result<std::collections::BTreeSet<String>> {
-        let mut statement = c.prepare(&format!("PRAGMA table_info({table})"))?;
-        let collected = statement
-            .query_map([], |row| row.get(1))?
-            .collect::<rusqlite::Result<_>>();
+
+/// Rebuild all dual-written tables atomically, including nullable provider
+/// evidence. Copying into constrained v2 tables validates existing µ rows.
+fn migrate_canonical_amounts(c: &Connection) -> rusqlite::Result<()> {
+    if !has_column(c, "executions", "authorized_minor")? {
+        return Ok(());
+    }
+    let objects = {
+        let mut stmt = c.prepare("SELECT name, type, sql FROM sqlite_master WHERE type IN ('index', 'trigger') AND sql IS NOT NULL AND tbl_name IN ('executions', 'hubu_authorization_snapshots', 'provider_attempts', 'receipts')")?;
+        let collected = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         collected
-    }
-
-    let attempt_columns = columns(c, "provider_attempts")?;
-    for (name, definition) in [
-        ("actual_vendor_cost_amount", "INTEGER"),
-        ("actual_vendor_cost_scale", "INTEGER"),
-        ("actual_vendor_cost_currency", "TEXT"),
+    };
+    let mut rebuild = MIGRATION.to_owned();
+    for table in [
+        "executions",
+        "hubu_authorization_snapshots",
+        "provider_attempts",
+        "receipts",
     ] {
-        if !attempt_columns.contains(name) {
-            c.execute(
-                &format!("ALTER TABLE provider_attempts ADD COLUMN {name} {definition}"),
-                [],
-            )?;
-        }
+        rebuild = rebuild.replace(
+            &format!("CREATE TABLE IF NOT EXISTS {table}("),
+            &format!("CREATE TABLE {table}_v2("),
+        );
     }
-    // v4 stored provider amounts in currency minor units. That legacy value is
-    // exact at decimal scale 2 and remains a valid deterministic backfill.
-    c.execute(
-        "UPDATE provider_attempts SET actual_vendor_cost_amount=provider_amount_minor,actual_vendor_cost_scale=2,actual_vendor_cost_currency=upper(provider_currency) WHERE actual_vendor_cost_amount IS NULL AND provider_amount_minor IS NOT NULL AND provider_currency IS NOT NULL",
-        [],
-    )?;
-
-    let receipt_columns = columns(c, "receipts")?;
-    for (name, definition) in [
-        ("actual_vendor_cost_amount", "INTEGER"),
-        ("actual_vendor_cost_scale", "INTEGER"),
-        ("actual_vendor_cost_currency", "TEXT"),
-        ("provider_request_id", "TEXT"),
-        ("pricing_snapshot_json", "TEXT"),
+    c.execute_batch(&rebuild)?;
+    for table in [
+        "executions",
+        "hubu_authorization_snapshots",
+        "provider_attempts",
+        "receipts",
     ] {
-        if !receipt_columns.contains(name) {
-            c.execute(
-                &format!("ALTER TABLE receipts ADD COLUMN {name} {definition}"),
-                [],
-            )?;
-        }
+        let columns = {
+            // New optional evidence columns use their schema defaults. All
+            // authoritative amounts are copied, including NULLs which reject
+            // the rebuild through the canonical NOT NULL constraints.
+            let mut stmt = c.prepare("SELECT target.name FROM pragma_table_info(?1) target JOIN pragma_table_info(?2) source USING(name) ORDER BY target.cid")?;
+            let columns = stmt
+                .query_map([format!("{table}_v2"), table.to_owned()], |row| {
+                    row.get::<_, String>(0)
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+                .join(", ");
+            columns
+        };
+        c.execute_batch(&format!(
+            "INSERT INTO {table}_v2 ({columns}) SELECT {columns} FROM {table};"
+        ))?;
     }
-    c.execute(
-        "UPDATE receipts SET actual_vendor_cost_amount=settlement_minor,actual_vendor_cost_scale=2,actual_vendor_cost_currency=upper(currency) WHERE actual_vendor_cost_amount IS NULL",
-        [],
-    )?;
-    // Before precise receipts, Gongbu deliberately used its deterministic
-    // receipt ID as the provider request reference on the Hubu wire. Preserve
-    // that exact value so a lost-response retry still compares equal in Hubu.
-    c.execute(
-        "UPDATE receipts SET provider_request_id=receipt_id WHERE provider_request_id IS NULL",
-        [],
-    )?;
-    // The legacy Hubu wire carried a reduced price-model object rather than the
-    // complete Gongbu pricing snapshot. Reconstruct that exact JSON value for
-    // already-created receipts; new receipts persist the full snapshot when
-    // they are created.
-    c.execute(
-        "UPDATE receipts
-         SET pricing_snapshot_json=(
-             SELECT json_object(
-                 'provider', executions.provider,
-                 'model', executions.model,
-                 'unit_price_cents', json_extract(executions.pricing_snapshot_json, '$.estimated_amount_minor'),
-                 'pricing_unit', 'execution',
-                 'currency', lower(executions.authorization_currency)
-             )
-             FROM executions
-             WHERE executions.execution_id=receipts.execution_id
-         )
-         WHERE pricing_snapshot_json IS NULL",
-        [],
-    )?;
-    Ok(())
-}
-
-/// Add the micro-unit columns and backfill them exactly from whole cents in
-/// one transaction. Rows already converted are skipped, so this is
-/// idempotent; an amount too large to convert aborts without changes.
-fn migrate_accounting_units(c: &Connection) -> rusqlite::Result<()> {
-    const MAX_CONVERTIBLE_MINOR: i64 = i64::MAX / 10_000;
-    let tables = [
-        ("executions", "authorized_minor", "authorized_units"),
-        (
-            "hubu_authorization_snapshots",
-            "amount_minor",
-            "amount_units",
-        ),
-        ("receipts", "settlement_minor", "settlement_units"),
-    ];
-    for (table, _, units) in tables {
-        let mut statement = c.prepare(&format!("PRAGMA table_info({table})"))?;
-        let existing = statement
-            .query_map([], |row| row.get::<_, String>(1))?
-            .collect::<rusqlite::Result<std::collections::BTreeSet<_>>>()?;
-        if !existing.contains(units) {
-            c.execute(
-                &format!(
-                    "ALTER TABLE {table} ADD COLUMN {units} INTEGER CHECK({units} IS NULL OR {units}>=0)"
-                ),
-                [],
-            )?;
-        }
-        if !existing.contains("units_scale") {
-            c.execute(
-                &format!(
-                    "ALTER TABLE {table} ADD COLUMN units_scale INTEGER CHECK(units_scale IS NULL OR units_scale=6)"
-                ),
-                [],
-            )?;
-        }
+    for (name, kind, _) in &objects {
+        c.execute_batch(&format!("DROP {kind} \"{name}\";"))?;
     }
-    c.execute_batch("BEGIN IMMEDIATE")?;
-    let result = (|| {
-        for (table, minor, units) in tables {
-            let overflow: i64 = c.query_row(
-                &format!(
-                    "SELECT count(*) FROM {table} WHERE {units} IS NULL AND {minor}>{MAX_CONVERTIBLE_MINOR}"
-                ),
-                [],
-                |row| row.get(0),
-            )?;
-            if overflow > 0 {
-                return Err(rusqlite::Error::SqliteFailure(
-                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
-                    Some(format!(
-                        "{table}.{minor} exceeds the micro-unit range; refusing to migrate"
-                    )),
-                ));
-            }
-        }
-        c.execute_batch(ACCOUNTING_UNITS_MIGRATION)?;
-        // Every row's cent column is its micro-unit amount rounded up.
-        for (table, minor, units) in tables {
-            let mismatched: i64 = c.query_row(
-                &format!(
-                    "SELECT count(*) FROM {table} WHERE {units} IS NULL OR units_scale IS NOT 6 OR {units}>{minor}*10000 OR {units}<=({minor}-1)*10000"
-                ),
-                [],
-                |row| row.get(0),
-            )?;
-            if mismatched > 0 {
-                return Err(rusqlite::Error::SqliteFailure(
-                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT),
-                    Some(format!(
-                        "{table}.{units} backfill verification failed for {mismatched} rows"
-                    )),
-                ));
-            }
-        }
-        Ok(())
-    })();
-    match result {
-        Ok(()) => c.execute_batch("COMMIT"),
-        Err(error) => {
-            let _ = c.execute_batch("ROLLBACK");
-            Err(error)
-        }
-    }
-}
-
-fn migrate_provider_operation_checkpoint_columns(c: &Connection) -> rusqlite::Result<()> {
-    let mut statement = c.prepare("PRAGMA table_info(provider_attempts)")?;
-    let existing: std::collections::BTreeSet<String> = statement
-        .query_map([], |row| row.get(1))?
-        .collect::<rusqlite::Result<_>>()?;
-    drop(statement);
-    for (name, definition) in [
-        ("provider_polling_host", "TEXT"),
-        ("provider_deadline_unix_ms", "INTEGER"),
-        ("operation_checkpointed_at", "TEXT"),
-        ("provider_recovery_context_json", "TEXT"),
+    for table in [
+        "receipts",
+        "hubu_authorization_snapshots",
+        "provider_attempts",
+        "executions",
     ] {
-        if !existing.contains(name) {
-            c.execute(
-                &format!("ALTER TABLE provider_attempts ADD COLUMN {name} {definition}"),
-                [],
-            )?;
-        }
+        c.execute_batch(&format!(
+            "DROP TABLE {table}; ALTER TABLE {table}_v2 RENAME TO {table};"
+        ))?;
     }
-    Ok(())
-}
-
-fn migrate_provider_transport_counter_columns(c: &Connection) -> rusqlite::Result<()> {
-    let mut statement = c.prepare("PRAGMA table_info(provider_attempts)")?;
-    let existing: std::collections::BTreeSet<String> = statement
-        .query_map([], |row| row.get(1))?
-        .collect::<rusqlite::Result<_>>()?;
-    drop(statement);
-    for name in ["provider_poll_count", "artifact_fetch_count"] {
-        if !existing.contains(name) {
-            c.execute(
-                &format!(
-                    "ALTER TABLE provider_attempts ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0 CHECK({name}>=0)"
-                ),
-                [],
-            )?;
-        }
+    for (_, _, sql) in objects {
+        c.execute_batch(&sql)?;
+    }
+    if c.prepare("PRAGMA foreign_key_check")?
+        .query([])?
+        .next()?
+        .is_some()
+    {
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY),
+            Some("canonical amount migration found a foreign-key violation".into()),
+        ));
     }
     Ok(())
 }
@@ -2238,13 +2146,42 @@ fn j(v: &Value) -> String {
     serde_json::to_string(v).unwrap()
 }
 
+/// Test-only shape of the released dual-written µ schema. Production creates
+/// canonical tables directly; this fixture models only the retired projections.
+#[cfg(test)]
+pub(crate) fn micro_build_schema() -> String {
+    let mut sql = MIGRATION.to_owned();
+    for (table, units, minor) in [
+        ("executions", "authorized_units", "authorized_minor"),
+        (
+            "hubu_authorization_snapshots",
+            "amount_units",
+            "amount_minor",
+        ),
+        ("receipts", "settlement_units", "settlement_minor"),
+    ] {
+        sql = sql.replace(
+            &format!("{units} INTEGER NOT NULL CHECK(typeof({units})='integer' AND {units}>=0)"),
+            &format!("{units} INTEGER, {minor} INTEGER NOT NULL"),
+        );
+        assert!(
+            sql.contains(&format!("{minor} INTEGER NOT NULL")),
+            "{table}"
+        );
+    }
+    sql = sql.replace(
+        "units_scale INTEGER NOT NULL CHECK(units_scale=6)",
+        "units_scale INTEGER",
+    );
+    sql.replacen("actual_vendor_cost_amount INTEGER CHECK", "provider_amount_minor INTEGER, provider_currency TEXT, actual_vendor_cost_amount INTEGER CHECK",1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::execution_scope::for_target;
     use serde_json::json;
     use std::{
-        collections::BTreeSet,
         io::{Read, Write},
         net::TcpListener,
         sync::Barrier,
@@ -2401,207 +2338,6 @@ mod tests {
         );
     }
 
-    fn legacy_cent_rows(path: &Path, authorized_minor: i64) {
-        let connection = Connection::open(path).unwrap();
-        connection.execute_batch(MIGRATION).unwrap();
-        let digest = format!("sha256:{}", "a".repeat(64));
-        connection.execute(
-            "INSERT INTO executions(execution_id,account_id,operation_key,hubu_authorization_id,hubu_token_reference,authorized_minor,authorization_currency,normalized_input_json,input_hash,input_schema_version,target,config_version,provider_config_digest,pricing_snapshot_json,pricing_schema_version,execution_scope_json,status,created_at,updated_at,version) VALUES('units-row','account-a','operation','token-1','token-1',?2,'USD','{}','sha256:input',1,'image_generation/example/fixture/image-v1','provider-v1',?1,'{}',1,NULL,'pending','now','now',0)",
-            params![digest, authorized_minor],
-        ).unwrap();
-        connection.execute(
-            "INSERT INTO hubu_authorization_snapshots(execution_id,account_id,agent_id,operation_key,decision_id,spend_auth_token_id,amount_minor,currency,execution_scope_json,lease_profile,expires_at,authorization_status,reason) VALUES('units-row','account-a','agent-a','operation','decision-1','token-1',?1,'USD',?2,'default','2026-08-05T21:00:00Z','available','units fixture')",
-            params![
-                authorized_minor,
-                serde_json::to_string(&for_target("example", "fixture").unwrap()).unwrap()
-            ],
-        ).unwrap();
-    }
-
-    #[test]
-    fn accounting_units_migration_backfills_exactly_and_is_idempotent() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("cents.sqlite3");
-        legacy_cent_rows(&path, 7);
-        for _ in 0..2 {
-            let repository = Repository::open(&path, Redactor::default()).unwrap();
-            assert_eq!(
-                repository
-                    .get_execution("units-row")
-                    .unwrap()
-                    .authorized_units,
-                70_000
-            );
-            assert_eq!(
-                repository
-                    .get_hubu_authorization_snapshot("units-row")
-                    .unwrap()
-                    .amount_units,
-                70_000
-            );
-        }
-        let connection = Connection::open(&path).unwrap();
-        let (minor, units, scale): (i64, i64, i64) = connection
-            .query_row(
-                "SELECT authorized_minor,authorized_units,units_scale FROM executions WHERE execution_id='units-row'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .unwrap();
-        assert_eq!((minor, units, scale), (7, 70_000, 6));
-    }
-
-    #[test]
-    fn accounting_units_migration_refuses_amounts_beyond_the_micro_unit_range() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("overflow.sqlite3");
-        legacy_cent_rows(&path, i64::MAX / 10_000 + 1);
-        let error = Repository::open(&path, Redactor::default())
-            .err()
-            .expect("an unconvertible amount must stop the migration")
-            .to_string();
-        assert!(error.contains("exceeds the micro-unit range"), "{error}");
-        // Nothing was backfilled: the rolled-back rows keep only their cents.
-        let connection = Connection::open(&path).unwrap();
-        let units: Option<i64> = connection
-            .query_row(
-                "SELECT authorized_units FROM executions WHERE execution_id='units-row'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(units, None);
-    }
-
-    #[test]
-    fn migration_collapses_short_lived_decision_value_without_losing_snapshot() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("hub-72-layout.sqlite3");
-        let connection = Connection::open(&path).unwrap();
-        connection.execute_batch(MIGRATION).unwrap();
-        let digest = format!("sha256:{}", "a".repeat(64));
-        connection.execute(
-            "INSERT INTO executions(execution_id,account_id,operation_key,hubu_authorization_id,hubu_token_reference,authorized_minor,authorization_currency,normalized_input_json,input_hash,input_schema_version,target,config_version,provider_config_digest,pricing_snapshot_json,pricing_schema_version,execution_scope_json,status,created_at,updated_at,version) VALUES('hub-72-row','account-a','operation','decision-1','token-1',100,'USD','{}','sha256:input',1,'image_generation/example/fixture/image-v1','provider-v1',?1,'{}',1,'{\"schema_version\":1,\"provider\":{\"id\":\"provider:local:fixture\",\"display_name\":\"Local fixture provider\"},\"executor\":{\"id\":\"executor:gongbu:image\",\"display_name\":\"Gongbu image executor\"},\"capability\":{\"id\":\"capability:image:generate\",\"display_name\":\"Generate image\"},\"billing_merchant\":{\"id\":\"merchant:local\",\"display_name\":\"Local merchant\"}}','pending','now','now',0)",
-            [&digest],
-        ).unwrap();
-        connection.execute(
-            "INSERT INTO hubu_authorization_snapshots(execution_id,account_id,agent_id,operation_key,decision_id,spend_auth_token_id,amount_minor,currency,execution_scope_json,lease_profile,expires_at,authorization_status,reason) VALUES('hub-72-row','account-a','agent-a','operation','decision-1','token-1',100,'USD','{\"schema_version\":1,\"provider\":{\"id\":\"provider:local:fixture\",\"display_name\":\"Local fixture provider\"},\"executor\":{\"id\":\"executor:gongbu:image\",\"display_name\":\"Gongbu image executor\"},\"capability\":{\"id\":\"capability:image:generate\",\"display_name\":\"Generate image\"},\"billing_merchant\":{\"id\":\"merchant:local\",\"display_name\":\"Local merchant\"}}','default','2026-08-05T21:00:00Z','available','migration fixture')",
-            [],
-        ).unwrap();
-        drop(connection);
-
-        let repository = Repository::open(&path, Redactor::default()).unwrap();
-        let execution = repository.get_execution("hub-72-row").unwrap();
-        assert_eq!(execution.hubu_authorization_id, "token-1");
-        assert_eq!(execution.hubu_token_reference.as_str(), "token-1");
-        let snapshot = repository
-            .get_hubu_authorization_snapshot("hub-72-row")
-            .unwrap();
-        assert_eq!(snapshot.decision_id, "decision-1");
-        assert_eq!(snapshot.spend_auth_token_id, "token-1");
-    }
-
-    #[test]
-    fn exact_pre_snapshot_database_migrates_replays_and_preserves_reconciliation() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("pre-hub-70.sqlite3");
-        let legacy = Connection::open(&path).unwrap();
-        legacy
-            .execute_batch(include_str!(
-                "../../../../fixtures/gongbu-pre-authorization-snapshot.sql"
-            ))
-            .unwrap();
-        assert_eq!(
-            legacy
-                .query_row(
-                    "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='hubu_authorization_snapshots'",
-                    [],
-                    |row| row.get::<_, i64>(0),
-                )
-                .unwrap(),
-            0
-        );
-        legacy.execute("INSERT INTO provider_attempts(provider_attempt_id,execution_id,provider,provider_request_id,outcome,usage_json,usage_schema_version,provider_amount_minor,provider_currency,started_at,transmission_started_at,completed_at) VALUES('legacy-attempt','legacy-reconciliation','example','legacy-request','succeeded','{\"images\":1}',1,7,'usd','2026-08-05T20:00:10Z','2026-08-05T20:00:10Z','2026-08-05T20:00:20Z')", []).unwrap();
-        legacy.execute("INSERT INTO receipts(receipt_id,execution_id,provider_attempt_id,settlement_minor,currency,pricing_catalog_version,created_at) VALUES('legacy-receipt','legacy-reconciliation','legacy-attempt',7,'usd','prices-v2','2026-08-05T20:00:30Z')", []).unwrap();
-        drop(legacy);
-
-        let repository = Repository::open(&path, Redactor::default()).unwrap();
-        assert_eq!(repository.count("hubu_authorization_snapshots"), 0);
-        let replay = repository
-            .get_execution_by_hubu_token("account-a", "legacy-token")
-            .unwrap();
-        assert_eq!(replay.execution_id, "legacy-reconciliation");
-        assert_eq!(
-            repository
-                .get_execution_by_spend_auth_token("legacy-token")
-                .unwrap()
-                .execution_id,
-            "legacy-reconciliation"
-        );
-        let reconciliation = repository
-            .get_reconciliation("legacy-reconciliation")
-            .unwrap();
-        assert_eq!(
-            reconciliation.evidence["provider_request_id"],
-            "provider-before-upgrade"
-        );
-        assert_eq!(reconciliation.automatic_attempts, 2);
-        assert!(reconciliation.automatic_attempts_exhausted);
-        let legacy_attempt = repository.get_provider_attempt("legacy-attempt").unwrap();
-        assert_eq!(
-            legacy_attempt.actual_vendor_cost,
-            Some(ActualVendorCost::new(7, 2, "USD").unwrap())
-        );
-        assert_eq!(legacy_attempt.provider_poll_count, 0);
-        assert_eq!(legacy_attempt.artifact_fetch_count, 0);
-        let legacy_receipt = repository
-            .get_receipt_for_execution("legacy-reconciliation")
-            .unwrap();
-        assert_eq!(
-            legacy_receipt.actual_vendor_cost,
-            ActualVendorCost::new(7, 2, "USD").unwrap()
-        );
-        assert_eq!(legacy_receipt.provider_request_id, "legacy-receipt");
-        assert_eq!(
-            legacy_receipt.price_model_snapshot,
-            json!({
-                "provider": "example",
-                "model": "image-v1",
-                "unit_price_cents": 100,
-                "pricing_unit": "execution",
-                "currency": "usd"
-            })
-        );
-        assert!(repository
-            .record_operator_action(
-                "legacy-reconciliation",
-                "operator-confirmed",
-                "release",
-                &json!({"review":"legacy evidence retained"}),
-                "2026-08-05T20:02:00Z",
-            )
-            .unwrap());
-        drop(repository);
-
-        let restarted = Repository::open(&path, Redactor::default()).unwrap();
-        let replay_receipt = restarted
-            .get_receipt_for_execution("legacy-reconciliation")
-            .unwrap();
-        assert_eq!(replay_receipt, legacy_receipt);
-        let preserved = restarted
-            .get_reconciliation("legacy-reconciliation")
-            .unwrap();
-        assert_eq!(
-            preserved.evidence["provider_request_id"],
-            "provider-before-upgrade"
-        );
-        assert_eq!(
-            preserved.last_operator_action_id.as_deref(),
-            Some("operator-confirmed")
-        );
-        assert_eq!(preserved.last_operator_action.as_deref(), Some("release"));
-    }
-
     #[test]
     fn ambiguous_pre_snapshot_token_reference_fails_closed() {
         let repository = Repository::in_memory().unwrap();
@@ -2632,61 +2368,10 @@ mod tests {
     }
 
     #[test]
-    fn legacy_database_preserves_claim_contract_and_new_rows_use_typed_scope() {
+    fn omitted_and_typed_scopes_preserve_claim_contract_across_restart() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("legacy.sqlite3");
-        let legacy = MIGRATION.replace(
-            ", provider_config_digest TEXT NOT NULL CHECK(provider_config_digest GLOB 'sha256:*' AND length(provider_config_digest)=71)",
-            "",
-        ).replace(
-            " execution_scope_json TEXT CHECK(execution_scope_json IS NULL OR json_valid(execution_scope_json)),\n",
-            "",
-        );
-        let legacy_connection = Connection::open(&path).unwrap();
-        legacy_connection.execute_batch(&legacy).unwrap();
-        for column in [
-            "workload_type",
-            "provider",
-            "adapter",
-            "model",
-            "provider_config_version",
-        ] {
-            legacy_connection
-                .execute(
-                    &format!("ALTER TABLE executions ADD COLUMN {column} TEXT NOT NULL DEFAULT 'legacy-unresolved' CHECK(trim({column})<>'')"),
-                    [],
-                )
-                .unwrap();
-        }
-        legacy_connection.execute(
-            "INSERT INTO executions(execution_id,account_id,operation_key,hubu_authorization_id,hubu_token_reference,authorized_minor,authorization_currency,normalized_input_json,input_hash,input_schema_version,target,config_version,workload_type,provider,adapter,model,provider_config_version,pricing_snapshot_json,pricing_schema_version,status,created_at,updated_at,version) VALUES('legacy-execution','legacy','in-flight','auth','token-ref',100,'USD','{}','hash',1,'image_generation/example/fixture/image-v1','pcv-1','image_generation','example','fixture','image-v1','pcv-1','{}',1,'pending','now','now',0)",
-            [],
-        ).unwrap();
-        drop(legacy_connection);
-
+        let path = directory.path().join("scopes.sqlite3");
         let repository = Repository::open(&path, Redactor::default()).unwrap();
-        let columns: BTreeSet<String> = repository
-            .0
-            .lock()
-            .unwrap()
-            .prepare("PRAGMA table_info(executions)")
-            .unwrap()
-            .query_map([], |row| row.get(1))
-            .unwrap()
-            .collect::<rusqlite::Result<_>>()
-            .unwrap();
-        assert!(columns.contains("provider_config_digest"));
-        assert!(columns.contains("execution_scope_json"));
-        let legacy_execution = repository.get_execution("legacy-execution").unwrap();
-        assert_eq!(
-            legacy_execution.provider_config_digest,
-            crate::provider_targets::LEGACY_UNRESOLVED_DIGEST
-        );
-        assert_eq!(legacy_execution.execution_scope, None);
-        let legacy_claim = submitted_claim(&legacy_execution);
-        assert_eq!(legacy_claim["merchant"], "gongbu.execution");
-        assert!(legacy_claim.get("execution_scope").is_none());
-
         let mut omitted = new("migration", "omitted-scope");
         omitted.provider = "google".into();
         omitted.adapter = "gemini_developer_image".into();
@@ -3616,5 +3301,268 @@ mod tests {
             fixed_repo.create_execution(&new("a", "fixed-status")),
             Err(Error::Invalid("secret-bearing persistence value"))
         ));
+    }
+    fn micro_build_database(path: &Path) -> Connection {
+        let c = Connection::open(path).unwrap();
+        c.execute_batch(&micro_build_schema()).unwrap();
+        for column in [
+            "provider_polling_host",
+            "provider_deadline_unix_ms",
+            "operation_checkpointed_at",
+            "provider_recovery_context_json",
+            "provider_poll_count",
+            "artifact_fetch_count",
+        ] {
+            c.execute_batch(&format!(
+                "ALTER TABLE provider_attempts DROP COLUMN {column}"
+            ))
+            .unwrap();
+        }
+        let digest = format!("sha256:{}", "a".repeat(64));
+        c.execute("INSERT INTO executions(execution_id,account_id,operation_key,hubu_authorization_id,hubu_token_reference,authorized_minor,authorized_units,units_scale,authorization_currency,normalized_input_json,input_hash,input_schema_version,target,config_version,provider_config_digest,pricing_snapshot_json,pricing_schema_version,status,created_at,updated_at) VALUES('units-row','account-a','operation','token-1','token-1',1,3500,6,'USD','{}','sha256:input',1,'image_generation/example/fixture/image-v1','provider-v1',?1,'{}',1,'pending','now','now')",[digest]).unwrap();
+        c.execute("INSERT INTO hubu_authorization_snapshots(execution_id,account_id,agent_id,operation_key,decision_id,spend_auth_token_id,amount_minor,amount_units,units_scale,currency,execution_scope_json,lease_profile,expires_at,authorization_status,reason) VALUES('units-row','account-a','agent-a','operation','decision-1','token-1',1,3500,6,'USD',?1,'default','2026-08-05T21:00:00Z','available','units fixture')",[serde_json::to_string(&for_target("example","fixture").unwrap()).unwrap()]).unwrap();
+        c
+    }
+
+    #[test]
+    fn fresh_schema_is_canonical_without_a_rebuild() {
+        let repo = Repository::in_memory().unwrap();
+        let c = repo.0.lock().unwrap();
+        for (table, column) in [
+            ("executions", "authorized_minor"),
+            ("hubu_authorization_snapshots", "amount_minor"),
+            ("provider_attempts", "provider_amount_minor"),
+            ("receipts", "settlement_minor"),
+        ] {
+            assert!(!has_column(&c, table, column).unwrap());
+        }
+        assert_eq!(
+            c.pragma_query_value(None, "foreign_keys", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn pre_micro_profile_is_rejected_without_changes() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("pre-micro.sqlite3");
+        let c = Connection::open(&path).unwrap();
+        c.execute_batch("CREATE TABLE executions(execution_id TEXT PRIMARY KEY, authorized_minor INTEGER); INSERT INTO executions VALUES('old',7);").unwrap();
+        let before: i64 = c
+            .query_row("PRAGMA schema_version", [], |r| r.get(0))
+            .unwrap();
+        drop(c);
+        let error = Repository::open(&path, Redactor::default())
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("upgrade with Hubu v0.2.4"), "{error}");
+        let c = Connection::open(&path).unwrap();
+        assert_eq!(
+            c.query_row("PRAGMA schema_version", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            before
+        );
+        assert_eq!(
+            c.query_row("SELECT authorized_minor FROM executions", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            7
+        );
+    }
+
+    #[test]
+    fn incomplete_micro_profiles_preserve_legacy_provider_evidence() {
+        for shape in [
+            "missing-exact-column",
+            "null-exact-value",
+            "orphan-provider-table",
+        ] {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("partial.sqlite3");
+            let c = if shape == "orphan-provider-table" {
+                let c = Connection::open(&path).unwrap();
+                c.execute_batch("CREATE TABLE provider_attempts(provider_attempt_id TEXT,provider_amount_minor INTEGER,provider_currency TEXT)").unwrap();
+                c
+            } else {
+                let c = micro_build_database(&path);
+                if shape == "missing-exact-column" {
+                    c.execute_batch("ALTER TABLE provider_attempts RENAME COLUMN actual_vendor_cost_amount TO incomplete_cost").unwrap();
+                }
+                c
+            };
+            if shape == "orphan-provider-table" {
+                c.execute_batch("INSERT INTO provider_attempts VALUES('attempt',7,'USD')")
+                    .unwrap();
+            } else {
+                c.execute_batch("INSERT INTO provider_attempts(provider_attempt_id,execution_id,provider,outcome,started_at,provider_amount_minor,provider_currency) VALUES('attempt','units-row','fixture','succeeded','now',7,'USD')").unwrap();
+            }
+            let before: i64 = c
+                .query_row("PRAGMA schema_version", [], |r| r.get(0))
+                .unwrap();
+            drop(c);
+            let error = Repository::open(&path, Redactor::default())
+                .err()
+                .unwrap()
+                .to_string();
+            assert!(
+                error.contains("upgrade with Hubu v0.2.4"),
+                "{shape}: {error}"
+            );
+            let c = Connection::open(&path).unwrap();
+            assert_eq!(
+                c.query_row("PRAGMA schema_version", [], |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                before,
+                "{shape}"
+            );
+            assert_eq!(
+                c.query_row(
+                    "SELECT provider_amount_minor FROM provider_attempts",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+                7,
+                "{shape}"
+            );
+        }
+    }
+
+    #[test]
+    fn micro_build_rebuild_preserves_sub_cent_rows_evidence_and_indexes() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("micro.sqlite3");
+        let c = micro_build_database(&path);
+        c.execute_batch("UPDATE executions SET authorized_units=3500; UPDATE hubu_authorization_snapshots SET amount_units=3500;
+            INSERT INTO provider_attempts(provider_attempt_id,execution_id,provider,outcome,started_at,completed_at,provider_amount_minor,provider_currency,actual_vendor_cost_amount,actual_vendor_cost_scale,actual_vendor_cost_currency)
+            VALUES('attempt','units-row','fixture','succeeded','now','now',1,'USD',31,4,'USD');
+            INSERT INTO receipts(receipt_id,execution_id,provider_attempt_id,settlement_minor,currency,pricing_catalog_version,actual_vendor_cost_amount,actual_vendor_cost_scale,actual_vendor_cost_currency,provider_request_id,pricing_snapshot_json,created_at,settlement_units,units_scale,cost_basis)
+            VALUES('receipt','units-row','attempt',1,'USD','fixture',31,4,'USD','provider-request','{\"frozen\":true}','now',3100,6,'provider_reported');").unwrap();
+        drop(c);
+        for _ in 0..2 {
+            let repo = Repository::open(&path, Redactor::default()).unwrap();
+            assert_eq!(
+                repo.get_execution("units-row").unwrap().authorized_units,
+                3500
+            );
+            assert_eq!(
+                repo.get_hubu_authorization_snapshot("units-row")
+                    .unwrap()
+                    .amount_units,
+                3500
+            );
+            let c = repo.0.lock().unwrap();
+            let receipt:(i64,i64,i64,String)=c.query_row("SELECT settlement_units,actual_vendor_cost_amount,actual_vendor_cost_scale,pricing_snapshot_json FROM receipts",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
+            assert_eq!(receipt, (3100, 31, 4, "{\"frozen\":true}".into()));
+            for (table, legacy, col) in [
+                ("executions", "authorized_minor", "authorized_units"),
+                (
+                    "hubu_authorization_snapshots",
+                    "amount_minor",
+                    "amount_units",
+                ),
+                ("receipts", "settlement_minor", "settlement_units"),
+                (
+                    "provider_attempts",
+                    "provider_amount_minor",
+                    "actual_vendor_cost_amount",
+                ),
+            ] {
+                let count: i64 = c
+                    .query_row(
+                        &format!("SELECT count(*) FROM pragma_table_info('{table}') WHERE name=?1"),
+                        [legacy],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(count, 0);
+                if table != "provider_attempts" {
+                    assert!(c
+                        .execute(&format!("UPDATE {table} SET {col}=NULL"), [])
+                        .is_err());
+                    assert!(c
+                        .execute(&format!("UPDATE {table} SET {col}=-1"), [])
+                        .is_err());
+                    assert!(c
+                        .execute(&format!("UPDATE {table} SET {col}=0.5"), [])
+                        .is_err());
+                    assert!(c
+                        .execute(&format!("UPDATE {table} SET units_scale=2"), [])
+                        .is_err());
+                }
+            }
+            assert!(c
+                .execute(
+                    "UPDATE provider_attempts SET actual_vendor_cost_scale=NULL",
+                    []
+                )
+                .is_err());
+            assert!(c
+                .prepare("PRAGMA foreign_key_check")
+                .unwrap()
+                .query([])
+                .unwrap()
+                .next()
+                .unwrap()
+                .is_none());
+            let indexes:i64=c.query_row("SELECT count(*) FROM sqlite_master WHERE name IN ('executions_status_created','hubu_authorization_token','attempts_provider_request','receipts_settlement')",[],|r|r.get(0)).unwrap();
+            assert_eq!(indexes, 4);
+        }
+    }
+
+    #[test]
+    fn invalid_micro_build_rolls_back_all_tables_and_restores_foreign_keys() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("invalid.sqlite3");
+        let c = Connection::open(&path).unwrap();
+        c.execute_batch(&micro_build_schema()).unwrap();
+        c.execute_batch("PRAGMA ignore_check_constraints=ON; INSERT INTO executions(execution_id,account_id,operation_key,hubu_authorization_id,hubu_token_reference,authorized_minor,authorization_currency,normalized_input_json,input_hash,input_schema_version,target,config_version,provider_config_digest,pricing_snapshot_json,pricing_schema_version,status,created_at,updated_at,authorized_units,units_scale) VALUES('bad','account','operation','token','token',1,'USD','{}','hash',1,'target','config','legacy-unresolved','{}',1,'pending','now','now',NULL,6); PRAGMA ignore_check_constraints=OFF;").unwrap();
+        drop(c);
+        assert!(Repository::open(&path, Redactor::default()).is_err());
+        let c = Connection::open(&path).unwrap();
+        assert!(has_column(&c, "executions", "authorized_minor").unwrap());
+        assert_eq!(
+            c.query_row("SELECT count(*) FROM executions", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            c.query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name LIKE '%_v2'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+    }
+    #[test]
+    fn concurrent_micro_build_opens_serialize_discovery_and_rebuild() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("concurrent.sqlite3");
+        let c = micro_build_database(&path);
+        c.execute_batch("UPDATE executions SET authorized_units=3500; UPDATE hubu_authorization_snapshots SET amount_units=3500;").unwrap();
+        drop(c);
+        let barrier = Arc::new(std::sync::Barrier::new(6));
+        let handles: Vec<_> = (0..6)
+            .map(|_| {
+                let path = path.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let repo = Repository::open(path, Redactor::default()).unwrap();
+                    assert_eq!(
+                        repo.get_execution("units-row").unwrap().authorized_units,
+                        3500
+                    );
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
     }
 }

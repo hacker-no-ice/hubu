@@ -187,6 +187,10 @@ Required for managed Gongbu. This safe absolute directory stores Gongbu-owned ex
 
 Optional absolute path for managed Gongbu structured logs. Keep it separate from all managed databases and directories.
 
+### `gongbu.reference_images_root`
+
+Optional existing absolute directory of your own reference images, such as `~/Documents/Hubu/assets` written out in full. An image edit can send a file from it without generating one first; see [reference images](../../../gongbu-execution.md#reference-images). Gongbu only reads it. The stack never creates, resets or removes it, and it must not overlap `gongbu.artifact_root`. Omit it to accept only governed artifact IDs.
+
 ## `[temporal]`
 
 Both supported modes include Gongbu.

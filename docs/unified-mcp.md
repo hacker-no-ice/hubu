@@ -14,8 +14,8 @@ setup, boundaries and the implemented behavior behind those tools.
 
 ## Save artifacts into a project folder
 
-`hubu_save_artifact` saves one artifact of a succeeded governed operation into
-a folder the human allowlisted. The agent passes the public operation handle,
+`hubu_save_artifact` saves one durable artifact of a governed operation into
+a folder the human allowlisted, including while billing requires reconciliation. The agent passes the public operation handle,
 an allowlisted folder **name**, and optionally the chosen `artifact_id` and a
 file name stem. It never passes a filesystem path, and the tool's input schema
 lists only the allowlisted names. The human manages the allowlist:
@@ -38,7 +38,13 @@ signature, and re-reads the Hubu authorization after the fetch so a settlement
 correction refuses the save. It then writes `NAME.png` (or `.jpg`) and a
 `NAME.png.receipt.json` sidecar with the artifact ID, digest, media type,
 dimensions, operation handle, execution, authorization, settlement and ledger
-identities, provider and exact settled cost. The cost is the operation total
+identities, provider and exact settlement amount. `cost_basis` distinguishes
+`provider_reported`, `catalog_usage`, `frozen_quote` and `legacy_unspecified`.
+`provider_actual_cost` is populated only for provider-reported billing. The
+compatibility `settled_cost` field equals `settlement_amount` and does not imply
+provider confirmation. For an unresolved claim, `billing_status` is
+`pending_reconciliation`, `cost_basis` is `unknown`, and all cost/settlement
+fields are null; re-save after reconciliation to refresh them. The cost is the operation total
 (`cost_semantics: operation_total_not_per_artifact`). Neither the response nor
 the receipt contains Gongbu endpoints or storage paths, and image bytes never
 pass through the model.
@@ -260,6 +266,10 @@ These controls define a local trust boundary. A same-user process that can read
 the capability files or control an authorized MCP client can act with that
 client's authority. Do not expose this configuration to an untrusted network or
 connect it to a real payment rail without a stronger authentication design.
+An agent that can run the `hubu` CLI with the profile's credentials can make
+the same administrative changes without these MCP tools, so for such an agent
+the admin gate is not a security boundary; see the
+[threat model](threat-model.md).
 
 ## MCP behavior and responses
 
@@ -314,7 +324,7 @@ trusted harness identity and a newly allocated private operation key.
 ### Versioned budget tools
 
 `hubu_update_budget` is approval-gated and idempotent. Its strict input requires
-`budget_id`, `expected_revision >= 1`, and `amount_limit_cents >= 1`, with an
+`budget_id`, `expected_revision >= 1`, and a positive decimal `amount_limit`, with an
 optional `reason`. The amount is the budget's new cumulative total cap, not an
 increment. The router validates the public budget ID, places it only in
 `/budgets/{budget_id}/versions`, and forwards only the revision, amount, and
@@ -400,7 +410,11 @@ Discovery returns structured content containing only the opaque target ID,
 workload type, provider/model labels, authorization scope, supported
 `image_size` values, and exact configured price components. An image-edit
 target also returns `input_images`, naming the input parameter that takes the
-artifact IDs of earlier governed executions' images; see
+artifact IDs of earlier governed executions' images, or the pinned tokens
+`gongbu_list_reference_images` returns for the operator's
+[reference images](gongbu-execution.md#reference-images), and, when it prices
+them by size, `input_megapixels`, the rule that counts their billed
+megapixels; see
 [editing an image](gongbu-execution.md#editing-an-image). It omits adapter
 settings, endpoints, headers, credentials, and provider configuration
 revisions. Execution tools accept only the discovered `target_id`; provider,

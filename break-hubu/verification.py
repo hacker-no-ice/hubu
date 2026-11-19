@@ -25,6 +25,16 @@ class Evidence:
             raise ValueError('Missing request evidence: ' + label)
         return records
 
+    def last(self, label):
+        """The final attempt of one logical request; an unresolved outcome is not evidence either way."""
+        record = self.requests(label)[-1]
+        if record.get('status') is None or record['status'] >= 500:
+            raise ValueError('Unresolved transport/server outcome: ' + label)
+        return record
+
+    def all_budgets(self, phase):
+        return self.json('snapshots/' + phase + '/budgets.json')['budgets']
+
     @staticmethod
     def money(value):
         if 'currency' in value and value['currency'].lower() != 'usd':
@@ -80,7 +90,11 @@ class Evidence:
         authorizations, _ = self._pages(phase, 'authorizations', 'authorization_records')
         budgets = self.json('snapshots/' + phase + '/budgets.json')['budgets']
         if len(budgets) != 1:
-            raise ValueError('Expected one isolated fixture budget')
+            # Multi-agent kits export every owner budget; select this kit's own budget.
+            own = self.json('run.json').get('ids', {}).get('budget_id')
+            budgets = [budget for budget in budgets if budget['budget_id'] == own]
+            if len(budgets) != 1:
+                raise ValueError('Expected one isolated fixture budget')
         return dict(budget=budgets[0], transactions=transactions,
                     authorizations=authorizations, coverage=coverage)
 

@@ -203,7 +203,7 @@ fn budget_list_body() -> String {
                   consumed: (&str, &str),
                   frozen: (&str, &str),
                   remaining: (&str, &str),
-                  cents: [i64; 4]| {
+                  _cents: [i64; 4]| {
         serde_json::json!({
             "budget_id": id, "agent_id": "agt_0123456789ab", "status": "active",
             "currency": "usd",
@@ -211,8 +211,6 @@ fn budget_list_body() -> String {
             "consumed_amount": money(consumed.0, consumed.1),
             "frozen_amount": money(frozen.0, frozen.1),
             "remaining_amount": money(remaining.0, remaining.1),
-            "amount_limit_cents": cents[0], "consumed_amount_cents": cents[1],
-            "frozen_amount_cents": cents[2], "remaining_amount_cents": cents[3],
             "current_version_id": "bgv_000000000001", "current_revision": 1,
             "starting_at": "2026-10-01T00:00:00+00:00", "ending_before": null
         })
@@ -286,7 +284,7 @@ fn round_cents_marks_and_conservatively_rounds_amounts() {
 }
 
 #[test]
-fn older_servers_without_money_objects_fall_back_to_cents() {
+fn responses_without_money_objects_are_rejected() {
     let home = tempdir().unwrap();
     let body = serde_json::json!({"budgets": [{
         "budget_id": "bgt_000000000001", "agent_id": "agt_0123456789ab", "status": "active",
@@ -298,9 +296,9 @@ fn older_servers_without_money_objects_fall_back_to_cents() {
     .to_string();
     let (url, server) = serve_json_once(&body);
     let output = run(home.path(), &["--url", &url, "budget", "list"]);
-    assert_success(&output);
+    assert!(!output.status.success());
     server.join().unwrap();
-    assert!(String::from_utf8(output.stdout)
+    assert!(String::from_utf8(output.stderr)
         .unwrap()
-        .contains("limit: $10.00  consumed: $0.04  frozen: $0.01  remaining: $9.95"));
+        .contains("amount_limit"));
 }

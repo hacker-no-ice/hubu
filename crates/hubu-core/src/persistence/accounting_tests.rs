@@ -622,7 +622,7 @@ fn agent_budget_query_includes_wallet_provider_adjustments_and_truthful_unlinked
         )
         .unwrap();
     // Model the wallet lifecycle's successful consumption, still separate until HUB-210.
-    repo.conn.execute("UPDATE budget_balances SET consumed_amount_cents=consumed_amount_cents+1000,remaining_amount_cents=remaining_amount_cents-1000,consumed_amount=consumed_amount+10000000,remaining_amount=remaining_amount-10000000 WHERE budget_id=?1",[settled.hold.budget_id.to_string()]).unwrap();
+    repo.conn.execute("UPDATE budget_balances SET consumed_amount=consumed_amount+10000000,remaining_amount=remaining_amount-10000000 WHERE budget_id=?1",[settled.hold.budget_id.to_string()]).unwrap();
     wallet
         .record_transaction(
             user_id(),
@@ -948,7 +948,7 @@ fn adjustment_chain_crosses_from_a_legacy_cent_posting() {
             "CREATE TRIGGER ledger_metadata_no_update BEFORE UPDATE ON ledger_transaction_metadata
              BEGIN SELECT RAISE(ABORT, 'ledger metadata is immutable'); END;
              UPDATE budget_balances
-             SET consumed_amount = 10000, consumed_amount_cents = 1,
+             SET consumed_amount = 10000,
                  remaining_amount = remaining_amount - 6900
              WHERE consumed_amount = 3100;",
         )

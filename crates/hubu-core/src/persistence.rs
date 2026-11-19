@@ -28,9 +28,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::budget::{
-    budget_update_request_fingerprint, initial_budget_request_fingerprint, Budget,
-    BudgetAdministrativeState, BudgetAvailability, BudgetBalance, BudgetHold, BudgetHoldStatus,
-    BudgetUpdateError, BudgetVersion, BudgetWithBalance,
+    budget_update_request_fingerprint, Budget, BudgetAdministrativeState, BudgetAvailability,
+    BudgetBalance, BudgetHold, BudgetHoldStatus, BudgetUpdateError, BudgetVersion,
+    BudgetWithBalance,
 };
 use crate::policy::Policy;
 use crate::spend::{
@@ -1087,25 +1087,35 @@ impl SqliteGovernanceRepository {
         Ok(repository)
     }
 
-    /// Creates and migrates the schema. Several steps drop guard triggers,
-    /// backfill rows and recreate the triggers, so each phase holds the
-    /// database write lock (`BEGIN IMMEDIATE`): concurrent opens of the same
-    /// file serialize instead of interleaving with another connection's
-    /// half-applied migration or observing a window without guard triggers.
+    /// Fresh databases use the final µ schema. Existing µ profiles get one
+    /// atomic table rebuild; no pre-µ backfill chain runs on normal opens.
     fn init(&mut self) -> Result<(), StorageError> {
-        // Foreign-key enforcement is per connection and SQLite ignores changes
-        // to it inside a transaction, so enable it before any phase begins.
-        self.conn.pragma_update(None, "foreign_keys", true)?;
-        self.in_init_transaction(Self::init_schema_and_policy_migrations)?;
-        // The legacy budget-table rebuild must disable foreign keys, so it owns
-        // its immediate transaction instead of joining an init phase.
-        self.migrate_versioned_budgets()?;
-        self.in_init_transaction(Self::init_spend_migrations)?;
-        // The accounting-scale migration backs the database up with
-        // `VACUUM INTO`, which cannot run inside a transaction, so it runs
-        // after the spend phase has committed (with immutability restored)
-        // and owns its immediate transaction.
-        self.migrate_accounting_scale()?;
+        self.conn.pragma_update(None, "foreign_keys", false)?;
+        let result = self.in_init_transaction(|repo| {
+            let has_profile: bool = repo.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name IN ('budgets','budget_versions','budget_balances','budget_holds','spending_targets','spend_executor_settlement_receipts'))", [], |row| row.get(0))?;
+            if has_profile {
+                for (table, columns) in [
+                    ("budget_versions", &["amount_limit", "amount_scale"][..]),
+                    ("budget_balances", &["consumed_amount", "frozen_amount", "remaining_amount", "amount_scale"][..]),
+                    ("budget_holds", &["amount", "amount_scale", "spend_asset", "spend_exact_amount", "spend_exact_scale"][..]),
+                    ("spending_targets", &["target_amount", "amount_scale"][..]),
+                    ("spend_executor_settlement_receipts", &["authorized_max", "budget_charge", "released_amount", "overrun_amount", "amount_scale", "actual_vendor_cost_amount", "actual_vendor_cost_scale", "actual_vendor_cost_currency"][..]),
+                ] {
+                    for column in columns {
+                        if !table_has_column(&repo.conn, table, column)? {
+                            return Err(StorageError::InvalidData(format!("profile lacks released micro-unit field {table}.{column}: upgrade through v0.2.4 or v0.2.5 before opening this version")));
+                        }
+                    }
+                }
+            }
+            repo.init_schema_and_policy_migrations()?;
+            repo.init_spend_migrations()?;
+            repo.migrate_canonical_amounts()
+        });
+        let restore = self.conn.pragma_update(None, "foreign_keys", true);
+        result?;
+        restore?;
         self.initialize_provider_accounting()?;
         self.in_init_transaction(Self::init_lifecycle_schema)?;
         Ok(())
@@ -1124,6 +1134,8 @@ impl SqliteGovernanceRepository {
     }
 
     fn init_schema_and_policy_migrations(&mut self) -> Result<(), StorageError> {
+        self.conn
+            .execute_batch(include_str!("persistence/canonical_amounts.sql"))?;
         self.conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS policy_assignments (
@@ -1250,33 +1262,6 @@ impl SqliteGovernanceRepository {
                 voided_at TEXT NOT NULL
             );
 
-            CREATE TABLE IF NOT EXISTS spend_executor_settlement_receipts (
-                claim_id TEXT PRIMARY KEY,
-                settlement_id TEXT NOT NULL UNIQUE,
-                authorized_max_cents INTEGER NOT NULL,
-                actual_vendor_cost_cents INTEGER NOT NULL,
-                actual_vendor_cost_amount INTEGER NOT NULL,
-                actual_vendor_cost_scale INTEGER NOT NULL,
-                actual_vendor_cost_currency TEXT NOT NULL,
-                budget_charge_cents INTEGER NOT NULL,
-                released_amount_cents INTEGER NOT NULL,
-                overrun_amount_cents INTEGER NOT NULL,
-                currency TEXT NOT NULL,
-                provider_request_id TEXT NOT NULL,
-                price_model_snapshot_json TEXT NOT NULL,
-                artifact_reference TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                CHECK(authorized_max_cents > 0),
-                CHECK(actual_vendor_cost_cents >= 0),
-                CHECK(actual_vendor_cost_cents <= authorized_max_cents),
-                CHECK(released_amount_cents = authorized_max_cents - actual_vendor_cost_cents),
-                CHECK(actual_vendor_cost_amount >= 0),
-                CHECK(actual_vendor_cost_scale BETWEEN 0 AND 18),
-                CHECK(budget_charge_cents >= 0),
-                CHECK(overrun_amount_cents >= 0),
-                FOREIGN KEY(claim_id) REFERENCES spend_executor_claims(id)
-            );
-
             CREATE TABLE IF NOT EXISTS budgets (
                 id TEXT PRIMARY KEY,
                 scope_type TEXT NOT NULL,
@@ -1288,31 +1273,6 @@ impl SqliteGovernanceRepository {
                     CHECK(administrative_state IN ('active', 'revoked')),
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS budget_versions (
-                id TEXT PRIMARY KEY,
-                budget_id TEXT NOT NULL,
-                revision INTEGER NOT NULL,
-                predecessor_version_id TEXT,
-                amount_limit_cents INTEGER NOT NULL,
-                effective_at TEXT NOT NULL,
-                actor TEXT NOT NULL,
-                source TEXT NOT NULL,
-                reason TEXT,
-                request_fingerprint TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                UNIQUE(budget_id, id),
-                UNIQUE(budget_id, revision),
-                UNIQUE(budget_id, predecessor_version_id),
-                CHECK(revision >= 1),
-                CHECK(amount_limit_cents > 0),
-                CHECK(length(actor) > 0),
-                CHECK(length(source) > 0),
-                CHECK(length(request_fingerprint) > 0),
-                FOREIGN KEY(budget_id) REFERENCES budgets(id),
-                FOREIGN KEY(budget_id, predecessor_version_id)
-                    REFERENCES budget_versions(budget_id, id)
             );
 
             CREATE TABLE IF NOT EXISTS budget_current_versions (
@@ -1330,48 +1290,6 @@ impl SqliteGovernanceRepository {
             CREATE UNIQUE INDEX IF NOT EXISTS budget_versions_one_successor
                 ON budget_versions(budget_id, predecessor_version_id)
                 WHERE predecessor_version_id IS NOT NULL;
-
-            CREATE TABLE IF NOT EXISTS spending_targets (
-                id TEXT PRIMARY KEY,
-                owner_user_id TEXT NOT NULL,
-                target_amount_cents INTEGER NOT NULL,
-                currency TEXT NOT NULL,
-                starting_at TEXT NOT NULL,
-                ending_before TEXT,
-                status TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS budget_balances (
-                budget_id TEXT PRIMARY KEY,
-                consumed_amount_cents INTEGER NOT NULL,
-                frozen_amount_cents INTEGER NOT NULL,
-                remaining_amount_cents INTEGER NOT NULL,
-                updated_at TEXT NOT NULL,
-                CHECK(consumed_amount_cents >= 0),
-                CHECK(frozen_amount_cents >= 0),
-                FOREIGN KEY(budget_id) REFERENCES budgets(id)
-            );
-
-            CREATE TABLE IF NOT EXISTS budget_holds (
-                id TEXT PRIMARY KEY,
-                budget_id TEXT NOT NULL,
-                budget_version_id TEXT NOT NULL,
-                spend_decision_id TEXT NOT NULL,
-                amount_cents INTEGER NOT NULL,
-                currency TEXT NOT NULL,
-                status TEXT NOT NULL,
-                executor_claim_id TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                expires_at TEXT NOT NULL,
-                CHECK(amount_cents > 0),
-                FOREIGN KEY(budget_id) REFERENCES budgets(id),
-                FOREIGN KEY(budget_id, budget_version_id)
-                    REFERENCES budget_versions(budget_id, id),
-                FOREIGN KEY(spend_decision_id) REFERENCES spend_decisions(id)
-            );
 
             CREATE TRIGGER IF NOT EXISTS spend_decisions_no_update
             BEFORE UPDATE ON spend_decisions
@@ -1413,161 +1331,108 @@ impl SqliteGovernanceRepository {
         )?;
         self.migrate_policy_assignment_scope()?;
         self.migrate_declarative_policies()?;
-        self.migrate_user_caps_to_spending_targets()?;
         self.migrate_executor_claim_budget_holds()?;
         Ok(())
     }
 
     fn init_spend_migrations(&mut self) -> Result<(), StorageError> {
-        self.migrate_budget_administrative_state()?;
-        // A legacy budget-table rebuild replaces the holds table and its
-        // indexes, so restore executor-claim uniqueness on the new table.
         self.migrate_executor_claim_budget_holds()?;
         self.migrate_spend_auth_token_claim_ttl()?;
         self.migrate_spend_operation_keys()?;
         self.migrate_spend_operation_attempts()?;
         self.migrate_executor_claim_reconciliation()?;
-        self.migrate_precise_executor_settlement_receipts()?;
-        // Restore immutability in this phase, before the fallible
-        // accounting-scale migration runs, so neither an aborted migration
-        // nor its backup is left without it.
         self.enforce_executor_settlement_receipt_immutability()?;
         self.enforce_budget_version_immutability()?;
         self.enforce_one_budget_hold_per_spend_decision()?;
         Ok(())
     }
 
-    /// Adds authoritative accounting-scale (µ-unit) amount columns next to the
-    /// legacy `*_cents` columns and backfills them exactly (`cents × 10⁴`).
-    ///
-    /// The migration is one-way. It backs the database up first, refuses rows
-    /// whose conversion would overflow (SQLite would otherwise silently turn
-    /// the product into a REAL), and verifies every backfilled value and the
-    /// budget invariants before committing. Re-running it is a no-op.
-    fn migrate_accounting_scale(&mut self) -> Result<(), StorageError> {
-        if accounting_scale_migrated(&self.conn)? {
+    /// Rebuild the dual-written µ schema without legacy projections. The copy
+    /// enforces constraints before any old table is dropped. Init owns the
+    /// write transaction and restores foreign keys even on failure.
+    fn migrate_canonical_amounts(&self) -> Result<(), StorageError> {
+        let tx = &self.conn;
+        if !table_has_column(tx, "budget_versions", "amount_limit_cents")? {
             return Ok(());
         }
-        backup_before_accounting_scale(&self.conn)?;
-
-        let transaction = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        // A concurrent open may have finished the migration while this
-        // connection waited for the write lock.
-        if accounting_scale_migrated(&transaction)? {
-            return Ok(());
-        }
-        for column in ACCOUNTING_SCALE_COLUMNS {
-            if let Some(legacy) = column.legacy {
-                let overflowing: i64 = transaction.query_row(
-                    &format!(
-                        "SELECT COUNT(*) FROM {table}
-                         WHERE abs({legacy}) > {MAX_LEGACY_CENTS}
-                            OR typeof({legacy}) NOT IN ('integer', 'null')",
-                        table = column.table,
-                    ),
-                    [],
-                    |row| row.get(0),
-                )?;
-                if overflowing > 0 {
-                    return Err(StorageError::InvalidData(format!(
-                        "cannot migrate {table}.{legacy} to accounting scale: {overflowing} \
-                         row(s) exceed {MAX_LEGACY_CENTS} cents or are not integers",
-                        table = column.table,
-                    )));
-                }
-            }
-        }
-
-        // Immutability triggers would reject the backfill. Capture their exact
-        // definitions, drop them, and recreate them before committing.
-        let update_triggers = {
-            let mut stmt = transaction.prepare(
-                "SELECT name, sql FROM sqlite_master
-                 WHERE type = 'trigger'
-                   AND tbl_name IN ('spend_executor_settlement_receipts', 'budget_versions')
-                   AND sql LIKE '%BEFORE UPDATE%'",
+        let objects = {
+            let mut stmt = tx.prepare(
+                "SELECT name, type, sql FROM sqlite_master
+                    WHERE type IN ('index', 'trigger') AND sql IS NOT NULL
+                    AND tbl_name IN ('budget_versions', 'budget_balances', 'budget_holds',
+                                     'spending_targets', 'spend_executor_settlement_receipts')",
             )?;
-            let rows = stmt.query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?;
-            rows.collect::<Result<Vec<_>, _>>()?
+            let collected = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            collected
         };
-        for (name, _) in &update_triggers {
-            transaction.execute_batch(&format!("DROP TRIGGER \"{name}\";"))?;
-        }
-
-        for column in ACCOUNTING_SCALE_COLUMNS {
-            if !table_has_column(&transaction, column.table, column.name)? {
-                transaction.execute_batch(&format!(
-                    "ALTER TABLE {} ADD COLUMN {} {};",
-                    column.table, column.name, column.sql_type
-                ))?;
-            }
-        }
-        for column in ACCOUNTING_SCALE_COLUMNS {
-            transaction.execute(
-                &format!(
-                    "UPDATE {table} SET {name} = {backfill} WHERE {name} IS NULL",
-                    table = column.table,
-                    name = column.name,
-                    backfill = column.backfill,
-                ),
-                [],
-            )?;
-        }
-        verify_accounting_scale_backfill(&transaction)?;
-
-        for (_, sql) in &update_triggers {
-            transaction.execute_batch(&format!("{sql};"))?;
-        }
-        transaction.commit()?;
-        Ok(())
-    }
-
-    fn migrate_precise_executor_settlement_receipts(&self) -> Result<(), StorageError> {
-        // A previous successful open has installed the immutability triggers.
-        // Remove them while filling only missing migration values, then init
-        // recreates them immediately after this method returns.
-        self.conn.execute_batch(
-            "DROP TRIGGER IF EXISTS spend_executor_settlement_receipts_no_update;
-             DROP TRIGGER IF EXISTS spend_executor_settlement_receipts_no_delete;",
-        )?;
-        for (column, definition) in [
-            ("actual_vendor_cost_amount", "INTEGER"),
-            ("actual_vendor_cost_scale", "INTEGER"),
-            ("actual_vendor_cost_currency", "TEXT"),
-            ("budget_charge_cents", "INTEGER"),
-            ("overrun_amount_cents", "INTEGER"),
+        let mut schema = include_str!("persistence/canonical_amounts.sql").to_owned();
+        for table in [
+            "budget_versions",
+            "budget_balances",
+            "budget_holds",
+            "spending_targets",
+            "spend_executor_settlement_receipts",
         ] {
-            if !table_has_column(&self.conn, "spend_executor_settlement_receipts", column)? {
-                self.conn.execute(
-                    &format!(
-                        "ALTER TABLE spend_executor_settlement_receipts ADD COLUMN {column} {definition}"
-                    ),
-                    [],
-                )?;
-            }
+            schema = schema.replace(
+                &format!("CREATE TABLE IF NOT EXISTS {table} ("),
+                &format!("CREATE TABLE {table}_v2 ("),
+            );
         }
-
-        // v4.3 receipts were already exact cents. Preserve their legacy columns
-        // while materializing the canonical scale-2 representation and derived
-        // accounting values used by the precise settlement path.
-        self.conn.execute(
-            "UPDATE spend_executor_settlement_receipts
-             SET actual_vendor_cost_amount = COALESCE(actual_vendor_cost_amount, actual_vendor_cost_cents),
-                 actual_vendor_cost_scale = COALESCE(actual_vendor_cost_scale, 2),
-                 actual_vendor_cost_currency = COALESCE(actual_vendor_cost_currency, currency),
-                 budget_charge_cents = COALESCE(budget_charge_cents, actual_vendor_cost_cents),
-                 overrun_amount_cents = COALESCE(overrun_amount_cents, 0)
-             WHERE actual_vendor_cost_amount IS NULL
-                OR actual_vendor_cost_scale IS NULL
-                OR actual_vendor_cost_currency IS NULL
-                OR budget_charge_cents IS NULL
-                OR overrun_amount_cents IS NULL",
-            [],
-        )?;
+        tx.execute_batch(&schema)?;
+        for table in [
+            "budget_versions",
+            "budget_balances",
+            "budget_holds",
+            "spending_targets",
+            "spend_executor_settlement_receipts",
+        ] {
+            let columns = {
+                let mut stmt = tx.prepare(&format!("PRAGMA table_info({table}_v2)"))?;
+                let collected = stmt
+                    .query_map([], |row| row.get::<_, String>(1))?
+                    .collect::<Result<Vec<_>, _>>()?
+                    .join(", ");
+                collected
+            };
+            tx.execute_batch(&format!(
+                "INSERT INTO {table}_v2 ({columns}) SELECT {columns} FROM {table};"
+            ))?;
+        }
+        for (name, kind, _) in &objects {
+            tx.execute_batch(&format!("DROP {kind} \"{name}\";"))?;
+        }
+        for table in [
+            "budget_holds",
+            "budget_balances",
+            "budget_versions",
+            "spending_targets",
+            "spend_executor_settlement_receipts",
+        ] {
+            tx.execute_batch(&format!(
+                "DROP TABLE {table}; ALTER TABLE {table}_v2 RENAME TO {table};"
+            ))?;
+        }
+        for (_, _, sql) in objects {
+            tx.execute_batch(&sql)?;
+        }
+        if tx
+            .prepare("PRAGMA foreign_key_check")?
+            .query([])?
+            .next()?
+            .is_some()
+        {
+            return Err(StorageError::InvalidData(
+                "canonical amount migration found a foreign-key violation".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -1776,463 +1641,6 @@ impl SqliteGovernanceRepository {
         }
 
         transaction.execute_batch("DROP TABLE policy_assignments_embedded_legacy;")?;
-        transaction.commit()?;
-        Ok(())
-    }
-
-    fn migrate_user_caps_to_spending_targets(&self) -> Result<(), StorageError> {
-        if !table_has_column(&self.conn, "budgets", "amount_limit_cents")? {
-            return Ok(());
-        }
-        self.conn.execute_batch(
-            "
-            INSERT OR IGNORE INTO spending_targets
-                (id, owner_user_id, target_amount_cents, currency, starting_at,
-                 ending_before, status, created_at, updated_at)
-            SELECT
-                id,
-                scope_id,
-                amount_limit_cents,
-                currency,
-                starting_at,
-                ending_before,
-                CASE WHEN status = 'revoked' THEN 'revoked' ELSE 'active' END,
-                created_at,
-                updated_at
-            FROM budgets
-            WHERE scope_type = 'user';
-
-            DELETE FROM budget_holds
-            WHERE budget_id IN (SELECT id FROM budgets WHERE scope_type = 'user');
-
-            DELETE FROM budget_balances
-            WHERE budget_id IN (SELECT id FROM budgets WHERE scope_type = 'user');
-
-            DELETE FROM budgets
-            WHERE scope_type = 'user';
-            ",
-        )?;
-        Ok(())
-    }
-
-    fn migrate_versioned_budgets(&mut self) -> Result<(), StorageError> {
-        if !table_has_column(&self.conn, "budgets", "amount_limit_cents")? {
-            return Ok(());
-        }
-
-        self.conn.pragma_update(None, "foreign_keys", false)?;
-        let migration_result = (|| -> Result<(), StorageError> {
-            let transaction = self
-                .conn
-                .transaction_with_behavior(TransactionBehavior::Immediate)?;
-            // A concurrent open may have finished the rebuild while this
-            // connection waited for the write lock.
-            if !table_has_column(&transaction, "budgets", "amount_limit_cents")? {
-                return Ok(());
-            }
-            transaction.execute_batch(
-                "DROP TRIGGER IF EXISTS budget_versions_no_update;
-                 DROP TRIGGER IF EXISTS budget_versions_no_delete;
-                 DROP INDEX IF EXISTS budget_versions_one_root;
-                 DROP INDEX IF EXISTS budget_versions_one_successor;
-                 DROP TABLE IF EXISTS budget_current_versions;
-                 DROP TABLE IF EXISTS budget_versions;
-
-                 CREATE TABLE budgets_v2 (
-                     id TEXT PRIMARY KEY,
-                     scope_type TEXT NOT NULL,
-                     scope_id TEXT NOT NULL,
-                     currency TEXT NOT NULL,
-                     starting_at TEXT NOT NULL,
-                     ending_before TEXT,
-                     administrative_state TEXT NOT NULL
-                         CHECK(administrative_state IN ('active', 'revoked')),
-                     created_at TEXT NOT NULL,
-                     updated_at TEXT NOT NULL
-                 );
-
-                 CREATE TABLE budget_versions_v2 (
-                     id TEXT PRIMARY KEY,
-                     budget_id TEXT NOT NULL,
-                     revision INTEGER NOT NULL,
-                     predecessor_version_id TEXT,
-                     amount_limit_cents INTEGER NOT NULL,
-                     effective_at TEXT NOT NULL,
-                     actor TEXT NOT NULL,
-                     source TEXT NOT NULL,
-                     reason TEXT,
-                     request_fingerprint TEXT NOT NULL,
-                     created_at TEXT NOT NULL,
-                     UNIQUE(budget_id, id),
-                     UNIQUE(budget_id, revision),
-                     CHECK(revision >= 1),
-                     CHECK(amount_limit_cents > 0),
-                     CHECK(length(actor) > 0),
-                     CHECK(length(source) > 0),
-                     CHECK(length(request_fingerprint) > 0),
-                     FOREIGN KEY(budget_id) REFERENCES budgets_v2(id),
-                     FOREIGN KEY(budget_id, predecessor_version_id)
-                         REFERENCES budget_versions_v2(budget_id, id)
-                 );
-
-                 CREATE UNIQUE INDEX budget_versions_one_root
-                     ON budget_versions_v2(budget_id)
-                     WHERE predecessor_version_id IS NULL;
-                 CREATE UNIQUE INDEX budget_versions_one_successor
-                     ON budget_versions_v2(budget_id, predecessor_version_id)
-                     WHERE predecessor_version_id IS NOT NULL;
-
-                 CREATE TABLE budget_current_versions_v2 (
-                     budget_id TEXT PRIMARY KEY,
-                     version_id TEXT NOT NULL UNIQUE,
-                     FOREIGN KEY(budget_id) REFERENCES budgets_v2(id),
-                     FOREIGN KEY(budget_id, version_id)
-                         REFERENCES budget_versions_v2(budget_id, id)
-                 );
-
-                 CREATE TABLE budget_balances_v2 (
-                     budget_id TEXT PRIMARY KEY,
-                     consumed_amount_cents INTEGER NOT NULL,
-                     frozen_amount_cents INTEGER NOT NULL,
-                     remaining_amount_cents INTEGER NOT NULL,
-                     updated_at TEXT NOT NULL,
-                     CHECK(consumed_amount_cents >= 0),
-                     CHECK(frozen_amount_cents >= 0),
-                     FOREIGN KEY(budget_id) REFERENCES budgets_v2(id)
-                 );
-
-                 CREATE TABLE budget_holds_v2 (
-                     id TEXT PRIMARY KEY,
-                     budget_id TEXT NOT NULL,
-                     budget_version_id TEXT NOT NULL,
-                     spend_decision_id TEXT NOT NULL,
-                     amount_cents INTEGER NOT NULL,
-                     currency TEXT NOT NULL,
-                     status TEXT NOT NULL,
-                     executor_claim_id TEXT,
-                     created_at TEXT NOT NULL,
-                     updated_at TEXT NOT NULL,
-                     expires_at TEXT NOT NULL,
-                     CHECK(amount_cents > 0),
-                     FOREIGN KEY(budget_id) REFERENCES budgets_v2(id),
-                     FOREIGN KEY(budget_id, budget_version_id)
-                         REFERENCES budget_versions_v2(budget_id, id),
-                     FOREIGN KEY(spend_decision_id) REFERENCES spend_decisions(id)
-                 );",
-            )?;
-
-            let legacy_budgets = {
-                let mut statement = transaction.prepare(
-                    "SELECT id, scope_type, scope_id, amount_limit_cents, currency,
-                            starting_at, ending_before, status, created_at, updated_at
-                     FROM budgets
-                     ORDER BY created_at ASC",
-                )?;
-                let rows = statement.query_map([], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, i64>(3)?,
-                        row.get::<_, String>(4)?,
-                        row.get::<_, String>(5)?,
-                        row.get::<_, Option<String>>(6)?,
-                        row.get::<_, String>(7)?,
-                        row.get::<_, String>(8)?,
-                        row.get::<_, String>(9)?,
-                    ))
-                })?;
-                rows.collect::<Result<Vec<_>, _>>()?
-            };
-
-            for (
-                id,
-                scope_type,
-                scope_id,
-                amount_limit,
-                currency,
-                starting_at,
-                ending_before,
-                status,
-                created_at,
-                updated_at,
-            ) in &legacy_budgets
-            {
-                if scope_type != "agent" {
-                    return Err(StorageError::InvalidData(format!(
-                        "cannot migrate unsupported budget scope `{scope_type}`"
-                    )));
-                }
-                let agent_id = parse_id::<AgentId>(scope_id)?;
-                let parsed_currency = parse_currency(currency)?;
-                let period = TimePeriod::new(
-                    parse_timestamp(starting_at)?,
-                    parse_optional_timestamp(ending_before.clone())?,
-                )
-                .map_err(|_| {
-                    StorageError::InvalidData(format!("budget {id} has an invalid period"))
-                })?;
-                let legacy_limit = Amount::from_legacy_cents(*amount_limit).map_err(|_| {
-                    StorageError::InvalidData(format!("budget {id} limit is out of range"))
-                })?;
-                let request_fingerprint = initial_budget_request_fingerprint(
-                    &agent_id,
-                    legacy_limit,
-                    parsed_currency,
-                    &period,
-                );
-                let administrative_state = match status.as_str() {
-                    "active" | "exhausted" | "expired" => "active",
-                    "revoked" => "revoked",
-                    other => {
-                        return Err(StorageError::InvalidData(format!(
-                            "cannot migrate unknown budget status `{other}` for budget {id}"
-                        )));
-                    }
-                };
-                let version_id = BudgetVersionId::new().to_string();
-                transaction.execute(
-                    "INSERT INTO budgets_v2
-                     (id, scope_type, scope_id, currency, starting_at, ending_before,
-                      administrative_state, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                    params![
-                        id,
-                        scope_type,
-                        scope_id,
-                        currency,
-                        starting_at,
-                        ending_before,
-                        administrative_state,
-                        created_at,
-                        updated_at,
-                    ],
-                )?;
-                transaction.execute(
-                    "INSERT INTO budget_versions_v2
-                     (id, budget_id, revision, predecessor_version_id, amount_limit_cents,
-                      effective_at, actor, source, reason, request_fingerprint, created_at)
-                     VALUES (?1, ?2, 1, NULL, ?3, ?4, 'system:migration',
-                             'legacy_budget_backfill', ?5, ?6, ?4)",
-                    params![
-                        version_id,
-                        id,
-                        amount_limit,
-                        created_at,
-                        "Backfilled from the pre-versioned budget row",
-                        request_fingerprint,
-                    ],
-                )?;
-                transaction.execute(
-                    "INSERT INTO budget_current_versions_v2 (budget_id, version_id)
-                     VALUES (?1, ?2)",
-                    params![id, version_id],
-                )?;
-            }
-
-            reject_overlapping_non_revoked_budgets(
-                &transaction,
-                "budgets_v2",
-                "administrative_state",
-            )?;
-
-            transaction.execute(
-                "INSERT INTO budget_balances_v2
-                 (budget_id, consumed_amount_cents, frozen_amount_cents,
-                  remaining_amount_cents, updated_at)
-                 SELECT budget_id, consumed_amount_cents, frozen_amount_cents,
-                        remaining_amount_cents, updated_at
-                 FROM budget_balances",
-                [],
-            )?;
-            transaction.execute(
-                "INSERT INTO budget_holds_v2
-                 (id, budget_id, budget_version_id, spend_decision_id, amount_cents,
-                  currency, status, executor_claim_id, created_at, updated_at, expires_at)
-                 SELECT hold.id, hold.budget_id, current.version_id, hold.spend_decision_id,
-                        hold.amount_cents, hold.currency, hold.status, hold.executor_claim_id,
-                        hold.created_at, hold.updated_at, hold.expires_at
-                 FROM budget_holds AS hold
-                 JOIN budget_current_versions_v2 AS current
-                   ON current.budget_id = hold.budget_id",
-                [],
-            )?;
-
-            let legacy_budget_count = legacy_budgets.len() as i64;
-            let legacy_balance_count: i64 =
-                transaction
-                    .query_row("SELECT COUNT(*) FROM budget_balances", [], |row| row.get(0))?;
-            let legacy_hold_count: i64 =
-                transaction.query_row("SELECT COUNT(*) FROM budget_holds", [], |row| row.get(0))?;
-            let migrated_counts: (i64, i64, i64, i64) = transaction.query_row(
-                "SELECT
-                    (SELECT COUNT(*) FROM budgets_v2),
-                    (SELECT COUNT(*) FROM budget_versions_v2),
-                    (SELECT COUNT(*) FROM budget_balances_v2),
-                    (SELECT COUNT(*) FROM budget_holds_v2)",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )?;
-            if migrated_counts
-                != (
-                    legacy_budget_count,
-                    legacy_budget_count,
-                    legacy_balance_count,
-                    legacy_hold_count,
-                )
-                || legacy_balance_count != legacy_budget_count
-            {
-                return Err(StorageError::InvalidData(
-                    "versioned budget migration changed row counts or found a missing balance"
-                        .to_string(),
-                ));
-            }
-            let invalid_balance_count: i64 = transaction.query_row(
-                "SELECT COUNT(*)
-                 FROM budget_balances_v2 AS balance
-                 JOIN budget_current_versions_v2 AS current
-                   ON current.budget_id = balance.budget_id
-                 JOIN budget_versions_v2 AS version
-                   ON version.budget_id = current.budget_id
-                  AND version.id = current.version_id
-                 WHERE balance.consumed_amount_cents < 0
-                    OR balance.frozen_amount_cents < 0
-                    OR balance.remaining_amount_cents !=
-                       version.amount_limit_cents
-                       - balance.consumed_amount_cents
-                       - balance.frozen_amount_cents",
-                [],
-                |row| row.get(0),
-            )?;
-            if invalid_balance_count != 0 {
-                return Err(StorageError::InvalidData(
-                    "versioned budget migration found an invalid logical balance".to_string(),
-                ));
-            }
-            let invalid_frozen_count: i64 = transaction.query_row(
-                "SELECT COUNT(*)
-                 FROM budget_balances_v2 AS balance
-                 LEFT JOIN (
-                     SELECT budget_id, SUM(amount_cents) AS frozen_amount_cents
-                     FROM budget_holds_v2
-                     WHERE status IN ('frozen', 'claimed')
-                     GROUP BY budget_id
-                 ) AS holds ON holds.budget_id = balance.budget_id
-                 WHERE balance.frozen_amount_cents !=
-                       COALESCE(holds.frozen_amount_cents, 0)",
-                [],
-                |row| row.get(0),
-            )?;
-            if invalid_frozen_count != 0 {
-                return Err(StorageError::InvalidData(
-                    "versioned budget migration found frozen usage without matching active holds"
-                        .to_string(),
-                ));
-            }
-
-            transaction.execute_batch(
-                "DROP TABLE budget_holds;
-                 DROP TABLE budget_balances;
-                 DROP TABLE budgets;
-                 ALTER TABLE budgets_v2 RENAME TO budgets;
-                 ALTER TABLE budget_versions_v2 RENAME TO budget_versions;
-                 ALTER TABLE budget_current_versions_v2 RENAME TO budget_current_versions;
-                 ALTER TABLE budget_balances_v2 RENAME TO budget_balances;
-                 ALTER TABLE budget_holds_v2 RENAME TO budget_holds;",
-            )?;
-            {
-                let mut foreign_key_check = transaction.prepare("PRAGMA foreign_key_check")?;
-                if foreign_key_check.query([])?.next()?.is_some() {
-                    return Err(StorageError::InvalidData(
-                        "versioned budget migration produced a foreign-key violation".to_string(),
-                    ));
-                }
-            }
-            transaction.commit()?;
-            Ok(())
-        })();
-
-        let foreign_key_restore = self.conn.pragma_update(None, "foreign_keys", true);
-        migration_result?;
-        foreign_key_restore?;
-
-        let mut foreign_key_check = self.conn.prepare("PRAGMA foreign_key_check")?;
-        if foreign_key_check.query([])?.next()?.is_some() {
-            return Err(StorageError::InvalidData(
-                "versioned budget migration produced a foreign-key violation".to_string(),
-            ));
-        }
-        Ok(())
-    }
-
-    fn migrate_budget_administrative_state(&mut self) -> Result<(), StorageError> {
-        let has_administrative_state =
-            table_has_column(&self.conn, "budgets", "administrative_state")?;
-        let has_legacy_status = table_has_column(&self.conn, "budgets", "status")?;
-        if has_administrative_state == has_legacy_status {
-            return Err(StorageError::InvalidData(
-                "budgets must have exactly one administrative-state column".to_string(),
-            ));
-        }
-
-        let transaction = self.conn.savepoint()?;
-        if has_legacy_status {
-            let unknown: Option<(String, String)> = transaction
-                .query_row(
-                    "SELECT id, status FROM budgets
-                     WHERE status NOT IN ('active', 'exhausted', 'expired', 'revoked')
-                     ORDER BY id LIMIT 1",
-                    [],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .optional()?;
-            if let Some((budget_id, status)) = unknown {
-                return Err(StorageError::InvalidData(format!(
-                    "cannot migrate unknown budget status `{status}` for budget {budget_id}"
-                )));
-            }
-            transaction.execute(
-                "UPDATE budgets
-                 SET status = CASE WHEN status = 'revoked' THEN 'revoked' ELSE 'active' END",
-                [],
-            )?;
-            transaction.execute_batch(
-                "ALTER TABLE budgets RENAME COLUMN status TO administrative_state;",
-            )?;
-        } else {
-            let unknown: Option<(String, String)> = transaction
-                .query_row(
-                    "SELECT id, administrative_state FROM budgets
-                     WHERE administrative_state NOT IN ('active', 'revoked')
-                     ORDER BY id LIMIT 1",
-                    [],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .optional()?;
-            if let Some((budget_id, state)) = unknown {
-                return Err(StorageError::InvalidData(format!(
-                    "unknown budget administrative state `{state}` for budget {budget_id}"
-                )));
-            }
-        }
-
-        reject_overlapping_non_revoked_budgets(&transaction, "budgets", "administrative_state")?;
-        transaction.execute_batch(
-            "DROP TRIGGER IF EXISTS budgets_administrative_state_insert_guard;
-             DROP TRIGGER IF EXISTS budgets_administrative_state_update_guard;
-             CREATE TRIGGER budgets_administrative_state_insert_guard
-             BEFORE INSERT ON budgets
-             WHEN NEW.administrative_state NOT IN ('active', 'revoked')
-             BEGIN
-                 SELECT RAISE(ABORT, 'invalid budget administrative state');
-             END;
-             CREATE TRIGGER budgets_administrative_state_update_guard
-             BEFORE UPDATE OF administrative_state ON budgets
-             WHEN NEW.administrative_state NOT IN ('active', 'revoked')
-             BEGIN
-                 SELECT RAISE(ABORT, 'invalid budget administrative state');
-             END;",
-        )?;
         transaction.commit()?;
         Ok(())
     }
@@ -3229,240 +2637,6 @@ fn policy_revision_from_row(
     })
 }
 
-/// Largest legacy cent value whose ×10⁴ conversion still fits an `i64`.
-const MAX_LEGACY_CENTS: i64 = i64::MAX / 10_000;
-
-struct AccountingScaleColumn {
-    table: &'static str,
-    name: &'static str,
-    sql_type: &'static str,
-    /// The legacy cent column this amount is backfilled from, if any.
-    legacy: Option<&'static str>,
-    backfill: &'static str,
-}
-
-const fn amount_column(
-    table: &'static str,
-    name: &'static str,
-    legacy: &'static str,
-    backfill: &'static str,
-) -> AccountingScaleColumn {
-    AccountingScaleColumn {
-        table,
-        name,
-        sql_type: "INTEGER",
-        legacy: Some(legacy),
-        backfill,
-    }
-}
-
-const fn scale_column(table: &'static str) -> AccountingScaleColumn {
-    AccountingScaleColumn {
-        table,
-        name: "amount_scale",
-        sql_type: "INTEGER",
-        legacy: None,
-        backfill: "6",
-    }
-}
-
-/// Authoritative accounting-scale columns. SQLite cannot add `NOT NULL` to an
-/// existing table, so reads treat NULL as invalid data until a later table
-/// rebuild drops the legacy columns and adds the constraints.
-const ACCOUNTING_SCALE_COLUMNS: &[AccountingScaleColumn] = &[
-    amount_column(
-        "budget_versions",
-        "amount_limit",
-        "amount_limit_cents",
-        "amount_limit_cents * 10000",
-    ),
-    scale_column("budget_versions"),
-    amount_column(
-        "budget_balances",
-        "consumed_amount",
-        "consumed_amount_cents",
-        "consumed_amount_cents * 10000",
-    ),
-    amount_column(
-        "budget_balances",
-        "frozen_amount",
-        "frozen_amount_cents",
-        "frozen_amount_cents * 10000",
-    ),
-    amount_column(
-        "budget_balances",
-        "remaining_amount",
-        "remaining_amount_cents",
-        "remaining_amount_cents * 10000",
-    ),
-    scale_column("budget_balances"),
-    amount_column(
-        "budget_holds",
-        "amount",
-        "amount_cents",
-        "amount_cents * 10000",
-    ),
-    scale_column("budget_holds"),
-    // The asset and exact amount the hold was requested in. Every hold so far
-    // was requested in whole cents of its budget currency.
-    AccountingScaleColumn {
-        table: "budget_holds",
-        name: "spend_asset",
-        sql_type: "TEXT",
-        legacy: None,
-        backfill: "currency",
-    },
-    AccountingScaleColumn {
-        table: "budget_holds",
-        name: "spend_exact_amount",
-        sql_type: "TEXT",
-        legacy: None,
-        backfill: "CAST(amount_cents AS TEXT)",
-    },
-    AccountingScaleColumn {
-        table: "budget_holds",
-        name: "spend_exact_scale",
-        sql_type: "INTEGER",
-        legacy: None,
-        backfill: "2",
-    },
-    // Frozen conversion into the budget currency; NULL means none was needed.
-    AccountingScaleColumn {
-        table: "budget_holds",
-        name: "conversion_json",
-        sql_type: "TEXT",
-        legacy: None,
-        backfill: "NULL",
-    },
-    amount_column(
-        "spending_targets",
-        "target_amount",
-        "target_amount_cents",
-        "target_amount_cents * 10000",
-    ),
-    scale_column("spending_targets"),
-    amount_column(
-        "spend_executor_settlement_receipts",
-        "authorized_max",
-        "authorized_max_cents",
-        "authorized_max_cents * 10000",
-    ),
-    amount_column(
-        "spend_executor_settlement_receipts",
-        "budget_charge",
-        "budget_charge_cents",
-        "budget_charge_cents * 10000",
-    ),
-    amount_column(
-        "spend_executor_settlement_receipts",
-        "released_amount",
-        "released_amount_cents",
-        "released_amount_cents * 10000",
-    ),
-    amount_column(
-        "spend_executor_settlement_receipts",
-        "overrun_amount",
-        "overrun_amount_cents",
-        "overrun_amount_cents * 10000",
-    ),
-    scale_column("spend_executor_settlement_receipts"),
-];
-
-fn accounting_scale_migrated(conn: &Connection) -> Result<bool, StorageError> {
-    for column in ACCOUNTING_SCALE_COLUMNS {
-        if !table_has_column(conn, column.table, column.name)? {
-            return Ok(false);
-        }
-    }
-    Ok(true)
-}
-
-/// Copies the database aside before the one-way accounting-scale migration.
-/// In-memory and empty databases have nothing to protect.
-fn backup_before_accounting_scale(conn: &Connection) -> Result<(), StorageError> {
-    let Some(path) = conn.path().filter(|path| !path.is_empty()) else {
-        return Ok(());
-    };
-    let has_budget_data: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM budget_versions)
-             OR EXISTS(SELECT 1 FROM spending_targets)
-             OR EXISTS(SELECT 1 FROM spend_executor_settlement_receipts)",
-        [],
-        |row| row.get(0),
-    )?;
-    if !has_budget_data {
-        return Ok(());
-    }
-    let mut backup = format!("{path}.pre-accounting-scale.bak");
-    if std::path::Path::new(&backup).exists() {
-        backup = format!(
-            "{path}.pre-accounting-scale.{}.bak",
-            Utc::now().format("%Y%m%dT%H%M%S%.fZ")
-        );
-    }
-    conn.execute("VACUUM INTO ?1", params![backup])?;
-    eprintln!("hubu: backed up the database to {backup} before the accounting-scale migration");
-    Ok(())
-}
-
-fn verify_accounting_scale_backfill(conn: &Connection) -> Result<(), StorageError> {
-    for column in ACCOUNTING_SCALE_COLUMNS {
-        let Some(legacy) = column.legacy else {
-            continue;
-        };
-        let mismatched: i64 = conn.query_row(
-            &format!(
-                "SELECT COUNT(*) FROM {table}
-                 WHERE typeof({name}) != 'integer'
-                    OR {name} != {legacy} * 10000
-                    OR amount_scale IS NOT 6",
-                table = column.table,
-                name = column.name,
-            ),
-            [],
-            |row| row.get(0),
-        )?;
-        if mismatched > 0 {
-            return Err(StorageError::InvalidData(format!(
-                "accounting-scale backfill of {}.{} left {mismatched} mismatched row(s)",
-                column.table, column.name
-            )));
-        }
-    }
-    let unbalanced: i64 = conn.query_row(
-        "SELECT COUNT(*)
-         FROM budget_balances AS balance
-         JOIN budget_current_versions AS current ON current.budget_id = balance.budget_id
-         JOIN budget_versions AS version
-           ON version.budget_id = current.budget_id AND version.id = current.version_id
-         WHERE balance.remaining_amount
-               != version.amount_limit - balance.consumed_amount - balance.frozen_amount",
-        [],
-        |row| row.get(0),
-    )?;
-    let unfrozen: i64 = conn.query_row(
-        "SELECT COUNT(*)
-         FROM budget_balances AS balance
-         LEFT JOIN (
-             SELECT budget_id, SUM(amount) AS held
-             FROM budget_holds
-             WHERE status IN ('frozen', 'claimed')
-             GROUP BY budget_id
-         ) AS holds ON holds.budget_id = balance.budget_id
-         WHERE balance.frozen_amount != COALESCE(holds.held, 0)",
-        [],
-        |row| row.get(0),
-    )?;
-    if unbalanced > 0 || unfrozen > 0 {
-        return Err(StorageError::InvalidData(format!(
-            "accounting-scale migration found {unbalanced} budget(s) whose remaining amount \
-             differs from limit - consumed - frozen and {unfrozen} whose frozen amount differs \
-             from their active holds"
-        )));
-    }
-    Ok(())
-}
-
 fn table_has_column(
     conn: &Connection,
     table_name: &str,
@@ -3476,85 +2650,6 @@ fn table_has_column(
         }
     }
     Ok(false)
-}
-
-fn reject_overlapping_non_revoked_budgets(
-    conn: &Connection,
-    table: &str,
-    administrative_state_column: &str,
-) -> Result<(), StorageError> {
-    if !matches!(
-        (table, administrative_state_column),
-        ("budgets", "administrative_state") | ("budgets_v2", "administrative_state")
-    ) {
-        return Err(StorageError::InvalidData(
-            "invalid internal budget overlap migration target".to_string(),
-        ));
-    }
-    let sql = format!(
-        "SELECT id, scope_type, scope_id, currency, starting_at, ending_before
-         FROM {table}
-         WHERE {administrative_state_column} != 'revoked'
-         ORDER BY id"
-    );
-    let rows = {
-        let mut statement = conn.prepare(&sql)?;
-        let rows = statement.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, Option<String>>(5)?,
-            ))
-        })?;
-        rows.collect::<Result<Vec<_>, _>>()?
-    };
-    for (index, left) in rows.iter().enumerate() {
-        if left.1 != "agent" {
-            return Err(StorageError::InvalidData(format!(
-                "budget {} has unsupported scope `{}`",
-                left.0, left.1
-            )));
-        }
-        let left_period = TimePeriod::new(
-            parse_timestamp(&left.4)?,
-            parse_optional_timestamp(left.5.clone())?,
-        )
-        .map_err(|_| {
-            StorageError::InvalidData(format!("budget {} has an invalid period", left.0))
-        })?;
-        for right in rows.iter().skip(index + 1) {
-            if left.2 != right.2 || left.3 != right.3 {
-                continue;
-            }
-            let right_period = TimePeriod::new(
-                parse_timestamp(&right.4)?,
-                parse_optional_timestamp(right.5.clone())?,
-            )
-            .map_err(|_| {
-                StorageError::InvalidData(format!("budget {} has an invalid period", right.0))
-            })?;
-            if budget_periods_overlap(&left_period, &right_period) {
-                return Err(StorageError::InvalidData(format!(
-                    "non-revoked budgets {} and {} overlap for one agent and currency",
-                    left.0, right.0
-                )));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn budget_periods_overlap(left: &TimePeriod, right: &TimePeriod) -> bool {
-    let left_starts_before_right_ends = right
-        .ending_before
-        .is_none_or(|right_end| left.starting_at < right_end);
-    let right_starts_before_left_ends = left
-        .ending_before
-        .is_none_or(|left_end| right.starting_at < left_end);
-    left_starts_before_right_ends && right_starts_before_left_ends
 }
 
 impl SpendRepository for SqliteGovernanceRepository {
@@ -4345,16 +3440,15 @@ impl BudgetVersionRepository for SqliteGovernanceRepository {
         let amount_limit = version.amount_limit;
         transaction.execute(
             "INSERT INTO budget_versions
-             (id, budget_id, revision, predecessor_version_id, amount_limit_cents,
+             (id, budget_id, revision, predecessor_version_id,
               effective_at, actor, source, reason, request_fingerprint, created_at,
               amount_limit, amount_scale)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 6)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 6)",
             params![
                 version.id.to_string(),
                 version.budget_id.to_string(),
                 sqlite_revision,
                 expected.id.to_string(),
-                legacy_limit_cents(amount_limit),
                 version.effective_at.to_rfc3339(),
                 version.actor,
                 version.source,
@@ -4445,12 +3539,11 @@ impl SpendingTargetRepository for SqliteGovernanceRepository {
     fn save_spending_target(&mut self, target: &SpendingTarget) -> Result<(), StorageError> {
         self.conn.execute(
             "INSERT INTO spending_targets
-             (id, owner_user_id, target_amount_cents, currency, starting_at,
+             (id, owner_user_id, currency, starting_at,
               ending_before, status, created_at, updated_at, target_amount, amount_scale)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 6)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 6)
              ON CONFLICT(id) DO UPDATE SET
                 owner_user_id = excluded.owner_user_id,
-                target_amount_cents = excluded.target_amount_cents,
                 target_amount = excluded.target_amount,
                 amount_scale = excluded.amount_scale,
                 currency = excluded.currency,
@@ -4461,7 +3554,6 @@ impl SpendingTargetRepository for SqliteGovernanceRepository {
             params![
                 target.id.to_string(),
                 target.owner_user_id.to_string(),
-                target.target_amount.legacy_cents_floor(),
                 target.currency.to_string(),
                 target.period.starting_at.to_rfc3339(),
                 target
@@ -4558,7 +3650,7 @@ fn load_executor_settlement_receipt_by_claim_id(
                 actual_vendor_cost_amount, actual_vendor_cost_scale,
                 actual_vendor_cost_currency, budget_charge,
                 released_amount, overrun_amount, currency,
-                provider_request_id, price_model_snapshot_json, artifact_reference, created_at
+                provider_request_id, price_model_snapshot_json, artifact_reference, created_at, cost_basis
          FROM spend_executor_settlement_receipts
          WHERE claim_id = ?1",
         params![claim_id.to_string()],
@@ -4573,35 +3665,21 @@ fn save_executor_settlement_receipt(
     record: &PersistedSpendExecutorSettlementReceipt,
 ) -> Result<(), StorageError> {
     let price_model_snapshot_json = serde_json::to_string(&record.receipt.price_model_snapshot)?;
-    // Retained v4.3 columns continue to describe the authorization-bounded
-    // budget charge. Precise columns are authoritative, including for a human
-    // reconciliation whose already-incurred charge exceeds that authorization.
-    // Legacy cent columns are conservative projections that still satisfy the
-    // table's v4.3 CHECKs (released = authorized - actual, actual <= authorized).
-    let authorized_max_cents = record.authorized_max.legacy_cents_ceil();
-    let budget_charge_cents = record.budget_charge.legacy_cents_ceil();
-    let legacy_actual_vendor_cost_cents = budget_charge_cents.min(authorized_max_cents);
     conn.execute(
         "INSERT INTO spend_executor_settlement_receipts
-         (claim_id, settlement_id, authorized_max_cents, actual_vendor_cost_cents,
-          actual_vendor_cost_amount, actual_vendor_cost_scale, actual_vendor_cost_currency,
-          budget_charge_cents, released_amount_cents, overrun_amount_cents, currency,
+         (claim_id, settlement_id,
+          actual_vendor_cost_amount, actual_vendor_cost_scale, actual_vendor_cost_currency, currency,
           provider_request_id, price_model_snapshot_json,
           artifact_reference, created_at, authorized_max, budget_charge,
-          released_amount, overrun_amount, amount_scale)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                 ?16, ?17, ?18, ?19, 6)",
+          released_amount, overrun_amount, amount_scale, cost_basis)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                 ?11, ?12, ?13, ?14, 6, ?15)",
         params![
             record.claim_id.to_string(),
             record.settlement_id.to_string(),
-            authorized_max_cents,
-            legacy_actual_vendor_cost_cents,
             record.receipt.actual_vendor_cost.amount,
             i64::from(record.receipt.actual_vendor_cost.scale),
             record.receipt.actual_vendor_cost.currency.to_string(),
-            budget_charge_cents,
-            authorized_max_cents - legacy_actual_vendor_cost_cents,
-            record.overrun_amount.legacy_cents_ceil(),
             record.currency.to_string(),
             record.receipt.provider_request_id,
             price_model_snapshot_json,
@@ -4611,6 +3689,9 @@ fn save_executor_settlement_receipt(
             record.budget_charge.units(),
             record.released_amount.units(),
             record.overrun_amount.units(),
+            serde_json::to_value(record.receipt.cost_basis)?
+                .as_str()
+                .unwrap(),
         ],
     )?;
     Ok(())
@@ -4868,6 +3949,7 @@ fn executor_settlement_receipt_from_row(
         overrun_amount: accounting_units_from_row(row, 8)?,
         currency: parse_currency(&currency)?,
         receipt: SpendExecutorSettlementReceipt {
+            cost_basis: parse_json(&serde_json::to_string(&row.get::<_, String>(14)?).unwrap())?,
             actual_vendor_cost: crate::spend::SpendExecutorVendorCost {
                 amount: row.get(3)?,
                 scale: actual_vendor_cost_scale,
@@ -5228,13 +4310,10 @@ fn upsert_balance(conn: &Connection, balance: &BudgetBalance) -> Result<(), Stor
     let units = BalanceUnits::from_balance(balance)?;
     conn.execute(
         "INSERT INTO budget_balances
-         (budget_id, consumed_amount_cents, frozen_amount_cents, remaining_amount_cents, updated_at,
+         (budget_id, updated_at,
           consumed_amount, frozen_amount, remaining_amount, amount_scale)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 6)
+         VALUES (?1, ?2, ?3, ?4, ?5, 6)
          ON CONFLICT(budget_id) DO UPDATE SET
-            consumed_amount_cents = excluded.consumed_amount_cents,
-            frozen_amount_cents = excluded.frozen_amount_cents,
-            remaining_amount_cents = excluded.remaining_amount_cents,
             consumed_amount = excluded.consumed_amount,
             frozen_amount = excluded.frozen_amount,
             remaining_amount = excluded.remaining_amount,
@@ -5242,9 +4321,6 @@ fn upsert_balance(conn: &Connection, balance: &BudgetBalance) -> Result<(), Stor
             updated_at = excluded.updated_at",
         params![
             balance.budget_id.to_string(),
-            units.consumed.legacy_cents_ceil(),
-            units.frozen.legacy_cents_ceil(),
-            units.remaining.legacy_cents_floor(),
             Utc::now().to_rfc3339(),
             units.consumed.units(),
             units.frozen.units(),
@@ -5254,9 +4330,7 @@ fn upsert_balance(conn: &Connection, balance: &BudgetBalance) -> Result<(), Stor
     Ok(())
 }
 
-/// A balance at accounting scale. The authoritative columns hold these units;
-/// the legacy `*_cents` columns hold conservative projections (consumed and
-/// frozen rounded up, remaining rounded down).
+/// A balance in canonical accounting units.
 struct BalanceUnits {
     consumed: Amount,
     frozen: Amount,
@@ -5288,22 +4362,16 @@ fn compare_and_set_balance(
          SET consumed_amount = ?2,
              frozen_amount = ?3,
              remaining_amount = ?4,
-             consumed_amount_cents = ?5,
-             frozen_amount_cents = ?6,
-             remaining_amount_cents = ?7,
-             updated_at = ?8
+             updated_at = ?5
          WHERE budget_id = ?1
-           AND consumed_amount = ?9
-           AND frozen_amount = ?10
-           AND remaining_amount = ?11",
+           AND consumed_amount = ?6
+           AND frozen_amount = ?7
+           AND remaining_amount = ?8",
         params![
             updated.budget_id.to_string(),
             updated_units.consumed.units(),
             updated_units.frozen.units(),
             updated_units.remaining.units(),
-            updated_units.consumed.legacy_cents_ceil(),
-            updated_units.frozen.legacy_cents_ceil(),
-            updated_units.remaining.legacy_cents_floor(),
             updated_at,
             current_units.consumed.units(),
             current_units.frozen.units(),
@@ -5312,26 +4380,19 @@ fn compare_and_set_balance(
     )?)
 }
 
-/// Legacy limit projection: rounded down, but never below the 1-cent minimum
-/// that the legacy `amount_limit_cents > 0` CHECK requires.
-fn legacy_limit_cents(amount_limit: Amount) -> i64 {
-    amount_limit.legacy_cents_floor().max(1)
-}
-
 fn insert_budget_hold(conn: &Connection, hold: &BudgetHold) -> Result<(), StorageError> {
     let amount = hold.amount;
     conn.execute(
         "INSERT INTO budget_holds
-         (id, budget_id, budget_version_id, spend_decision_id, amount_cents,
+         (id, budget_id, budget_version_id, spend_decision_id,
           currency, status, executor_claim_id, created_at, updated_at, expires_at,
           amount, amount_scale, spend_asset, spend_exact_amount, spend_exact_scale)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 6, ?6, ?13, 6)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 6, ?5, ?12, 6)",
         params![
             hold.id.to_string(),
             hold.budget_id.to_string(),
             hold.budget_version_id.to_string(),
             hold.spend_decision_id.to_string(),
-            amount.legacy_cents_ceil(),
             hold.currency.to_string(),
             budget_hold_status(&hold.status),
             hold.executor_claim_id.as_ref().map(ToString::to_string),
@@ -5561,10 +4622,10 @@ fn persist_budget_records(
     let amount_limit = version.amount_limit;
     sqlite_tx.execute(
         "INSERT INTO budget_versions
-             (id, budget_id, revision, predecessor_version_id, amount_limit_cents,
+             (id, budget_id, revision, predecessor_version_id,
               effective_at, actor, source, reason, request_fingerprint, created_at,
               amount_limit, amount_scale)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 6)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 6)
              ON CONFLICT(id) DO NOTHING",
         params![
             version.id.to_string(),
@@ -5574,7 +4635,6 @@ fn persist_budget_records(
                 .predecessor_version_id
                 .as_ref()
                 .map(ToString::to_string),
-            legacy_limit_cents(amount_limit),
             version.effective_at.to_rfc3339(),
             version.actor,
             version.source,
@@ -5792,17 +4852,6 @@ fn load_budget_state_from(
         load_budget_holds_from(conn)?,
     )
     .map_err(|error| StorageError::InvalidData(error.to_string()))
-}
-
-#[cfg(test)]
-pub(crate) fn strip_accounting_scale_columns(conn: &Connection) {
-    for column in ACCOUNTING_SCALE_COLUMNS.iter().rev() {
-        conn.execute_batch(&format!(
-            "ALTER TABLE {} DROP COLUMN {};",
-            column.table, column.name
-        ))
-        .unwrap();
-    }
 }
 
 #[cfg(test)]
@@ -6306,114 +5355,6 @@ mod tests {
             .unwrap()
     }
 
-    fn create_legacy_versioned_budget_tables(conn: &Connection) {
-        conn.execute_batch(
-            "CREATE TABLE budgets (
-                 id TEXT PRIMARY KEY,
-                 scope_type TEXT NOT NULL,
-                 scope_id TEXT NOT NULL,
-                 currency TEXT NOT NULL,
-                 starting_at TEXT NOT NULL,
-                 ending_before TEXT,
-                 status TEXT NOT NULL,
-                 created_at TEXT NOT NULL,
-                 updated_at TEXT NOT NULL
-             );
-             CREATE TABLE budget_versions (
-                 id TEXT PRIMARY KEY,
-                 budget_id TEXT NOT NULL,
-                 revision INTEGER NOT NULL,
-                 predecessor_version_id TEXT,
-                 amount_limit_cents INTEGER NOT NULL,
-                 effective_at TEXT NOT NULL,
-                 actor TEXT NOT NULL,
-                 source TEXT NOT NULL,
-                 reason TEXT,
-                 request_fingerprint TEXT NOT NULL,
-                 created_at TEXT NOT NULL
-             );
-             CREATE TABLE budget_current_versions (
-                 budget_id TEXT PRIMARY KEY,
-                 version_id TEXT NOT NULL UNIQUE
-             );
-             CREATE TABLE budget_balances (
-                 budget_id TEXT PRIMARY KEY,
-                 consumed_amount_cents INTEGER NOT NULL,
-                 frozen_amount_cents INTEGER NOT NULL,
-                 remaining_amount_cents INTEGER NOT NULL,
-                 updated_at TEXT NOT NULL
-             );
-             CREATE TABLE budget_holds (
-                 id TEXT PRIMARY KEY,
-                 budget_id TEXT NOT NULL,
-                 budget_version_id TEXT NOT NULL,
-                 spend_decision_id TEXT NOT NULL,
-                 amount_cents INTEGER NOT NULL,
-                 currency TEXT NOT NULL,
-                 status TEXT NOT NULL,
-                 executor_claim_id TEXT,
-                 created_at TEXT NOT NULL,
-                 updated_at TEXT NOT NULL,
-                 expires_at TEXT NOT NULL
-             );",
-        )
-        .unwrap();
-    }
-
-    fn insert_legacy_versioned_budget(
-        conn: &Connection,
-        budget_id: &BudgetId,
-        agent_id: &AgentId,
-        status: &str,
-        starting_at: DateTime<Utc>,
-        ending_before: DateTime<Utc>,
-        updated_at: DateTime<Utc>,
-    ) -> BudgetVersionId {
-        let version_id = BudgetVersionId::new();
-        conn.execute(
-            "INSERT INTO budgets
-             (id, scope_type, scope_id, currency, starting_at, ending_before,
-              status, created_at, updated_at)
-             VALUES (?1, 'agent', ?2, 'usd', ?3, ?4, ?5, ?3, ?6)",
-            params![
-                budget_id.to_string(),
-                agent_id.to_string(),
-                starting_at.to_rfc3339(),
-                ending_before.to_rfc3339(),
-                status,
-                updated_at.to_rfc3339(),
-            ],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO budget_versions
-             (id, budget_id, revision, predecessor_version_id, amount_limit_cents,
-              effective_at, actor, source, reason, request_fingerprint, created_at)
-             VALUES (?1, ?2, 1, NULL, 10000, ?3, 'legacy:actor', 'legacy:test',
-                     NULL, 'sha256:legacy', ?3)",
-            params![
-                version_id.to_string(),
-                budget_id.to_string(),
-                starting_at.to_rfc3339(),
-            ],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO budget_current_versions (budget_id, version_id) VALUES (?1, ?2)",
-            params![budget_id.to_string(), version_id.to_string()],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO budget_balances
-             (budget_id, consumed_amount_cents, frozen_amount_cents,
-              remaining_amount_cents, updated_at)
-             VALUES (?1, 0, 0, 10000, ?2)",
-            params![budget_id.to_string(), updated_at.to_rfc3339()],
-        )
-        .unwrap();
-        version_id
-    }
-
     pub(super) fn settlement_receipt(
         actual_vendor_cost_cents: i64,
     ) -> SpendExecutorSettlementReceipt {
@@ -6425,6 +5366,7 @@ mod tests {
         scale: u32,
     ) -> SpendExecutorSettlementReceipt {
         SpendExecutorSettlementReceipt {
+            cost_basis: Default::default(),
             actual_vendor_cost: SpendExecutorVendorCost {
                 amount,
                 scale,
@@ -6864,90 +5806,6 @@ mod tests {
         let holds = repo.load_budget_holds().unwrap();
         assert_eq!(holds.len(), 1);
         assert_eq!(holds[0].id, hold.id);
-    }
-
-    #[test]
-    fn precise_receipt_migration_backfills_legacy_rows_and_reopens_with_immutable_triggers() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("legacy-receipts.sqlite");
-        let claim_id = SpendExecutorClaimId::new();
-        let settlement_id = PaymentId::new();
-        let created_at = Utc::now();
-        {
-            let conn = Connection::open(&path).unwrap();
-            conn.execute_batch(
-                "CREATE TABLE spend_executor_settlement_receipts (
-                    claim_id TEXT PRIMARY KEY,
-                    settlement_id TEXT NOT NULL UNIQUE,
-                    authorized_max_cents INTEGER NOT NULL,
-                    actual_vendor_cost_cents INTEGER NOT NULL,
-                    released_amount_cents INTEGER NOT NULL,
-                    currency TEXT NOT NULL,
-                    provider_request_id TEXT NOT NULL,
-                    price_model_snapshot_json TEXT NOT NULL,
-                    artifact_reference TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    CHECK(actual_vendor_cost_cents <= authorized_max_cents),
-                    CHECK(released_amount_cents = authorized_max_cents - actual_vendor_cost_cents)
-                );",
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO spend_executor_settlement_receipts
-                 (claim_id, settlement_id, authorized_max_cents, actual_vendor_cost_cents,
-                  released_amount_cents, currency, provider_request_id,
-                  price_model_snapshot_json, artifact_reference, created_at)
-                 VALUES (?1, ?2, 25, 17, 8, 'usd', 'legacy-request', ?3, 'artifact://legacy', ?4)",
-                params![
-                    claim_id.to_string(),
-                    settlement_id.to_string(),
-                    serde_json::json!({
-                        "provider": "legacy-provider",
-                        "model": "legacy-model",
-                        "currency": "usd"
-                    })
-                    .to_string(),
-                    created_at.to_rfc3339(),
-                ],
-            )
-            .unwrap();
-        }
-
-        let first = SqliteGovernanceRepository::open(&path).unwrap();
-        for column in [
-            "actual_vendor_cost_cents",
-            "actual_vendor_cost_amount",
-            "actual_vendor_cost_scale",
-            "actual_vendor_cost_currency",
-            "budget_charge_cents",
-            "released_amount_cents",
-            "overrun_amount_cents",
-        ] {
-            assert!(
-                table_has_column(&first.conn, "spend_executor_settlement_receipts", column)
-                    .unwrap()
-            );
-        }
-        drop(first);
-
-        // A second open exercises migration with immutability triggers already present.
-        let reopened = SqliteGovernanceRepository::open(&path).unwrap();
-        let receipt = load_executor_settlement_receipt_by_claim_id(&reopened.conn, &claim_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(receipt.receipt.actual_vendor_cost.amount, 17);
-        assert_eq!(receipt.receipt.actual_vendor_cost.scale, 2);
-        assert_eq!(receipt.budget_charge, cents(17));
-        assert_eq!(receipt.released_amount, cents(8));
-        assert_eq!(receipt.overrun_amount, cents(0));
-        let update_error = reopened
-            .conn
-            .execute(
-                "UPDATE spend_executor_settlement_receipts SET provider_request_id = 'changed' WHERE claim_id = ?1",
-                params![claim_id.to_string()],
-            )
-            .unwrap_err();
-        assert!(update_error.to_string().contains("immutable"));
     }
 
     #[test]
@@ -7716,8 +6574,7 @@ mod tests {
         repo.conn
             .execute(
                 "UPDATE budget_balances
-                 SET consumed_amount_cents = 1, remaining_amount_cents = 7499,
-                     consumed_amount = 10000, remaining_amount = 74990000
+                 SET consumed_amount = 10000, remaining_amount = 74990000
                  WHERE budget_id = ?1",
                 params![hold.budget_id.to_string()],
             )
@@ -9284,155 +8141,6 @@ mod tests {
     }
 
     #[test]
-    fn historical_period_budgets_reload_with_unchanged_identity_and_independent_lifecycle() {
-        let path = std::env::temp_dir().join(format!(
-            "hubu-historical-periods-{}.sqlite",
-            BudgetId::new()
-        ));
-        // The fixture is persisted state from before the accounting-scale
-        // migration: load it into that schema, then let reopening migrate it.
-        let repo = SqliteGovernanceRepository::open(&path).unwrap();
-        strip_accounting_scale_columns(&repo.conn);
-        repo.conn
-            .execute_batch(include_str!("../../../fixtures/legacy-budget-periods.sql"))
-            .unwrap();
-        drop(repo);
-        let mut repo = SqliteGovernanceRepository::open(&path).unwrap();
-        // Compare complete persisted rows, including IDs, version fingerprints,
-        // provenance and timestamps, rather than just counts after reopening.
-        let snapshot = |repo: &SqliteGovernanceRepository| {
-            [
-                "budgets",
-                "budget_versions",
-                "budget_current_versions",
-                "budget_balances",
-                "budget_holds",
-            ]
-            .map(|table| {
-                let mut statement = repo
-                    .conn
-                    .prepare(&format!("SELECT * FROM {table} ORDER BY 1"))
-                    .unwrap();
-                let columns = statement.column_count();
-                statement
-                    .query_map([], |row| {
-                        (0..columns)
-                            .map(|column| row.get::<_, rusqlite::types::Value>(column))
-                            .collect::<rusqlite::Result<Vec<_>>>()
-                    })
-                    .unwrap()
-                    .collect::<rusqlite::Result<Vec<_>>>()
-                    .unwrap()
-            })
-        };
-        let hydrate = |repo: &SqliteGovernanceRepository| {
-            BudgetManager::from_records(
-                repo.load_budgets().unwrap(),
-                repo.load_budget_versions().unwrap(),
-                repo.load_budget_balances().unwrap(),
-                repo.load_budget_holds().unwrap(),
-            )
-            .unwrap()
-        };
-        let mut manager = hydrate(&repo);
-        let mut budgets = repo.load_budgets().unwrap();
-        budgets.sort_by_key(|budget| budget.period.starting_at);
-        let first = &budgets[0];
-        let second = &budgets[1];
-        assert_eq!(first.agent_id, second.agent_id);
-        assert_ne!(first.id, second.id);
-        assert_eq!(first.period.ending_before, Some(second.period.starting_at));
-        let decision = spend_decision();
-        repo.save_spend_decision(&decision).unwrap();
-        let reserved = manager
-            .reserve_budget_at(
-                ReserveBudgetRequest {
-                    budget_id: first.id.clone(),
-                    spend_decision_id: decision.id,
-                    amount: cents(2_500),
-                    currency: Currency::Usd,
-                    expires_at: second.period.starting_at,
-                },
-                first.period.starting_at,
-            )
-            .unwrap();
-        repo.save_budget_hold(&reserved.hold, &reserved.balance)
-            .unwrap();
-        let before = snapshot(&repo);
-        drop(repo);
-
-        let mut repo = SqliteGovernanceRepository::open(&path).unwrap();
-        assert_eq!(snapshot(&repo), before);
-        let mut restarted = hydrate(&repo);
-        assert_eq!(
-            restarted
-                .available_budget_id_for_agent_at(
-                    &first.agent_id,
-                    Currency::Usd,
-                    first.period.starting_at
-                )
-                .unwrap(),
-            Some(first.id.clone())
-        );
-        assert_eq!(
-            restarted
-                .available_budget_id_for_agent_at(
-                    &first.agent_id,
-                    Currency::Usd,
-                    second.period.starting_at
-                )
-                .unwrap(),
-            Some(second.id.clone())
-        );
-        let settled = restarted
-            .settle_budget(&reserved.hold.id, reserved.hold.amount)
-            .unwrap();
-        assert_eq!(settled.hold.budget_version_id, first.current_version_id);
-        assert_eq!(settled.balance.consumed_amount, cents(2_500));
-        repo.update_budget_hold(&settled.hold, &settled.balance)
-            .unwrap();
-        let revoked = restarted
-            .revoke_budget_at_in_memory(&first.id, second.period.starting_at)
-            .unwrap();
-        repo.save_budget_with_balance(&revoked.budget, &revoked.version, &revoked.balance)
-            .unwrap();
-        let untouched = restarted.get_budget_by_id(&second.id).unwrap();
-        assert_eq!(untouched.balance.remaining_amount, cents(10_000));
-        assert_eq!(
-            untouched.budget.administrative_state,
-            BudgetAdministrativeState::Active
-        );
-        // Neither spending nor revocation rewrites either budget's version history.
-        assert_eq!(snapshot(&repo)[1], before[1]);
-        let after = snapshot(&repo);
-        drop(repo);
-        let reopened = SqliteGovernanceRepository::open(&path).unwrap();
-        assert_eq!(snapshot(&reopened), after);
-        let restarted = hydrate(&reopened);
-        assert_eq!(
-            restarted
-                .get_budget_by_id(&first.id)
-                .unwrap()
-                .budget
-                .administrative_state,
-            BudgetAdministrativeState::Revoked
-        );
-        assert_eq!(
-            restarted
-                .available_budget_id_for_agent_at(
-                    &second.agent_id,
-                    Currency::Usd,
-                    second.period.starting_at
-                )
-                .unwrap(),
-            Some(second.id.clone())
-        );
-        assert_eq!(reopened.load_budgets().unwrap().len(), 2);
-        drop(reopened);
-        std::fs::remove_file(path).unwrap();
-    }
-
-    #[test]
     fn versioned_budget_hold_and_logical_balance_survive_restart_and_settlement() {
         let mut repo = SqliteGovernanceRepository::in_memory().unwrap();
         let decision = spend_decision();
@@ -9709,7 +8417,7 @@ mod tests {
         assert!(repo
             .conn
             .execute(
-                "UPDATE budget_versions SET amount_limit_cents = 1 WHERE id = ?1",
+                "UPDATE budget_versions SET amount_limit = 1 WHERE id = ?1",
                 params![first.version.id.to_string()],
             )
             .is_err());
@@ -9742,10 +8450,10 @@ mod tests {
         repo.conn
             .execute(
                 "INSERT INTO budget_versions
-                 (id, budget_id, revision, predecessor_version_id, amount_limit_cents,
-                  effective_at, actor, source, reason, request_fingerprint, created_at)
+                 (id, budget_id, revision, predecessor_version_id, amount_limit,
+                  effective_at, actor, source, reason, request_fingerprint, created_at, amount_scale)
                  VALUES (?1, ?2, 2, ?3, 12000, ?4, 'test:owner', 'constraint-test',
-                         NULL, 'sha256:successor', ?4)",
+                         NULL, 'sha256:successor', ?4, 6)",
                 params![
                     successor_id.to_string(),
                     first.budget.id.to_string(),
@@ -9758,10 +8466,10 @@ mod tests {
             .conn
             .execute(
                 "INSERT INTO budget_versions
-                 (id, budget_id, revision, predecessor_version_id, amount_limit_cents,
-                  effective_at, actor, source, reason, request_fingerprint, created_at)
+                 (id, budget_id, revision, predecessor_version_id, amount_limit,
+                  effective_at, actor, source, reason, request_fingerprint, created_at, amount_scale)
                  VALUES (?1, ?2, 3, ?3, 13000, ?4, 'test:owner', 'constraint-test',
-                         NULL, 'sha256:alternate-successor', ?4)",
+                         NULL, 'sha256:alternate-successor', ?4, 6)",
                 params![
                     hubu_common::ids::BudgetVersionId::new().to_string(),
                     first.budget.id.to_string(),
@@ -9774,10 +8482,10 @@ mod tests {
             .conn
             .execute(
                 "INSERT INTO budget_versions
-                 (id, budget_id, revision, predecessor_version_id, amount_limit_cents,
-                  effective_at, actor, source, reason, request_fingerprint, created_at)
+                 (id, budget_id, revision, predecessor_version_id, amount_limit,
+                  effective_at, actor, source, reason, request_fingerprint, created_at, amount_scale)
                  VALUES (?1, ?2, 1, NULL, 13000, ?3, 'test:owner', 'constraint-test',
-                         NULL, 'sha256:duplicate-revision', ?3)",
+                         NULL, 'sha256:duplicate-revision', ?3, 6)",
                 params![
                     hubu_common::ids::BudgetVersionId::new().to_string(),
                     first.budget.id.to_string(),
@@ -9810,382 +8518,6 @@ mod tests {
         assert_eq!(targets[0].target_amount, cents(25_000));
         assert!(repo.load_budgets().unwrap().is_empty());
     }
-
-    #[test]
-    fn migrates_legacy_budget_lifecycle_to_administrative_state_idempotently() {
-        let path = std::env::temp_dir().join(format!(
-            "hubu-budget-admin-migration-{}.sqlite",
-            BudgetId::new()
-        ));
-        let start = Utc::now() - Duration::days(10);
-        let updated_at = start + Duration::hours(6);
-        let mut expected = Vec::new();
-        let exhausted_budget_id = BudgetId::new();
-        let mut exhausted_version_id = None;
-        {
-            let conn = Connection::open(&path).unwrap();
-            create_legacy_versioned_budget_tables(&conn);
-            for (index, status) in ["active", "exhausted", "expired", "revoked"]
-                .into_iter()
-                .enumerate()
-            {
-                let budget_id = if status == "exhausted" {
-                    exhausted_budget_id.clone()
-                } else {
-                    BudgetId::new()
-                };
-                let period_start = start + Duration::days(index as i64 * 2);
-                let version_id = insert_legacy_versioned_budget(
-                    &conn,
-                    &budget_id,
-                    &AgentId::new(),
-                    status,
-                    period_start,
-                    period_start + Duration::days(1),
-                    updated_at,
-                );
-                if status == "exhausted" {
-                    exhausted_version_id = Some(version_id);
-                }
-                expected.push((
-                    budget_id,
-                    if status == "revoked" {
-                        BudgetAdministrativeState::Revoked
-                    } else {
-                        BudgetAdministrativeState::Active
-                    },
-                ));
-            }
-            conn.execute(
-                "UPDATE budget_balances
-                 SET frozen_amount_cents = 500, remaining_amount_cents = 9500
-                 WHERE budget_id = ?1",
-                params![exhausted_budget_id.to_string()],
-            )
-            .unwrap();
-            let exhausted_version_id = exhausted_version_id.as_ref().unwrap();
-            conn.execute(
-                "INSERT INTO budget_holds
-                 (id, budget_id, budget_version_id, spend_decision_id, amount_cents,
-                  currency, status, executor_claim_id, created_at, updated_at, expires_at)
-                 VALUES (?1, ?2, ?3, ?4, 500, 'usd', 'frozen', NULL, ?5, ?5, ?6)",
-                params![
-                    BudgetHoldId::new().to_string(),
-                    exhausted_budget_id.to_string(),
-                    exhausted_version_id.to_string(),
-                    SpendDecisionId::new().to_string(),
-                    updated_at.to_rfc3339(),
-                    (updated_at + Duration::days(30)).to_rfc3339(),
-                ],
-            )
-            .unwrap();
-        }
-
-        let repo = SqliteGovernanceRepository::open(&path).unwrap();
-        let exhausted_version_id = exhausted_version_id.unwrap();
-        let budgets = repo.load_budgets().unwrap();
-        assert_eq!(budgets.len(), 4);
-        for (budget_id, administrative_state) in &expected {
-            let budget = budgets
-                .iter()
-                .find(|budget| &budget.id == budget_id)
-                .unwrap();
-            assert_eq!(budget.administrative_state, *administrative_state);
-            assert_eq!(budget.updated_at, updated_at);
-        }
-        assert_eq!(repo.load_budget_versions().unwrap().len(), 4);
-        assert_eq!(repo.load_budget_balances().unwrap().len(), 4);
-        let holds = repo.load_budget_holds().unwrap();
-        assert_eq!(holds.len(), 1);
-        assert_eq!(holds[0].budget_id, exhausted_budget_id);
-        assert_eq!(holds[0].budget_version_id, exhausted_version_id);
-        assert!(table_has_column(&repo.conn, "budgets", "administrative_state").unwrap());
-        assert!(!table_has_column(&repo.conn, "budgets", "status").unwrap());
-        assert!(repo
-            .conn
-            .execute(
-                "UPDATE budgets SET administrative_state = 'expired' WHERE id = ?1",
-                params![exhausted_budget_id.to_string()],
-            )
-            .is_err());
-        assert!(repo
-            .conn
-            .execute(
-                "INSERT INTO budgets
-                 (id, scope_type, scope_id, currency, starting_at, ending_before,
-                  administrative_state, created_at, updated_at)
-                 VALUES (?1, 'agent', ?2, 'usd', ?3, ?4, 'exhausted', ?3, ?3)",
-                params![
-                    BudgetId::new().to_string(),
-                    AgentId::new().to_string(),
-                    start.to_rfc3339(),
-                    (start + Duration::days(1)).to_rfc3339(),
-                ],
-            )
-            .is_err());
-        drop(repo);
-
-        let reopened = SqliteGovernanceRepository::open(&path).unwrap();
-        assert_eq!(reopened.load_budgets().unwrap().len(), 4);
-        assert_eq!(reopened.load_budget_versions().unwrap().len(), 4);
-        assert_eq!(reopened.load_budget_holds().unwrap().len(), 1);
-        drop(reopened);
-        std::fs::remove_file(path).ok();
-    }
-
-    #[test]
-    fn budget_lifecycle_migration_rejects_unknown_state() {
-        let path = std::env::temp_dir().join(format!(
-            "hubu-budget-admin-unknown-{}.sqlite",
-            BudgetId::new()
-        ));
-        let budget_id = BudgetId::new();
-        {
-            let conn = Connection::open(&path).unwrap();
-            create_legacy_versioned_budget_tables(&conn);
-            let start = Utc::now();
-            insert_legacy_versioned_budget(
-                &conn,
-                &budget_id,
-                &AgentId::new(),
-                "paused",
-                start,
-                start + Duration::days(1),
-                start,
-            );
-        }
-
-        let error = match SqliteGovernanceRepository::open(&path) {
-            Ok(_) => panic!("unknown legacy lifecycle must fail closed"),
-            Err(error) => error,
-        };
-        assert!(error.to_string().contains("unknown budget status `paused`"));
-        std::fs::remove_file(path).ok();
-    }
-
-    #[test]
-    fn budget_lifecycle_migration_rejects_overlapping_non_revoked_budgets() {
-        let path = std::env::temp_dir().join(format!(
-            "hubu-budget-admin-overlap-{}.sqlite",
-            BudgetId::new()
-        ));
-        let first_id = BudgetId::new();
-        let second_id = BudgetId::new();
-        {
-            let conn = Connection::open(&path).unwrap();
-            create_legacy_versioned_budget_tables(&conn);
-            let start = Utc::now();
-            let agent_id = AgentId::new();
-            insert_legacy_versioned_budget(
-                &conn,
-                &first_id,
-                &agent_id,
-                "exhausted",
-                start,
-                start + Duration::days(2),
-                start,
-            );
-            insert_legacy_versioned_budget(
-                &conn,
-                &second_id,
-                &agent_id,
-                "active",
-                start + Duration::days(1),
-                start + Duration::days(3),
-                start,
-            );
-        }
-
-        let error = match SqliteGovernanceRepository::open(&path) {
-            Ok(_) => panic!("legacy exhausted overlap must fail closed"),
-            Err(error) => error,
-        };
-        let message = error.to_string();
-        assert!(message.contains(&first_id.to_string()));
-        assert!(message.contains(&second_id.to_string()));
-        assert!(message.contains("overlap"));
-        std::fs::remove_file(path).ok();
-    }
-
-    #[test]
-    fn migrates_legacy_user_cap_budget_to_advisory_spending_target() {
-        let path = std::env::temp_dir().join(format!(
-            "hubu-governance-target-migration-{}.sqlite",
-            UserId::new()
-        ));
-        {
-            let conn = Connection::open(&path).unwrap();
-            conn.execute_batch(
-                "CREATE TABLE spend_decisions (
-                     id TEXT PRIMARY KEY,
-                     owner_user_id TEXT NOT NULL,
-                     agent_id TEXT NOT NULL,
-                     operation_key TEXT NOT NULL,
-                     request_json TEXT NOT NULL,
-                     evaluation_json TEXT NOT NULL,
-                     created_at TEXT NOT NULL
-                 );
-                 CREATE TABLE budgets (
-                     id TEXT PRIMARY KEY,
-                     scope_type TEXT NOT NULL,
-                     scope_id TEXT NOT NULL,
-                     amount_limit_cents INTEGER NOT NULL,
-                     currency TEXT NOT NULL,
-                     starting_at TEXT NOT NULL,
-                     ending_before TEXT,
-                     status TEXT NOT NULL,
-                     created_at TEXT NOT NULL,
-                     updated_at TEXT NOT NULL
-                 );
-                 CREATE TABLE budget_balances (
-                     budget_id TEXT PRIMARY KEY,
-                     consumed_amount_cents INTEGER NOT NULL,
-                     frozen_amount_cents INTEGER NOT NULL,
-                     remaining_amount_cents INTEGER NOT NULL,
-                     updated_at TEXT NOT NULL
-                 );
-                 CREATE TABLE budget_holds (
-                     id TEXT PRIMARY KEY,
-                     budget_id TEXT NOT NULL,
-                     spend_decision_id TEXT NOT NULL,
-                     amount_cents INTEGER NOT NULL,
-                     currency TEXT NOT NULL,
-                     status TEXT NOT NULL,
-                     created_at TEXT NOT NULL,
-                     updated_at TEXT NOT NULL,
-                     expires_at TEXT NOT NULL
-                 );",
-            )
-            .unwrap();
-        }
-        let legacy_cap_id = BudgetId::new();
-        let agent_budget_id = BudgetId::new();
-        let spend_decision_id = SpendDecisionId::new();
-        let cap_hold_id = BudgetHoldId::new();
-        let agent_hold_id = BudgetHoldId::new();
-        let now = Utc::now();
-        {
-            let conn = Connection::open(&path).unwrap();
-            conn.execute(
-                "INSERT INTO spend_decisions
-                 (id, owner_user_id, agent_id, operation_key, request_json, evaluation_json, created_at)
-                 VALUES (?1, ?2, ?3, ?4, '{}', '{}', ?5)",
-                params![
-                    spend_decision_id.to_string(),
-                    user_id().to_string(),
-                    agent_id().to_string(),
-                    format!("legacy-{spend_decision_id}"),
-                    now.to_rfc3339(),
-                ],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO budgets
-                 (id, scope_type, scope_id, amount_limit_cents, currency, starting_at,
-                  ending_before, status, created_at, updated_at)
-                 VALUES (?1, 'user', ?2, 10000, 'usd', ?3, NULL, 'active', ?3, ?3)",
-                params![
-                    legacy_cap_id.to_string(),
-                    user_id().to_string(),
-                    now.to_rfc3339(),
-                ],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO budgets
-                 (id, scope_type, scope_id, amount_limit_cents, currency, starting_at,
-                  ending_before, status, created_at, updated_at)
-                 VALUES (?1, 'agent', ?2, 10000, 'usd', ?3, NULL, 'active', ?3, ?3)",
-                params![
-                    agent_budget_id.to_string(),
-                    agent_id().to_string(),
-                    now.to_rfc3339(),
-                ],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO budget_balances
-                 (budget_id, consumed_amount_cents, frozen_amount_cents,
-                  remaining_amount_cents, updated_at)
-                 VALUES (?1, 0, 500, 9500, ?2)",
-                params![legacy_cap_id.to_string(), now.to_rfc3339()],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO budget_balances
-                 (budget_id, consumed_amount_cents, frozen_amount_cents,
-                  remaining_amount_cents, updated_at)
-                 VALUES (?1, 0, 500, 9500, ?2)",
-                params![agent_budget_id.to_string(), now.to_rfc3339()],
-            )
-            .unwrap();
-            for (hold_id, budget_id) in [
-                (&cap_hold_id, &legacy_cap_id),
-                (&agent_hold_id, &agent_budget_id),
-            ] {
-                conn.execute(
-                    "INSERT INTO budget_holds
-                     (id, budget_id, spend_decision_id, amount_cents, currency,
-                      status, created_at, updated_at, expires_at)
-                     VALUES (?1, ?2, ?3, 500, 'usd', 'frozen', ?4, ?4, ?5)",
-                    params![
-                        hold_id.to_string(),
-                        budget_id.to_string(),
-                        spend_decision_id.to_string(),
-                        now.to_rfc3339(),
-                        (now + Duration::hours(1)).to_rfc3339(),
-                    ],
-                )
-                .unwrap();
-            }
-        }
-
-        let repo = SqliteGovernanceRepository::open(&path).unwrap();
-        let targets = repo.load_spending_targets().unwrap();
-        assert_eq!(targets.len(), 1);
-        assert_eq!(targets[0].id.to_string(), legacy_cap_id.to_string());
-        assert_eq!(targets[0].target_amount, cents(10_000));
-        assert_eq!(targets[0].status, SpendingTargetStatus::Active);
-        let budgets = repo.load_budgets().unwrap();
-        assert_eq!(budgets.len(), 1);
-        assert_eq!(budgets[0].id, agent_budget_id);
-        let versions = repo.load_budget_versions().unwrap();
-        assert_eq!(versions.len(), 1);
-        assert_eq!(versions[0].budget_id, agent_budget_id);
-        assert_eq!(versions[0].revision, 1);
-        assert_eq!(budgets[0].current_version_id, versions[0].id);
-        let balances = repo.load_budget_balances().unwrap();
-        assert_eq!(balances.len(), 1);
-        assert_eq!(balances[0].budget_id, agent_budget_id);
-        let holds = repo.load_budget_holds().unwrap();
-        assert_eq!(holds.len(), 1);
-        assert_eq!(holds[0].id, agent_hold_id);
-        assert_eq!(holds[0].budget_id, agent_budget_id);
-        assert_eq!(holds[0].budget_version_id, versions[0].id);
-        let migrated_version_id = versions[0].id.clone();
-        drop(repo);
-
-        let reopened = SqliteGovernanceRepository::open(&path).unwrap();
-        let reopened_versions = reopened.load_budget_versions().unwrap();
-        assert_eq!(reopened_versions.len(), 1);
-        assert_eq!(reopened_versions[0].id, migrated_version_id);
-        assert_eq!(
-            reopened.load_budget_holds().unwrap()[0].budget_version_id,
-            migrated_version_id
-        );
-        let executor_claim_index_count: i64 = reopened
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master
-                 WHERE type = 'index' AND name = 'budget_holds_executor_claim_unique'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(executor_claim_index_count, 1);
-        drop(reopened);
-        std::fs::remove_file(path).ok();
-    }
 }
 
 #[cfg(test)]
@@ -10193,8 +8525,8 @@ mod tests {
 mod accounting_tests;
 
 #[cfg(test)]
-#[path = "persistence/accounting_scale_tests.rs"]
-mod accounting_scale_tests;
+#[path = "persistence/canonical_amount_tests.rs"]
+mod canonical_amount_tests;
 
 #[cfg(test)]
 #[path = "persistence/sub_cent_tests.rs"]

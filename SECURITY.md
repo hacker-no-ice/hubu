@@ -4,6 +4,13 @@ Hubu is experimental, local-first software. This policy describes how to
 report security problems; it is not a claim that Hubu is ready for production
 or real-money use.
 
+## Threat model
+
+The [threat model](docs/threat-model.md) describes what Hubu protects against
+when an agent runs as the owner's macOS user, what it doesn't, and the
+recommended setup. A way around a protection the threat model says is in
+place is a vulnerability; a gap it lists as not protected is known.
+
 ## Supported versions
 
 Security fixes are made on a best-effort basis for the current `main` branch

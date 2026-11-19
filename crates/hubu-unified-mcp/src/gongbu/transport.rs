@@ -10,8 +10,9 @@ use super::{
     request::{self, PreparedCall},
     response::{
         api_error, artifact_result, execution_result, execution_target_catalog_result,
-        scrub_artifact_metadata, text_result, ApiErrorContext, ArtifactListResponse,
-        ExecutionResponse, ExecutionTargetCatalogResponse, ToolError, ToolErrorClass, ToolResult,
+        reference_images_result, scrub_artifact_metadata, text_result, ApiErrorContext,
+        ArtifactListResponse, ExecutionResponse, ExecutionTargetCatalogResponse,
+        ReferenceImagesResponse, ToolError, ToolErrorClass, ToolResult,
         EXECUTION_V1_SCHEMA_VERSION, EXECUTION_V2_SCHEMA_VERSION,
     },
     AdmissionDiagnostic,
@@ -158,6 +159,11 @@ fn execute(
             let response: ExecutionTargetCatalogResponse =
                 json_request::<Value, _>(client, Method::GET, "v2/execution-targets", None)?;
             Ok((execution_target_catalog_result(response)?, None))
+        }
+        PreparedCall::ListReferenceImages => {
+            let response: ReferenceImagesResponse =
+                json_request::<Value, _>(client, Method::GET, "v1/reference-images", None)?;
+            Ok((reference_images_result(response)?, None))
         }
         PreparedCall::Create(request) => {
             let expected = expected.ok_or_else(|| {

@@ -10,6 +10,7 @@ pub mod http;
 pub mod hubu;
 pub mod lifecycle;
 pub mod provider;
+pub mod reference;
 pub mod sandbox;
 pub mod server;
 pub mod temporal;

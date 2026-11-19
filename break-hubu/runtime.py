@@ -35,6 +35,39 @@ rules:
         string: provider:local:fixture
 '''
 
+# Tiered fixture policy for approval and denial kits. Effects merge by strict
+# precedence (deny > needs_approval > allow): up to USD 0.05 is allowed, above
+# that needs a human, and above USD 1.00 is denied.
+TIERED_POLICY = '''id: break_hubu_tiers
+version: v1
+default_effect: deny
+rules:
+  - id: deny_over_one_dollar
+    effect: deny
+    reason: synthetic fixture single-request cap
+    when:
+      op: gt
+      field: amount
+      value:
+        money: "1.00"
+  - id: approve_over_five_cents
+    effect: needs_approval
+    reason: synthetic fixture approval threshold
+    when:
+      op: gt
+      field: amount
+      value:
+        money: "0.05"
+  - id: allow_synthetic_fixture
+    effect: allow
+    reason: synthetic local fixture only
+    when:
+      op: eq
+      field: provider
+      value:
+        string: provider:local:fixture
+'''
+
 
 def now():
     return datetime.now(timezone.utc).isoformat()
@@ -97,13 +130,19 @@ class Runtime:
         if check and result.returncode: raise RuntimeError(f'CLI failed: {shlex.join(args)}: {result.stderr}')
         return {'exit_code': result.returncode, 'stdout': result.stdout, 'stderr': result.stderr}
 
-    def request(self, method, route, body=None, label='request', retry=True):
+    def request(self, method, route, body=None, label='request', retry=True, headers=None):
         encoded = None if body is None else json.dumps(body, separators=(',', ':')).encode()
         request_file = self.private / 'requests' / (secrets.token_hex(12) + '.json')
         durable = dict(label=label, method=method, route=route, body=body)
         save(request_file, durable)
-        headers = {'Authorization': 'Bearer ' + Path(self.context['auth_file']).read_text().strip(),
-                   'Content-Type': 'application/json'}
+        extra = dict(headers or {})
+        # The synthetic executor presents the executor credential; every other
+        # route gets this process's own credential (the agent's, in the attack).
+        credential = self.context['auth_file']
+        if route.startswith('/spend/executor/'):
+            credential = self.context.get('executor_file', credential)
+        headers = {'Authorization': 'Bearer ' + Path(credential).read_text().strip(),
+                   'Content-Type': 'application/json', **extra}
         # Exact persisted body is reused on ambiguous transport responses.
         for attempt in range(1, 4 if retry else 2):
             started = now()
@@ -120,6 +159,9 @@ class Runtime:
                 result = {'status': None, 'body': None, 'transport_error': str(error)}
             record = dict(type='http', label=label, attempt=attempt, started_at=started, ended_at=now(),
                           method=method, route=route, request=redact(body), **redact(result))
+            if extra:
+                # Header names only: capability values never enter public evidence.
+                record['extra_headers'] = sorted(extra)
             save(request_file, dict(**durable, last_attempt=attempt, response=result))
             append(self.output / 'requests.jsonl', record)
             self.note(f'{label} {method} {route} -> {result["status"]}: ' + json.dumps(redact(result['body'])))
@@ -127,17 +169,25 @@ class Runtime:
             if attempt < (3 if retry else 1): time.sleep(0.2 * attempt)
         return result
 
-    def authorize(self, label, amount):
+    def authorize(self, label, amount, account_id=None, scope=None, reason=None, operation_key=None):
         path = self.private / 'operations' / (label + '.json')
         if path.exists():
             body = json.loads(path.read_text())
             if body['amount'] != amount: raise ValueError('Retry changes amount')
         else:
-            body = dict(operation_key='break-hubu:' + secrets.token_hex(24), account_id=self.ids['account_id'],
-                        amount=amount, currency='usd', reason='Synthetic proof kit: ' + label,
-                        execution_scope=SCOPE, lease_profile=self.context['lease_profile'])
+            body = dict(operation_key=operation_key or 'break-hubu:' + secrets.token_hex(24),
+                        account_id=account_id or self.ids['account_id'],
+                        amount=amount, currency='usd', reason=reason or 'Synthetic proof kit: ' + label,
+                        execution_scope=scope or SCOPE, lease_profile=self.context['lease_profile'])
             save(path, body)
         return self.request('POST', '/spend/authorize', body, label=label)
+
+    def operation_key(self, label):
+        return json.loads((self.private / 'operations' / (label + '.json')).read_text())['operation_key']
+
+    def approve(self, approval_request_id, decision='approve', label='owner-approve'):
+        # The human approval capability stays in the parent; the attack process asks for it by message.
+        return self.control('approve', approval_request_id=approval_request_id, decision=decision, label=label)
 
     def claim(self, authorization, label='claim'):
         token = authorization['body']['auth_token_id']
@@ -145,6 +195,19 @@ class Runtime:
         if resolved['status'] != 200: return resolved
         body = dict(spend_auth_token_id=token, contract_version='hubu-spend-executor-v4.5',
                     **{key: resolved['body'][key] for key in ('account_id', 'amount', 'execution_scope')})
+        return self.request('POST', '/spend/executor/claim', body, label=label)
+
+    def claim_with_amount(self, authorization, amount, label):
+        # Executor claim that asserts a different amount than the authorization holds.
+        token = authorization['body']['auth_token_id']
+        resolved = self.request('POST', '/spend/executor/resolve', {'spend_auth_token_id': token}, label=label + '-resolve')
+        if resolved['status'] != 200: return resolved
+        altered = dict(resolved['body']['amount'])
+        altered['units'] = str(int(Decimal(amount) * 1000000))
+        if 'display' in altered: altered['display'] = amount
+        body = dict(spend_auth_token_id=token, contract_version='hubu-spend-executor-v4.5',
+                    account_id=resolved['body']['account_id'], amount=altered,
+                    execution_scope=resolved['body']['execution_scope'])
         return self.request('POST', '/spend/executor/claim', body, label=label)
 
     def receipt(self, label, amount):
@@ -245,6 +308,12 @@ class Runtime:
             else: raise RuntimeError('Hubu health deadline exceeded')
             event = dict(event='restart', at=now(), pid=self.server.pid)
             append(self.output / 'process-events.jsonl', event); return event
+        if action == 'approve':
+            self.note('OWNER STEP: human approval decision with the approval capability; capability stays in parent')
+            token = (self.private / 'approval.token').read_text().strip()
+            return self.request('POST', '/spend/approval/resolve',
+                                {'approval_request_id': kwargs['approval_request_id'], 'decision': kwargs['decision']},
+                                label=kwargs['label'], headers={'x-hubu-approval-capability': token})
         if action == 'reconcile':
             claim, receipt = kwargs['claim'], kwargs['receipt']; cost = receipt['actual_vendor_cost']
             self.note('OWNER STEP: explicit reconciliation of a synthetic known bill; capability stays in parent')
@@ -260,14 +329,16 @@ class Runtime:
         raise ValueError('Unknown parent operation')
 
 
-def run_episode(attack, verify, *, episode, budget, short_lease=False):
+def run_episode(attack, verify, *, episode, budget, short_lease=False, policy=POLICY, setup=None):
     parser = argparse.ArgumentParser(description=episode + ': unchanged released Hubu, synthetic executor')
-    parser.add_argument('--release', default='v0.2.4'); parser.add_argument('--output'); parser.add_argument('--cache')
+    parser.add_argument('--release', help='published stable tag, such as v0.2.5'); parser.add_argument('--output'); parser.add_argument('--cache')
     parser.add_argument('--attack-context', help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.attack_context:
         attack(Runtime(json.loads(Path(args.attack_context).read_text())))
         return
+    if not args.release:
+        parser.error('--release is required, such as --release v0.2.5')
     output = Path(args.output).resolve() if args.output else Path(tempfile.mkdtemp(prefix=episode + '-evidence-'))
     if output.exists() and any(output.iterdir()): raise RuntimeError('Output must be a fresh empty directory')
     output.mkdir(parents=True, exist_ok=True)
@@ -283,13 +354,17 @@ def run_episode(attack, verify, *, episode, budget, short_lease=False):
         with socket.socket() as listener:
             listener.bind(('127.0.0.1', 0)); port = listener.getsockname()[1]
         context['url'] = f'http://127.0.0.1:{port}'
-        for name in ('auth', 'approval', 'owner-reconciliation'):
+        for name in ('auth', 'agent', 'approval', 'owner-reconciliation'):
             path = private / (name + '.token'); path.write_text(secrets.token_urlsafe(48) + '\n'); path.chmod(0o600)
         context['auth_file'] = str(private / 'auth.token')
+        # Executor routes keep the owner bearer until the executor credential
+        # moves to its own signed model (v0.3.2).
+        context['executor_file'] = context['auth_file']
         lease = private / 'leases.yaml'
         lease.write_text('authorization_ttl_seconds: 300\ndefault_lease_profile: default\nlease_profiles:\n  default:\n    claim_ttl_seconds: 900\n  proof_short:\n    claim_ttl_seconds: 30\n')
         config = dict(schema_version=1, listen=f'127.0.0.1:{port}', database_path=str(private / 'hubu.sqlite'),
-                      auth_token_file=context['auth_file'], approval_token_file=str(private / 'approval.token'),
+                      auth_token_file=context['auth_file'], agent_token_file=str(private / 'agent.token'),
+                      approval_token_file=str(private / 'approval.token'),
                       reconciliation_token_file=str(private / 'owner-reconciliation.token'), lease_config=str(lease))
         save(private / 'server.json', config)
         rt = Runtime(context, owner=True)
@@ -297,7 +372,17 @@ def run_episode(attack, verify, *, episode, budget, short_lease=False):
         rt.note('Verified binary versions: ' + json.dumps(metadata['binary_versions']))
         command = [str(Path(metadata['binary_directory']) / 'hubu-server'), 'validate-config', '--config', str(private / 'server.json')]
         rt.note('$ ' + shlex.join(command))
-        validation = subprocess.run(command, env=rt.environment(), capture_output=True, text=True, check=True)
+        validation = subprocess.run(command, env=rt.environment(), capture_output=True, text=True)
+        context['credential_split'] = validation.returncode == 0
+        if not context['credential_split']:
+            # Releases before v0.3.0 have one shared bearer: the agent holds it.
+            if 'agent_token_file' not in validation.stderr:
+                raise RuntimeError('hubu-server rejected the launch config: ' + validation.stderr)
+            rt.note('This release has no agent credential class; the attack process holds the shared bearer.')
+            del config['agent_token_file']; save(private / 'server.json', config)
+            rt.note('$ ' + shlex.join(command))
+            validation = subprocess.run(command, env=rt.environment(), capture_output=True, text=True, check=True)
+        context['agent_file'] = config.get('agent_token_file', context['auth_file'])
         rt.note(validation.stdout)
         rt.restart()
         rt.cli('register', 'human', '--username', 'proof-kit-owner', '--display-name', 'Synthetic proof-kit owner')
@@ -305,14 +390,18 @@ def run_episode(attack, verify, *, episode, budget, short_lease=False):
         context['ids'] = {key: re.search(r'\b' + key + r':\s*(\S+)', registration).group(1)
                           for key in ('agent_id', 'account_id')}
         rt.ids = context['ids']
-        policy = private / 'policy.yaml'; policy.write_text(POLICY)
-        rt.cli('policy', 'validate', '--path', policy)
-        rt.cli('policy', 'apply', '--path', policy, '--name', 'Synthetic fixture allow policy', '--agent-id', rt.ids['agent_id'])
+        policy_path = private / 'policy.yaml'; policy_path.write_text(policy)
+        rt.cli('policy', 'validate', '--path', policy_path)
+        rt.cli('policy', 'apply', '--path', policy_path, '--name',
+               'Synthetic fixture allow policy' if policy == POLICY else 'Synthetic fixture policy', '--agent-id', rt.ids['agent_id'])
         rt.cli('budget', 'create', '--agent-id', rt.ids['agent_id'], '--amount', budget,
                '--currency', 'usd', '--ending-before', '2999-01-01T00:00:00Z')
         budgets = rt.request('GET', '/budgets', label='setup-budget')['body']['budgets']
         if len(budgets) != 1: raise RuntimeError('Fresh fixture must have exactly one budget')
         rt.ids['budget_id'] = budgets[0]['budget_id']
+        if setup:
+            # Owner-side fixture additions (for example a second agent) before the initial export.
+            setup(rt)
         guidance = rt.request('GET', '/.well-known/hubu-spend-executor.json', label='executor-guidance')
         save(output / 'executor-guidance.json', guidance['body'])
         if guidance['status'] != 200 or guidance['body']['lease']['lease_profiles'][context['lease_profile']]['claim_ttl_seconds'] != (30 if short_lease else 900):
@@ -322,14 +411,19 @@ def run_episode(attack, verify, *, episode, budget, short_lease=False):
         dirty = bool(subprocess.check_output(['git', '-C', str(kits_root), 'status', '--porcelain'], text=True).strip())
         save(output / 'run.json', dict(**metadata, episode=episode, budget=budget, currency='usd',
              lease_profile=context['lease_profile'], claim_ttl_seconds=30 if short_lease else 900,
+             credential_split=context['credential_split'],
              kits_commit=kits_commit, kits_worktree_dirty=dirty, platform=platform.platform(), machine=platform.machine(),
              python=sys.version, started_at=now(), ids=rt.ids, invocation=sys.argv))
-        child_context = private / 'attack-context.json'; save(child_context, context)
+        # The attack process holds only the agent credential (plus the executor
+        # credential for synthetic executor routes); owner capabilities stay here.
+        child_context = private / 'attack-context.json'
+        save(child_context, dict(context, auth_file=context['agent_file']))
+        child_environment = dict(rt.environment(), HUBU_AUTH_TOKEN_FILE=context['agent_file'])
         rt.snapshot('initial')
         command = [sys.executable, str(Path(sys.argv[0]).resolve()), '--attack-context', str(child_context)]
         error_path = private / 'attack-stderr.txt'
         with error_path.open('w') as errors:
-            child = subprocess.Popen(command, cwd=private, env=rt.environment(), stdin=subprocess.PIPE,
+            child = subprocess.Popen(command, cwd=private, env=child_environment, stdin=subprocess.PIPE,
                                      stdout=subprocess.PIPE, stderr=errors, text=True, bufsize=1, start_new_session=True)
             for line in child.stdout:
                 request = json.loads(line)

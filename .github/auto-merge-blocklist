@@ -1,0 +1,20 @@
+# Paths that a `merge:auto` pull request may not change.
+# Checked by .github/workflows/merge-guard.yml. Only the owner edits this file.
+#
+# One entry per line. A line ending in `/` blocks everything under that
+# directory; any other line blocks that exact file. Blank lines and lines
+# starting with `#` are ignored.
+
+crates/hubu-core/
+crates/hubu-ledger/
+crates/hubu-wallet/
+crates/gongbu-api/
+contracts/
+policies/
+packs/
+.github/
+AGENTS.md
+Cargo.toml
+Cargo.lock
+rust-toolchain.toml
+deny.toml

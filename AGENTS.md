@@ -24,9 +24,8 @@ through the full PR lifecycle unless the user says otherwise:
 3. Request review with `@codex review`.
 4. Address only P0/P1 findings and re-request review after remediation, for at
    most 2 remediation rounds.
-5. After the requested review completes and required checks pass, leave the PR
-   open and report that it is ready for human review and merge. Do not merge
-   unless the user explicitly asks.
+5. After the requested review completes and required checks pass, follow the
+   merge policy below.
 6. If P0/P1 findings remain after 2 rounds, or remediation requires an ambiguous
    product or design decision, stop and wait for human input.
 
@@ -35,6 +34,52 @@ correctness or safety issue that should reasonably be treated as P0/P1. Requests
 only to scope, investigate, review, plan, or discuss do not trigger this
 lifecycle.
 
+## Release specs
+
+Some releases have a tech spec in `docs/specs/` (index: `docs/specs/README.md`).
+A spec records the technical decisions for its release, so that agents working
+on different issues make the same choices.
+
+- Before working on an issue in a release that has a spec, read the spec
+  sections the issue links to, plus any section covering the routes, records or
+  surfaces you change.
+- Where the issue and the spec disagree, follow the spec.
+- Do not change behaviour the spec decides without changing the spec. If the
+  implementation has to depart from it, update the spec in the same PR and say
+  so under "Spec" in the PR description. If the departure needs a product or
+  security decision, stop and ask the owner instead.
+- A behaviour the spec does not cover is fine to add, but name it under "Spec"
+  in the PR description so a reviewer can decide whether the spec needs it.
+
+## Merge policy
+
+The merge decision is made at triage, when the Linear issue is labeled. The
+implementing agent follows the label and does not re-decide it.
+
+- The Linear issue's `Merge` label sets the mode:
+  - `Merge → auto`: the PR auto-merges after review and checks.
+  - `Merge → manual`, no `Merge` label, or no Linear issue: `manual`.
+- Put the Linear issue ID (for example `HUB-284`) in the PR title, and add the
+  matching GitHub label `merge:auto` or `merge:manual` to the PR.
+- An explicit instruction from the user in the current task overrides the label.
+
+Handoff:
+- `auto`: once the requested review is done and required checks pass, enable
+  GitHub auto-merge (squash) on the PR. Do not merge it directly or bypass
+  checks; branch protection decides when it lands. Report that auto-merge is
+  enabled.
+- `manual`: leave the PR open and report that it is ready for human review and
+  merge. Do not merge unless the user explicitly asks.
+
+### Auto-merge blocklist
+
+`.github/auto-merge-blocklist` lists the paths a `merge:auto` PR may not change.
+The `Merge guard` CI check enforces it, so agents do not judge this themselves:
+
+- Do not edit the blocklist or the `Merge guard` workflow.
+- Do not change the PR's merge label to get past a failing `Merge guard`.
+  Report the failure and leave the PR for the owner.
+
 ## Unified workspace discipline
 
 Hubu and Gongbu live in this repository's single Rust workspace. Run Cargo
@@ -42,7 +87,7 @@ commands from the repository root and use package selectors such as
 `-p gongbu-api` for component-focused work. Do not require or document a
 separate Gongbu checkout, lockfile, toolchain, CI workflow, or release version.
 
-The workspace MSRV is Rust 1.88. Keep root `Cargo.toml`, `Cargo.lock`, CI, and
+The workspace MSRV is Rust 1.89. Keep root `Cargo.toml`, `Cargo.lock`, CI, and
 runbooks consistent when changing dependencies or toolchain requirements.
 Install `protoc` before building Gongbu/Temporal code.
 
@@ -115,3 +160,25 @@ alone. Resolve a review thread only after its change is
 verified, committed, pushed, and described in a reply that includes the fix
 commit and verification. Leave ambiguous, conflicting, optional, or
 out-of-scope requests unresolved with concise technical reasoning.
+
+## Review guidelines
+
+These apply to Codex code review and to any agent reviewing a PR.
+
+- When a PR touches work covered by a release spec in `docs/specs/`, compare
+  the diff with the relevant spec sections.
+- Report as **P1** any departure from the spec that the PR description's
+  "Spec" section does not name. A departure that is named there is for the
+  owner to judge and is not a finding.
+- PRs that only change files under `docs/specs/` are reviewed for internal
+  consistency and agreement with the current code.
+
+## Owner identity
+
+Refer to the repository owner by the GitHub handle `hacker-no-ice`, never by
+their legal name. This applies to specs, documentation, runbooks, code
+comments, and owner fields in configuration, such as the owners of
+`deny.toml` exceptions.
+
+Leave the existing copyright line in `LICENSE-MIT` and recorded evidence,
+such as committed transcripts, as they are.

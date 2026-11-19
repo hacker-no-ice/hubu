@@ -1,0 +1,26 @@
+{
+  "v0.2.4": {
+    "notes": {
+      "C3": "Registered agent accounts are not bound to an authenticated runtime or thread.",
+      "C5": "The normal bearer can change budgets and policies.",
+      "C6": "Provider packs did not exist in v0.2.4; every provider was a built-in adapter."
+    },
+    "documented": {
+      "C3.1": "known-gap",
+      "C3.2": "known-gap",
+      "C5.1": "known-gap"
+    }
+  },
+  "v0.2.5": {
+    "notes": {
+      "C3": "Registered agent accounts are not bound to an authenticated runtime or thread. Strong binding is planned for a future release.",
+      "C5": "The normal bearer can change budgets and policies. hubu ui holds the bearer and approval credentials in a local process, not per-user accounts.",
+      "C6": "Only verified packs from the repository ship in v0.2.5, and pack validation rejects packs that weaken engine-owned settlement or credential hosts."
+    },
+    "documented": {
+      "C3.1": "known-gap",
+      "C3.2": "known-gap",
+      "C5.1": "known-gap"
+    }
+  }
+}

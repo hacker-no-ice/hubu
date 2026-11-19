@@ -13,9 +13,9 @@
 use super::{
     contract::{
         AdapterCapabilities, AdapterOutcome, AdapterSubmission, AsyncProviderOperation,
-        ContractError, NoopProviderTransportObserver, NormalizedRequest, PollingRecoveryContext,
-        ProviderAdapter, ProviderFailure, ProviderPhase, ProviderTransportInteraction,
-        ProviderTransportObserver,
+        ContractError, InputImageSource, NoInputImages, NoopProviderTransportObserver,
+        NormalizedRequest, PollingRecoveryContext, ProviderAdapter, ProviderFailure, ProviderPhase,
+        ProviderTransportInteraction, ProviderTransportObserver, INPUT_ARTIFACT_UNAVAILABLE,
     },
     http_kernel::InvocationDeadline,
     pack::{safe_job_id, select_path, Evidence, JobState, Pack, PollSpec, ProviderResponse},
@@ -161,10 +161,13 @@ impl<T: SyncTransport> AsyncPollEngine<T> {
             .map(|status| self.poll_spec().classify(status))
     }
 
+    /// Submit the job, with any input images loaded from `inputs` before
+    /// anything is transmitted.
     fn submit_inner(
         &self,
         request: &NormalizedRequest,
         input: &Value,
+        inputs: &dyn InputImageSource,
         secret: &ProviderSecret,
         vendor_idempotency_key: Option<&str>,
         observer: &dyn ProviderTransportObserver,
@@ -178,8 +181,13 @@ impl<T: SyncTransport> AsyncPollEngine<T> {
             .map_err(|_| pre_send("invalid_request"))?;
         let prepared = self
             .pack
-            .prepare(&self.model, input)
-            .map_err(|_| pre_send("invalid_request"))?;
+            .prepare_with_images(&self.model, input, inputs)
+            .map_err(|error| match error {
+                ContractError::Provider { code } if code == INPUT_ARTIFACT_UNAVAILABLE => {
+                    pre_send(INPUT_ARTIFACT_UNAVAILABLE)
+                }
+                _ => pre_send("invalid_request"),
+            })?;
         let (auth_name, auth_value) = self
             .auth(secret)
             .ok_or_else(|| pre_send("credential_invalid"))?;
@@ -707,6 +715,7 @@ impl<T: SyncTransport> ProviderAdapter for AsyncPollEngine<T> {
         match self.submit_inner(
             request,
             normalized_input,
+            &NoInputImages,
             secret,
             vendor_idempotency_key,
             observer,
@@ -728,6 +737,7 @@ impl<T: SyncTransport> ProviderAdapter for AsyncPollEngine<T> {
         self.submit_inner(
             request,
             normalized_input,
+            &NoInputImages,
             secret,
             vendor_idempotency_key,
             &NoopProviderTransportObserver,
@@ -745,6 +755,26 @@ impl<T: SyncTransport> ProviderAdapter for AsyncPollEngine<T> {
         self.submit_inner(
             request,
             normalized_input,
+            &NoInputImages,
+            secret,
+            vendor_idempotency_key,
+            observer,
+        )
+    }
+
+    fn submit_with_inputs(
+        &self,
+        request: &NormalizedRequest,
+        normalized_input: &Value,
+        inputs: &dyn InputImageSource,
+        secret: &ProviderSecret,
+        vendor_idempotency_key: Option<&str>,
+        observer: &dyn ProviderTransportObserver,
+    ) -> Result<AdapterSubmission, ProviderFailure> {
+        self.submit_inner(
+            request,
+            normalized_input,
+            inputs,
             secret,
             vendor_idempotency_key,
             observer,
@@ -988,7 +1018,12 @@ mod tests {
                             assert_eq!(operation.provider_operation_id, "job-1");
                         }
                         Ok(AdapterSubmission::Complete(outcome)) => {
-                            assert_eq!(scenario, "ready");
+                            assert!(matches!(scenario, "ready" | "mapping_error"));
+                            assert_eq!(
+                                outcome.billing_failure.as_deref(),
+                                (scenario == "mapping_error")
+                                    .then_some("pack_response_cost_invalid")
+                            );
                             assert_eq!(outcome.provider_request_id, None);
                             assert_eq!(outcome.provider_operation_id.as_deref(), Some("job-1"));
                             outcome.validate().unwrap();
@@ -1073,14 +1108,14 @@ mod tests {
                     &operation,
                 );
                 assert_no_credential_metadata(&result);
-                if mapping_error {
-                    assert_eq!(result.unwrap_err().evidence.request_id, None);
-                } else {
-                    let outcome = result.unwrap();
-                    assert_eq!(outcome.provider_request_id, None);
-                    assert_eq!(outcome.provider_operation_id.as_deref(), Some("job-1"));
-                    outcome.validate().unwrap();
-                }
+                let outcome = result.unwrap();
+                assert_eq!(
+                    outcome.billing_failure.as_deref(),
+                    mapping_error.then_some("pack_response_cost_invalid")
+                );
+                assert_eq!(outcome.provider_request_id, None);
+                assert_eq!(outcome.provider_operation_id.as_deref(), Some("job-1"));
+                outcome.validate().unwrap();
                 assert_eq!(*resumed.posts.lock().unwrap(), 0);
                 assert_eq!(resumed.poll_urls.lock().unwrap().len(), 1);
             }
@@ -1770,11 +1805,15 @@ mod tests {
     fn a_malformed_reported_cost_goes_to_reconciliation() {
         let mut body = ready();
         body["cost"] = json!("free");
-        let failure = engine(Fake::new(body, vec![]))
+        let outcome = engine(Fake::new(body, vec![]))
             .invoke(&request(), &input(), &secret_for_test("k"), None)
-            .unwrap_err();
-        assert_eq!(failure.code, "pack_response_cost_invalid");
-        assert_eq!(failure.spend_disposition, SpendDisposition::Reconcile);
-        assert_eq!(failure.evidence.operation_id.as_deref(), Some("job-1"));
+            .unwrap();
+        assert_eq!(
+            outcome.billing_failure.as_deref(),
+            Some("pack_response_cost_invalid")
+        );
+        assert!(outcome.actual_vendor_cost.is_none());
+        assert_eq!(outcome.provider_operation_id.as_deref(), Some("job-1"));
+        assert_eq!(outcome.artifacts.len(), 1);
     }
 }

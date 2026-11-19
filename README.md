@@ -145,7 +145,9 @@ it can register identities, apply policies, and create budgets in step 4; Codex
 still asks for your confirmation before each of those calls. To do that
 administration from the terminal instead, pass `--no-trust-client-approval` and
 follow the [CLI administration reference](docs/cli.md). Restart Codex
-afterwards.
+afterwards. Codex in your terminal can also run the `hubu` CLI, so this
+choice isn't a security boundary; the [threat model](docs/threat-model.md)
+explains what does bind an agent.
 
 ### 4. Set up governance from Codex
 
@@ -192,6 +194,8 @@ explains each one. Inspect what Hubu recorded with
   configuration changes, and rollback.
 - [Live provider operations](docs/operations/live-providers.md): move to real,
   billable providers in a separate profile.
+- [Admin web UI](docs/admin-ui.md): manage agents, policies, budgets and
+  approvals, and review spend and decisions, in a local browser UI.
 - [Policy engine](docs/policy-engine.md): write your own spending rules.
 - [Unified MCP surface](docs/unified-mcp.md): every agent-facing tool.
 - [Full documentation](https://hubustack.dev/): concepts, architecture,
@@ -199,7 +203,7 @@ explains each one. Inspect what Hubu recorded with
 
 ## Development
 
-Hubu and Gongbu share one Cargo workspace (MSRV Rust 1.88). Install `protoc`,
+Hubu and Gongbu share one Cargo workspace (MSRV Rust 1.89). Install `protoc`,
 then run from the repository root:
 
 ```sh

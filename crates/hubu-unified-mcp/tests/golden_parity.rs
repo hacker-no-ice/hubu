@@ -79,6 +79,14 @@ fn cases() -> Vec<GoldenCase> {
             meta: None,
         },
         GoldenCase {
+            name: "gongbu_list_reference_images",
+            owner: gongbu,
+            method: "GET",
+            path: "/v1/reference-images",
+            arguments: json!({}),
+            meta: None,
+        },
+        GoldenCase {
             name: "hubu_governance_summary",
             owner: hubu,
             method: "GET",
@@ -271,7 +279,7 @@ fn cases() -> Vec<GoldenCase> {
             arguments: json!({
                 "budget_id":"bgt_0123456789ab",
                 "expected_revision":1,
-                "amount_limit_cents":5_000,
+                "amount_limit": "50.00",
                 "reason":"golden total cap update"
             }),
             meta: None,
@@ -337,7 +345,7 @@ fn cases() -> Vec<GoldenCase> {
             owner: hubu,
             method: "POST",
             path: "/spend",
-            arguments: json!({"account_id":"account-107","amount_cents":0,"reason":"no-spend parity fixture"}),
+            arguments: json!({"account_id":"account-107","amount": "0.00","reason":"no-spend parity fixture"}),
             meta: Some(platform_meta("submit-107")),
         },
     ]
@@ -359,8 +367,8 @@ fn assert_complete_unique_matrix(cases: &[GoldenCase]) {
     );
     assert_eq!(
         cases.len(),
-        36,
-        "golden matrix must contain exactly 36 cases"
+        37,
+        "golden matrix must contain exactly 37 cases"
     );
     let fixture = routing_fixture();
     let expected_names = fixture["tools"]
@@ -373,8 +381,8 @@ fn assert_complete_unique_matrix(cases: &[GoldenCase]) {
     let expected = expected_names.iter().copied().collect::<BTreeSet<_>>();
     assert_eq!(
         expected_names.len(),
-        36,
-        "routing fixture must map 36 tools"
+        37,
+        "routing fixture must map 37 tools"
     );
     assert_eq!(
         expected.len(),
@@ -397,7 +405,7 @@ fn assert_complete_unique_matrix(cases: &[GoldenCase]) {
             .iter()
             .filter(|case| case.owner == Owner::Gongbu)
             .count(),
-        5
+        6
     );
 }
 
@@ -442,6 +450,9 @@ fn success_body(case: &GoldenCase) -> Value {
         "gongbu_get_execution" => execution_observation_response_for("operation-107", "exec-107"),
         "gongbu_list_artifacts" => artifact_list_response(),
         "gongbu_list_execution_targets" => json!({"schema_version":2,"targets":[]}),
+        "gongbu_list_reference_images" => {
+            json!({"schema_version":1,"configured":false,"images":[]})
+        }
         "gongbu_get_artifact" => unreachable!("artifact success uses image bytes"),
         "hubu_governance_summary"
         | "hubu_list_governance_records"
@@ -474,7 +485,7 @@ fn success_body(case: &GoldenCase) -> Value {
                 "operation_key":"fixture-private-approval-operation",
                 "account_id":"account-107",
                 "agent_id":"agent-107",
-                "amount_cents":0,
+                "amount": "0.00",
                 "currency":"USD",
                 "merchant":null,
                 "execution_scope":null,
@@ -502,7 +513,7 @@ fn success_body(case: &GoldenCase) -> Value {
                 "revision": 2,
                 "predecessor_version_id": "bgv_0123456789ab",
                 "predecessor_revision": 1,
-                "amount_limit_cents": 5_000,
+                "amount_limit": "50.00",
                 "effective_at": "2026-08-28T00:00:00Z",
                 "actor": "usr_0123456789ab",
                 "source": "hubu-api:update-budget-limit",
@@ -515,7 +526,7 @@ fn success_body(case: &GoldenCase) -> Value {
                 "agent_id": "agt_0123456789ab",
                 "current_version_id": "bgv_0123456789ac",
                 "current_revision": 2,
-                "amount_limit_cents": 5_000,
+                "amount_limit": "50.00",
                 "currency": "USD",
                 "starting_at": "2026-08-01T00:00:00Z",
                 "ending_before": "2026-09-01T00:00:00Z",
@@ -533,7 +544,7 @@ fn success_body(case: &GoldenCase) -> Value {
                 "agent_id": "agt_0123456789ab",
                 "current_version_id": "bgv_0123456789ac",
                 "current_revision": 2,
-                "amount_limit_cents": 5_000,
+                "amount_limit": "50.00",
                 "currency": "USD",
                 "starting_at": "2026-08-01T00:00:00Z",
                 "ending_before": "2026-09-01T00:00:00Z",
@@ -548,7 +559,7 @@ fn success_body(case: &GoldenCase) -> Value {
                     "revision": 1,
                     "predecessor_version_id": null,
                     "predecessor_revision": null,
-                    "amount_limit_cents": 4_000,
+                    "amount_limit": "40.00",
                     "effective_at": "2026-08-01T00:00:00Z",
                     "actor": "usr_0123456789ab",
                     "source": "hubu-api:create-budget",
@@ -561,7 +572,7 @@ fn success_body(case: &GoldenCase) -> Value {
                     "revision": 2,
                     "predecessor_version_id": "bgv_0123456789ab",
                     "predecessor_revision": 1,
-                    "amount_limit_cents": 5_000,
+                    "amount_limit": "50.00",
                     "effective_at": "2026-08-28T00:00:00Z",
                     "actor": "usr_0123456789ab",
                     "source": "hubu-api:update-budget-limit",
@@ -705,7 +716,7 @@ fn all_mapped_tools_have_unified_owned_golden_routing_coverage() {
             assert_eq!(
                 body,
                 json!({
-                    "amount_limit_cents": 5_000,
+                    "amount_limit": "50.00",
                     "expected_revision": 1,
                     "reason": "golden total cap update"
                 })

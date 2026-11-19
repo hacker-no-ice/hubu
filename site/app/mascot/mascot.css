@@ -1,0 +1,24 @@
+.mascot-history .engineering-article-inner { max-width: 900px; }
+.mascot-history-heading { width: min(100%, 690px); margin: 0 auto 56px; }
+.mascot-history-heading .eyebrow { margin-top: 28px; }
+.mascot-history-heading h1 { margin: 28px 0 20px; font-size: clamp(40px, 5.5vw, 64px); line-height: 1.06; font-weight: 550; letter-spacing: -.05em; }
+.mascot-timeline { margin: 0; padding: 0; list-style: none; }
+.mascot-stage { display: grid; grid-template-columns: 56px minmax(0, 1fr); gap: 0 20px; padding: 0 0 56px; }
+.mascot-stage-marker { position: relative; display: flex; justify-content: center; }
+.mascot-stage-marker span { position: relative; z-index: 1; display: grid; place-items: center; width: 40px; height: 40px; border: 1px solid var(--line); border-radius: 50%; background: var(--surface); color: var(--indigo); font: 12px/1 var(--font-geist-mono), monospace; }
+.mascot-stage:not(:last-child) .mascot-stage-marker::after { content: ""; position: absolute; top: 40px; bottom: -56px; left: 50%; width: 1px; background: linear-gradient(var(--line), var(--line-soft)); }
+.mascot-stage h2 { margin: 6px 0 10px; font-size: 26px; font-weight: 550; letter-spacing: -.03em; }
+.mascot-stage p { margin: 0 0 18px; color: var(--muted); font-size: 16px; line-height: 1.65; }
+.mascot-stage-images { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px; margin: 0 0 18px; }
+.mascot-stage-images figure { min-width: 0; margin: 0; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: var(--surface); }
+.mascot-stage-images img { display: block; width: 100%; height: auto; aspect-ratio: 4 / 3; object-fit: contain; background: radial-gradient(circle at 50% 40%, #29242a, #0d0e10 75%); }
+.mascot-stage-images .mascot-light img { background: #eee9d9; }
+.mascot-stage-images .mascot-evolved img { object-fit: cover; background: #000; }
+.mascot-stage-images figcaption { padding: 12px 14px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.mascot-stage-link { display: inline-block; color: var(--cyan); font-size: 15px; }
+.mascot-stage-link:hover { color: white; }
+@media (max-width: 640px) {
+  .mascot-stage { grid-template-columns: 40px minmax(0, 1fr); gap: 0 12px; }
+  .mascot-stage-marker span { width: 32px; height: 32px; }
+  .mascot-stage:not(:last-child) .mascot-stage-marker::after { top: 32px; }
+}

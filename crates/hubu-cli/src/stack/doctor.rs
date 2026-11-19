@@ -522,6 +522,19 @@ fn inspect_profile_with(
                 .is_some(),
         ),
         (
+            "hubu_agent",
+            "hubu",
+            "credentials.toml:files.hubu_agent",
+            credential_paths.hubu_agent.clone(),
+            hubu_managed
+                && configured_files
+                    .and_then(|files| files.hubu_agent.as_ref())
+                    .is_none(),
+            configured_files
+                .and_then(|files| files.hubu_agent.as_ref())
+                .is_some(),
+        ),
+        (
             "hubu_approval",
             "hubu",
             "credentials.toml:files.hubu_approval",
@@ -1158,6 +1171,7 @@ fn validate_handoff(
     handoff.schema_version == 2
         && Some(&handoff.mcp_server) == binaries.get("hubu-unified-mcp")
         && Some(&handoff.hubu_token_file) == credentials.get("hubu_auth")
+        && handoff.agent_token_file.as_ref() == credentials.get("hubu_agent")
         && Some(&handoff.approval_token_file) == credentials.get("hubu_approval")
         && Some(&handoff.reconciliation_token_file) == credentials.get("hubu_reconciliation")
         && handoff.gongbu_token_file.as_ref() == credentials.get("gongbu_caller")
@@ -2325,7 +2339,13 @@ mod tests {
         write_fake_gongbu_v3_binary(&binaries.join("gongbu-server"), false);
         let temporal = binaries.join("temporal");
         fs::write(&temporal, b"temporal fixture").unwrap();
-        for name in ["auth", "approval", "reconciliation", "gongbu-caller"] {
+        for name in [
+            "auth",
+            "agent",
+            "approval",
+            "reconciliation",
+            "gongbu-caller",
+        ] {
             fs::write(credential_root.join(name), format!("{name}-secret")).unwrap();
             fs::set_permissions(
                 credential_root.join(name),
@@ -2386,6 +2406,7 @@ task_queue = "gongbu-local"
                 r#"schema_version = 1
 [files]
 hubu_auth = {}
+hubu_agent = {}
 hubu_approval = {}
 hubu_reconciliation = {}
 gongbu_caller = {}
@@ -2397,6 +2418,7 @@ service = "hubu-test"
 account = "gongbu-caller"
 "#,
                 quote(credential_root.join("auth").display().to_string()),
+                quote(credential_root.join("agent").display().to_string()),
                 quote(credential_root.join("approval").display().to_string()),
                 quote(credential_root.join("reconciliation").display().to_string()),
                 quote(credential_root.join("gongbu-caller").display().to_string()),
@@ -2524,7 +2546,7 @@ account = "gongbu-caller"
                 .iter()
                 .filter(|check| check.code == "managed_credential_pending")
                 .count(),
-            4
+            5
         );
         assert!(!managed_root.exists());
         assert!(report.checks.iter().all(|check| {
@@ -2773,7 +2795,13 @@ schema_version = 1
         for name in ["hubu", "hubu-unified-mcp"] {
             write_fake_binary(&binaries.join(name), false);
         }
-        for name in ["auth", "approval", "reconciliation", "gongbu-caller"] {
+        for name in [
+            "auth",
+            "agent",
+            "approval",
+            "reconciliation",
+            "gongbu-caller",
+        ] {
             fs::write(credentials.join(name), format!("{name}-secret")).unwrap();
             fs::set_permissions(credentials.join(name), fs::Permissions::from_mode(0o600)).unwrap();
         }
@@ -2803,6 +2831,7 @@ endpoint = "http://127.0.0.1:42002"
                 r#"schema_version = 1
 [files]
 hubu_auth = {}
+hubu_agent = {}
 hubu_approval = {}
 hubu_reconciliation = {}
 gongbu_caller = {}
@@ -2811,6 +2840,7 @@ service = "provider-test"
 account = "provider-account"
 "#,
                 quote(credentials.join("auth").display().to_string()),
+                quote(credentials.join("agent").display().to_string()),
                 quote(credentials.join("approval").display().to_string()),
                 quote(credentials.join("reconciliation").display().to_string()),
                 quote(credentials.join("gongbu-caller").display().to_string()),
@@ -2970,6 +3000,7 @@ deliberately_unvalidated_external_shape = true
         fs::set_permissions(&managed_hubu, fs::Permissions::from_mode(0o700)).unwrap();
         for (name, value) in [
             ("auth", "auth-secret"),
+            ("agent", "agent-secret"),
             ("approval", "approval-secret"),
             ("reconciliation", "reconciliation-secret"),
         ] {

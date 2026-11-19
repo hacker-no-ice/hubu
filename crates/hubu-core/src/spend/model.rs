@@ -491,8 +491,21 @@ impl SpendExecutorVendorCost {
     }
 }
 
+/// Source of the settlement amount. Legacy receipts do not prove provider reporting.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SettlementCostBasis {
+    #[default]
+    LegacyUnspecified,
+    ProviderReported,
+    CatalogUsage,
+    FrozenQuote,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct SpendExecutorSettlementReceipt {
+    pub cost_basis: SettlementCostBasis,
+    /// Compatibility field: settlement amount, interpreted with cost_basis.
     pub actual_vendor_cost: SpendExecutorVendorCost,
     pub provider_request_id: String,
     pub price_model_snapshot: Value,
@@ -507,6 +520,8 @@ impl<'de> Deserialize<'de> for SpendExecutorSettlementReceipt {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct PreciseReceipt {
+            #[serde(default)]
+            cost_basis: SettlementCostBasis,
             actual_vendor_cost: SpendExecutorVendorCost,
             provider_request_id: String,
             price_model_snapshot: Value,
@@ -531,12 +546,14 @@ impl<'de> Deserialize<'de> for SpendExecutorSettlementReceipt {
 
         Ok(match CompatibleReceipt::deserialize(deserializer)? {
             CompatibleReceipt::Precise(receipt) => Self {
+                cost_basis: receipt.cost_basis,
                 actual_vendor_cost: receipt.actual_vendor_cost,
                 provider_request_id: receipt.provider_request_id,
                 price_model_snapshot: receipt.price_model_snapshot,
                 artifact_reference: receipt.artifact_reference,
             },
             CompatibleReceipt::LegacyV43(receipt) => Self {
+                cost_basis: SettlementCostBasis::LegacyUnspecified,
                 actual_vendor_cost: SpendExecutorVendorCost {
                     amount: receipt.actual_vendor_cost_cents,
                     scale: 2,

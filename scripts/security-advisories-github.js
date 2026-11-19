@@ -100,7 +100,7 @@ function issueBody(report, reason, workflowUrl, runbookUrl, pull) {
     '',
     `Inspect the [scheduled security workflow](${workflowUrl}) for scan and validation logs.`,
     'This issue remains open until the default branch passes the advisory scan.',
-    'Remediation must preserve Rust 1.88 compatibility and pass workspace tests, Clippy, security policy, and production builds. Advisory ignores and policy exceptions require human review.',
+    'Remediation must preserve Rust 1.89 compatibility and pass workspace tests, Clippy, security policy, and production builds. Advisory ignores and policy exceptions require human review.',
     ...(!pull ? [
       `The assigned maintainer should choose whether to wait for an upstream fix, review a major upgrade or replacement, or request a timeboxed exception with an owner and removal condition. Follow the [exception review requirements](${runbookUrl}).`,
     ] : []),
@@ -119,7 +119,7 @@ function pullBody(report, workflowUrl) {
     'Dependency updates:',
     renderUpdates(report),
     '',
-    `Validation: Rust 1.88 workspace check, workspace tests, Clippy, advisory/license/source policy checks, and production builds. See the [security workflow](${workflowUrl}).`,
+    `Validation: Rust 1.89 workspace check, workspace tests, Clippy, advisory/license/source policy checks, and production builds. See the [security workflow](${workflowUrl}).`,
     'Human review and merge are required. No advisory ignores or policy exceptions were added.',
   ].join('\n');
 }

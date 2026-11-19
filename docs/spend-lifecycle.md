@@ -141,7 +141,7 @@ the logical budget ID and the version that authorized it.
 Every current-budget HTTP projection includes the stable public `budget_id`,
 the public `current_version_id`, and `current_revision`. Limit changes append a
 version through `POST /budgets/{budget_id}/versions` with
-`amount_limit_cents`, `expected_revision`, and optional `reason`; the amount is
+`amount_limit`, `expected_revision`, and optional `reason`; the amount is
 the new cumulative total cap, not an added allowance. The immutable agent,
 currency, period, consumed amount, and frozen amount do not reset. The append
 atomically advances the version pointer and recalculates remaining as the new

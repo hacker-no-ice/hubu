@@ -92,7 +92,7 @@ jobs:
         id: exercise
         continue-on-error: true
         run: |
-          rustup toolchain install 1.88.0 --profile minimal
+          rustup toolchain install 1.89.0 --profile minimal
           bash scripts/test-security-advisory-flow.sh
 
       - name: Collect structured findings and attempt targeted updates
@@ -133,8 +133,8 @@ jobs:
         continue-on-error: true
         run: |
           sudo apt-get update && sudo apt-get install --yes protobuf-compiler
-          rustup toolchain install 1.88.0 --profile minimal
-          cargo +1.88.0 check --workspace --all-targets --all-features --locked
+          rustup toolchain install 1.89.0 --profile minimal
+          cargo +1.89.0 check --workspace --all-targets --all-features --locked
           cargo fmt --all -- --check
           cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
           cargo test --workspace --all-targets --locked
