@@ -34,6 +34,9 @@ const DEFAULT_BASE_URL: &str = "http://127.0.0.1:8787";
 const AUTH_TOKEN_ENV: &str = "HUBU_AUTH_TOKEN";
 const AUTH_TOKEN_FILE_ENV: &str = "HUBU_AUTH_TOKEN_FILE";
 const DEFAULT_AUTH_TOKEN_FILE: &str = "hubu.auth-token";
+const AGENT_TOKEN_ENV: &str = "HUBU_AGENT_TOKEN";
+const AGENT_TOKEN_FILE_ENV: &str = "HUBU_AGENT_TOKEN_FILE";
+const DEFAULT_AGENT_TOKEN_FILE: &str = "hubu.agent-token";
 const APPROVAL_TOKEN_ENV: &str = "HUBU_APPROVAL_TOKEN";
 const APPROVAL_TOKEN_FILE_ENV: &str = "HUBU_APPROVAL_TOKEN_FILE";
 const DEFAULT_APPROVAL_TOKEN_FILE: &str = "hubu.approval-token";
@@ -331,6 +334,7 @@ fn init_codex(base_url: &str, explicit_base_url: bool, mut args: Vec<String>) ->
     let manual_gongbu_endpoint = take_value(&mut args, "--gongbu-endpoint");
     let manual_gongbu_token_file = take_value(&mut args, "--gongbu-token-file").map(PathBuf::from);
     let manual_token_file = take_value(&mut args, "--token-file").map(PathBuf::from);
+    let manual_agent_token_file = take_value(&mut args, "--agent-token-file").map(PathBuf::from);
     let manual_approval_token_file =
         take_value(&mut args, "--approval-token-file").map(PathBuf::from);
     let manual_reconciliation_token_file =
@@ -342,6 +346,7 @@ fn init_codex(base_url: &str, explicit_base_url: bool, mut args: Vec<String>) ->
             || manual_gongbu_endpoint.is_some()
             || manual_gongbu_token_file.is_some()
             || manual_token_file.is_some()
+            || manual_agent_token_file.is_some()
             || manual_approval_token_file.is_some()
             || manual_reconciliation_token_file.is_some()
             || manual_operation_state_path.is_some()
@@ -376,6 +381,13 @@ fn init_codex(base_url: &str, explicit_base_url: bool, mut args: Vec<String>) ->
         .map(|value| value.hubu_token_file.clone())
         .or(manual_token_file)
         .unwrap_or_else(default_codex_token_file_path);
+    // The unified MCP holds only the agent credential; the owner credential
+    // stays with the server and the owner's CLI.
+    let agent_token_file = match handoff.as_ref() {
+        Some(value) => value.agent_bearer_file()?.to_path_buf(),
+        None => manual_agent_token_file
+            .unwrap_or_else(|| default_codex_agent_token_file_path(&token_file)),
+    };
     let approval_token_file = handoff
         .as_ref()
         .map(|value| value.approval_token_file.clone())
@@ -411,6 +423,21 @@ fn init_codex(base_url: &str, explicit_base_url: bool, mut args: Vec<String>) ->
         ensure_auth_token_file(&token_file)
             .with_context(|| format!("prepare Hubu auth token file `{}`", token_file.display()))?
     };
+    let agent_token_file = if dry_run {
+        absolute_path(&agent_token_file)?
+    } else if handoff.is_some() {
+        absolute_existing_file_path(&agent_token_file)?
+    } else {
+        ensure_agent_token_file(&agent_token_file).with_context(|| {
+            format!(
+                "prepare Hubu agent token file `{}`",
+                agent_token_file.display()
+            )
+        })?
+    };
+    if !dry_run && agent_token_file == token_file {
+        bail!("the agent token file must differ from the owner token file");
+    }
     let reconciliation_token_file = if dry_run {
         absolute_path(&reconciliation_token_file)?
     } else if handoff.is_some() {
@@ -476,7 +503,7 @@ fn init_codex(base_url: &str, explicit_base_url: bool, mut args: Vec<String>) ->
     let block = codex_mcp::unified_block(codex_mcp::UnifiedConfig {
         mcp_server: &mcp_server,
         hubu_endpoint,
-        hubu_token_file: &token_file,
+        hubu_token_file: &agent_token_file,
         approval_token_file: &approval_token_file,
         reconciliation_token_file: &reconciliation_token_file,
         operation_state_path: &operation_state_path,
@@ -498,7 +525,7 @@ fn init_codex(base_url: &str, explicit_base_url: bool, mut args: Vec<String>) ->
     println!("  config: {}", config_path.display());
     println!("  mcp_server: {}", mcp_server.display());
     println!("  hubu_url: {hubu_endpoint}");
-    println!("  token_file: {}", token_file.display());
+    println!("  agent_token_file: {}", agent_token_file.display());
     println!("  approval_token_file: {}", approval_token_file.display());
     println!(
         "  reconciliation_token_file: {}",
@@ -516,8 +543,9 @@ fn init_codex(base_url: &str, explicit_base_url: bool, mut args: Vec<String>) ->
     println!("  next: restart Codex, then use /mcp or ask Codex to list Hubu tools");
     if stack_profile.is_none() {
         println!(
-            "  server: start hubu-server with {AUTH_TOKEN_FILE_ENV}={} {APPROVAL_TOKEN_FILE_ENV}={} {RECONCILIATION_TOKEN_FILE_ENV}={}",
+            "  server: start hubu-server with {AUTH_TOKEN_FILE_ENV}={} {AGENT_TOKEN_FILE_ENV}={} {APPROVAL_TOKEN_FILE_ENV}={} {RECONCILIATION_TOKEN_FILE_ENV}={}",
             token_file.display(),
+            agent_token_file.display(),
             approval_token_file.display(),
             reconciliation_token_file.display()
         );
@@ -629,6 +657,17 @@ fn default_codex_token_file_path() -> PathBuf {
     hubu_home().join(DEFAULT_AUTH_TOKEN_FILE)
 }
 
+fn default_codex_agent_token_file_path(auth_token_file: &Path) -> PathBuf {
+    if let Ok(path) = env::var(AGENT_TOKEN_FILE_ENV) {
+        return PathBuf::from(path);
+    }
+    auth_token_file
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .join(DEFAULT_AGENT_TOKEN_FILE)
+}
+
 fn default_codex_reconciliation_token_file_path(auth_token_file: &Path) -> PathBuf {
     if let Ok(path) = env::var(RECONCILIATION_TOKEN_FILE_ENV) {
         return PathBuf::from(path);
@@ -734,6 +773,10 @@ fn ensure_auth_token_file(path: &Path) -> Result<PathBuf> {
     ensure_token_file(path, AUTH_TOKEN_ENV, generate_local_auth_token)
 }
 
+fn ensure_agent_token_file(path: &Path) -> Result<PathBuf> {
+    ensure_token_file(path, AGENT_TOKEN_ENV, generate_local_agent_token)
+}
+
 fn ensure_reconciliation_token_file(path: &Path) -> Result<PathBuf> {
     ensure_token_file(
         path,
@@ -784,6 +827,10 @@ fn generate_local_auth_token() -> String {
 
 fn generate_local_reconciliation_token() -> String {
     format!("hubu_reconcile_{}", Uuid::new_v4().simple())
+}
+
+fn generate_local_agent_token() -> String {
+    format!("hubu_agent_{}", Uuid::new_v4().simple())
 }
 
 fn generate_local_approval_token() -> String {
@@ -3944,7 +3991,7 @@ fn print_init_help() {
 
 Usage:
   hubu init [--policy FILE] [--force]
-  hubu init codex [--stack-profile ABSOLUTE_DIR] [--config FILE] [--mcp-server FILE] [--token-file FILE] [--approval-token-file FILE] [--reconciliation-token-file FILE] [--mcp-state-file FILE] [--operation-key-db FILE] [--gongbu-endpoint URL --gongbu-token-file FILE] [--force] [--dry-run]
+  hubu init codex [--stack-profile ABSOLUTE_DIR] [--config FILE] [--mcp-server FILE] [--token-file FILE] [--agent-token-file FILE] [--approval-token-file FILE] [--reconciliation-token-file FILE] [--mcp-state-file FILE] [--operation-key-db FILE] [--gongbu-endpoint URL --gongbu-token-file FILE] [--force] [--dry-run]
 
 Options:
   --policy FILE   Policy template path (default: policy.yaml)
@@ -3965,13 +4012,14 @@ fn print_init_codex_help() {
         "Configure Codex to discover Hubu MCP tools
 
 Usage:
-  hubu init codex [--stack-profile ABSOLUTE_DIR] [--config FILE] [--mcp-server FILE] [--token-file FILE] [--approval-token-file FILE] [--reconciliation-token-file FILE] [--mcp-state-file FILE] [--operation-key-db FILE] [--gongbu-endpoint URL --gongbu-token-file FILE] [--force] [--dry-run] [--trust-client-approval | --no-trust-client-approval]
+  hubu init codex [--stack-profile ABSOLUTE_DIR] [--config FILE] [--mcp-server FILE] [--token-file FILE] [--agent-token-file FILE] [--approval-token-file FILE] [--reconciliation-token-file FILE] [--mcp-state-file FILE] [--operation-key-db FILE] [--gongbu-endpoint URL --gongbu-token-file FILE] [--force] [--dry-run] [--trust-client-approval | --no-trust-client-approval]
 
 Options:
   --config FILE             Codex config path (default: $CODEX_HOME/config.toml or ~/.codex/config.toml)
   --stack-profile DIR       Read MCP binary, backend endpoints, and token files from an active rendered stack profile
   --mcp-server FILE         Selected MCP executable (default: hubu-unified-mcp sibling, then PATH)
-  --token-file FILE         Hubu auth token file (default: $HUBU_AUTH_TOKEN_FILE, ./hubu.auth-token, or ~/.hubu/hubu.auth-token)
+  --token-file FILE         Hubu owner credential file for the server; never given to the MCP (default: $HUBU_AUTH_TOKEN_FILE, ./hubu.auth-token, or ~/.hubu/hubu.auth-token)
+  --agent-token-file FILE   Hubu agent credential file the MCP holds (default: $HUBU_AGENT_TOKEN_FILE or hubu.agent-token beside --token-file)
   --approval-token-file FILE
                              Separate human approval capability file (default: beside --token-file)
   --reconciliation-token-file FILE
@@ -3994,7 +4042,8 @@ Notes:
   Disabling them is not a security boundary for an agent that can run the hubu CLI with this profile's credentials; see docs/threat-model.md.
   On first interactive setup the command asks once whether to enable them (default: no). Re-runs keep the choice stored in the managed Codex config block.
   --trust-client-approval and --no-trust-client-approval override the stored choice. Without a terminal, or with --dry-run, nothing is asked and the stored choice (or off) is used.
-  Start hubu-server with the same HUBU_AUTH_TOKEN_FILE, HUBU_APPROVAL_TOKEN_FILE, and HUBU_RECONCILIATION_TOKEN_FILE shown by this command.
+  The MCP holds only the agent credential, which reaches spend, status, and read routes; owner routes answer owner_authority_required.
+  Start hubu-server with the same HUBU_AUTH_TOKEN_FILE, HUBU_AGENT_TOKEN_FILE, HUBU_APPROVAL_TOKEN_FILE, and HUBU_RECONCILIATION_TOKEN_FILE shown by this command.
 
 Examples:
   hubu init codex --token-file ~/.hubu/hubu.auth-token

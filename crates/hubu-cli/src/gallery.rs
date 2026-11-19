@@ -84,7 +84,7 @@ pub(crate) fn native_command(
         .env("HUBU_UNIFIED_HUBU_ENDPOINT", &handoff.hubu_endpoint)
         .env(
             "HUBU_UNIFIED_HUBU_BEARER_TOKEN_FILE",
-            &handoff.hubu_token_file,
+            handoff.agent_bearer_file()?,
         )
         .env("HUBU_UNIFIED_GONGBU_ENDPOINT", gongbu_endpoint)
         .env("HUBU_UNIFIED_GONGBU_BEARER_TOKEN_FILE", gongbu_token)
@@ -106,6 +106,7 @@ mod tests {
             mcp_server: "/profile/bin/hubu-unified-mcp".into(),
             hubu_endpoint: "http://127.0.0.1:8787".into(),
             hubu_token_file: "/profile/hubu-token".into(),
+            agent_token_file: Some("/profile/agent-token".into()),
             approval_token_file: "/profile/approval".into(),
             reconciliation_token_file: "/profile/reconciliation".into(),
             operation_state_path: "/profile/operations.sqlite3".into(),
@@ -133,7 +134,7 @@ mod tests {
         );
         assert_eq!(
             environment[std::ffi::OsStr::new("HUBU_UNIFIED_HUBU_BEARER_TOKEN_FILE")],
-            Some(handoff.hubu_token_file.as_os_str())
+            Some(std::ffi::OsStr::new("/profile/agent-token"))
         );
         assert_eq!(
             environment[std::ffi::OsStr::new("HUBU_UNIFIED_GONGBU_BEARER_TOKEN_FILE")],
