@@ -784,6 +784,8 @@ const unpublishedDocs = [
   ["docs/operations/gongbu-sandbox.md", "operations/gongbu-sandbox"],
   ["docs/operations/live-provider-testing.md", "operations/live-provider-testing"],
   ["docs/operations/publishing-releases.md", "operations/publishing-releases"],
+  ["docs/specs/README.md", "specs/README"],
+  ["docs/specs/v0.3.0-owner-agent-separation.md", "specs/v0.3.0-owner-agent-separation"],
 ];
 
 async function generatedDocuments() {
