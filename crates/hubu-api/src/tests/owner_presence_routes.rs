@@ -578,3 +578,32 @@ fn agent_raised_approval_reports_the_stored_status_when_resolution_fails() {
     assert_eq!(approval_status(&state, id), "pending");
     std::fs::remove_file(path).ok();
 }
+
+/// Codex P2: presence checks accept the same currency spellings as the
+/// handlers, so `"USD"` still creates a budget.
+#[test]
+fn budget_reasons_accept_any_currency_case() {
+    let (path, state, agent) = state_with_agent("presence-currency");
+    for currency in ["USD", " usdc "] {
+        let response = route(
+            authenticated_json_request(
+                "/budgets",
+                json!({ "agent_id": agent.agent_id, "amount": "3.00", "currency": currency }),
+            ),
+            &state,
+        );
+        assert_eq!(response.status, 200, "{currency}: {}", response.body);
+    }
+    let reasons = records(&state)
+        .iter()
+        .map(|record| record["reason"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        reasons,
+        vec![
+            "create a 3.00 USDC budget for design-agent",
+            "create a 3.00 USD budget for design-agent"
+        ]
+    );
+    std::fs::remove_file(path).ok();
+}

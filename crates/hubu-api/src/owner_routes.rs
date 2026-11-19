@@ -526,10 +526,8 @@ fn body_str<'a>(map: &'a serde_json::Map<String, Value>, field: &str) -> Option<
 
 fn format_money(amount: &str, currency: Option<&str>) -> Result<String> {
     let parsed = amount.trim().parse::<Amount>()?;
-    let currency = match currency.map(str::trim).filter(|c| !c.is_empty()) {
-        Some(currency) => currency.parse::<Currency>()?,
-        None => Currency::Usd,
-    };
+    // Accept exactly what the handlers accept (trimmed, any case).
+    let currency = normalize_spend_currency(currency)?;
     let money = MoneyHttpResponse::new(parsed, currency);
     Ok(format!(
         "{} {}",
