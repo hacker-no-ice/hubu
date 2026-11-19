@@ -162,7 +162,9 @@ and admin tools (registering agents, applying policies, changing budgets).
 Answer yes to do the setup in "Make your first governed request" from Codex
 instead of the CLI; Codex still asks you to approve each call. The choice is
 remembered on re-runs. Override it with `--trust-client-approval` or
-`--no-trust-client-approval`.
+`--no-trust-client-approval`. An agent that can run the `hubu` CLI can make
+the same changes either way; read the [threat model](threat-model.md) before
+deciding how much to delegate.
 
 Codex starts `hubu-unified-mcp` itself; the stack does not own that process.
 Other MCP clients can connect to `hubu-unified-mcp` with manual configuration;

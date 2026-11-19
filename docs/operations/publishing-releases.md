@@ -80,6 +80,8 @@ proof kits against the exact tag on macOS and opens a PR with the measured
 system card. Review and merge that PR by following the [release-card
 checklist](../../break-hubu/release-checklist.md). It never makes provider
 calls, edits the release or merges anything, and it does not add a PR CI gate.
+Archive the captured evidence privately. Publish the test methodology and
+reproduction instructions with the system card.
 
 ## Rollback and retention
 

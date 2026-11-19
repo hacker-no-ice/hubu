@@ -266,6 +266,10 @@ These controls define a local trust boundary. A same-user process that can read
 the capability files or control an authorized MCP client can act with that
 client's authority. Do not expose this configuration to an untrusted network or
 connect it to a real payment rail without a stronger authentication design.
+An agent that can run the `hubu` CLI with the profile's credentials can make
+the same administrative changes without these MCP tools, so for such an agent
+the admin gate is not a security boundary; see the
+[threat model](threat-model.md).
 
 ## MCP behavior and responses
 
