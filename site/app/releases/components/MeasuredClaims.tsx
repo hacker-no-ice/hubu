@@ -87,7 +87,7 @@ export function MeasuredClaims({ release, report, previous }: { release: string;
       </li>)}
     </ul>
     {report
-      ? <div className="release-analysis-link"><div><h3>Full system analysis</h3><p>Every challenge behind these claims, with its setup, scripts, result, evidence and limits.</p></div><a className="button primary" href={`/releases/${release}/report`}>Read the analysis <span aria-hidden="true">↗</span></a></div>
+      ? <div className="release-analysis-link"><div><h3>Full system analysis</h3><p>Every challenge behind these claims, with its setup, scripts, result and limits.</p></div><a className="button primary" href={`/releases/${release}/report`}>Read the analysis <span aria-hidden="true">↗</span></a></div>
       : previous && <div className="release-analysis-link"><div><h3>Previous measured analysis</h3><p>The {previous} analysis applies only to {previous}’s released source. It shows the challenges the {release} run will repeat.</p></div><a className="button secondary" href={`/releases/${previous}/report`}>Read the {previous} analysis <span aria-hidden="true">↗</span></a></div>}
   </>;
 }

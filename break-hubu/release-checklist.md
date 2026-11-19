@@ -27,12 +27,11 @@ PRs.
    skips it if a card already exists or a card PR is open, and otherwise:
    - builds the exact published tag on macOS with its pinned toolchain,
      verifying the tag commit against the published release notes;
-   - runs every kit from a clean checkout of `main` and keeps the raw public
-     evidence as a workflow artifact;
+   - runs every kit from a clean checkout of `main` and uploads the evidence
+     as an encrypted workflow artifact;
    - renders `site/app/releases/vX.Y.Z/report.ts`, the
-     `/releases/vX.Y.Z/report` analysis page, the evidence bundle and archive
-     in `site/evidence/vX.Y.Z/` (the site build unpacks the bundle to the
-     public evidence URLs), and `cards/vX.Y.Z.md` with claim tiers;
+     `/releases/vX.Y.Z/report` analysis page and `cards/vX.Y.Z.md` with
+     claim tiers and reproduction instructions;
    - lints and tests the site, then opens a `system-card/vX.Y.Z` PR.
 
    When the catalog gains kits after a release was measured, the workflow
@@ -40,7 +39,7 @@ PRs.
    their results without changing any published one.
 
    To measure a release by hand, dispatch the workflow with its tag, or run
-   the kits locally:
+   the kits locally, then move the output directories to private storage:
 
    ```sh
    ./break-hubu/run-all.sh --release vX.Y.Z --output /tmp/vX.Y.Z-card-evidence
@@ -50,8 +49,9 @@ PRs.
    python3 break-hubu/render-report.py --supplement /tmp/vX.Y.Z-more
    ```
 
-4. Review the PR. Inspect every result, including incomplete or contradicted
-   assertions: raw public ledger and authorization pages, budget coverage,
+4. Review the PR. Save its run’s encrypted artifact to private storage before
+   the 30-day Actions expiry. Inspect every result, including incomplete or
+   contradicted assertions. Review ledger and authorization pages, budget coverage,
    request outcomes, operator interventions, exact arithmetic, tool and host
    metadata. Check that the caveats and known limits (identity, bearer
    authority, serial request handling, shortened leases, mock execution,
@@ -65,12 +65,35 @@ PRs.
    card run already tested the site; push a commit or close and reopen the PR
    to run the required checks.
 
-5. After the PR merges and the site deploys, verify the live report, attach
-   `site/evidence/vX.Y.Z/evidence.zip` to the GitHub release, and add the card and
-   reproduction links to the release notes. Preserve existing release assets
-   and notes. Check downloads from an unauthenticated browser. Posting or
-   messaging needs separate authorization.
+5. After the PR merges and the site deploys, verify the live methodology and
+   reproduction commands. Link the analysis and proof kits in the release notes.
+   Keep captured logs, request traces, state exports, and archives out of the
+   website, public repository, and GitHub release attachments.
+
+## Private evidence archive
+
+The workflow uses [the public archive recipient certificate](archive-recipient.pem)
+to encrypt the compressed run directory. It saves its console output inside
+that encrypted archive. Keep the corresponding private key in owner-only
+storage and keep a secure backup. Preserve old keys for archives that still
+need them when rotating the recipient certificate.
+
+Download the encrypted artifact from its workflow run. Extract the GitHub
+artifact ZIP to obtain `proof-kit-evidence.cms`. Use OpenSSL 3 and the matching
+private key to decrypt it in a private directory.
+
+```sh
+umask 077
+openssl cms -decrypt -binary -inform DER -in proof-kit-evidence.cms \
+  -recip /path/to/archive-recipient.pem -inkey /path/to/archive-key.pem \
+  -out evidence.tar.gz
+tar -xzf evidence.tar.gz
+```
+
+Label each saved archive with the release and run ID. Review and sanitize any
+copy before sharing it on request, then rerun the verifier on the sanitized
+copy to check that it remains usable.
 
 The workflow needs the repository setting that allows GitHub Actions to create
-pull requests. Earlier cards are never regenerated: the renderer refuses to
-replace an existing measured report, card or evidence directory.
+pull requests. The renderer refuses to replace an existing measured report or
+card.

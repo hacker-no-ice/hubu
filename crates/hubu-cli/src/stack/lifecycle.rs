@@ -928,6 +928,7 @@ fn prepare_managed_credential_storage(profile: &Path, manifest: &ActiveManifest)
     {
         for path in [
             &paths.hubu_auth,
+            &paths.hubu_agent,
             &paths.hubu_approval,
             &paths.hubu_reconciliation,
         ] {
@@ -2265,6 +2266,7 @@ ownership = "managed"
             mcp_server: PathBuf::from("/tmp/hubu-unified-mcp"),
             hubu_endpoint: active_endpoint.clone(),
             hubu_token_file: PathBuf::from("/tmp/hubu-auth"),
+            agent_token_file: Some(PathBuf::from("/tmp/hubu-agent")),
             approval_token_file: PathBuf::from("/tmp/hubu-approval"),
             reconciliation_token_file: PathBuf::from("/tmp/hubu-reconciliation"),
             operation_state_path: PathBuf::from("/tmp/hubu-unified-operations.sqlite3"),

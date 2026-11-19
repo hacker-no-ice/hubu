@@ -89,6 +89,9 @@ jobs:
       - name: Test advisory publication and duplicate suppression
         run: node --test scripts/test-security-advisories-github.js
 
+      - name: Test reconciliation UI exact amounts and states
+        run: node --test scripts/test-ui-reconciliation.mjs
+
       - name: Test lockfile publication and branch ownership
         run: bash scripts/test-security-advisories-push.sh
 

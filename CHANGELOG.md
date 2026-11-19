@@ -25,6 +25,19 @@ Future release template
 
 ## Unreleased
 
+### Breaking or operational changes
+
+- Hubu issues a separate agent credential (`HUBU_AGENT_TOKEN_FILE`, managed
+  profile `state/credentials/hubu/agent`) beside the owner credential.
+  `hubu stack start` provisions it and `hubu init codex` hands only the agent
+  credential to the unified MCP. The agent credential reaches an explicit
+  allowlist of spend, status, and read routes; every other protected route
+  answers HTTP 403 `owner_authority_required`. External Hubu profiles must add
+  `files.hubu_agent` to `credentials.toml`; re-run `hubu stack start` and
+  `hubu init codex --stack-profile` to pick up the new credential. Until the
+  unified MCP surface is reduced, its admin tools return
+  `owner_authority_required`.
+
 ## v0.2.5 — 2026-11-06
 
 ### Highlights

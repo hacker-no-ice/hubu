@@ -34,6 +34,23 @@ correctness or safety issue that should reasonably be treated as P0/P1. Requests
 only to scope, investigate, review, plan, or discuss do not trigger this
 lifecycle.
 
+## Release specs
+
+Some releases have a tech spec in `docs/specs/` (index: `docs/specs/README.md`).
+A spec records the technical decisions for its release, so that agents working
+on different issues make the same choices.
+
+- Before working on an issue in a release that has a spec, read the spec
+  sections the issue links to, plus any section covering the routes, records or
+  surfaces you change.
+- Where the issue and the spec disagree, follow the spec.
+- Do not change behaviour the spec decides without changing the spec. If the
+  implementation has to depart from it, update the spec in the same PR and say
+  so under "Spec" in the PR description. If the departure needs a product or
+  security decision, stop and ask the owner instead.
+- A behaviour the spec does not cover is fine to add, but name it under "Spec"
+  in the PR description so a reviewer can decide whether the spec needs it.
+
 ## Merge policy
 
 The merge decision is made at triage, when the Linear issue is labeled. The
@@ -143,3 +160,25 @@ alone. Resolve a review thread only after its change is
 verified, committed, pushed, and described in a reply that includes the fix
 commit and verification. Leave ambiguous, conflicting, optional, or
 out-of-scope requests unresolved with concise technical reasoning.
+
+## Review guidelines
+
+These apply to Codex code review and to any agent reviewing a PR.
+
+- When a PR touches work covered by a release spec in `docs/specs/`, compare
+  the diff with the relevant spec sections.
+- Report as **P1** any departure from the spec that the PR description's
+  "Spec" section does not name. A departure that is named there is for the
+  owner to judge and is not a finding.
+- PRs that only change files under `docs/specs/` are reviewed for internal
+  consistency and agreement with the current code.
+
+## Owner identity
+
+Refer to the repository owner by the GitHub handle `hacker-no-ice`, never by
+their legal name. This applies to specs, documentation, runbooks, code
+comments, and owner fields in configuration, such as the owners of
+`deny.toml` exceptions.
+
+Leave the existing copyright line in `LICENSE-MIT` and recorded evidence,
+such as committed transcripts, as they are.

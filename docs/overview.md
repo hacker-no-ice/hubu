@@ -119,6 +119,7 @@ protocol rather than a single agent harness.
 - [See how Gongbu executes authorized work →](gongbu-execution.md)
 - [Use Hubu with your own executor →](external-executor.md)
 - [Integrate through unified MCP →](unified-mcp.md)
+- [Understand the agent threat model →](threat-model.md)
 
 See the [roadmap](roadmap.md) for what comes next.
 

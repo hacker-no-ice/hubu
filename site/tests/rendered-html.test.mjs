@@ -222,6 +222,21 @@ test("the detailed system analysis keeps reproducibility and authority limits al
   assert.doesNotMatch(html, /All claims pass|100% secure|autoplay|setInterval/);
 });
 
+test("public analyses have reproduction instructions and legacy evidence URLs return 404", async () => {
+  for (const release of ["v0.2.4", "v0.2.5"]) {
+    const html = await (await render(`/releases/${release}/report`)).text();
+    assert.match(html, /Reproduce these experiments/);
+    assert.match(html, new RegExp(`run-all\\.sh --release ${release}<`));
+    assert.doesNotMatch(html, /\/break-hubu\/evidence|Captured terminal excerpt|\/Users\//);
+    if (release === "v0.2.5") {
+      assert.match(html, /--kits ep05-denied-operation,ep06-approval-reuse/);
+    }
+    for (const filename of ["evidence.zip", "ep01-runaway/transcript.txt"]) {
+      assert.equal((await render(`/break-hubu/evidence/${release}/${filename}`)).status, 404);
+    }
+  }
+});
+
 test("embeds the introduction below the hero without autoplay", async () => {
   const html = await (await render()).text();
   assert.match(html, /Meet Hubu in 3 min/);
@@ -769,6 +784,8 @@ const unpublishedDocs = [
   ["docs/operations/gongbu-sandbox.md", "operations/gongbu-sandbox"],
   ["docs/operations/live-provider-testing.md", "operations/live-provider-testing"],
   ["docs/operations/publishing-releases.md", "operations/publishing-releases"],
+  ["docs/specs/README.md", "specs/README"],
+  ["docs/specs/v0.3.0-owner-agent-separation.md", "specs/v0.3.0-owner-agent-separation"],
 ];
 
 async function generatedDocuments() {
@@ -804,6 +821,21 @@ test("does not publish maintainer-only documents", async () => {
       const response = await render(`/docs/${slug}`);
       assert.equal(response.status, 404, slug);
     }
+  }
+});
+
+test("does not publish anything under docs/specs", async () => {
+  const [documents, sitemap] = await Promise.all([
+    generatedDocuments(),
+    readFile(new URL("../dist/client/sitemap.xml", import.meta.url), "utf8"),
+  ]);
+  assert.ok(!documents.some((document) => document.sourcePath.startsWith("docs/specs/")), "a spec is generated");
+  assert.ok(!sitemap.includes("/docs/specs/"), "a spec is in the sitemap");
+  const specs = (await readdir(new URL("../../docs/specs/", import.meta.url))).filter((name) => name.endsWith(".md"));
+  assert.ok(specs.length > 0);
+  for (const name of specs) {
+    const response = await render(`/docs/specs/${name.replace(/\.md$/, "")}`);
+    assert.equal(response.status, 404, name);
   }
 });
 

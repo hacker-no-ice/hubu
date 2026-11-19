@@ -31,6 +31,9 @@ verified** when some do, **Unverified** when none have been shown, and **Does
 not hold** when any challenge fails. Out-of-scope challenges are not counted;
 planned, blocked and untested ones count as not holding.
 
+The adversary these claims are measured against, and what is out of scope,
+are described in the [threat model](../docs/threat-model.md).
+
 Each stable release gets a card in [cards/](cards/), starting with
 [v0.2.4](cards/v0.2.4.md), that ties measured outcomes to their exact scripts,
 environment and evidence. Targets in the episode READMEs are assertions to test,
@@ -200,7 +203,7 @@ The implementation is intentionally inspectable: scenario steps live in each
 and [verification.py](verification.py). Those four shared files total about
 650 lines, in addition to scenario code and episode assertions; the shared work
 is not hidden from episode-size accounting. The separate
-[report renderer](render-report.py) only turns captured public evidence into
-website data and a plain ZIP; it is not part of the attack runtime. Run verifiers with ordinary Python,
+[report renderer](render-report.py) turns captured results into the public analysis and plain-text card.
+Keep raw outputs in a private archive. Run verifiers with ordinary Python,
 without `-O`, `-OO` or `PYTHONOPTIMIZE`; optimized mode cannot produce a passing verdict.
 There is no automatic PR proof-kit job or custom replay viewer.

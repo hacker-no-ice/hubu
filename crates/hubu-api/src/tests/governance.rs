@@ -780,3 +780,181 @@ fn governance_coverage_observation_is_explicit_and_gets_never_write_or_touch_man
         .contains("spend_lifecycle_records"));
     assert!(!unavailable.body.to_string().contains("governance.sqlite"));
 }
+
+#[test]
+fn reconciliation_detail_overlays_current_state_without_changing_history() {
+    for billed in [false, true] {
+        let mut config = LeaseConfig::default();
+        config
+            .lease_profiles
+            .get_mut("default")
+            .unwrap()
+            .claim_ttl_seconds = 1;
+        let (path, state, agent, auth) = setup_executor_authorization_with_lease_config(
+            &format!("governance-current-{billed}"),
+            config,
+        );
+        let claim = claim_executor_spend(
+            json!({"spend_auth_token_id":auth.auth_token_id,
+            "account_id":agent.account_id,"amount_cents":500,"merchant":"gongbu.image"})
+            .to_string(),
+            &state,
+        )
+        .unwrap();
+        let mut payload = json!({"claim_id":claim.claim_id,"provider_reference":"fixture-provider-ref",
+            "evidence":"Isolated fixture billing evidence"});
+        if billed {
+            payload["receipt"] = precise_settlement_receipt_json(135121, 6);
+        }
+        // Neither the portal nor a capability holder can reconcile a live lease.
+        assert!(finalize_executor_spend(
+            payload.to_string(),
+            &state,
+            billed,
+            Some(TEST_RECONCILIATION_TOKEN)
+        )
+        .is_err());
+        std::thread::sleep(std::time::Duration::from_millis(1_100));
+        let observer =
+            financial_observer::FinancialObserver::start(Arc::clone(&state.governance)).unwrap();
+        observer.observe_at(Utc::now());
+        drop(observer);
+        let entries = get(
+            &state,
+            "/governance/records?categories=reconciliation_entry",
+        );
+        let event = entries["records"][0].clone();
+        let endpoint = format!(
+            "/governance/records/{}/reconciliation",
+            event["record_id"].as_str().unwrap()
+        );
+        let current = |state: &ServerState| {
+            let response = route(authenticated_get_request(&endpoint), state);
+            assert_eq!(response.status, 200, "{}", response.body);
+            response.body
+        };
+        assert_eq!(current(&state)["claim"]["reconciliation_required"], true);
+        let mut missing_bearer = authenticated_get_request(&endpoint);
+        missing_bearer.headers.remove("authorization");
+        assert_eq!(route(missing_bearer, &state).status, 401);
+        let mut bad = payload.clone();
+        bad["evidence"] = json!("");
+        assert!(finalize_executor_spend(
+            bad.to_string(),
+            &state,
+            billed,
+            Some(TEST_RECONCILIATION_TOKEN)
+        )
+        .is_err());
+        assert_eq!(current(&state)["claim"]["reconciliation_required"], true);
+        assert!(finalize_executor_spend(payload.to_string(), &state, billed, None).is_err());
+        let resolved = finalize_executor_spend(
+            payload.to_string(),
+            &state,
+            billed,
+            Some(TEST_RECONCILIATION_TOKEN),
+        )
+        .unwrap();
+        let detail = current(&state);
+        assert_eq!(detail["claim"]["reconciliation_required"], false);
+        assert_eq!(
+            detail["claim"]["status"],
+            if billed { "settled" } else { "released" }
+        );
+        assert_eq!(detail["claim"]["evidence"], payload["evidence"]);
+        assert_eq!(
+            detail["claim"]["provider_reference"],
+            payload["provider_reference"]
+        );
+        assert!(detail["claim"]["reconciled_by_user_id"].is_string());
+        assert_eq!(detail["claim"]["reconciled_at"], resolved["reconciled_at"]);
+        if billed {
+            assert_eq!(detail["receipt"]["actual_vendor_cost"]["amount"], "135121");
+            assert_eq!(detail["receipt"]["budget_charge"]["units"], "135121");
+        } else {
+            assert!(detail["receipt"].is_null());
+        }
+        // An identical retry cannot double-settle/release; a conflicting stale
+        // submission cannot change the accepted resolution or balances.
+        let replay = finalize_executor_spend(
+            payload.to_string(),
+            &state,
+            billed,
+            Some(TEST_RECONCILIATION_TOKEN),
+        )
+        .unwrap();
+        assert_eq!(replay, resolved);
+        assert!(finalize_executor_spend(
+            payload.to_string(),
+            &state,
+            !billed,
+            Some(TEST_RECONCILIATION_TOKEN)
+        )
+        .is_err());
+        assert_eq!(current(&state), detail);
+        assert!(list_executor_claims_requiring_reconciliation(&state)
+            .unwrap()
+            .claims
+            .is_empty());
+        let latest = get(
+            &state,
+            "/governance/records?categories=reconciliation_entry",
+        );
+        assert_eq!(latest["records"][0], event);
+        assert_eq!(
+            latest["summary"]["backlog"]["unresolved_reconciliations"],
+            0
+        );
+        // Simulate a legacy loaded claim whose final financial state exists
+        // but human-resolution metadata was never captured. Do not fabricate it
+        // from the immutable reconciliation-entry event or the receipt.
+        {
+            let owner = authenticated_user_context(&state).unwrap().user_id;
+            let mut spend = state.spend.lock().unwrap();
+            let mut legacy = spend.executor_claim_records_for_owner(&owner).remove(0);
+            let token = spend
+                .auth_token_record(&legacy.spend_auth_token_id)
+                .unwrap();
+            legacy.reconciled_at = None;
+            legacy.reconciled_by_user_id = None;
+            legacy.reconciliation_evidence = None;
+            legacy.provider_reference = None;
+            spend.apply_persisted_executor_finalization(legacy, token);
+        }
+        let legacy = current(&state);
+        assert_eq!(legacy["claim"]["reconciliation_required"], false);
+        for field in [
+            "evidence",
+            "provider_reference",
+            "reconciled_at",
+            "reconciled_by_user_id",
+            "reconciliation_outcome",
+        ] {
+            assert!(legacy["claim"][field].is_null(), "invented {field}");
+        }
+        assert_eq!(
+            legacy["claim"]["status"],
+            if billed { "settled" } else { "released" }
+        );
+        assert_eq!(
+            route(
+                authenticated_get_request(&format!("{endpoint}?snapshot=old")),
+                &state
+            )
+            .status,
+            400
+        );
+        // Owner-derived correlation cannot disclose another owner's evidence.
+        init(
+            json!({"username":"other-owner","display_name":"Other","email":"other@example.com"})
+                .to_string(),
+            &state,
+        )
+        .unwrap();
+        assert_eq!(
+            route(authenticated_get_request(&endpoint), &state).status,
+            404
+        );
+        std::fs::remove_file(path).ok();
+    }
+}
