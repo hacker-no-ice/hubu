@@ -217,6 +217,10 @@ fn system_provider() -> Result<Arc<dyn PresenceProvider>> {
 }
 
 /// A managed profile root holds both `stack.toml` and `credentials.toml`.
+///
+/// SQLite follows symlinks, so both the path as written and the path with
+/// every symlink resolved are checked; either one inside a managed profile
+/// refuses the fixture provider.
 pub(crate) fn is_inside_managed_profile(database_path: &Path) -> bool {
     let absolute = if database_path.is_absolute() {
         database_path.to_path_buf()
@@ -225,10 +229,34 @@ pub(crate) fn is_inside_managed_profile(database_path: &Path) -> bool {
             .map(|cwd| cwd.join(database_path))
             .unwrap_or_else(|_| database_path.to_path_buf())
     };
-    absolute
-        .ancestors()
-        .skip(1)
-        .any(|dir| dir.join("stack.toml").is_file() && dir.join("credentials.toml").is_file())
+    let inside = |path: &Path| {
+        path.ancestors()
+            .skip(1)
+            .any(|dir| dir.join("stack.toml").is_file() && dir.join("credentials.toml").is_file())
+    };
+    inside(&absolute) || resolved_path(&absolute).is_some_and(|resolved| inside(&resolved))
+}
+
+/// The path with symlinks resolved. A database that does not exist yet is
+/// resolved through its nearest existing ancestor.
+fn resolved_path(path: &Path) -> Option<std::path::PathBuf> {
+    if let Ok(resolved) = std::fs::canonicalize(path) {
+        return Some(resolved);
+    }
+    let mut missing = Vec::new();
+    let mut current = path;
+    loop {
+        missing.push(current.file_name()?.to_os_string());
+        current = current.parent()?;
+        if let Ok(resolved) = std::fs::canonicalize(current) {
+            return Some(
+                missing
+                    .iter()
+                    .rev()
+                    .fold(resolved, |path, part| path.join(part)),
+            );
+        }
+    }
 }
 
 /// Which client presented an owner request (spec section 9).
@@ -819,6 +847,20 @@ mod tests {
         let other = tempfile::tempdir().unwrap();
         assert!(!is_inside_managed_profile(
             &other.path().join("hubu.sqlite3")
+        ));
+
+        // A symlink outside the profile to the managed database file.
+        let database = root.path().join("state/hubu/hubu.sqlite3");
+        std::fs::write(&database, "").unwrap();
+        let file_link = other.path().join("linked.sqlite3");
+        std::os::unix::fs::symlink(&database, &file_link).unwrap();
+        assert!(is_inside_managed_profile(&file_link));
+        // A symlinked parent directory, with a database not created yet.
+        let dir_link = other.path().join("linked-state");
+        std::os::unix::fs::symlink(root.path().join("state/hubu"), &dir_link).unwrap();
+        assert!(is_inside_managed_profile(&dir_link.join("new.sqlite3")));
+        assert!(is_inside_managed_profile(
+            &dir_link.join("nested/new.sqlite3")
         ));
     }
 
