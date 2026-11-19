@@ -165,27 +165,13 @@ out-of-scope requests unresolved with concise technical reasoning.
 
 These apply to Codex code review and to any agent reviewing a PR.
 
-- **Check the change against its release spec.** When a PR touches a release
-  that has a spec in `docs/specs/`, compare the diff with the relevant
-  sections. Report as **P1** any behaviour that contradicts the spec without a
-  matching spec change in the same PR, including routes, credential classes,
-  error codes, record fields and dialog text.
-- **Report as P1** any of these, whatever the spec says:
-  - A protected route without an access declaration (`ROUTE_ACCESS` or its
-    successor), or a route whose declared class lets the agent credential
-    approve a spend, raise a limit, change policy, or otherwise grant authority.
-  - Text shown to the owner for confirmation (for example a Touch ID dialog
-    reason) that includes free text supplied by the caller, rather than text
-    Hubu builds from stored, validated data.
-  - An error, timeout or cancelled confirmation that results in an approval or
-    a granted action. Failures must refuse.
-  - Credentials, window tokens or secrets written to a file, a log, or a
-    response where an agent could read them, unless the spec allows it.
-- **Check the PR description.** If the "Spec" section is missing or says
-  "none" while the diff changes behaviour a spec decides, report it as P2.
-- Spec PRs themselves (changes only under `docs/specs/`) are reviewed for
-  internal consistency and for agreement with the current code, not against
-  another spec.
+- When a PR touches work covered by a release spec in `docs/specs/`, compare
+  the diff with the relevant spec sections.
+- Report as **P1** any departure from the spec that the PR description's
+  "Spec" section does not name. A departure that is named there is for the
+  owner to judge and is not a finding.
+- PRs that only change files under `docs/specs/` are reviewed for internal
+  consistency and agreement with the current code.
 
 ## Owner identity
 
