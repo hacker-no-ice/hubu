@@ -319,7 +319,7 @@ pub fn validate_image(
     if image::guess_format(bytes).ok() != Some(format) {
         return Err(Error::MediaTypeMismatch);
     }
-    let (width, height) = image::io::Reader::with_format(Cursor::new(bytes), format)
+    let (width, height) = image::ImageReader::with_format(Cursor::new(bytes), format)
         .into_dimensions()
         .map_err(|_| Error::InvalidImage)?;
     if width > limits.max_width || height > limits.max_height {
@@ -332,8 +332,8 @@ pub fn validate_image(
     if decoded_size > limits.max_decoded_bytes {
         return Err(Error::Limit("decoded size"));
     }
-    let mut decoder = image::io::Reader::with_format(Cursor::new(bytes), format);
-    let mut decoder_limits = image::io::Limits::default();
+    let mut decoder = image::ImageReader::with_format(Cursor::new(bytes), format);
+    let mut decoder_limits = image::Limits::default();
     decoder_limits.max_image_width = Some(limits.max_width);
     decoder_limits.max_image_height = Some(limits.max_height);
     decoder_limits.max_alloc = Some(limits.max_decoded_bytes);
@@ -374,7 +374,7 @@ pub(crate) fn hex_sha256(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use crate::persistence::{CreateExecutionParams, HubuTokenReference};
-    use image::{DynamicImage, ImageOutputFormat, RgbaImage};
+    use image::{DynamicImage, ImageFormat, RgbaImage};
     use serde_json::json;
     use std::io::Cursor;
     use tempfile::tempdir;
@@ -386,7 +386,7 @@ mod tests {
             height,
             image::Rgba([1, 2, 3, 255]),
         ))
-        .write_to(&mut Cursor::new(&mut bytes), ImageOutputFormat::Png)
+        .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png)
         .unwrap();
         bytes
     }

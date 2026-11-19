@@ -1523,7 +1523,7 @@ mod tests {
             secrets::{ProviderSecret, SecretError, SecretReference},
         };
         use base64::{engine::general_purpose::STANDARD, Engine};
-        use image::{DynamicImage, ImageOutputFormat, RgbaImage};
+        use image::{DynamicImage, ImageFormat, RgbaImage};
         use serde_json::json;
         use std::{
             collections::BTreeMap,
@@ -1613,7 +1613,7 @@ mod tests {
 
         let mut png = Vec::new();
         DynamicImage::ImageRgba8(RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255])))
-            .write_to(&mut Cursor::new(&mut png), ImageOutputFormat::Png)
+            .write_to(&mut Cursor::new(&mut png), ImageFormat::Png)
             .unwrap();
         let calls = Arc::new(FixtureTransport(AtomicUsize::new(0), png.clone()));
         let pack = verified_packs()
@@ -1790,7 +1790,7 @@ mod tests {
             secrets::{ProviderSecret, SecretError, SecretReference},
         };
         use base64::{engine::general_purpose::STANDARD, Engine};
-        use image::{DynamicImage, ImageOutputFormat, RgbaImage};
+        use image::{DynamicImage, ImageFormat, RgbaImage};
         use serde_json::json;
         use std::{
             collections::BTreeMap,
@@ -1806,7 +1806,7 @@ mod tests {
         fn png(rgba: [u8; 4]) -> Vec<u8> {
             let mut png = Vec::new();
             DynamicImage::ImageRgba8(RgbaImage::from_pixel(1, 1, image::Rgba(rgba)))
-                .write_to(&mut Cursor::new(&mut png), ImageOutputFormat::Png)
+                .write_to(&mut Cursor::new(&mut png), ImageFormat::Png)
                 .unwrap();
             png
         }
@@ -2112,7 +2112,7 @@ mod tests {
             secrets::{ProviderSecret, SecretError, SecretReference},
         };
         use base64::{engine::general_purpose::STANDARD, Engine};
-        use image::{DynamicImage, ImageOutputFormat, RgbaImage};
+        use image::{DynamicImage, ImageFormat, RgbaImage};
         use serde_json::json;
         use std::{
             collections::BTreeMap,
@@ -2128,7 +2128,7 @@ mod tests {
         fn png(width: u32, height: u32, rgba: [u8; 4]) -> Vec<u8> {
             let mut png = Vec::new();
             DynamicImage::ImageRgba8(RgbaImage::from_pixel(width, height, image::Rgba(rgba)))
-                .write_to(&mut Cursor::new(&mut png), ImageOutputFormat::Png)
+                .write_to(&mut Cursor::new(&mut png), ImageFormat::Png)
                 .unwrap();
             png
         }
@@ -3032,7 +3032,7 @@ mod tests {
             secrets::{ProviderSecret, SecretError, SecretReference},
         };
         use base64::Engine as _;
-        use image::{DynamicImage, ImageOutputFormat, RgbaImage};
+        use image::{DynamicImage, ImageFormat, RgbaImage};
         use serde_json::json;
         use std::{
             collections::BTreeMap,
@@ -3142,7 +3142,7 @@ mod tests {
         .unwrap();
         let mut png = Vec::new();
         DynamicImage::ImageRgba8(RgbaImage::new(1, 1))
-            .write_to(&mut Cursor::new(&mut png), ImageOutputFormat::Png)
+            .write_to(&mut Cursor::new(&mut png), ImageFormat::Png)
             .unwrap();
         let transport = Transport {
             png,
@@ -3268,7 +3268,7 @@ mod tests {
             secrets::{ProviderSecret, SecretError, SecretReference},
         };
         use base64::Engine as _;
-        use image::{GrayImage, ImageOutputFormat};
+        use image::{GrayImage, ImageFormat};
         use serde_json::json;
         use std::{collections::BTreeMap, io::Cursor, sync::Mutex, time::Duration};
         use tempfile::tempdir;
@@ -3304,7 +3304,7 @@ mod tests {
                 };
                 let mut png = Vec::new();
                 GrayImage::new((width / shrink) as u32, (height / shrink) as u32)
-                    .write_to(&mut Cursor::new(&mut png), ImageOutputFormat::Png)
+                    .write_to(&mut Cursor::new(&mut png), ImageFormat::Png)
                     .unwrap();
                 Ok(TransportResponse {
                     status: 200,
@@ -3479,7 +3479,7 @@ mod tests {
             },
             secrets::{ProviderSecret, SecretError, SecretReference},
         };
-        use image::{DynamicImage, ImageOutputFormat, RgbaImage};
+        use image::{DynamicImage, ImageFormat, RgbaImage};
         use serde_json::json;
         use std::{
             collections::BTreeMap,
@@ -3604,7 +3604,7 @@ mod tests {
         .unwrap();
         let mut png = Vec::new();
         DynamicImage::ImageRgba8(RgbaImage::new(1, 1))
-            .write_to(&mut Cursor::new(&mut png), ImageOutputFormat::Png)
+            .write_to(&mut Cursor::new(&mut png), ImageFormat::Png)
             .unwrap();
         let transport = Transport {
             png,
@@ -3743,7 +3743,7 @@ mod tests {
             },
             secrets::{ProviderSecret, SecretError, SecretReference},
         };
-        use image::{DynamicImage, ImageOutputFormat, RgbaImage};
+        use image::{DynamicImage, ImageFormat, RgbaImage};
         use serde_json::json;
         use std::{
             collections::BTreeMap,
@@ -3902,7 +3902,7 @@ mod tests {
         .unwrap();
         let mut png = Vec::new();
         DynamicImage::ImageRgba8(RgbaImage::new(1, 1))
-            .write_to(&mut Cursor::new(&mut png), ImageOutputFormat::Png)
+            .write_to(&mut Cursor::new(&mut png), ImageFormat::Png)
             .unwrap();
         let calls = Arc::new(Calls::default());
         let mut registry = ProviderRegistry::new();

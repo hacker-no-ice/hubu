@@ -235,14 +235,14 @@ impl InputImageSource for EditInputImages<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::{DynamicImage, ImageOutputFormat, RgbaImage};
+    use image::{DynamicImage, ImageFormat, RgbaImage};
     use std::io::Cursor;
     use tempfile::tempdir;
 
     fn png(width: u32, height: u32) -> Vec<u8> {
         let mut bytes = Vec::new();
         DynamicImage::ImageRgba8(RgbaImage::new(width, height))
-            .write_to(&mut Cursor::new(&mut bytes), ImageOutputFormat::Png)
+            .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png)
             .unwrap();
         bytes
     }
