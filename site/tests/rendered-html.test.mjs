@@ -824,6 +824,21 @@ test("does not publish maintainer-only documents", async () => {
   }
 });
 
+test("does not publish anything under docs/specs", async () => {
+  const [documents, sitemap] = await Promise.all([
+    generatedDocuments(),
+    readFile(new URL("../dist/client/sitemap.xml", import.meta.url), "utf8"),
+  ]);
+  assert.ok(!documents.some((document) => document.sourcePath.startsWith("docs/specs/")), "a spec is generated");
+  assert.ok(!sitemap.includes("/docs/specs/"), "a spec is in the sitemap");
+  const specs = (await readdir(new URL("../../docs/specs/", import.meta.url))).filter((name) => name.endsWith(".md"));
+  assert.ok(specs.length > 0);
+  for (const name of specs) {
+    const response = await render(`/docs/specs/${name.replace(/\.md$/, "")}`);
+    assert.equal(response.status, 404, name);
+  }
+});
+
 test("links from published pages to unpublished documents use GitHub blob URLs", async () => {
   const response = await render("/docs/ledger-history");
   assert.equal(response.status, 200);
