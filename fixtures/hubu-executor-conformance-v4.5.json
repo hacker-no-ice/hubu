@@ -193,19 +193,19 @@
       "gongbu_activity_class": "proven"
     },
     "human_capability_missing": {
-      "trigger": "A reconciliation-shaped request from an executor carried only the normal bearer and no owner window (executors send X-Hubu-No-Prompt and never prompt the owner).",
+      "trigger": "A reconciliation-shaped request from an executor carried only the normal bearer (executors send X-Hubu-No-Prompt and never prompt the owner).",
       "observed": {
         "status": 403,
-        "error_contains": "needs an open owner window or the owner's confirmation"
+        "error_contains": "needs the owner's confirmation on the Mac"
       },
       "executor_action": "Executors never reconcile; surface the claim to a human.",
       "gongbu_activity_class": "proven"
     },
     "human_capability_invalid": {
-      "trigger": "A reconciliation-shaped request from an executor presented the normal bearer as the retired human capability, which Hubu ignores; with no owner window it is refused.",
+      "trigger": "A reconciliation-shaped request from an executor presented the normal bearer as the retired human capability, which Hubu ignores; without the owner's confirmation it is refused.",
       "observed": {
         "status": 403,
-        "error_contains": "needs an open owner window or the owner's confirmation"
+        "error_contains": "needs the owner's confirmation on the Mac"
       },
       "executor_action": "Executors never reconcile; surface the claim to a human.",
       "gongbu_activity_class": "proven"

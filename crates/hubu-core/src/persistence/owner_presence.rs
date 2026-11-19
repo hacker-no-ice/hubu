@@ -1,9 +1,8 @@
 //! Owner presence governance records (v0.3.0, spec section 9).
 //!
 //! One row per owner-presence decision: every prompt the server raised
-//! (confirmed, denied, timed out, unavailable, rate limited, superseded), every
-//! owner action performed inside an open owner window, and every tightening
-//! write that needed no prompt. The table is additive and never rewrites
+//! (confirmed, denied, timed out, unavailable, rate limited, superseded) and
+//! every tightening write that needed no prompt. The table is additive and never rewrites
 //! existing governance rows.
 use super::*;
 
@@ -15,11 +14,10 @@ pub struct OwnerPresenceRecord {
     pub recorded_at: DateTime<Utc>,
     /// Route and action kind, for example `budget.version.create`.
     pub action: String,
-    /// The exact reason text shown in the dialog (or, for an action inside a
-    /// window, the text of the prompt that opened the window).
+    /// The exact reason text shown in the dialog (empty for tightening).
     pub reason: String,
     /// `confirmed`, `denied`, `timed_out`, `unavailable`, `rate_limited`,
-    /// `superseded`, `not_required`, or `window` (performed inside a window).
+    /// `superseded`, or `not_required`.
     pub outcome: String,
     /// `biometric`, `device_password`, `fixture`, or none.
     pub method: Option<String>,
@@ -27,8 +25,6 @@ pub struct OwnerPresenceRecord {
     pub client: String,
     /// Public ids of the budget, policy, agent or authorization concerned.
     pub targets: Vec<String>,
-    /// For an action inside a window: the record of the prompt that opened it.
-    pub window_record_id: Option<String>,
 }
 
 pub(super) const OWNER_PRESENCE_SCHEMA: &str = "
@@ -41,8 +37,7 @@ CREATE TABLE IF NOT EXISTS owner_presence_records (
     outcome TEXT NOT NULL,
     method TEXT,
     client TEXT NOT NULL,
-    targets_json TEXT NOT NULL,
-    window_record_id TEXT
+    targets_json TEXT NOT NULL
 );
 ";
 
@@ -53,8 +48,8 @@ impl SqliteGovernanceRepository {
     ) -> Result<(), StorageError> {
         self.conn.execute(
             "INSERT INTO owner_presence_records
-             (record_id, recorded_at, action, reason, outcome, method, client, targets_json, window_record_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             (record_id, recorded_at, action, reason, outcome, method, client, targets_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 record.record_id,
                 record.recorded_at.to_rfc3339(),
@@ -64,7 +59,6 @@ impl SqliteGovernanceRepository {
                 record.method,
                 record.client,
                 serde_json::to_string(&record.targets)?,
-                record.window_record_id,
             ],
         )?;
         Ok(())
@@ -77,7 +71,7 @@ impl SqliteGovernanceRepository {
     ) -> Result<Vec<OwnerPresenceRecord>, StorageError> {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         let mut stmt = self.conn.prepare(
-            "SELECT record_id, recorded_at, action, reason, outcome, method, client, targets_json, window_record_id
+            "SELECT record_id, recorded_at, action, reason, outcome, method, client, targets_json
              FROM owner_presence_records ORDER BY seq DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map([limit], |row| {
@@ -91,7 +85,6 @@ impl SqliteGovernanceRepository {
                 method: row.get(5)?,
                 client: row.get(6)?,
                 targets: parse_json(&targets)?,
-                window_record_id: row.get(8)?,
             })
         })?;
         collect_rows(rows)
@@ -116,7 +109,6 @@ mod tests {
                 method: (outcome == "confirmed").then(|| "fixture".to_string()),
                 client: "cli".to_string(),
                 targets: vec!["agt_1".to_string()],
-                window_record_id: None,
             })
             .unwrap();
         }

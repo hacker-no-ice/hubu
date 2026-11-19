@@ -541,7 +541,7 @@ guidance.
 
    The agent credential is refused on this route. With the owner credential,
    `approve` makes `hubu-server` ask the owner to confirm on the Mac (Touch ID)
-   every time, even inside an owner window, and `deny` needs no confirmation
+   for each approval, and `deny` needs no confirmation
    (see [owner presence](owner-presence.md)). An agent may instead call
    `POST /spend/approval/prompt` after the owner says yes in chat; only the
    owner's confirmation approves. `decision` is `approve` or `deny`. Approval reserves the original immutable
@@ -1001,8 +1001,8 @@ that human resolution only after the claim lease expires.
 
 Reconciliation is an owner action (v0.3.0). The request body decides the
 class: an executor-shaped body stays on the executor route, and a
-reconciliation-shaped body needs the owner credential plus an owner window,
-which `hubu-server` opens only after the owner confirms on the Mac. The retired
+reconciliation-shaped body needs the owner credential and the owner's
+confirmation of that reconciliation on the Mac. The retired
 `X-Hubu-Reconciliation-Capability` header is ignored. Executors send
 `X-Hubu-No-Prompt: 1` and never prompt the owner, so an executor that sends a
 reconciliation body gets `owner_presence_required`. See

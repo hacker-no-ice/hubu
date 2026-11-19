@@ -99,7 +99,7 @@ ships it; until that issue is done, the protection is not in place.
 | --- | --- | --- |
 | Owner and agent credential classes | Splits the shared bearer so an agent credential can't perform owner actions. | In progress ([HUB-345](https://linear.app/hubu/issue/HUB-345)) |
 | Agent allowlist on unified MCP | Reduces the MCP surface to the agent tools and removes the admin gate described above. | Planned ([HUB-346](https://linear.app/hubu/issue/HUB-346)) |
-| Owner presence with Touch ID | Owner actions need a Touch ID dialog, followed by a five-minute owner window. | Planned ([HUB-347](https://linear.app/hubu/issue/HUB-347)) |
+| Owner presence with Touch ID | Each owner action needs its own Touch ID confirmation; there is no owner window. | Planned ([HUB-347](https://linear.app/hubu/issue/HUB-347)) |
 | Admin portal with Touch ID | The portal signs in and acts with Touch ID and retires the one-time login link. | Planned ([HUB-348](https://linear.app/hubu/issue/HUB-348)) |
 | Owner presence in the CLI | Owner CLI commands require owner presence. | Planned ([HUB-349](https://linear.app/hubu/issue/HUB-349)) |
 | Agents draft, the owner applies | Agents write policy and budget changes as files; the owner applies them on the portal. | Planned ([HUB-350](https://linear.app/hubu/issue/HUB-350)) |

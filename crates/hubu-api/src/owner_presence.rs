@@ -1,16 +1,15 @@
 //! Owner presence (v0.3.0 spec, section 5).
 //!
 //! Owner actions need the owner's physical presence, confirmed by
-//! `hubu-server` itself through a [`PresenceProvider`]. One confirmation opens
-//! a five-minute owner window held in server memory only and bound to the
-//! client that opened it by a random window token. The server stores only the
-//! token's hash.
+//! `hubu-server` itself through a [`PresenceProvider`]. Each confirmation
+//! authorizes exactly the one action (or approval) its dialog names; there is
+//! no owner window (owner decision, 2026-11-19).
 // Unit tests install fixture providers directly, so the environment-driven
 // provider selection and the macOS provider are unused in the test build. On
 // other platforms the macOS-only policy setting and methods are unused.
 #![cfg_attr(any(test, not(target_os = "macos")), allow(dead_code))]
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::VecDeque,
     fs::File,
     io::Read,
     path::Path,
@@ -19,13 +18,11 @@ use std::{
 };
 
 use anyhow::{anyhow, Result};
-use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 
 #[cfg(target_os = "macos")]
 mod macos;
 
-pub(crate) const OWNER_WINDOW_HEADER: &str = "x-hubu-owner-window";
 pub(crate) const NO_PROMPT_HEADER: &str = "x-hubu-no-prompt";
 pub(crate) const CLIENT_HEADER: &str = "x-hubu-client";
 pub(crate) const PROVIDER_ENV: &str = "HUBU_OWNER_PRESENCE_PROVIDER";
@@ -35,12 +32,12 @@ pub(crate) const POLICY_ENV: &str = "HUBU_OWNER_PRESENCE_POLICY";
 /// exercise it). Scripted runs leave it off: no person is being prompted.
 pub(crate) const FIXTURE_RATE_LIMIT_ENV: &str = "HUBU_OWNER_PRESENCE_FIXTURE_RATE_LIMIT";
 
-/// A window lasts five minutes from confirmation and does not slide.
-pub(crate) const OWNER_WINDOW_DURATION: Duration = Duration::from_secs(5 * 60);
 pub(crate) const PROMPT_TIMEOUT: Duration = Duration::from_secs(60);
 pub(crate) const RATE_LIMIT_PERIOD: Duration = Duration::from_secs(10 * 60);
+/// At most this many refused or timed-out prompts per [`RATE_LIMIT_PERIOD`].
+/// Confirmed prompts do not count: the limit stops an agent wearing the owner
+/// down, not the owner working.
 pub(crate) const RATE_LIMIT_MAX_PROMPTS: usize = 5;
-const WINDOW_TOKEN_PREFIX: &str = "hubu_window_";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PresenceMethod {
@@ -369,50 +366,15 @@ impl PromptRefusal {
     }
 }
 
-/// An open owner window, as seen by a request that presented its token.
-#[derive(Clone, Debug)]
-pub(crate) struct ActiveWindow {
-    pub(crate) client: OwnerClient,
-    pub(crate) record_id: String,
-    pub(crate) reason: String,
-    pub(crate) method: PresenceMethod,
-    pub(crate) expires_at: DateTime<Utc>,
-}
-
-/// A newly opened window. The token is returned once and never stored.
-#[derive(Clone, Debug)]
-pub(crate) struct IssuedWindow {
-    pub(crate) token: String,
-    pub(crate) expires_at: DateTime<Utc>,
-}
-
-impl IssuedWindow {
-    pub(crate) fn to_json(&self) -> Value {
-        json!({
-            "token": self.token,
-            "expires_at": self.expires_at.to_rfc3339(),
-        })
-    }
-}
-
-struct OwnerWindow {
-    token_hash: String,
-    expires_at: Instant,
-    expires_at_utc: DateTime<Utc>,
-    record_id: String,
-    reason: String,
-    method: PresenceMethod,
-}
-
 #[derive(Default)]
 struct PresenceState {
-    windows: HashMap<OwnerClient, OwnerWindow>,
     prompting: bool,
-    recent_prompts: VecDeque<Instant>,
+    /// When recent prompts were refused or timed out.
+    recent_refusals: VecDeque<Instant>,
 }
 
-/// Server-memory owner presence state. Restarting the server closes every
-/// window.
+/// Server-memory owner presence state: the provider, whether a dialog is on
+/// screen, and the refusal rate limit. It holds no authority.
 pub(crate) struct OwnerPresence {
     provider: RwLock<Arc<dyn PresenceProvider>>,
     state: Mutex<PresenceState>,
@@ -459,9 +421,8 @@ impl OwnerPresence {
         Instant::now() + self.clock_offset.lock().map(|o| *o).unwrap_or_default()
     }
 
-    fn now_utc(&self) -> DateTime<Utc> {
-        let offset = self.clock_offset.lock().map(|o| *o).unwrap_or_default();
-        Utc::now() + chrono::Duration::from_std(offset).unwrap_or_else(|_| chrono::Duration::zero())
+    fn limit(&self) -> Option<(usize, Duration)> {
+        self.rate_limit.read().ok().and_then(|limit| *limit)
     }
 
     pub(crate) fn provider_name(&self) -> &'static str {
@@ -471,58 +432,34 @@ impl OwnerPresence {
             .unwrap_or("unknown")
     }
 
-    /// The open window whose token was presented, if it has not expired.
-    pub(crate) fn active_window(&self, token: Option<&str>) -> Option<ActiveWindow> {
-        let token = token.map(str::trim).filter(|token| !token.is_empty())?;
-        let presented = super::hash_token(token);
-        let now = self.now();
-        let mut state = self.state.lock().ok()?;
-        state.windows.retain(|_, window| window.expires_at > now);
-        state.windows.iter().find_map(|(client, window)| {
-            super::constant_time_eq(presented.as_bytes(), window.token_hash.as_bytes()).then(|| {
-                ActiveWindow {
-                    client: *client,
-                    record_id: window.record_id.clone(),
-                    reason: window.reason.clone(),
-                    method: window.method,
-                    expires_at: window.expires_at_utc,
-                }
-            })
-        })
-    }
-
     /// Raises one dialog. Holds no lock while the provider waits for the owner.
     pub(crate) fn prompt(&self, reason: &str) -> Result<PresenceMethod, PromptRefusal> {
-        let started =
-            {
-                let mut state = self.state.lock().map_err(|_| {
-                    PromptRefusal::Unavailable("presence state poisoned".to_string())
-                })?;
-                if state.prompting {
-                    return Err(PromptRefusal::InProgress);
-                }
+        {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| PromptRefusal::Unavailable("presence state poisoned".to_string()))?;
+            if state.prompting {
+                return Err(PromptRefusal::InProgress);
+            }
+            if let Some((max, period)) = self.limit() {
                 let now = self.now();
-                if let Some((max, period)) = *self.rate_limit.read().map_err(|_| {
-                    PromptRefusal::Unavailable("presence state poisoned".to_string())
-                })? {
-                    while state
-                        .recent_prompts
-                        .front()
-                        .is_some_and(|at| now.duration_since(*at) >= period)
-                    {
-                        state.recent_prompts.pop_front();
-                    }
-                    if state.recent_prompts.len() >= max {
-                        let oldest = *state.recent_prompts.front().expect("non-empty when full");
-                        return Err(PromptRefusal::RateLimited {
-                            retry_after: period.saturating_sub(now.duration_since(oldest)),
-                        });
-                    }
+                while state
+                    .recent_refusals
+                    .front()
+                    .is_some_and(|at| now.duration_since(*at) >= period)
+                {
+                    state.recent_refusals.pop_front();
                 }
-                state.recent_prompts.push_back(now);
-                state.prompting = true;
-                now
-            };
+                if state.recent_refusals.len() >= max {
+                    let oldest = *state.recent_refusals.front().expect("non-empty when full");
+                    return Err(PromptRefusal::RateLimited {
+                        retry_after: period.saturating_sub(now.duration_since(oldest)),
+                    });
+                }
+            }
+            state.prompting = true;
+        }
         let _guard = PromptGuard(self);
         let provider = self
             .provider
@@ -533,104 +470,45 @@ impl OwnerPresence {
             reason: reason.to_string(),
             timeout: PROMPT_TIMEOUT,
         });
+        let refused = |state: &Self| {
+            let now = state.now();
+            if let Ok(mut inner) = state.state.lock() {
+                inner.recent_refusals.push_back(now);
+            }
+        };
         match outcome {
             PresenceOutcome::Confirmed { method } => Ok(method),
-            PresenceOutcome::Denied => Err(PromptRefusal::Denied),
-            PresenceOutcome::TimedOut => Err(PromptRefusal::TimedOut),
-            PresenceOutcome::Unavailable(reason) => {
-                // No dialog was shown, so it does not count toward the limit.
-                if let Ok(mut state) = self.state.lock() {
-                    if let Some(position) =
-                        state.recent_prompts.iter().rposition(|at| *at == started)
-                    {
-                        state.recent_prompts.remove(position);
-                    }
-                }
-                Err(PromptRefusal::Unavailable(reason))
+            PresenceOutcome::Denied => {
+                refused(self);
+                Err(PromptRefusal::Denied)
             }
+            PresenceOutcome::TimedOut => {
+                refused(self);
+                Err(PromptRefusal::TimedOut)
+            }
+            // No dialog was shown, so it does not count toward the limit.
+            PresenceOutcome::Unavailable(reason) => Err(PromptRefusal::Unavailable(reason)),
         }
     }
 
-    /// Opens a window for `client`, replacing any window it already had.
-    pub(crate) fn open_window(
-        &self,
-        client: OwnerClient,
-        record_id: &str,
-        reason: &str,
-        method: PresenceMethod,
-    ) -> Result<IssuedWindow> {
-        let token = format!("{WINDOW_TOKEN_PREFIX}{}", random_hex(32)?);
-        let expires_at_utc = self.now_utc()
-            + chrono::Duration::from_std(OWNER_WINDOW_DURATION)
-                .map_err(|_| anyhow!("owner window duration out of range"))?;
-        let window = OwnerWindow {
-            token_hash: super::hash_token(&token),
-            expires_at: self.now() + OWNER_WINDOW_DURATION,
-            expires_at_utc,
-            record_id: record_id.to_string(),
-            reason: reason.to_string(),
-            method,
-        };
-        self.state
-            .lock()
-            .map_err(|_| anyhow!("presence state poisoned"))?
-            .windows
-            .insert(client, window);
-        Ok(IssuedWindow {
-            token,
-            expires_at: expires_at_utc,
-        })
-    }
-
-    /// Closes every open window. Returns how many were open.
-    pub(crate) fn lock_all(&self) -> usize {
+    pub(crate) fn status(&self) -> Value {
         let now = self.now();
-        self.state.lock().map_or(0, |mut state| {
-            let open = state
-                .windows
-                .values()
-                .filter(|window| window.expires_at > now)
-                .count();
-            state.windows.clear();
-            open
-        })
-    }
-
-    pub(crate) fn status(&self, token: Option<&str>) -> Value {
-        let window = self.active_window(token);
-        let now = self.now();
+        let limit = self.limit();
         let (prompting, recent) = self.state.lock().map_or((false, 0), |state| {
-            let period = self
-                .rate_limit
-                .read()
-                .ok()
-                .and_then(|limit| limit.map(|(_, period)| period))
-                .unwrap_or(RATE_LIMIT_PERIOD);
+            let period = limit.map_or(RATE_LIMIT_PERIOD, |(_, period)| period);
             (
                 state.prompting,
                 state
-                    .recent_prompts
+                    .recent_refusals
                     .iter()
                     .filter(|at| now.duration_since(**at) < period)
                     .count(),
             )
         });
-        let limit = self
-            .rate_limit
-            .read()
-            .ok()
-            .and_then(|limit| *limit)
-            .map(|(max, _)| max);
         json!({
             "provider": self.provider_name(),
-            "window": window.map(|window| json!({
-                "open": true,
-                "client": window.client.as_str(),
-                "expires_at": window.expires_at.to_rfc3339(),
-            })).unwrap_or_else(|| json!({ "open": false })),
             "prompt_in_progress": prompting,
-            "prompts_remaining": limit.map(|max| max.saturating_sub(recent)),
-            "window_seconds": OWNER_WINDOW_DURATION.as_secs(),
+            "refusals_remaining": limit.map(|(max, _)| max.saturating_sub(recent)),
         })
     }
 }
@@ -639,7 +517,7 @@ pub(crate) fn random_hex(bytes: usize) -> Result<String> {
     let mut buffer = vec![0_u8; bytes];
     File::open("/dev/urandom")
         .and_then(|mut source| source.read_exact(&mut buffer))
-        .map_err(|error| anyhow!("read randomness for an owner window token: {error}"))?;
+        .map_err(|error| anyhow!("read randomness for an owner presence record id: {error}"))?;
     Ok(super::hex_encode(&buffer))
 }
 
@@ -686,22 +564,6 @@ mod tests {
     }
 
     #[test]
-    fn confirm_opens_a_window_bound_to_its_token() {
-        let presence = presence(vec![confirm()]);
-        let method = presence.prompt("unlock").unwrap();
-        let window = presence
-            .open_window(OwnerClient::Portal, "opr_1", "unlock", method)
-            .unwrap();
-        assert!(window.token.starts_with(WINDOW_TOKEN_PREFIX));
-        assert_eq!(window.token.len(), WINDOW_TOKEN_PREFIX.len() + 64);
-        let active = presence.active_window(Some(&window.token)).unwrap();
-        assert_eq!(active.client, OwnerClient::Portal);
-        assert_eq!(active.record_id, "opr_1");
-        assert!(presence.active_window(Some("hubu_window_forged")).is_none());
-        assert!(presence.active_window(None).is_none());
-    }
-
-    #[test]
     fn deny_timeout_and_unavailable_are_refusals() {
         let presence = presence(vec![
             PresenceOutcome::Denied,
@@ -717,52 +579,7 @@ mod tests {
     }
 
     #[test]
-    fn window_expires_after_five_minutes_without_sliding() {
-        let presence = presence(vec![confirm()]);
-        let window = presence
-            .open_window(OwnerClient::Cli, "opr_1", "r", PresenceMethod::Fixture)
-            .unwrap();
-        presence.advance_clock(Duration::from_secs(299));
-        assert!(presence.active_window(Some(&window.token)).is_some());
-        presence.advance_clock(Duration::from_secs(1));
-        assert!(presence.active_window(Some(&window.token)).is_none());
-    }
-
-    #[test]
-    fn lock_closes_every_window() {
-        let presence = presence(vec![confirm()]);
-        let portal = presence
-            .open_window(OwnerClient::Portal, "a", "r", PresenceMethod::Fixture)
-            .unwrap();
-        let cli = presence
-            .open_window(OwnerClient::Cli, "b", "r", PresenceMethod::Fixture)
-            .unwrap();
-        assert_eq!(presence.lock_all(), 2);
-        assert!(presence.active_window(Some(&portal.token)).is_none());
-        assert!(presence.active_window(Some(&cli.token)).is_none());
-    }
-
-    #[test]
-    fn a_new_window_replaces_the_clients_old_one() {
-        let presence = presence(vec![confirm()]);
-        let first = presence
-            .open_window(OwnerClient::Portal, "a", "r", PresenceMethod::Fixture)
-            .unwrap();
-        let second = presence
-            .open_window(OwnerClient::Portal, "b", "r", PresenceMethod::Fixture)
-            .unwrap();
-        assert!(presence.active_window(Some(&first.token)).is_none());
-        assert_eq!(
-            presence
-                .active_window(Some(&second.token))
-                .unwrap()
-                .record_id,
-            "b"
-        );
-    }
-
-    #[test]
-    fn rate_limit_allows_five_prompts_per_ten_minutes() {
+    fn rate_limit_allows_five_refusals_per_ten_minutes() {
         let presence = presence(vec![PresenceOutcome::Denied]);
         for _ in 0..5 {
             assert_eq!(presence.prompt("a"), Err(PromptRefusal::Denied));
@@ -773,6 +590,15 @@ mod tests {
         assert!(retry_after <= RATE_LIMIT_PERIOD);
         presence.advance_clock(RATE_LIMIT_PERIOD);
         assert_eq!(presence.prompt("a"), Err(PromptRefusal::Denied));
+    }
+
+    #[test]
+    fn confirmed_prompts_do_not_count_toward_the_limit() {
+        let presence = presence(vec![confirm()]);
+        for _ in 0..20 {
+            assert_eq!(presence.prompt("a"), Ok(PresenceMethod::Fixture));
+        }
+        assert_eq!(presence.status()["refusals_remaining"], 5);
     }
 
     #[test]

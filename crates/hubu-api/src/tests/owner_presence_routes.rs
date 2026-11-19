@@ -1,7 +1,7 @@
 //! Route-level owner presence tests (v0.3.0 spec, section 13). Every test uses
 //! the scripted fixture provider; none depends on a real fingerprint.
 use super::*;
-use owner_presence::{FixtureProvider, OwnerClient, PresenceMethod};
+use owner_presence::FixtureProvider;
 
 fn fixture(state: &ServerState, script: &str) {
     state
@@ -51,11 +51,11 @@ fn create_budget_request(agent_id: &str, amount: &str) -> HttpRequest {
     )
 }
 
-/// Every owner action is refused without an owner window, whatever else the
-/// caller holds: no-prompt gets `owner_presence_required`, a refused dialog
+/// Every owner action is refused without the owner's confirmation, whatever
+/// else the caller holds: no-prompt gets `owner_presence_required`, a refused dialog
 /// gets the refusal, and malformed requests are rejected before any prompt.
 #[test]
-fn owner_actions_are_refused_without_a_window_or_confirmation() {
+fn owner_actions_are_refused_without_confirmation() {
     let (path, state, agent) = state_with_agent("presence-sweep");
     for (method, sample, pattern) in ROUTE_SAMPLES {
         let declared = ROUTE_ACCESS
@@ -124,11 +124,12 @@ fn owner_actions_are_refused_without_a_window_or_confirmation() {
     std::fs::remove_file(path).ok();
 }
 
+/// No owner window (owner decision, 2026-11-19): a confirmation authorizes
+/// only the action its dialog named, so the next action prompts again.
 #[test]
-fn one_confirmation_opens_a_five_minute_window_for_that_client() {
-    let (path, state, agent) = state_with_agent("presence-window");
-    // The second answer would deny, so a second prompt would fail.
-    fixture(&state, "confirm,deny");
+fn each_owner_action_prompts_once_and_confirmation_does_not_carry_over() {
+    let (path, state, agent) = state_with_agent("presence-per-action");
+    fixture(&state, "confirm,deny,confirm");
     let first = route(
         with_header(
             create_budget_request(&agent.agent_id, "10.00"),
@@ -138,114 +139,64 @@ fn one_confirmation_opens_a_five_minute_window_for_that_client() {
         &state,
     );
     assert_eq!(first.status, 200, "{}", first.body);
-    let token = first.body["owner_window"]["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    assert!(token.starts_with("hubu_window_"));
+    assert!(first.body.get("owner_window").is_none());
     let budget_id = first.body["budget"]["budget_id"]
         .as_str()
         .unwrap()
         .to_string();
-
-    let raise = |token: &str| {
-        with_header(
-            authenticated_json_request(
-                &format!("/budgets/{budget_id}/versions"),
-                json!({ "amount_limit": "20.00", "expected_revision": 1, "reason": "more" }),
-            ),
-            owner_presence::OWNER_WINDOW_HEADER,
-            token,
+    let raise = |amount: &str| {
+        authenticated_json_request(
+            &format!("/budgets/{budget_id}/versions"),
+            json!({ "amount_limit": amount, "expected_revision": 1, "reason": "more" }),
         )
     };
-    let second = route(raise(&token), &state);
-    assert_eq!(second.status, 200, "{}", second.body);
-    assert!(second.body.get("owner_window").is_none());
-
-    // A forged token is not a window: the request prompts, and is denied.
-    let forged = route(raise("hubu_window_forged"), &state);
-    assert_eq!(forged.body["error_code"], "owner_presence_denied");
-
-    // The window does not slide and closes after five minutes.
-    state
-        .presence
-        .advance_clock(owner_presence::OWNER_WINDOW_DURATION);
-    let expired = route(
-        with_header(
-            authenticated_json_request(
-                &format!("/budgets/{budget_id}/versions"),
-                json!({ "amount_limit": "30.00", "expected_revision": 2, "reason": "more" }),
-            ),
-            owner_presence::OWNER_WINDOW_HEADER,
-            &token,
-        ),
-        &state,
-    );
-    assert_eq!(expired.body["error_code"], "owner_presence_denied");
+    // Right after a confirmation, the next action still prompts: denied.
+    let denied = route(raise("20.00"), &state);
+    assert_eq!(denied.body["error_code"], "owner_presence_denied");
+    // And the one after prompts again: confirmed.
+    let raised = route(raise("20.00"), &state);
+    assert_eq!(raised.status, 200, "{}", raised.body);
 
     let records = records(&state);
     let outcomes = records
         .iter()
         .map(|record| record["outcome"].as_str().unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(outcomes, vec!["denied", "denied", "window", "confirmed"]);
-    assert_eq!(records[3]["client"], "portal");
-    assert_eq!(records[3]["method"], "fixture");
+    assert_eq!(outcomes, vec!["confirmed", "denied", "confirmed"]);
+    assert_eq!(records[2]["client"], "portal");
+    assert_eq!(records[2]["method"], "fixture");
     assert_eq!(
-        records[3]["reason"],
+        records[2]["reason"],
         "create a 10.00 USD budget for design-agent"
     );
-    assert_eq!(records[2]["action"], "budget.version.create");
-    assert_eq!(records[2]["window_record_id"], records[3]["record_id"]);
+    assert_eq!(records[0]["action"], "budget.version.create");
     assert_eq!(
-        records[1]["reason"],
-        "set design-agent's budget to 20.00 USD (now 20.00 USD)"
+        records[0]["reason"],
+        "set design-agent's budget to 20.00 USD (now 10.00 USD)"
     );
+    assert!(records
+        .iter()
+        .all(|record| record.get("window_record_id").is_none()));
     std::fs::remove_file(path).ok();
 }
 
+/// The window routes are gone, and undeclared owner routes are refused
+/// without prompting the owner.
 #[test]
-fn lock_closes_windows_and_the_agent_credential_may_lock() {
-    let (path, state, agent) = state_with_agent("presence-lock");
-    fixture(&state, "confirm,deny");
-    let unlocked = route(
-        authenticated_json_request("/owner/unlock", json!({})),
-        &state,
-    );
-    assert_eq!(unlocked.status, 200, "{}", unlocked.body);
-    let token = unlocked.body["owner_window"]["token"]
-        .as_str()
-        .unwrap()
-        .to_string();
+fn window_routes_are_gone_and_unknown_routes_never_prompt() {
+    let (path, state) = temp_state("presence-no-window-routes");
+    fixture(&state, "confirm");
+    for path_ in ["/owner/unlock", "/owner/lock", "/budgets/raise"] {
+        let response = route(authenticated_json_request(path_, json!({})), &state);
+        assert_eq!(response.status, 404, "{path_}: {}", response.body);
+    }
+    assert!(records(&state).is_empty());
     let status = route(
-        with_header(
-            credential_request("GET", "/owner/presence", TEST_AGENT_TOKEN),
-            owner_presence::OWNER_WINDOW_HEADER,
-            &token,
-        ),
+        credential_request("GET", "/owner/presence", TEST_AGENT_TOKEN),
         &state,
     );
-    assert_eq!(status.body["window"]["open"], true);
-
-    let locked = route(
-        credential_request("POST", "/owner/lock", TEST_AGENT_TOKEN),
-        &state,
-    );
-    assert_eq!(locked.status, 200);
-    assert_eq!(locked.body["closed_windows"], 1);
-    let after = route(
-        with_header(
-            create_budget_request(&agent.agent_id, "10.00"),
-            owner_presence::OWNER_WINDOW_HEADER,
-            &token,
-        ),
-        &state,
-    );
-    assert_eq!(after.body["error_code"], "owner_presence_denied");
-    assert_eq!(
-        records(&state)[1]["reason"],
-        "unlock the Hubu admin portal for 5 minutes"
-    );
+    assert_eq!(status.status, 200);
+    assert!(status.body.get("window").is_none());
     std::fs::remove_file(path).ok();
 }
 
@@ -375,14 +326,35 @@ fn prompts_are_rate_limited_across_clients() {
         let response = route(create_budget_request(&agent.agent_id, "10.00"), &state);
         assert_eq!(response.body["error_code"], "owner_presence_denied");
     }
-    let limited = route(
-        authenticated_json_request("/owner/unlock", json!({})),
-        &state,
-    );
+    let limited = route(create_budget_request(&agent.agent_id, "10.00"), &state);
     assert_eq!(limited.status, 429);
     assert_eq!(limited.body["error_code"], "owner_prompt_rate_limited");
     assert!(limited.body["retry_guidance"]["retry_after_seconds"].is_u64());
     assert_eq!(records(&state)[0]["outcome"], "rate_limited");
+    let status = route(authenticated_get_request("/owner/presence"), &state);
+    assert_eq!(status.body["refusals_remaining"], 0);
+    std::fs::remove_file(path).ok();
+}
+
+/// Confirmed prompts never count toward the limit, so an owner working
+/// through many changes is not slowed down.
+#[test]
+fn confirmed_prompts_are_not_rate_limited() {
+    let (path, state, agent) = state_with_agent("presence-rate-confirm");
+    state.presence.set_rate_limit(Some((
+        owner_presence::RATE_LIMIT_MAX_PROMPTS,
+        owner_presence::RATE_LIMIT_PERIOD,
+    )));
+    fixture(&state, "confirm");
+    for _ in 0..(owner_presence::RATE_LIMIT_MAX_PROMPTS * 2) {
+        // Repeated creates fail as overlapping budgets after the owner
+        // confirms; what matters is that the prompt is never rate limited.
+        let response = route(create_budget_request(&agent.agent_id, "1.00"), &state);
+        assert_ne!(response.status, 429, "{}", response.body);
+    }
+    assert!(records(&state)
+        .iter()
+        .all(|record| record["outcome"] == "confirmed"));
     std::fs::remove_file(path).ok();
 }
 
@@ -472,84 +444,6 @@ fn unknown_targets_are_rejected_without_a_prompt() {
     let response = route(create_budget_request("agt_missing00000", "10.00"), &state);
     assert_eq!(response.status, 404);
     assert!(records(&state).is_empty());
-    std::fs::remove_file(path).ok();
-}
-
-#[test]
-fn unlock_reuses_an_open_window_and_honours_no_prompt() {
-    let (path, state) = temp_state("presence-unlock");
-    let no_prompt = route(
-        with_header(
-            authenticated_json_request("/owner/unlock", json!({})),
-            owner_presence::NO_PROMPT_HEADER,
-            "1",
-        ),
-        &state,
-    );
-    assert_eq!(
-        no_prompt.body["error_code"],
-        OWNER_PRESENCE_REQUIRED_ERROR_CODE
-    );
-    let window = state
-        .presence
-        .open_window(
-            OwnerClient::Portal,
-            "opr_x",
-            "unlock",
-            PresenceMethod::Fixture,
-        )
-        .unwrap();
-    fixture(&state, "deny");
-    let reused = route(
-        with_header(
-            authenticated_json_request("/owner/unlock", json!({})),
-            owner_presence::OWNER_WINDOW_HEADER,
-            &window.token,
-        ),
-        &state,
-    );
-    assert_eq!(reused.status, 200);
-    assert_eq!(reused.body["owner_window"]["reused"], true);
-    assert!(reused.body["owner_window"].get("token").is_none());
-    std::fs::remove_file(path).ok();
-}
-
-/// Codex P1: a lock that returned success must not be followed by an action
-/// that relied on the window it closed. The window is checked under the
-/// dispatch lock, which the lock handler also holds.
-#[test]
-fn lock_wins_over_a_window_action_waiting_for_dispatch() {
-    let (path, state, agent) = state_with_agent("presence-lock-race");
-    let window = state
-        .presence
-        .open_window(OwnerClient::Cli, "opr_race", "r", PresenceMethod::Fixture)
-        .unwrap();
-    fixture(&state, "deny");
-    let state = Arc::new(state);
-    let held = lock_dispatch(&state);
-    let worker = {
-        let state = Arc::clone(&state);
-        let agent_id = agent.agent_id.clone();
-        let token = window.token.clone();
-        std::thread::spawn(move || {
-            route(
-                with_header(
-                    create_budget_request(&agent_id, "10.00"),
-                    owner_presence::OWNER_WINDOW_HEADER,
-                    &token,
-                ),
-                &state,
-            )
-        })
-    };
-    // The worker is now blocked on the dispatch lock (or about to be).
-    std::thread::sleep(std::time::Duration::from_millis(50));
-    assert_eq!(state.presence.lock_all(), 1);
-    drop(held);
-    let response = worker.join().unwrap();
-    assert_eq!(response.body["error_code"], "owner_presence_denied");
-    let budgets = route(authenticated_get_request("/budgets?all=true"), &state);
-    assert_eq!(budgets.body["budgets"].as_array().unwrap().len(), 0);
     std::fs::remove_file(path).ok();
 }
 

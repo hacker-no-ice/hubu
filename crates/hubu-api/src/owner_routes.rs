@@ -1,15 +1,15 @@
 //! Route-level owner presence enforcement (v0.3.0 spec, sections 4, 5 and 9).
 //!
 //! Every protected request is classified by credential and by its effective
-//! [`RouteAccess`]. Owner actions run only inside an owner window, or after
-//! `hubu-server` itself raised the presence dialog and the owner confirmed.
+//! [`RouteAccess`]. Every owner action runs only after `hubu-server` itself
+//! raised the presence dialog for that action and the owner confirmed. There
+//! is no owner window: one confirmation authorizes exactly the action its
+//! dialog named (owner decision, 2026-11-19).
 //! Prompts run outside the dispatch lock so a dialog waiting for the owner
 //! never blocks other requests.
 use super::*;
 use hubu_core::persistence::OwnerPresenceRecord;
-use owner_presence::{
-    sanitize_id, sanitize_label, IssuedWindow, OwnerClient, PresenceMethod, PromptRefusal,
-};
+use owner_presence::{sanitize_id, sanitize_label, OwnerClient, PresenceMethod, PromptRefusal};
 
 const INVALID_OWNER_ACTION_ERROR_CODE: &str = "invalid_owner_action";
 const OWNER_ACTION_TARGET_NOT_FOUND_ERROR_CODE: &str = "owner_action_target_not_found";
@@ -19,16 +19,13 @@ const OWNER_ACTION_TARGET_NOT_FOUND_ERROR_CODE: &str = "owner_action_target_not_
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
 struct UnknownOwnerTarget(String);
-const UNLOCK_REASON: &str = "unlock the Hubu admin portal for 5 minutes";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ActionKind {
-    /// Covered by an open owner window; prompts inline when none is open.
-    Windowed,
-    /// Every spend approval prompts, even inside a window.
+    /// Prompts once for this action.
+    Action,
+    /// A spend approval: prompts once, and Deny closes the request.
     Approval,
-    /// Opens a window without performing an action.
-    Unlock,
 }
 
 #[derive(Clone, Debug)]
@@ -118,114 +115,22 @@ fn owner_action(request: HttpRequest, state: &ServerState, client: OwnerClient) 
         Ok(None) => return dispatch_route(request, state),
         Err(error) => return invalid_owner_action(&request, &error),
     };
-    let window_token = header(&request, owner_presence::OWNER_WINDOW_HEADER);
-    match spec.kind {
-        ActionKind::Approval => {
-            if no_prompt(&request) {
-                return presence_required(&spec);
-            }
-            match prompt_and_record(state, &spec, client) {
-                Ok(_) => dispatch_route(request, state),
-                // Deny closes the request in every flow (spec 5.6, owner
-                // decision 2026-11-19): the owner's own Approve and an
-                // agent-raised prompt behave the same.
-                Err((refusal, response)) => {
-                    let approval_request_id =
-                        serde_json::from_str::<ResolveSpendApprovalHttpRequest>(&request.body)
-                            .map(|body| body.approval_request_id)
-                            .unwrap_or_default();
-                    with_refusal_outcome(state, &approval_request_id, &refusal, response)
-                }
-            }
-        }
-        ActionKind::Unlock => {
-            if let Some(window) = state.presence.active_window(window_token) {
-                return HttpResponse {
-                    status: 200,
-                    body: json!({
-                        "owner_window": {
-                            "expires_at": window.expires_at.to_rfc3339(),
-                            "reused": true,
-                        }
-                    }),
-                };
-            }
-            if no_prompt(&request) {
-                return presence_required(&spec);
-            }
-            let (method, record_id) = match prompt_and_record(state, &spec, client) {
-                Ok(confirmed) => confirmed,
-                Err((_, response)) => return response,
-            };
-            match state
-                .presence
-                .open_window(client, &record_id, &spec.reason, method)
-            {
-                Ok(window) => HttpResponse {
-                    status: 200,
-                    body: json!({ "owner_window": window.to_json() }),
-                },
-                Err(error) => internal_presence_error(&error),
-            }
-        }
-        ActionKind::Windowed => {
-            // Check the window under the dispatch lock, which `POST /owner/lock`
-            // also holds, so a lock that returned success is never followed by
-            // an action that relied on the window it closed.
-            let dispatch = lock_dispatch(state);
-            if let Some(window) = state.presence.active_window(window_token) {
-                let response = dispatch_route_locked(request, state);
-                drop(dispatch);
-                if response.status < 400 {
-                    let record = OwnerPresenceRecord {
-                        record_id: new_record_id(),
-                        recorded_at: Utc::now(),
-                        action: spec.action.to_string(),
-                        reason: window.reason.clone(),
-                        outcome: "window".to_string(),
-                        method: Some(window.method.as_str().to_string()),
-                        client: client.as_str().to_string(),
-                        targets: spec.targets.clone(),
-                        window_record_id: Some(window.record_id.clone()),
-                    };
-                    if let Err(error) = record_presence(state, &record) {
-                        log_event(
-                            "error",
-                            "owner_presence_record_failed",
-                            json!({ "action": spec.action, "error": error.to_string() }),
-                        );
-                    }
-                }
-                return response;
-            }
-            drop(dispatch);
-            if no_prompt(&request) {
-                return presence_required(&spec);
-            }
-            let (method, record_id) = match prompt_and_record(state, &spec, client) {
-                Ok(confirmed) => confirmed,
-                Err((_, response)) => return response,
-            };
-            let window = state
-                .presence
-                .open_window(client, &record_id, &spec.reason, method);
-            let mut response = dispatch_route(request, state);
-            match window {
-                Ok(window) => attach_window(&mut response, &window),
-                Err(error) => log_event(
-                    "error",
-                    "owner_window_open_failed",
-                    json!({ "error": error.to_string() }),
-                ),
-            }
-            response
-        }
+    if no_prompt(&request) {
+        return presence_required(&spec);
     }
-}
-
-fn attach_window(response: &mut HttpResponse, window: &IssuedWindow) {
-    if let Value::Object(body) = &mut response.body {
-        body.insert("owner_window".to_string(), window.to_json());
+    match (spec.kind, prompt_and_record(state, &spec, client)) {
+        (_, Ok(_)) => dispatch_route(request, state),
+        // Deny closes the request in every flow (spec 5.6, owner decision
+        // 2026-11-19): the owner's own Approve and an agent-raised prompt
+        // behave the same.
+        (ActionKind::Approval, Err((refusal, response))) => {
+            let approval_request_id =
+                serde_json::from_str::<ResolveSpendApprovalHttpRequest>(&request.body)
+                    .map(|body| body.approval_request_id)
+                    .unwrap_or_default();
+            with_refusal_outcome(state, &approval_request_id, &refusal, response)
+        }
+        (ActionKind::Action, Err((_, response))) => response,
     }
 }
 
@@ -253,7 +158,6 @@ fn tightening(request: HttpRequest, state: &ServerState, client: OwnerClient) ->
             method: None,
             client: client.as_str().to_string(),
             targets,
-            window_record_id: None,
         };
         if let Err(error) = record_presence(state, &record) {
             log_event(
@@ -421,7 +325,6 @@ fn prompt_and_record(
         method,
         client: client.as_str().to_string(),
         targets: spec.targets.clone(),
-        window_record_id: None,
     };
     if let Err(error) = record_presence(state, &record) {
         log_event(
@@ -475,7 +378,7 @@ fn presence_required(spec: &OwnerActionSpec) -> HttpResponse {
     HttpResponse {
         status: 403,
         body: json!({
-            "error": "this owner action needs an open owner window or the owner's confirmation on the Mac",
+            "error": "this owner action needs the owner's confirmation on the Mac",
             "error_code": OWNER_PRESENCE_REQUIRED_ERROR_CODE,
             "owner_action": spec.action,
             "retry_guidance": {
@@ -589,12 +492,12 @@ fn owner_action_spec(
     request: &HttpRequest,
     state: &ServerState,
 ) -> Result<Option<OwnerActionSpec>> {
-    let windowed = |action, reason, targets| {
+    let action = |action, reason, targets| {
         Ok(Some(OwnerActionSpec {
             action,
             reason,
             targets,
-            kind: ActionKind::Windowed,
+            kind: ActionKind::Action,
         }))
     };
     if request.method == "POST" {
@@ -623,7 +526,7 @@ fn owner_action_spec(
                 .unwrap_or_else(|| "unknown".to_string());
             let agent_id = budget["agent_id"].as_str().unwrap_or_default();
             let name = agent_name(state, agent_id).unwrap_or_else(|_| sanitize_id(agent_id));
-            return windowed(
+            return action(
                 "budget.version.create",
                 format!(
                     "set {name}'s budget to {} (now {current})",
@@ -638,7 +541,7 @@ fn owner_action_spec(
             let map = body_object(&request.body)?;
             let username = body_str(&map, "username")
                 .map_or_else(|| "the default user".to_string(), sanitize_label);
-            windowed(
+            action(
                 "user.init",
                 format!("initialize Hubu for owner {username}"),
                 Vec::new(),
@@ -648,7 +551,7 @@ fn owner_action_spec(
             let map = body_object(&request.body)?;
             let amount = body_str(&map, "amount")
                 .ok_or_else(|| anyhow!("spending target requires `amount`"))?;
-            windowed(
+            action(
                 "spending_target.set",
                 format!("set the spending target to {}", format_money(amount, None)?),
                 Vec::new(),
@@ -661,7 +564,7 @@ fn owner_action_spec(
             let new_name =
                 body_str(&map, "name").ok_or_else(|| anyhow!("agent rename requires `name`"))?;
             let old_name = agent_name(state, agent_id)?;
-            windowed(
+            action(
                 "agent.rename",
                 format!("rename agent {old_name} to {}", sanitize_label(new_name)),
                 vec![sanitize_id(agent_id)],
@@ -681,7 +584,7 @@ fn owner_action_spec(
                 ),
                 None => format!("apply a new policy revision to {scope}"),
             };
-            windowed(
+            action(
                 "policy.apply",
                 reason,
                 agent_id.map(sanitize_id).into_iter().collect(),
@@ -694,7 +597,7 @@ fn owner_action_spec(
             let agent_id = body_str(&map, "agent_id")
                 .ok_or_else(|| anyhow!("budget create requires `agent_id`"))?;
             let name = agent_name(state, agent_id)?;
-            windowed(
+            action(
                 "budget.create",
                 format!(
                     "create a {} budget for {name}",
@@ -716,27 +619,18 @@ fn owner_action_spec(
             } else {
                 "not billed"
             };
-            windowed(
+            action(
                 "claim.reconcile",
                 format!("record claim {} as {billed}", sanitize_id(claim_id)),
                 vec![sanitize_id(claim_id)],
             )
         }
-        ("POST", "/owner/unlock") => Ok(Some(OwnerActionSpec {
-            action: "owner.unlock",
-            reason: UNLOCK_REASON.to_string(),
-            targets: Vec::new(),
-            kind: ActionKind::Unlock,
-        })),
-        _ => windowed(
-            "owner.action",
-            format!(
-                "perform the owner action {} {}",
-                sanitize_id(&request.method),
-                sanitize_id(&request.path.replace('/', "."))
-            ),
-            Vec::new(),
-        ),
+        // Every declared owner action has an arm above. Anything else is not
+        // a route, and the owner is never asked about it.
+        _ => Err(anyhow::Error::new(UnknownOwnerTarget(format!(
+            "no route for {} {}",
+            request.method, request.path
+        )))),
     }
 }
 
@@ -815,7 +709,6 @@ pub(super) fn owner_presence_records(request: &HttpRequest, state: &ServerState)
             "method": record.method,
             "client": record.client,
             "target": record.targets,
-            "window_record_id": record.window_record_id,
         })).collect::<Vec<_>>(),
     }))
 }

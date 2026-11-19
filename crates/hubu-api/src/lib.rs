@@ -103,7 +103,7 @@ const AGENT_TOKEN_PREFIX: &str = "hubu_agent_";
 const OWNER_AUTHORITY_REQUIRED_ERROR_CODE: &str = "owner_authority_required";
 const OWNER_PRESENCE_REQUIRED_ERROR_CODE: &str = "owner_presence_required";
 const APPROVAL_NOT_PENDING_ERROR_CODE: &str = "approval_not_pending";
-const OWNER_PRESENCE_GUIDANCE: &str = "owner actions need the owner credential plus an owner window: hubu-server asks the owner to confirm on the Mac (Touch ID) and returns owner_window.token, which the same client sends as X-Hubu-Owner-Window for 5 minutes; send X-Hubu-No-Prompt: 1 to get owner_presence_required instead of a dialog";
+const OWNER_PRESENCE_GUIDANCE: &str = "each owner action needs the owner credential and the owner's confirmation on the Mac (Touch ID): hubu-server raises one dialog naming that action and holds the request until the owner answers; there is no owner window; send X-Hubu-No-Prompt: 1 to get owner_presence_required instead of a dialog";
 /// Retired in v0.3.0. Clients may still send it; the server ignores it.
 #[cfg(test)]
 const APPROVAL_CAPABILITY_HEADER: &str = "x-hubu-approval-capability";
@@ -231,7 +231,7 @@ struct ServerState {
     payment_attempts: Mutex<SqlitePaymentAttemptRepository>,
     payments: Mutex<LocalPaymentManager>,
     lease_config: LeaseConfig,
-    /// Owner presence: provider, owner windows and prompt limits (v0.3.0).
+    /// Owner presence: provider, dialog state and prompt limits (v0.3.0).
     presence: owner_presence::OwnerPresence,
     /// Serializes request handling. Owner prompts run outside it so a dialog
     /// waiting for the owner never blocks other requests.
@@ -1985,21 +1985,7 @@ fn dispatch_route_locked(request: HttpRequest, state: &ServerState) -> HttpRespo
         ("POST", "/spend/approval/resolve") => {
             resolve_spend_approval_at(request.body, state, request_now).map(to_json)
         }
-        ("GET", "/owner/presence") => Ok(state.presence.status(
-            request
-                .headers
-                .get(owner_presence::OWNER_WINDOW_HEADER)
-                .map(String::as_str),
-        )),
-        ("POST", "/owner/lock") => {
-            let closed = state.presence.lock_all();
-            log_event(
-                "info",
-                "owner_windows_locked",
-                json!({ "closed_windows": closed }),
-            );
-            Ok(json!({ "locked": true, "closed_windows": closed }))
-        }
+        ("GET", "/owner/presence") => Ok(state.presence.status()),
         ("GET", "/governance/owner-presence") => owner_presence_records(&request, state),
         ("GET", "/spend/executor/guidance") | ("GET", "/.well-known/hubu-spend-executor.json") => {
             Ok(spend_executor_guidance(state))
@@ -2323,7 +2309,7 @@ enum RouteAccess {
     /// Owner bearer only: owner reads and tightening writes. Needs no owner
     /// window and never prompts.
     OwnerBearer,
-    /// Owner bearer plus a valid owner window token. The default for any
+    /// Owner bearer plus the owner's confirmation of this action. The default for any
     /// route without a declaration.
     OwnerAction,
     /// Executor routes keep the shared owner bearer in v0.3.0 and move to a
@@ -2381,8 +2367,6 @@ const ROUTE_ACCESS: &[(&str, &str, RouteAccess)] = &[
     // A new agent stays pending until the owner confirms (enforced in v0.3.1).
     ("POST", "/agents/register", RouteAccess::Agent),
     ("GET", "/owner/presence", RouteAccess::Agent),
-    // Locking only removes authority, so the agent credential may lock.
-    ("POST", "/owner/lock", RouteAccess::Agent),
     // Owner reads.
     ("GET", "/users", RouteAccess::OwnerBearer),
     ("GET", "/user/spending-target", RouteAccess::OwnerBearer),
@@ -2435,7 +2419,6 @@ const ROUTE_ACCESS: &[(&str, &str, RouteAccess)] = &[
     ),
     // `decision: deny` is lowered to OwnerBearer by its body.
     ("POST", "/spend/approval/resolve", RouteAccess::OwnerAction),
-    ("POST", "/owner/unlock", RouteAccess::OwnerAction),
     // Executor routes keep the shared owner bearer until v0.3.2. Settle and
     // release with a reconciliation body are raised to OwnerAction.
     ("POST", "/spend/executor/validate", RouteAccess::Executor),
@@ -2706,7 +2689,7 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
             "statuses": ["pending", "approved", "denied"],
             "approval_request_id": "the immutable spend decision id returned by needs_approval",
             "review": "show the complete approval.review object before asking the human to approve or deny",
-            "resolve": "approve needs the owner credential and a fresh owner confirmation on the Mac (Touch ID) every time, even inside an owner window; deny needs the owner credential only; approval reserves budget but never invokes a provider",
+            "resolve": "approve needs the owner credential and a fresh owner confirmation on the Mac (Touch ID) for each approval; deny needs the owner credential only; approval reserves budget but never invokes a provider",
             "owner_presence": OWNER_PRESENCE_GUIDANCE,
             "agent_prompt": "after the owner says yes in the conversation, an agent may call POST /spend/approval/prompt with approval_request_id; hubu-server raises the approval dialog and only the owner's confirmation approves",
             "retry": "replay the exact authorization request or read approval status to recover the durable result"
@@ -2779,7 +2762,7 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
                 "vendor_did_not_bill": "POST /spend/executor/release"
             },
             "human_gate": {
-                "requirement": "Reconciliation is an owner action: it needs the owner credential and an owner window opened by the owner's confirmation on the Mac.",
+                "requirement": "Reconciliation is an owner action: it needs the owner credential and the owner's confirmation of that claim on the Mac.",
                 "owner_presence": OWNER_PRESENCE_GUIDANCE
             }
         },
@@ -7970,8 +7953,6 @@ lease_profiles:
         ("POST", "/spend/executor/release", "/spend/executor/release"),
         ("POST", "/spend/approval/prompt", "/spend/approval/prompt"),
         ("GET", "/owner/presence", "/owner/presence"),
-        ("POST", "/owner/lock", "/owner/lock"),
-        ("POST", "/owner/unlock", "/owner/unlock"),
         (
             "GET",
             "/governance/owner-presence",
@@ -13556,23 +13537,9 @@ rules: []
             pending_events
         );
 
-        // An open owner window does not cover approvals: they prompt again,
-        // and Deny closes the request (owner decision, 2026-11-19).
+        // Deny closes the request (owner decision, 2026-11-19).
         deny_presence(&state);
-        let window = state
-            .presence
-            .open_window(
-                owner_presence::OwnerClient::Portal,
-                "opr_test",
-                "unlock",
-                owner_presence::PresenceMethod::Fixture,
-            )
-            .unwrap();
-        let mut in_window = approve();
-        in_window.headers.insert(
-            owner_presence::OWNER_WINDOW_HEADER.to_string(),
-            window.token.clone(),
-        );
+        let in_window = approve();
         let response = route(in_window, &state);
         assert_eq!(response.status, 403);
         assert_eq!(response.body["error_code"], "owner_presence_denied");

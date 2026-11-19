@@ -13,29 +13,28 @@ changes are documented with those components.
 
 | Class | Credential | Examples |
 | --- | --- | --- |
-| Agent | Agent or owner credential | spend, ledger and budget reads, `GET /owner/presence`, `POST /owner/lock`, `POST /spend/approval/prompt` |
-| Owner bearer | Owner credential, no prompt | owner reads, `POST /budgets/revoke`, `POST /user/spending-target/revoke`, approval `decision: deny` |
-| Owner action | Owner credential plus an owner window | `POST /budgets`, budget versions, `POST /policies`, spending target, agent rename, `POST /init`, approval `decision: approve`, reconciliation, `POST /owner/unlock` |
+| Agent | Agent or owner credential | spend, ledger and budget reads, `GET /owner/presence`, `POST /spend/approval/prompt` |
+| Owner bearer | Owner credential, no prompt | owner reads, `GET /governance/owner-presence`, `POST /budgets/revoke`, `POST /user/spending-target/revoke`, approval `decision: deny` |
+| Owner action | Owner credential plus the owner's confirmation of that action | `POST /budgets`, budget versions, `POST /policies`, spending target, agent rename, `POST /init`, approval `decision: approve`, reconciliation |
 | Executor | Owner credential until v0.3.2 | claim, settle and release with an executor body |
 
-A route without a declaration is an owner action. Tightening (deny, revoke,
-lock) never prompts, so the owner can always stop spending at once.
+A route without a declaration is an owner action, and a request to a path that
+does not exist is refused before any prompt. Tightening (deny, revoke) never
+prompts, so the owner can always stop spending at once.
 
-## Owner windows
+## One confirmation, one action
 
-- When an owner action arrives with no window, `hubu-server` raises the
-  dialog and holds the request until the owner answers or 60 seconds pass.
-  If the owner confirms, it performs the action and returns
-  `owner_window: { token, expires_at }` in the response.
-- The window lasts 5 minutes from confirmation and does not slide. The client
-  that opened it sends the token as `X-Hubu-Owner-Window` on later owner
-  actions. The server keeps only a hash of the token, in memory.
-- A window closes when it expires, on `POST /owner/lock`, and when the server
-  stops. Each client (`X-Hubu-Client: portal` or `cli`) has at most one window,
-  and a new window replaces the old one.
-- Every spend approval prompts, even inside a window, so the owner always sees
-  the amount. Pressing Deny in an approval dialog closes the request as denied,
-  whether the owner or an agent raised the dialog. A timeout leaves it pending.
+- When an owner action arrives, `hubu-server` raises the dialog and holds the
+  request until the owner answers or 60 seconds pass. If the owner confirms,
+  it performs that action.
+- A confirmation authorizes only the action its dialog named. There is no
+  owner window: the next owner action prompts again, and the server keeps no
+  owner authority between requests.
+- Every spend approval prompts, so the owner always sees the amount. Pressing
+  Deny in an approval dialog closes the request as denied, whether the owner
+  or an agent raised the dialog. A timeout leaves it pending.
+- Requests that fail validation, or name an agent or budget that does not
+  exist, are refused before any prompt.
 - `X-Hubu-No-Prompt: 1` returns `owner_presence_required` instead of raising
   the dialog. Executors always send it.
 
@@ -43,6 +42,9 @@ The dialog reads `"hubu-server" is trying to <reason>.` Hubu builds the reason
 from stored, validated data, for example
 `set design-agent's budget to 20.00 USD (now 10.00 USD)`. Agent names are
 reduced to `[A-Za-z0-9._-]`, at most 32 characters.
+
+Approving many pending requests with one dialog is planned
+([HUB-399](https://linear.app/hubu/issue/HUB-399)).
 
 ## Approving from chat
 
@@ -58,12 +60,12 @@ returns `approval_not_pending`.
 | Code | Status | Meaning |
 | --- | --- | --- |
 | `owner_authority_required` | 403 | The agent credential called an owner route |
-| `owner_presence_required` | 403 | No valid window, and the request sent `X-Hubu-No-Prompt` |
+| `owner_presence_required` | 403 | An owner action sent `X-Hubu-No-Prompt` |
 | `owner_presence_denied` | 403 | The owner refused, or the dialog failed |
 | `owner_presence_timeout` | 403 | No answer within 60 seconds |
 | `owner_presence_unavailable` | 403 | No presence provider can run, for example with no GUI session |
 | `owner_prompt_in_progress` | 409 | Another dialog is on screen |
-| `owner_prompt_rate_limited` | 429 | More than 5 prompts in 10 minutes |
+| `owner_prompt_rate_limited` | 429 | 5 refused or timed-out prompts in the last 10 minutes; confirmed prompts do not count |
 | `approval_not_pending` | 409 | The approval was already resolved or expired |
 
 Requests that name an unknown agent or budget are refused before any prompt.
@@ -72,9 +74,8 @@ Requests that name an unknown agent or budget are refused before any prompt.
 
 Each prompt is recorded with its action, the exact dialog text, the outcome
 (`confirmed`, `denied`, `timed_out`, `unavailable`, `rate_limited`,
-`superseded`), the method and the client. So are owner actions performed inside
-a window (`window`, with the record of the prompt that opened it) and tightening
-writes (`not_required`). Read them with `GET /governance/owner-presence`
+`superseded`), the method and the client. So are tightening writes
+(`not_required`). Read them with `GET /governance/owner-presence`
 (owner credential, `limit` 1–200, newest first).
 
 ## Providers
