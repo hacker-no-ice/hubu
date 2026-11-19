@@ -1898,10 +1898,19 @@ fn declared_content_length(head: &str) -> Result<usize> {
 
 /// Runs one request's handler under the dispatch lock.
 fn dispatch_route(request: HttpRequest, state: &ServerState) -> HttpResponse {
-    let _dispatch = match state.dispatch.lock() {
+    let _dispatch = lock_dispatch(state);
+    dispatch_route_locked(request, state)
+}
+
+fn lock_dispatch(state: &ServerState) -> std::sync::MutexGuard<'_, ()> {
+    match state.dispatch.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
-    };
+    }
+}
+
+/// Runs one request's handler. The caller holds the dispatch lock.
+fn dispatch_route_locked(request: HttpRequest, state: &ServerState) -> HttpResponse {
     let request_now = Utc::now();
     let budget_versions_public_id = budget_versions_public_id(&request.path).map(str::to_string);
     let result = match (request.method.as_str(), request.path.as_str()) {

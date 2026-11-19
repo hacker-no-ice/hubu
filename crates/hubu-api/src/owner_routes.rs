@@ -160,8 +160,13 @@ fn owner_action(request: HttpRequest, state: &ServerState, client: OwnerClient) 
             }
         }
         ActionKind::Windowed => {
+            // Check the window under the dispatch lock, which `POST /owner/lock`
+            // also holds, so a lock that returned success is never followed by
+            // an action that relied on the window it closed.
+            let dispatch = lock_dispatch(state);
             if let Some(window) = state.presence.active_window(window_token) {
-                let response = dispatch_route(request, state);
+                let response = dispatch_route_locked(request, state);
+                drop(dispatch);
                 if response.status < 400 {
                     let record = OwnerPresenceRecord {
                         record_id: new_record_id(),
@@ -184,6 +189,7 @@ fn owner_action(request: HttpRequest, state: &ServerState, client: OwnerClient) 
                 }
                 return response;
             }
+            drop(dispatch);
             if no_prompt(&request) {
                 return presence_required(&spec);
             }
@@ -309,8 +315,21 @@ fn approval_prompt(request: HttpRequest, state: &ServerState, client: OwnerClien
     match prompt_and_record(state, &spec, client) {
         Ok(_) => {
             let mut response = resolve("approve");
+            // The owner confirmed, but resolution can still fail (for example
+            // the budget was revoked while the dialog was open). Report the
+            // stored status, not the owner's answer.
+            let status = if response.status < 400 {
+                "approved".to_string()
+            } else {
+                with_dispatch(state, || {
+                    get_spend_approval(Some(&body.approval_request_id), state)
+                        .ok()
+                        .map(|approval| approval.status)
+                })
+                .unwrap_or_else(|| "pending".to_string())
+            };
             if let Value::Object(map) = &mut response.body {
-                map.insert("approval_status".to_string(), json!("approved"));
+                map.insert("approval_status".to_string(), json!(status));
             }
             response
         }

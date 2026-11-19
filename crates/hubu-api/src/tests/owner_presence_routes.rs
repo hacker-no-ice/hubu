@@ -513,3 +513,68 @@ fn unlock_reuses_an_open_window_and_honours_no_prompt() {
     assert!(reused.body["owner_window"].get("token").is_none());
     std::fs::remove_file(path).ok();
 }
+
+/// Codex P1: a lock that returned success must not be followed by an action
+/// that relied on the window it closed. The window is checked under the
+/// dispatch lock, which the lock handler also holds.
+#[test]
+fn lock_wins_over_a_window_action_waiting_for_dispatch() {
+    let (path, state, agent) = state_with_agent("presence-lock-race");
+    let window = state
+        .presence
+        .open_window(OwnerClient::Cli, "opr_race", "r", PresenceMethod::Fixture)
+        .unwrap();
+    fixture(&state, "deny");
+    let state = Arc::new(state);
+    let held = lock_dispatch(&state);
+    let worker = {
+        let state = Arc::clone(&state);
+        let agent_id = agent.agent_id.clone();
+        let token = window.token.clone();
+        std::thread::spawn(move || {
+            route(
+                with_header(
+                    create_budget_request(&agent_id, "10.00"),
+                    owner_presence::OWNER_WINDOW_HEADER,
+                    &token,
+                ),
+                &state,
+            )
+        })
+    };
+    // The worker is now blocked on the dispatch lock (or about to be).
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    assert_eq!(state.presence.lock_all(), 1);
+    drop(held);
+    let response = worker.join().unwrap();
+    assert_eq!(response.body["error_code"], "owner_presence_denied");
+    let budgets = route(authenticated_get_request("/budgets?all=true"), &state);
+    assert_eq!(budgets.body["budgets"].as_array().unwrap().len(), 0);
+    std::fs::remove_file(path).ok();
+}
+
+/// Codex P2: a confirmed agent-raised approval whose resolution fails must not
+/// report `approved`.
+#[test]
+fn agent_raised_approval_reports_the_stored_status_when_resolution_fails() {
+    let (path, state, agent, pending) = setup_pending_approval("presence-agent-fail");
+    let id = pending.body["approval"]["approval_request_id"]
+        .as_str()
+        .unwrap();
+    let budgets = route(authenticated_get_request("/budgets"), &state);
+    for budget in budgets.body["budgets"].as_array().unwrap() {
+        if budget["agent_id"] == json!(agent.agent_id) {
+            revoke_budget(
+                json!({ "budget_id": budget["budget_id"] }).to_string(),
+                &state,
+            )
+            .unwrap();
+        }
+    }
+    fixture(&state, "confirm");
+    let response = route(prompt_request(id), &state);
+    assert_eq!(response.status, 400, "{}", response.body);
+    assert_eq!(response.body["approval_status"], "pending");
+    assert_eq!(approval_status(&state, id), "pending");
+    std::fs::remove_file(path).ok();
+}

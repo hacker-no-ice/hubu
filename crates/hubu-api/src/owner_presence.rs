@@ -6,8 +6,9 @@
 //! client that opened it by a random window token. The server stores only the
 //! token's hash.
 // Unit tests install fixture providers directly, so the environment-driven
-// provider selection and the macOS provider are unused in the test build.
-#![cfg_attr(test, allow(dead_code))]
+// provider selection and the macOS provider are unused in the test build. On
+// other platforms the macOS-only policy setting and methods are unused.
+#![cfg_attr(any(test, not(target_os = "macos")), allow(dead_code))]
 use std::{
     collections::{HashMap, VecDeque},
     fs::File,
