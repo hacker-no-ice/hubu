@@ -79,8 +79,9 @@ the contract's [safety rules](spend-executor-contract.md#safety-rules).
 If a claim's lease expires before you finalize it, Hubu keeps the hold claimed
 and normal settle and release are rejected. The same applies when the provider
 outcome is unknown. A human checks provider billing and reconciles the claim
-with the separate reconciliation capability: `vendor_billed` with a receipt, or
-`vendor_did_not_bill`. Executors never hold that capability. See
+as an owner action confirmed on the Mac: `vendor_billed` with a receipt, or
+`vendor_did_not_bill`. Executors never reconcile and never prompt the owner
+(see [owner presence](owner-presence.md)). See
 [expired claims](spend-executor-contract.md#expired-claims).
 
 ## 5. The agent observes status by its handle

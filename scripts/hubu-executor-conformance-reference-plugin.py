@@ -32,9 +32,12 @@ def perform(base_url: str, bearer: str, message: dict) -> dict:
     if message.get("body") is not None:
         data = json.dumps(message["body"]).encode()
         headers["Content-Type"] = "application/json"
+    # Executors never ask the owner to confirm anything (v0.3.0): an owner
+    # action from an executor fails with owner_presence_required.
+    headers["X-Hubu-No-Prompt"] = "1"
     if message.get("reconciliation_capability") == "executor_bearer":
         # Conformance probe: an executor presenting its own bearer as the
-        # human capability must be rejected by Hubu.
+        # retired human capability must still be rejected by Hubu.
         headers[RECONCILIATION_HEADER] = bearer
     request = urllib.request.Request(url, method=message["method"], data=data, headers=headers)
     try:

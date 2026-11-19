@@ -53,6 +53,7 @@ DEFAULT_CORPUS = ROOT / "fixtures" / "hubu-executor-conformance-v4.5.json"
 CORPUS_SCHEMA = "hubu-executor-conformance-v1"
 PLUGIN_PROTOCOL = "hubu-executor-conformance-plugin-v1"
 RECONCILIATION_HEADER = "X-Hubu-Reconciliation-Capability"
+NO_PROMPT_HEADER = "X-Hubu-No-Prompt"
 PLUGIN_REPLY_TIMEOUT_SECONDS = 30.0
 TEMPLATE = re.compile(r"\$\{([A-Za-z0-9_.\-]+)\}")
 SEGMENT = re.compile(r"^([A-Za-z0-9_\-]*)(?:\[(.+)\])?$")
@@ -428,7 +429,9 @@ class BuiltinHttpExecutor(ExecutorSide):
         self.bearer = bearer
 
     def invoke(self, message: dict[str, Any]) -> tuple[int, Any]:
-        headers = {}
+        # Executors never ask the owner to confirm anything (v0.3.0): an owner
+        # action from an executor fails with owner_presence_required.
+        headers = {NO_PROMPT_HEADER: "1"}
         if message.get("reconciliation_capability") == "executor_bearer":
             headers[RECONCILIATION_HEADER] = self.bearer
         return http_request(

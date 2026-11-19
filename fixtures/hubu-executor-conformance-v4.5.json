@@ -11,7 +11,7 @@
     },
     "credentials": {
       "normal_bearer": "HUBU_AUTH_TOKEN; shared by agent-side, observer and executor-side requests",
-      "human_reconciliation_capability": "HUBU_RECONCILIATION_TOKEN; sent only by human reconciliation steps in the X-Hubu-Reconciliation-Capability header"
+      "human_reconciliation_capability": "HUBU_RECONCILIATION_TOKEN; retired in v0.3.0 and ignored by Hubu. Human reconciliation is an owner action confirmed by owner presence (the runner's server uses the fixture provider); executor-side requests send X-Hubu-No-Prompt"
     }
   },
   "setup": {
@@ -193,19 +193,19 @@
       "gongbu_activity_class": "proven"
     },
     "human_capability_missing": {
-      "trigger": "A reconciliation-shaped request carried only the normal bearer.",
+      "trigger": "A reconciliation-shaped request from an executor carried only the normal bearer and no owner window (executors send X-Hubu-No-Prompt and never prompt the owner).",
       "observed": {
-        "status": 400,
-        "error_contains": "missing human reconciliation capability"
+        "status": 403,
+        "error_contains": "needs an open owner window or the owner's confirmation"
       },
       "executor_action": "Executors never reconcile; surface the claim to a human.",
       "gongbu_activity_class": "proven"
     },
     "human_capability_invalid": {
-      "trigger": "A reconciliation-shaped request presented the normal bearer as the human capability.",
+      "trigger": "A reconciliation-shaped request from an executor presented the normal bearer as the retired human capability, which Hubu ignores; with no owner window it is refused.",
       "observed": {
-        "status": 400,
-        "error_contains": "invalid human reconciliation capability"
+        "status": 403,
+        "error_contains": "needs an open owner window or the owner's confirmation"
       },
       "executor_action": "Executors never reconcile; surface the claim to a human.",
       "gongbu_activity_class": "proven"

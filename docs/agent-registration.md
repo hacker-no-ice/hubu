@@ -201,10 +201,10 @@ hubu agent history --agent-id agt_EXACT_AGENT_ID
 ```
 
 The CLI calls `POST /agents/rename` with `agent_id`, `name`, and `reason` only.
-The route requires the human approval capability
-(`X-Hubu-Approval-Capability`, from `HUBU_APPROVAL_TOKEN` or
-`HUBU_APPROVAL_TOKEN_FILE`) in addition to the local bearer token, so agent
-sessions cannot rename themselves. Rename is not exposed through
+The route is an owner action: it needs the owner credential and an owner
+window, which `hubu-server` opens only after the owner confirms on the Mac
+(see [owner presence](owner-presence.md)), so agent sessions cannot rename
+themselves. Rename is not exposed through
 `hubu-unified-mcp`: there is no rename tool and the unified MCP route allowlist
 excludes `/agents/rename` and `/agents/history`.
 

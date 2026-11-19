@@ -48,7 +48,7 @@ shopt -s nullglob
     )
     if [[ "${#license_files[@]}" -eq 0 ]]; then
       case "${package_key}" in
-        "objc2-core-foundation v0.3.2"|"objc2-io-kit v0.3.2")
+        "objc2-core-foundation v0.3.2"|"objc2-io-kit v0.3.2"|"objc2-foundation v0.3.2"|"objc2-local-authentication v0.3.2"|"objc2 v0.6.5"|"objc2-encode v4.1.0"|"block2 v0.6.2")
           license_files=("${root_dir}/third-party-license-material/objc2-0.3.2-LICENSE.md")
           ;;
         "pbjson v0.9.0")

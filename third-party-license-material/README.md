@@ -6,7 +6,10 @@ matches exact locked package versions so dependency updates fail closed until
 their inputs are reviewed again.
 
 - `objc2-0.3.2-LICENSE.md`: `madsmtm/objc2` commit
-  `7b1abfd750a2cacaea71d6a56ecfb83cb7de560b`.
+  `7b1abfd750a2cacaea71d6a56ecfb83cb7de560b`. The same repository-level text
+  covers `objc2` 0.6.5, `objc2-encode` 4.1.0, `block2` 0.6.2,
+  `objc2-foundation` 0.3.2 and `objc2-local-authentication` 0.3.2, which
+  `hubu-server` uses on macOS for the owner presence (Touch ID) dialog.
 - `pbjson-0.9.0-LICENSE`: `influxdata/pbjson` commit
   `48ee5989564e0ace82ad71b87736d3d1b2e0e1cd`.
 - `tonic-0.14.6-LICENSE`: `hyperium/tonic` commit

@@ -7,11 +7,13 @@ mod history;
 mod human_lifecycle;
 mod lifecycle;
 mod lifecycle_coverage;
+mod owner_presence;
 pub use authorization_void::{AuthorizationVoidError, AuthorizationVoidResult};
 pub use automatic_lifecycle::SelectedSpendPolicy;
 pub use history::HistorySnapshot;
 pub(crate) use lifecycle::append_lifecycle_event_in_transaction;
 pub use lifecycle::AppendLifecycleResult;
+pub use owner_presence::OwnerPresenceRecord;
 
 use std::path::Path;
 use std::str::FromStr;
@@ -1118,6 +1120,8 @@ impl SqliteGovernanceRepository {
         restore?;
         self.initialize_provider_accounting()?;
         self.in_init_transaction(Self::init_lifecycle_schema)?;
+        self.conn
+            .execute_batch(owner_presence::OWNER_PRESENCE_SCHEMA)?;
         Ok(())
     }
 

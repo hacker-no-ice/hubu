@@ -141,6 +141,9 @@ class HubuServer:
             HUBU_RECONCILIATION_TOKEN=RECONCILIATION_TOKEN,
             HUBU_APPROVAL_TOKEN=APPROVAL_TOKEN,
             HUBU_LEASE_CONFIG=str(lease),
+            # Owner actions need owner presence (v0.3.0); never raise the real
+            # Touch ID dialog from a test server.
+            HUBU_OWNER_PRESENCE_PROVIDER="fixture",
         )
         for name in ("HUBU_AUTH_TOKEN_FILE", "HUBU_RECONCILIATION_TOKEN_FILE", "HUBU_APPROVAL_TOKEN_FILE"):
             self.env.pop(name, None)
