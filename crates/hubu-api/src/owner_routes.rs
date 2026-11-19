@@ -124,10 +124,19 @@ fn owner_action(request: HttpRequest, state: &ServerState, client: OwnerClient) 
             if no_prompt(&request) {
                 return presence_required(&spec);
             }
-            if let Err((_, response)) = prompt_and_record(state, &spec, client) {
-                return response;
+            match prompt_and_record(state, &spec, client) {
+                Ok(_) => dispatch_route(request, state),
+                // Deny closes the request in every flow (spec 5.6, owner
+                // decision 2026-11-19): the owner's own Approve and an
+                // agent-raised prompt behave the same.
+                Err((refusal, response)) => {
+                    let approval_request_id =
+                        serde_json::from_str::<ResolveSpendApprovalHttpRequest>(&request.body)
+                            .map(|body| body.approval_request_id)
+                            .unwrap_or_default();
+                    with_refusal_outcome(state, &approval_request_id, &refusal, response)
+                }
             }
-            dispatch_route(request, state)
         }
         ActionKind::Unlock => {
             if let Some(window) = state.presence.active_window(window_token) {
@@ -296,25 +305,9 @@ fn approval_prompt(request: HttpRequest, state: &ServerState, client: OwnerClien
         }
         Err(error) => return invalid_owner_action(&request, &error),
     };
-    let resolve = |decision: &str| {
-        dispatch_route(
-            HttpRequest {
-                method: "POST".to_string(),
-                path: "/spend/approval/resolve".to_string(),
-                query: HashMap::new(),
-                headers: HashMap::new(),
-                body: json!({
-                    "approval_request_id": body.approval_request_id,
-                    "decision": decision,
-                })
-                .to_string(),
-            },
-            state,
-        )
-    };
     match prompt_and_record(state, &spec, client) {
         Ok(_) => {
-            let mut response = resolve("approve");
+            let mut response = resolve_approval(state, &body.approval_request_id, "approve");
             // The owner confirmed, but resolution can still fail (for example
             // the budget was revoked while the dialog was open). Report the
             // stored status, not the owner's answer.
@@ -333,28 +326,62 @@ fn approval_prompt(request: HttpRequest, state: &ServerState, client: OwnerClien
             }
             response
         }
-        Err((refusal, mut response)) => {
-            let status = if refusal == PromptRefusal::Denied {
-                let denied = resolve("deny");
-                if denied.status >= 400 {
-                    log_event(
-                        "error",
-                        "approval_prompt_deny_failed",
-                        json!({ "status": denied.status, "body": denied.body }),
-                    );
-                    "pending"
-                } else {
-                    "denied"
-                }
-            } else {
-                "pending"
-            };
-            if let Value::Object(map) = &mut response.body {
-                map.insert("approval_status".to_string(), json!(status));
-            }
-            response
+        Err((refusal, response)) => {
+            with_refusal_outcome(state, &body.approval_request_id, &refusal, response)
         }
     }
+}
+
+/// Resolves an approval as `decision` under the dispatch lock.
+fn resolve_approval(
+    state: &ServerState,
+    approval_request_id: &str,
+    decision: &str,
+) -> HttpResponse {
+    dispatch_route(
+        HttpRequest {
+            method: "POST".to_string(),
+            path: "/spend/approval/resolve".to_string(),
+            query: HashMap::new(),
+            headers: HashMap::new(),
+            body: json!({
+                "approval_request_id": approval_request_id,
+                "decision": decision,
+            })
+            .to_string(),
+        },
+        state,
+    )
+}
+
+/// A refused approval prompt: Deny closes the request as denied; a timeout,
+/// an unavailable provider, a busy screen or the rate limit leave it pending.
+/// The refusal response carries the resulting `approval_status`.
+fn with_refusal_outcome(
+    state: &ServerState,
+    approval_request_id: &str,
+    refusal: &PromptRefusal,
+    mut response: HttpResponse,
+) -> HttpResponse {
+    let status = if *refusal == PromptRefusal::Denied {
+        let denied = resolve_approval(state, approval_request_id, "deny");
+        if denied.status >= 400 {
+            log_event(
+                "error",
+                "approval_prompt_deny_failed",
+                json!({ "status": denied.status, "body": denied.body }),
+            );
+            "pending"
+        } else {
+            "denied"
+        }
+    } else {
+        "pending"
+    };
+    if let Value::Object(map) = &mut response.body {
+        map.insert("approval_status".to_string(), json!(status));
+    }
+    response
 }
 
 /// Raises the dialog and records the result, confirmed or not. Fails closed

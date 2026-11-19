@@ -34,7 +34,8 @@ lock) never prompts, so the owner can always stop spending at once.
   stops. Each client (`X-Hubu-Client: portal` or `cli`) has at most one window,
   and a new window replaces the old one.
 - Every spend approval prompts, even inside a window, so the owner always sees
-  the amount.
+  the amount. Pressing Deny in an approval dialog closes the request as denied,
+  whether the owner or an agent raised the dialog. A timeout leaves it pending.
 - `X-Hubu-No-Prompt: 1` returns `owner_presence_required` instead of raising
   the dialog. Executors always send it.
 

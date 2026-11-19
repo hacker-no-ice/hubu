@@ -13537,7 +13537,11 @@ rules: []
         );
 
         // The retired approval capability carries no authority any more.
-        deny_presence(&state);
+        // The retired approval capability carries no authority any more. A
+        // timeout leaves the request pending.
+        state.presence.set_provider(Arc::new(
+            owner_presence::FixtureProvider::parse("timeout").unwrap(),
+        ));
         let mut with_capability = approve();
         with_capability.headers.insert(
             APPROVAL_CAPABILITY_HEADER.to_string(),
@@ -13545,9 +13549,16 @@ rules: []
         );
         let response = route(with_capability, &state);
         assert_eq!(response.status, 403);
-        assert_eq!(response.body["error_code"], "owner_presence_denied");
+        assert_eq!(response.body["error_code"], "owner_presence_timeout");
+        assert_eq!(response.body["approval_status"], "pending");
+        assert_eq!(
+            human_approval_lifecycle_events(&state, approval_request_id),
+            pending_events
+        );
 
-        // An open owner window does not cover approvals: they prompt again.
+        // An open owner window does not cover approvals: they prompt again,
+        // and Deny closes the request (owner decision, 2026-11-19).
+        deny_presence(&state);
         let window = state
             .presence
             .open_window(
@@ -13565,10 +13576,16 @@ rules: []
         let response = route(in_window, &state);
         assert_eq!(response.status, 403);
         assert_eq!(response.body["error_code"], "owner_presence_denied");
-        assert_eq!(
-            human_approval_lifecycle_events(&state, approval_request_id),
-            pending_events
-        );
+        assert_eq!(response.body["approval_status"], "denied");
+        assert_human_approval_lifecycle(&state, approval_request_id, Some("declined"));
+
+        // A closed request is never prompted again.
+        state.presence.set_provider(Arc::new(
+            owner_presence::FixtureProvider::parse("confirm").unwrap(),
+        ));
+        let again = route(approve(), &state);
+        assert!(again.status >= 400, "{}", again.body);
+        assert!(again.body["auth_token_id"].is_null());
 
         let records = route(
             authenticated_get_request("/governance/owner-presence"),
@@ -13576,11 +13593,16 @@ rules: []
         );
         assert_eq!(records.status, 200);
         let records = records.body["records"].as_array().unwrap().clone();
-        assert_eq!(records.len(), 2);
-        assert!(records.iter().all(|record| record["outcome"] == "denied"
-            && record["action"] == "spend.approval.approve"
-            && record["reason"].as_str().unwrap()
-                == "approve 6.00 USD on AcmeCafe for agent approval-owner-boundary-agent"));
+        let outcomes = records
+            .iter()
+            .map(|record| record["outcome"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(outcomes, vec!["denied", "timed_out"]);
+        assert!(records
+            .iter()
+            .all(|record| record["action"] == "spend.approval.approve"
+                && record["reason"].as_str().unwrap()
+                    == "approve 6.00 USD on AcmeCafe for agent approval-owner-boundary-agent"));
         std::fs::remove_file(path).ok();
     }
 
