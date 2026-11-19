@@ -120,6 +120,29 @@ fn validate_label(value: &str, field: &str, max_chars: usize) -> Result<String, 
     Ok(value.to_string())
 }
 
+/// The rename handler's checks that need no stored state, run before the
+/// owner is asked to confirm. State checks (unknown agent, collisions, no-op)
+/// run in the handler.
+pub(super) fn precheck_rename(body: &str) -> anyhow::Result<()> {
+    let request: RenameAgentHttpRequest = serde_json::from_str(body).map_err(|error| {
+        anyhow!("agent rename accepts only agent_id, name, and reason: {error}")
+    })?;
+    for (value, field, max) in [
+        (&request.name, "name", MAX_AGENT_NAME_CHARS),
+        (&request.reason, "reason", MAX_RENAME_REASON_CHARS),
+    ] {
+        if let Err(RenameFailure::Http(response)) = validate_label(value, field, max) {
+            return Err(anyhow!(
+                "{}",
+                response.body["error"]
+                    .as_str()
+                    .unwrap_or("invalid agent rename")
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn rename_agent(body: &str, state: &ServerState) -> Result<Value, RenameFailure> {
     let request: RenameAgentHttpRequest = serde_json::from_str(body).map_err(|error| {
         bad_request(format!(

@@ -501,3 +501,40 @@ fn budget_reasons_accept_any_currency_case() {
     );
     std::fs::remove_file(path).ok();
 }
+
+/// Codex P1 (spec 5.4): requests that fail the handler's stateless checks are
+/// refused before the owner is asked, so they never use up the refusal limit.
+#[test]
+fn invalid_owner_requests_are_refused_before_any_prompt() {
+    let (path, state, agent) = state_with_agent("presence-precheck");
+    fixture(&state, "deny");
+    for body in [
+        json!({}),
+        json!({ "policy_yaml": "not: [valid" }),
+        json!({ "policy_yaml": "id: p\nversion: v1\ndefault_effect: sometimes\nrules: []\n" }),
+        json!({ "daily_limit": "lots" }),
+        json!({ "daily_limit": "5.00", "unexpected": true }),
+    ] {
+        let response = route(
+            authenticated_json_request("/policies", body.clone()),
+            &state,
+        );
+        assert_eq!(response.status, 400, "{body}: {}", response.body);
+    }
+    for body in [
+        json!({ "agent_id": agent.agent_id, "name": " ", "reason": "x" }),
+        json!({ "agent_id": agent.agent_id, "name": "ok", "reason": "" }),
+        json!({ "agent_id": agent.agent_id, "name": "a\u{7}b", "reason": "x" }),
+        json!({ "agent_id": agent.agent_id, "name": "ok", "reason": "x", "owner": "usr_x" }),
+    ] {
+        let response = route(
+            authenticated_json_request("/agents/rename", body.clone()),
+            &state,
+        );
+        assert_eq!(response.status, 400, "{body}: {}", response.body);
+    }
+    let response = route(create_budget_request(&agent.agent_id, "ten"), &state);
+    assert_eq!(response.status, 400, "{}", response.body);
+    assert!(records(&state).is_empty(), "no prompt may be raised");
+    std::fs::remove_file(path).ok();
+}

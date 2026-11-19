@@ -558,6 +558,7 @@ fn owner_action_spec(
             )
         }
         ("POST", agent_identity::AGENT_RENAME_ROUTE) => {
+            agent_identity::precheck_rename(&request.body)?;
             let map = body_object(&request.body)?;
             let agent_id = body_str(&map, "agent_id")
                 .ok_or_else(|| anyhow!("agent rename requires `agent_id`"))?;
@@ -571,6 +572,7 @@ fn owner_action_spec(
             )
         }
         ("POST", "/policies") => {
+            precheck_policy(&request.body, state)?;
             let map = body_object(&request.body)?;
             let agent_id = body_str(&map, "agent_id");
             let scope = match agent_id {
@@ -632,6 +634,25 @@ fn owner_action_spec(
             request.method, request.path
         )))),
     }
+}
+
+/// The policy handler's checks that need no stored state, run before the
+/// owner is asked to confirm: the request shape, and the policy itself (the
+/// YAML parsed and validated, or the starter `daily_limit` amount).
+fn precheck_policy(body: &str, state: &ServerState) -> Result<()> {
+    let request: AddPolicyHttpRequest = serde_json::from_str(body)?;
+    match request.policy_yaml {
+        Some(policy_yaml) => {
+            let mut policy = Policy::from_yaml_str(&policy_yaml)
+                .map_err(|error| anyhow!("{}", policy_load_error_message(error)))?;
+            policy.owner_user_id = authenticated_user_context(state)?.user_id;
+            validate_policy(&policy)?;
+        }
+        None => {
+            decimal_amount(request.daily_limit.as_deref(), "daily_limit", "policy add")?;
+        }
+    }
+    Ok(())
 }
 
 /// The approval reason from the stored request, or `None` when it is no
