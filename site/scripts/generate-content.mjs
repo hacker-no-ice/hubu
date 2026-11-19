@@ -36,9 +36,14 @@ const unpublishedSources = new Set([
   "docs/operations/gongbu-sandbox.md", // developer manual-test sandbox
   "docs/operations/live-provider-testing.md", // superseded; the site redirects to live-providers
   "docs/operations/publishing-releases.md", // maintainer release publication runbook
-  "docs/specs/README.md", // index of internal release tech specs
-  "docs/specs/v0.3.0-owner-agent-separation.md", // internal v0.3.0 tech spec
 ]);
+
+// Whole folders of internal docs. Every Markdown file under them stays
+// unpublished, including files added later.
+const unpublishedDirectories = [
+  "docs/specs/", // release tech specs
+];
+
 
 const repoRelative = (file) => path.relative(repoRoot, file).split(path.sep).join("/");
 const allSourceFiles = await markdownPaths(docsRoot);
@@ -47,7 +52,11 @@ for (const excluded of unpublishedSources) {
     throw new Error(`Unpublished docs list names a missing file: ${excluded}`);
   }
 }
-const sourceFiles = allSourceFiles.filter((file) => !unpublishedSources.has(repoRelative(file)));
+const isUnpublished = (file) => {
+  const relative = repoRelative(file);
+  return unpublishedSources.has(relative) || unpublishedDirectories.some((directory) => relative.startsWith(directory));
+};
+const sourceFiles = allSourceFiles.filter((file) => !isUnpublished(file));
 const sourceToSlug = new Map(sourceFiles.map((file) => {
   const sourcePath = path.relative(repoRoot, file).split(path.sep).join("/");
   const slug = sourcePath
