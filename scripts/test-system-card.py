@@ -82,8 +82,8 @@ class RendererGuards(unittest.TestCase):
         run.update(overrides)
         (self.evidence / episode / "run.json").write_text(json.dumps(run))
 
-    def render(self):
-        return subprocess.run([sys.executable, str(KITS / "render-report.py"), str(self.evidence), "--root", str(self.root)],
+    def render(self, *options):
+        return subprocess.run([sys.executable, str(KITS / "render-report.py"), str(self.evidence), "--root", str(self.root), *options],
                               capture_output=True, text=True)
 
     def test_refuses_dirty_kits_checkouts(self):
@@ -112,6 +112,37 @@ class RendererGuards(unittest.TestCase):
         self.assertIn("must match the released source", self.render().stderr)
 
 
+    def test_card_and_supplement_never_copy_private_capture_data(self):
+        marker = "/Users/private-capture-marker"
+        episode = self.evidence / "ep01-runaway"
+        self.write_run("ep01-runaway", platform=marker)
+        (episode / "transcript.txt").write_text(f"[now] $ {marker}/hubu budget list\n{marker}\nCLI exit=0\n")
+        (episode / "result.json").write_text(json.dumps({
+            "verdict": "not tested", "checks": [{"name": marker, "status": "unconfirmed"}],
+        }))
+        rendered = self.render()
+        self.assertEqual(rendered.returncode, 0, rendered.stderr)
+        source = self.root / "site/app/releases/v0.2.5/report.ts"
+        card = self.root / "break-hubu/cards/v0.2.5.md"
+        self.assertNotIn(marker, source.read_text() + card.read_text())
+        self.assertFalse((self.root / "site/evidence").exists())
+        self.assertTrue((episode / "transcript.txt").is_file())
+        renderer = load_renderer()
+        original = renderer.load_report(source)["episodes"]
+        for directory in self.evidence.iterdir():
+            (directory / "run.json").unlink()
+        episode = self.evidence / "ep05-denied-operation"
+        episode.mkdir()
+        self.write_run(episode.name, kits_commit=COMMIT)
+        rendered = self.render("--supplement")
+        self.assertEqual(rendered.returncode, 0, rendered.stderr)
+        supplemented = renderer.load_report(source)
+        self.assertEqual({key: supplemented["episodes"][key] for key in original}, original)
+        self.assertEqual(supplemented["supplements"][0]["episodes"], [episode.name])
+        self.assertIn(f"--kits {episode.name}", card.read_text())
+        self.assertFalse((self.root / "site/evidence").exists())
+
+
 class SiteContract(unittest.TestCase):
     def test_rendered_tiers_include_documented_gaps_like_the_site(self):
         renderer = load_renderer()
@@ -131,19 +162,6 @@ class SiteContract(unittest.TestCase):
             self.assertLessEqual(set(assessment["documented"]), ids, release)
             self.assertTrue(all(value == "known-gap" for value in assessment["documented"].values()), release)
 
-    def test_release_reports_are_placeholders_or_rendered(self):
-        renderer = load_renderer()
-        reports = sorted((ROOT / "site/app/releases").glob("v*/report.ts"))
-        self.assertTrue(reports)
-        for report in reports:
-            with self.subTest(release=report.parent.name):
-                source = report.read_text()
-                wrapper = report.parent / "report/page.tsx"
-                if renderer.PLACEHOLDER in source:
-                    self.assertFalse(wrapper.exists(), "an unmeasured release has no analysis page")
-                else:
-                    self.assertIn("Generated from captured public evidence by break-hubu/render-report.py.", source)
-                    self.assertEqual(wrapper.read_text(), renderer.WRAPPER)
 
 
 class ClaimsCatalog(unittest.TestCase):
@@ -203,31 +221,16 @@ class ClaimsCatalog(unittest.TestCase):
                 if renderer.PLACEHOLDER in source:
                     self.assertFalse(wrapper.exists(), "an unmeasured release has no analysis page")
                 else:
-                    self.assertIn("Generated from captured public evidence by break-hubu/render-report.py.", source)
+                    self.assertIn("Generated from proof-kit results by break-hubu/render-report.py.", source)
                     self.assertEqual(wrapper.read_text(), renderer.WRAPPER)
                     measured = renderer.load_report(report)["episodes"]
                     self.assertLessEqual(set(measured), set(self.catalog["kits"]))
-                    bundle = json.loads((ROOT / "site/evidence" / report.parent.name / "bundle.json").read_text())
-                    self.assertEqual(bundle["schema"], renderer.BUNDLE_SCHEMA)
-                    self.assertTrue(all(any(name.startswith(kit + "/") for name in bundle["files"]) for kit in measured))
+                    self.assertNotRegex(source, r'"(?:terminal|visual|evidence|evidenceBundle|host)"\s*:')
 
-
-class EvidenceStore(unittest.TestCase):
-    def test_archive_is_deterministic_and_matches_the_bundle(self):
-        renderer = load_renderer()
-        files = {"ep01-runaway/run.json": "{}\n", "summary.json": "{\"a\": 1}\n"}
-        with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second:
-            renderer.write_store(Path(first), "v9.9.9", files)
-            renderer.write_store(Path(second), "v9.9.9", dict(reversed(list(files.items()))))
-            self.assertEqual((Path(first) / "evidence.zip").read_bytes(), (Path(second) / "evidence.zip").read_bytes())
-            import zipfile
-            with zipfile.ZipFile(Path(first) / "evidence.zip") as archive:
-                self.assertEqual({name: archive.read(name).decode() for name in archive.namelist()}, files)
-            self.assertEqual(renderer.read_bundle(Path(first) / "bundle.json"), files)
-
-    def test_no_evidence_tree_is_committed_under_public(self):
-        tracked = subprocess.run(["git", "ls-files", "site/public/break-hubu"], cwd=ROOT, capture_output=True, text=True).stdout
-        self.assertEqual(tracked.strip(), "")
+    def test_no_captures_are_present_in_the_public_tree(self):
+        for directory in ("site/evidence", "site/public/break-hubu/evidence", "break-hubu/qualification"):
+            captures = [path for path in (ROOT / directory).rglob("*") if path.is_file()]
+            self.assertFalse(captures, directory)
 
 
 class WorkflowPrivileges(unittest.TestCase):
@@ -254,6 +257,14 @@ class WorkflowPrivileges(unittest.TestCase):
     def test_never_merges_or_touches_providers(self):
         for forbidden in ("gh pr merge", "--auto", "gh release edit", "gh release upload", "GONGBU_LIVE_", "I_ACKNOWLEDGE_LIVE_PROVIDER_SPEND"):
             self.assertNotIn(forbidden, self.workflow)
+
+    def test_capture_is_encrypted_before_upload(self):
+        measure = self.jobs["measure"]
+        self.assertIn("cms -encrypt -binary -aes-256-gcm", measure)
+        self.assertIn('> "${RUNNER_TEMP}/proof-kit.log" 2>&1', measure)
+        paths = re.findall(r"(?m)^          path: (.+)$", measure)
+        self.assertEqual(paths, ["${{ runner.temp }}/proof-kit-evidence.cms", "${{ runner.temp }}/card"])
+        self.assertNotIn("site/evidence", self.workflow)
 
     def test_actions_are_pinned_by_commit(self):
         for action in re.findall(r"uses: (\S+)", self.workflow):
