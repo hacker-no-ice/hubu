@@ -8,6 +8,10 @@ use thiserror::Error;
 
 pub const SCHEMA_VERSION: u32 = 1;
 pub const AUTH_TOKEN_FILE_GENERATED_ENV: &str = "HUBU_AUTH_TOKEN_FILE_GENERATED";
+pub const AGENT_TOKEN_FILE_GENERATED_ENV: &str = "HUBU_AGENT_TOKEN_FILE_GENERATED";
+/// File name of the agent credential when a launch configuration omits
+/// `agent_token_file`; it is generated next to `auth_token_file`.
+pub const DEFAULT_AGENT_TOKEN_FILE_NAME: &str = "hubu.agent-token";
 pub const APPROVAL_TOKEN_FILE_GENERATED_ENV: &str = "HUBU_APPROVAL_TOKEN_FILE_GENERATED";
 pub const RECONCILIATION_TOKEN_FILE_GENERATED_ENV: &str =
     "HUBU_RECONCILIATION_TOKEN_FILE_GENERATED";
@@ -23,6 +27,12 @@ pub struct HubuLaunchConfig {
     pub auth_token_file: PathBuf,
     #[serde(default, skip_serializing_if = "is_false")]
     pub auth_token_file_generated: bool,
+    /// The agent credential (v0.3.0). Optional so earlier launch files stay
+    /// valid; when omitted, Hubu generates it next to `auth_token_file`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_token_file: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub agent_token_file_generated: bool,
     pub approval_token_file: PathBuf,
     #[serde(default, skip_serializing_if = "is_false")]
     pub approval_token_file_generated: bool,
@@ -48,6 +58,20 @@ pub enum LaunchConfigError {
 }
 
 impl HubuLaunchConfig {
+    /// The agent credential path and whether Hubu generates it.
+    pub fn agent_token_destination(&self) -> (PathBuf, bool) {
+        match &self.agent_token_file {
+            Some(path) => (path.clone(), self.agent_token_file_generated),
+            None => (
+                self.auth_token_file
+                    .parent()
+                    .unwrap_or_else(|| Path::new("/"))
+                    .join(DEFAULT_AGENT_TOKEN_FILE_NAME),
+                true,
+            ),
+        }
+    }
+
     pub fn from_path(path: impl AsRef<Path>) -> Result<Self, LaunchConfigError> {
         let path = path.as_ref();
         if !path.is_absolute() {
@@ -69,11 +93,17 @@ impl HubuLaunchConfig {
         if let Some(path) = &self.log_file {
             validate_safe_absolute(path, "log_file")?;
         }
+        let (agent_token_file, agent_token_file_generated) = self.agent_token_destination();
         for (path, name, generated) in [
             (
                 &self.auth_token_file,
                 "auth_token_file",
                 self.auth_token_file_generated,
+            ),
+            (
+                &agent_token_file,
+                "agent_token_file",
+                agent_token_file_generated,
             ),
             (
                 &self.approval_token_file,
@@ -107,6 +137,10 @@ impl HubuLaunchConfig {
             (
                 "auth_token_file",
                 resolve_credential_destination(&self.auth_token_file, "auth_token_file")?,
+            ),
+            (
+                "agent_token_file",
+                resolve_credential_destination(&agent_token_file, "agent_token_file")?,
             ),
             (
                 "approval_token_file",
@@ -217,7 +251,7 @@ mod tests {
     use tempfile::tempdir;
 
     fn config(root: &Path) -> HubuLaunchConfig {
-        for name in ["auth", "approval", "reconciliation"] {
+        for name in ["auth", "agent", "approval", "reconciliation"] {
             fs::write(root.join(name), format!("{name}-secret")).unwrap();
         }
         HubuLaunchConfig {
@@ -227,6 +261,8 @@ mod tests {
             log_file: Some(root.join("logs/hubu.jsonl")),
             auth_token_file: root.join("auth"),
             auth_token_file_generated: false,
+            agent_token_file: Some(root.join("agent")),
+            agent_token_file_generated: false,
             approval_token_file: root.join("approval"),
             approval_token_file_generated: false,
             reconciliation_token_file: root.join("reconciliation"),
@@ -295,6 +331,14 @@ mod tests {
         assert!(launch.validate().is_err());
 
         let mut launch = config(root.path());
+        launch.agent_token_file = Some(launch.auth_token_file.clone());
+        assert!(launch
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("auth_token_file and agent_token_file"));
+
+        let mut launch = config(root.path());
         launch.log_file = Some(launch.auth_token_file.clone());
         assert!(launch
             .validate()
@@ -309,6 +353,25 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("database_path and approval_token_file"));
+    }
+
+    #[test]
+    fn omitted_agent_token_file_is_generated_next_to_the_owner_credential() {
+        let root = tempdir().unwrap();
+        let mut launch = config(root.path());
+        launch.agent_token_file = None;
+        let mut value = serde_json::to_value(&launch).unwrap();
+        assert!(value.get("agent_token_file").is_none());
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("agent_token_file_generated");
+        let parsed: HubuLaunchConfig = serde_json::from_value(value).unwrap();
+        parsed.validate().unwrap();
+        assert_eq!(
+            parsed.agent_token_destination(),
+            (root.path().join(DEFAULT_AGENT_TOKEN_FILE_NAME), true)
+        );
     }
 
     #[cfg(unix)]

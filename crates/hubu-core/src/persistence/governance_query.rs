@@ -61,6 +61,12 @@ struct Evaluated {
     after: Option<AfterKey>,
 }
 
+/// Only the explicitly requested human case detail exposes this correlation.
+pub struct GovernanceReconciliationEvidence {
+    pub claim_id: SpendExecutorClaimId,
+    pub receipt: Option<PersistedSpendExecutorSettlementReceipt>,
+}
+
 impl SqliteGovernanceRepository {
     pub fn governance_list(
         &self,
@@ -131,6 +137,43 @@ impl SqliteGovernanceRepository {
                 fact: safe_fact(record),
                 summary: evaluated.summary.clone(),
             }))
+    }
+
+    /// Explicit owner-only current evidence, separate from redacted immutable
+    /// projections. Indexed event/claim lookups avoid scanning history per row.
+    pub fn governance_reconciliation_evidence(
+        &self,
+        owner: &UserId,
+        event_id: &str,
+    ) -> Result<Option<GovernanceReconciliationEvidence>, GovernanceReadError> {
+        let tx = self.conn.unchecked_transaction()?;
+        let payload: Option<String> = tx.query_row(
+            "SELECT payload_json FROM spend_lifecycle_records WHERE owner_user_id=?1 AND event_id=?2",
+            params![owner.to_string(), event_id], |row| row.get(0),
+        ).optional()?;
+        let Some(payload) = payload else {
+            return Ok(None);
+        };
+        let lifecycle::StoredLifecyclePayload::Event { input, .. } =
+            serde_json::from_str(&payload)?
+        else {
+            return Ok(None);
+        };
+        if input.correlation.owner_user_id != *owner {
+            return Err(StorageError::InvalidData("lifecycle owner mismatch".into()).into());
+        }
+        let claim_id = match input.fact {
+            LifecycleFact::ReconciliationRequired { claim_id }
+            | LifecycleFact::ReconciliationResolved { claim_id, .. } => claim_id,
+            _ => return Ok(None),
+        };
+        let claim = load_executor_claim_by_id(&tx, &claim_id)?;
+        if !claim.is_some_and(|c| c.owner_user_id == *owner) {
+            return Ok(None);
+        }
+        let receipt = load_executor_settlement_receipt_by_claim_id(&tx, &claim_id)?;
+        tx.commit()?;
+        Ok(Some(GovernanceReconciliationEvidence { claim_id, receipt }))
     }
 
     fn evaluate_governance(

@@ -93,6 +93,11 @@ const DEFAULT_BIND_ADDR: &str = "127.0.0.1:8787";
 const AUTH_TOKEN_ENV: &str = "HUBU_AUTH_TOKEN";
 const AUTH_TOKEN_FILE_ENV: &str = "HUBU_AUTH_TOKEN_FILE";
 const DEFAULT_AUTH_TOKEN_FILE: &str = "hubu.auth-token";
+const AGENT_TOKEN_ENV: &str = "HUBU_AGENT_TOKEN";
+const AGENT_TOKEN_FILE_ENV: &str = "HUBU_AGENT_TOKEN_FILE";
+const DEFAULT_AGENT_TOKEN_FILE: &str = "hubu.agent-token";
+const AGENT_TOKEN_PREFIX: &str = "hubu_agent_";
+const OWNER_AUTHORITY_REQUIRED_ERROR_CODE: &str = "owner_authority_required";
 const APPROVAL_TOKEN_ENV: &str = "HUBU_APPROVAL_TOKEN";
 const APPROVAL_TOKEN_FILE_ENV: &str = "HUBU_APPROVAL_TOKEN_FILE";
 const DEFAULT_APPROVAL_TOKEN_FILE: &str = "hubu.approval-token";
@@ -109,6 +114,8 @@ const MAX_HTTP_HEADER_BYTES: usize = 64 * 1024;
 const MAX_HTTP_BODY_BYTES: usize = 1024 * 1024;
 #[cfg(test)]
 const TEST_AUTH_TOKEN: &str = "test-local-auth-token";
+#[cfg(test)]
+const TEST_AGENT_TOKEN: &str = "test-local-agent-token";
 #[cfg(test)]
 const TEST_APPROVAL_TOKEN: &str = "test-human-approval-token";
 #[cfg(test)]
@@ -238,6 +245,7 @@ impl ServerState {
             "local_api_auth_configured",
             json!({
                 "source": auth.source(),
+                "agent_source": auth.agent_source(),
                 "approval_source": auth.approval_source(),
                 "reconciliation_source": auth.reconciliation_source(),
                 "owner_user_id": default_user.id.to_string(),
@@ -381,6 +389,8 @@ fn parse_lease_config(yaml: &str, path: &str) -> Result<LeaseConfig> {
 struct LocalAuth {
     token_hash: String,
     token_source: String,
+    agent_token_hash: String,
+    agent_token_source: String,
     approval_token_hash: String,
     approval_token_source: String,
     reconciliation_token_hash: String,
@@ -391,8 +401,30 @@ struct LocalAuth {
 impl LocalAuth {
     fn new(owner_user_id: UserId) -> Result<Self> {
         let token = load_local_auth_token()?;
+        let agent_token = load_local_agent_token()?;
         let approval_token = load_local_approval_token()?;
         let reconciliation_token = load_local_reconciliation_token()?;
+        for (other, message) in [
+            (
+                &token.value,
+                "Hubu agent credential must be distinct from the owner credential",
+            ),
+            (
+                &approval_token.value,
+                "Hubu agent credential must be distinct from the approval capability",
+            ),
+            (
+                &reconciliation_token.value,
+                "Hubu agent credential must be distinct from the reconciliation capability",
+            ),
+        ] {
+            if constant_time_eq(
+                hash_token(&agent_token.value).as_bytes(),
+                hash_token(other).as_bytes(),
+            ) {
+                return Err(anyhow!(message));
+            }
+        }
         if constant_time_eq(
             hash_token(&token.value).as_bytes(),
             hash_token(&approval_token.value).as_bytes(),
@@ -420,6 +452,8 @@ impl LocalAuth {
         Ok(Self {
             token_hash: hash_token(&token.value),
             token_source: token.source,
+            agent_token_hash: hash_token(&agent_token.value),
+            agent_token_source: agent_token.source,
             approval_token_hash: hash_token(&approval_token.value),
             approval_token_source: approval_token.source,
             reconciliation_token_hash: hash_token(&reconciliation_token.value),
@@ -428,12 +462,25 @@ impl LocalAuth {
         })
     }
 
-    fn verifies(&self, token: &str) -> bool {
-        constant_time_eq(hash_token(token).as_bytes(), self.token_hash.as_bytes())
+    /// Classifies a presented bearer. Each class has its own credential;
+    /// later releases add per-agent and executor classes.
+    fn classify(&self, token: &str) -> Option<CredentialClass> {
+        let presented = hash_token(token);
+        let owner = constant_time_eq(presented.as_bytes(), self.token_hash.as_bytes());
+        let agent = constant_time_eq(presented.as_bytes(), self.agent_token_hash.as_bytes());
+        match (owner, agent) {
+            (true, _) => Some(CredentialClass::Owner),
+            (false, true) => Some(CredentialClass::Agent),
+            (false, false) => None,
+        }
     }
 
     fn source(&self) -> &str {
         &self.token_source
+    }
+
+    fn agent_source(&self) -> &str {
+        &self.agent_token_source
     }
 
     fn verifies_approval_capability(&self, token: &str) -> bool {
@@ -536,6 +583,67 @@ fn load_local_auth_token() -> Result<LoadedLocalAuthToken> {
         }
         Err(error) => {
             Err(error).with_context(|| format!("read Hubu auth token file `{}`", path.display()))
+        }
+    }
+}
+
+fn load_local_agent_token() -> Result<LoadedLocalAuthToken> {
+    #[cfg(test)]
+    if env::var(AGENT_TOKEN_ENV).is_err() && env::var(AGENT_TOKEN_FILE_ENV).is_err() {
+        return Ok(LoadedLocalAuthToken {
+            value: TEST_AGENT_TOKEN.to_string(),
+            source: "test".to_string(),
+        });
+    }
+
+    if let Ok(token) = env::var(AGENT_TOKEN_ENV) {
+        let token = token.trim().to_string();
+        if token.is_empty() {
+            return Err(anyhow!("{AGENT_TOKEN_ENV} cannot be empty"));
+        }
+        return Ok(LoadedLocalAuthToken {
+            value: token,
+            source: AGENT_TOKEN_ENV.to_string(),
+        });
+    }
+
+    let path = agent_token_file_path();
+    let file_generated = credential_file_is_generated(
+        AGENT_TOKEN_FILE_ENV,
+        launch_config::AGENT_TOKEN_FILE_GENERATED_ENV,
+    );
+    match read_token_file(&path) {
+        Ok(contents) => {
+            let token = contents.trim().to_string();
+            if token.is_empty() {
+                return Err(anyhow!(
+                    "Hubu agent token file `{}` is empty",
+                    path.display()
+                ));
+            }
+            if file_generated {
+                validate_generated_file_token(&token, AGENT_TOKEN_PREFIX, &path)?;
+            }
+            Ok(LoadedLocalAuthToken {
+                value: token,
+                source: path.display().to_string(),
+            })
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if !file_generated {
+                return Err(anyhow!(
+                    "Hubu agent token file `{}` is externally supplied and does not exist",
+                    path.display()
+                ));
+            }
+            let token = create_token_file(&path, AGENT_TOKEN_PREFIX, file_generated)?;
+            Ok(LoadedLocalAuthToken {
+                value: token,
+                source: path.display().to_string(),
+            })
+        }
+        Err(error) => {
+            Err(error).with_context(|| format!("read Hubu agent token file `{}`", path.display()))
         }
     }
 }
@@ -666,6 +774,23 @@ fn auth_token_file_path() -> PathBuf {
     env::var(AUTH_TOKEN_FILE_ENV)
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(DEFAULT_AUTH_TOKEN_FILE))
+}
+
+/// `HUBU_AGENT_TOKEN_FILE`, else `hubu.agent-token` beside the owner token
+/// file, so a server started with only `HUBU_AUTH_TOKEN_FILE` keeps both
+/// credentials together.
+fn agent_token_file_path() -> PathBuf {
+    if let Ok(path) = env::var(AGENT_TOKEN_FILE_ENV) {
+        return PathBuf::from(path);
+    }
+    match env::var(AUTH_TOKEN_FILE_ENV) {
+        Ok(owner) => Path::new(&owner)
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."))
+            .join(DEFAULT_AGENT_TOKEN_FILE),
+        Err(_) => PathBuf::from(DEFAULT_AGENT_TOKEN_FILE),
+    }
 }
 
 fn reconciliation_token_file_path() -> PathBuf {
@@ -1926,20 +2051,38 @@ fn declared_content_length(head: &str) -> Result<usize> {
 
 fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
     if !is_public_route(&request) {
-        if let Err(error) = authenticate_request(&request, state) {
+        let class = match authenticate_request(&request, state) {
+            Ok(class) => class,
+            Err(error) => {
+                log_event(
+                    "warn",
+                    "http_request_unauthorized",
+                    json!({
+                        "method": request.method,
+                        "path": request.path,
+                        "error": error.to_string(),
+                    }),
+                );
+                return HttpResponse {
+                    status: 401,
+                    body: json!({ "error": error.to_string() }),
+                };
+            }
+        };
+        let required = route_access(&request.method, &request.path);
+        if !required.admits(class) {
             log_event(
                 "warn",
-                "http_request_unauthorized",
+                "http_request_forbidden",
                 json!({
                     "method": request.method,
                     "path": request.path,
-                    "error": error.to_string(),
+                    "credential_class": class.as_str(),
+                    "required": required.as_str(),
+                    "error_code": OWNER_AUTHORITY_REQUIRED_ERROR_CODE,
                 }),
             );
-            return HttpResponse {
-                status: 401,
-                body: json!({ "error": error.to_string() }),
-            };
+            return owner_authority_required_response(&request);
         }
     }
 
@@ -2325,6 +2468,155 @@ fn spend_retry_error_response(error: &anyhow::Error) -> (u16, Option<Value>) {
     }
 }
 
+/// Which class of local bearer presented a request.
+///
+/// v0.3.0 has two classes: the owner credential and one shared agent
+/// credential. Later releases add per-agent and executor classes, so this is a
+/// class rather than a boolean.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CredentialClass {
+    Owner,
+    Agent,
+}
+
+impl CredentialClass {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Owner => "owner",
+            Self::Agent => "agent",
+        }
+    }
+}
+
+/// The credential class a protected route requires.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RouteAccess {
+    /// Owner-only. This is the default for any route without a declaration.
+    Owner,
+    /// The agent allowlist: reachable by the agent credential and the owner.
+    Agent,
+    /// Executor routes keep the shared owner bearer in v0.3.0 and move to a
+    /// signed, executor-scoped credential in v0.3.2.
+    Executor,
+}
+
+impl RouteAccess {
+    fn admits(self, class: CredentialClass) -> bool {
+        match (self, class) {
+            (_, CredentialClass::Owner) => true,
+            (Self::Agent, CredentialClass::Agent) => true,
+            (Self::Owner | Self::Executor, CredentialClass::Agent) => false,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Owner => "owner",
+            Self::Agent => "agent",
+            Self::Executor => "executor",
+        }
+    }
+}
+
+/// Route access declarations, one per protected route in [`route`]. A route
+/// missing from this table is owner-only (default deny for agents); the
+/// `every_route_declares_its_credential_class` test fails until a new route is
+/// declared here.
+const ROUTE_ACCESS: &[(&str, &str, RouteAccess)] = &[
+    // Agent allowlist (v0.3.0).
+    ("POST", "/spend/authorize", RouteAccess::Agent),
+    ("POST", "/spend", RouteAccess::Agent),
+    ("POST", "/spend/void", RouteAccess::Agent),
+    ("GET", "/spend/approval", RouteAccess::Agent),
+    ("GET", "/budgets", RouteAccess::Agent),
+    ("GET", "/ledger", RouteAccess::Agent),
+    ("GET", "/ledger/transactions", RouteAccess::Agent),
+    ("GET", "/ledger/summary", RouteAccess::Agent),
+    ("GET", "/spend/authorizations", RouteAccess::Agent),
+    ("GET", "/spend/authorizations/show", RouteAccess::Agent),
+    ("GET", "/watch", RouteAccess::Agent),
+    ("GET", "/agents", RouteAccess::Agent),
+    ("GET", "/user", RouteAccess::Agent),
+    ("GET", "/policies", RouteAccess::Agent),
+    ("GET", "/policies/show", RouteAccess::Agent),
+    // A new agent stays pending until the owner confirms (enforced in v0.3.1).
+    ("POST", "/agents/register", RouteAccess::Agent),
+    // Owner-only.
+    ("GET", "/users", RouteAccess::Owner),
+    ("POST", "/init", RouteAccess::Owner),
+    ("POST", "/user/spending-target", RouteAccess::Owner),
+    ("GET", "/user/spending-target", RouteAccess::Owner),
+    ("POST", "/user/spending-target/revoke", RouteAccess::Owner),
+    (
+        "POST",
+        agent_identity::AGENT_RENAME_ROUTE,
+        RouteAccess::Owner,
+    ),
+    (
+        "GET",
+        agent_identity::AGENT_IDENTITY_HISTORY_ROUTE,
+        RouteAccess::Owner,
+    ),
+    ("GET", "/policies/export", RouteAccess::Owner),
+    ("GET", "/policies/history", RouteAccess::Owner),
+    ("GET", "/policies/diff", RouteAccess::Owner),
+    ("POST", "/policies", RouteAccess::Owner),
+    ("POST", "/budgets", RouteAccess::Owner),
+    ("POST", "/budgets/revoke", RouteAccess::Owner),
+    ("POST", "/budgets/{budget_id}/versions", RouteAccess::Owner),
+    ("GET", "/budgets/{budget_id}/versions", RouteAccess::Owner),
+    ("POST", "/spend/approval/resolve", RouteAccess::Owner),
+    ("GET", "/governance/summary", RouteAccess::Owner),
+    ("GET", "/governance/records", RouteAccess::Owner),
+    ("GET", "/governance/records/{record_id}", RouteAccess::Owner),
+    // Executor routes keep the shared owner bearer until v0.3.2.
+    ("POST", "/spend/executor/validate", RouteAccess::Executor),
+    ("POST", "/spend/executor/resolve", RouteAccess::Executor),
+    ("POST", "/spend/executor/claim", RouteAccess::Executor),
+    ("GET", "/spend/executor/claim", RouteAccess::Executor),
+    (
+        "GET",
+        "/spend/executor/reconciliation",
+        RouteAccess::Executor,
+    ),
+    ("POST", "/spend/executor/settle", RouteAccess::Executor),
+    ("POST", "/spend/executor/release", RouteAccess::Executor),
+];
+
+/// The declared access for a protected route; undeclared routes are owner-only.
+fn route_access(method: &str, path: &str) -> RouteAccess {
+    let pattern = if budget_versions_public_id(path).is_some() {
+        "/budgets/{budget_id}/versions"
+    } else if path.starts_with("/governance/records/") {
+        "/governance/records/{record_id}"
+    } else {
+        path
+    };
+    ROUTE_ACCESS
+        .iter()
+        .find(|(declared_method, declared_path, _)| {
+            *declared_method == method && *declared_path == pattern
+        })
+        .map_or(RouteAccess::Owner, |(_, _, access)| *access)
+}
+
+fn owner_authority_required_response(request: &HttpRequest) -> HttpResponse {
+    HttpResponse {
+        status: 403,
+        body: json!({
+            "error": format!(
+                "{} {} requires the owner credential; the agent credential cannot perform owner actions",
+                request.method, request.path
+            ),
+            "error_code": OWNER_AUTHORITY_REQUIRED_ERROR_CODE,
+            "retry_guidance": {
+                "action": "ask_owner",
+                "message": "do not retry with the agent credential; ask the owner to perform this action"
+            },
+        }),
+    }
+}
+
 fn is_public_route(request: &HttpRequest) -> bool {
     matches!(
         (request.method.as_str(), request.path.as_str()),
@@ -2341,7 +2633,7 @@ fn is_public_route(request: &HttpRequest) -> bool {
 // origins, and keep protected traffic on loopback hosts. These checks reduce
 // common localhost attack paths, but the token remains the actual local
 // capability and should not be treated as human approval for real-money flows.
-fn authenticate_request(request: &HttpRequest, state: &ServerState) -> Result<()> {
+fn authenticate_request(request: &HttpRequest, state: &ServerState) -> Result<CredentialClass> {
     if request.headers.contains_key("origin") {
         return Err(anyhow!(
             "browser-origin requests are not accepted by the Hubu local API"
@@ -2385,14 +2677,13 @@ fn authenticate_request(request: &HttpRequest, state: &ServerState) -> Result<()
     let (scheme, token) = authorization
         .split_once(' ')
         .ok_or_else(|| anyhow!("invalid authorization bearer token"))?;
-    if !scheme.eq_ignore_ascii_case("bearer")
-        || token.trim().is_empty()
-        || !state.auth.verifies(token.trim())
-    {
+    if !scheme.eq_ignore_ascii_case("bearer") || token.trim().is_empty() {
         return Err(anyhow!("invalid authorization bearer token"));
     }
-
-    Ok(())
+    state
+        .auth
+        .classify(token.trim())
+        .ok_or_else(|| anyhow!("invalid authorization bearer token"))
 }
 
 fn authenticate_reconciliation_capability(
@@ -7699,6 +7990,256 @@ lease_profiles:
             .expect("error should be a string")
             .contains("missing authorization bearer token"));
         std::fs::remove_file(path).ok();
+    }
+
+    fn credential_request(method: &str, path: &str, token: &str) -> HttpRequest {
+        let (path, query) = split_path_and_query(path);
+        let mut headers = HashMap::new();
+        headers.insert("host".to_string(), "127.0.0.1:8787".to_string());
+        headers.insert("authorization".to_string(), format!("Bearer {token}"));
+        if method == "POST" {
+            headers.insert("content-type".to_string(), "application/json".to_string());
+        }
+        HttpRequest {
+            method: method.to_string(),
+            path,
+            query,
+            headers,
+            body: if method == "POST" {
+                "{}".to_string()
+            } else {
+                String::new()
+            },
+        }
+    }
+
+    /// One concrete request per route declared in `ROUTE_ACCESS`, with the
+    /// declared pattern it must resolve to.
+    const ROUTE_SAMPLES: &[(&str, &str, &str)] = &[
+        ("POST", "/spend/authorize", "/spend/authorize"),
+        ("POST", "/spend", "/spend"),
+        ("POST", "/spend/void", "/spend/void"),
+        ("GET", "/spend/approval", "/spend/approval"),
+        ("GET", "/budgets", "/budgets"),
+        ("GET", "/budgets?all=true", "/budgets"),
+        ("GET", "/ledger", "/ledger"),
+        ("GET", "/ledger/transactions", "/ledger/transactions"),
+        ("GET", "/ledger/summary", "/ledger/summary"),
+        ("GET", "/spend/authorizations", "/spend/authorizations"),
+        (
+            "GET",
+            "/spend/authorizations/show",
+            "/spend/authorizations/show",
+        ),
+        ("GET", "/watch", "/watch"),
+        ("GET", "/agents", "/agents"),
+        ("GET", "/agents?all=true", "/agents"),
+        ("GET", "/user", "/user"),
+        ("GET", "/policies", "/policies"),
+        ("GET", "/policies/show", "/policies/show"),
+        ("POST", "/agents/register", "/agents/register"),
+        ("GET", "/users", "/users"),
+        ("POST", "/init", "/init"),
+        ("POST", "/user/spending-target", "/user/spending-target"),
+        ("GET", "/user/spending-target", "/user/spending-target"),
+        (
+            "POST",
+            "/user/spending-target/revoke",
+            "/user/spending-target/revoke",
+        ),
+        ("POST", "/agents/rename", "/agents/rename"),
+        ("GET", "/agents/history", "/agents/history"),
+        ("GET", "/policies/export", "/policies/export"),
+        ("GET", "/policies/history", "/policies/history"),
+        ("GET", "/policies/diff", "/policies/diff"),
+        ("POST", "/policies", "/policies"),
+        ("POST", "/budgets", "/budgets"),
+        ("POST", "/budgets/revoke", "/budgets/revoke"),
+        (
+            "POST",
+            "/budgets/bgt_0123456789ab/versions",
+            "/budgets/{budget_id}/versions",
+        ),
+        (
+            "GET",
+            "/budgets/bgt_0123456789ab/versions",
+            "/budgets/{budget_id}/versions",
+        ),
+        ("POST", "/spend/approval/resolve", "/spend/approval/resolve"),
+        ("GET", "/governance/summary", "/governance/summary"),
+        ("GET", "/governance/records", "/governance/records"),
+        (
+            "GET",
+            "/governance/records/gov_0123456789ab",
+            "/governance/records/{record_id}",
+        ),
+        (
+            "POST",
+            "/spend/executor/validate",
+            "/spend/executor/validate",
+        ),
+        ("POST", "/spend/executor/resolve", "/spend/executor/resolve"),
+        ("POST", "/spend/executor/claim", "/spend/executor/claim"),
+        ("GET", "/spend/executor/claim", "/spend/executor/claim"),
+        (
+            "GET",
+            "/spend/executor/reconciliation",
+            "/spend/executor/reconciliation",
+        ),
+        ("POST", "/spend/executor/settle", "/spend/executor/settle"),
+        ("POST", "/spend/executor/release", "/spend/executor/release"),
+    ];
+
+    fn declared_access(method: &str, pattern: &str) -> Option<RouteAccess> {
+        ROUTE_ACCESS
+            .iter()
+            .find(|(m, p, _)| *m == method && *p == pattern)
+            .map(|(_, _, access)| *access)
+    }
+
+    fn is_owner_authority_rejection(response: &HttpResponse) -> bool {
+        response.status == 403 && response.body["error_code"] == OWNER_AUTHORITY_REQUIRED_ERROR_CODE
+    }
+
+    #[test]
+    fn agent_credential_reaches_only_declared_agent_routes() {
+        let path = std::env::temp_dir().join(format!("hubu-api-classes-{}.sqlite", UserId::new()));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        for (method, sample, pattern) in ROUTE_SAMPLES {
+            let access = declared_access(method, pattern)
+                .unwrap_or_else(|| panic!("{method} {pattern} has no declared credential class"));
+            assert_eq!(
+                route_access(method, split_path_and_query(sample).0.as_str()),
+                access,
+                "{method} {sample} must resolve to its declaration {pattern}"
+            );
+
+            let agent = route(credential_request(method, sample, TEST_AGENT_TOKEN), &state);
+            match access {
+                RouteAccess::Agent => assert!(
+                    !is_owner_authority_rejection(&agent) && agent.status != 401,
+                    "agent credential must reach {method} {sample}: {:?}",
+                    agent.body
+                ),
+                RouteAccess::Owner | RouteAccess::Executor => {
+                    assert!(
+                        is_owner_authority_rejection(&agent),
+                        "agent credential must be rejected on {method} {sample}: {} {:?}",
+                        agent.status,
+                        agent.body
+                    );
+                    assert_eq!(agent.body["retry_guidance"]["action"], "ask_owner");
+                }
+            }
+
+            let owner = route(credential_request(method, sample, TEST_AUTH_TOKEN), &state);
+            assert!(
+                !is_owner_authority_rejection(&owner) && owner.status != 401,
+                "owner credential must reach {method} {sample}: {:?}",
+                owner.body
+            );
+            let error = owner.body["error"].as_str().unwrap_or_default();
+            assert!(
+                !error.starts_with("no route for"),
+                "{method} {sample} is declared but not routed"
+            );
+            for response in [&agent, &owner] {
+                let body = response.body.to_string();
+                assert!(!body.contains(TEST_AUTH_TOKEN) && !body.contains(TEST_AGENT_TOKEN));
+            }
+        }
+        for (method, pattern, _) in ROUTE_ACCESS {
+            assert!(
+                ROUTE_SAMPLES
+                    .iter()
+                    .any(|(m, _, p)| m == method && p == pattern),
+                "{method} {pattern} is declared but has no sample request"
+            );
+        }
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn agent_credential_is_denied_on_undeclared_routes() {
+        let path = std::env::temp_dir().join(format!("hubu-api-deny-{}.sqlite", UserId::new()));
+        let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
+        for (method, path) in [("GET", "/not-a-route"), ("POST", "/budgets/raise")] {
+            assert_eq!(route_access(method, path), RouteAccess::Owner);
+            let response = route(credential_request(method, path, TEST_AGENT_TOKEN), &state);
+            assert!(is_owner_authority_rejection(&response));
+        }
+        std::fs::remove_file(path).ok();
+    }
+
+    /// Fails when a route arm is added to `route` without a declaration in
+    /// `ROUTE_ACCESS` (and a sample in `ROUTE_SAMPLES`).
+    #[test]
+    fn every_route_declares_its_credential_class() {
+        let source = include_str!("lib.rs");
+        let start = source
+            .find("let result = match (request.method.as_str(), request.path.as_str()) {")
+            .expect("route dispatch start");
+        let end = start
+            + source[start..]
+                .find("_ => Err(anyhow!(\"no route for")
+                .expect("route dispatch end");
+        let dispatch = &source[start..end];
+        let mut found = Vec::new();
+        let mut guarded = Vec::new();
+        for method in ["GET", "POST"] {
+            let needle = format!("(\"{method}\", ");
+            let mut rest = dispatch;
+            while let Some(index) = rest.find(&needle) {
+                rest = &rest[index + needle.len()..];
+                let path = if let Some(literal) = rest.strip_prefix('"') {
+                    literal[..literal.find('"').expect("closing quote")].to_string()
+                } else if let Some(constant) = rest.strip_prefix("agent_identity::") {
+                    match &constant[..constant.find(')').expect("closing paren")] {
+                        "AGENT_RENAME_ROUTE" => agent_identity::AGENT_RENAME_ROUTE.to_string(),
+                        "AGENT_IDENTITY_HISTORY_ROUTE" => {
+                            agent_identity::AGENT_IDENTITY_HISTORY_ROUTE.to_string()
+                        }
+                        other => panic!("unknown route constant {other}; declare it"),
+                    }
+                } else if rest.starts_with("_)") {
+                    let guard = &rest[..rest.find("=>").expect("guard arm")];
+                    guarded.push(format!("{method} {}", guard.trim()));
+                    continue;
+                } else {
+                    panic!(
+                        "unrecognized route arm near `{}`",
+                        &rest[..40.min(rest.len())]
+                    );
+                };
+                found.push((method, path));
+            }
+        }
+        assert!(
+            found.len() > 40,
+            "route scan found only {} routes",
+            found.len()
+        );
+        for (method, path) in found {
+            let request = public_request(method, &path);
+            if is_public_route(&request) {
+                continue;
+            }
+            assert!(
+                declared_access(method, &path).is_some(),
+                "{method} {path} has no credential class in ROUTE_ACCESS"
+            );
+        }
+        // Pattern routes dispatched through guards; each must map to a
+        // declared pattern above.
+        assert_eq!(
+            guarded,
+            vec![
+                "GET _) if budget_versions_public_id.is_some()".to_string(),
+                "GET _) if governance::is_read_path(&request.path)".to_string(),
+                "POST _) if budget_versions_public_id.is_some()".to_string(),
+            ],
+            "a new guarded route arm needs a ROUTE_ACCESS pattern and an entry here"
+        );
     }
 
     #[test]

@@ -209,6 +209,7 @@ http.server.ThreadingHTTPServer(("127.0.0.1", {}), Handler).serve_forever()
 
     let credentials = [
         ("hubu-auth", "hubu-test-token"),
+        ("hubu-agent", "agent-test-token"),
         ("hubu-approval", "approval-test-token"),
         ("hubu-reconciliation", "reconciliation-test-token"),
         ("gongbu-caller", "gongbu-test-token"),
@@ -266,11 +267,13 @@ worker_drain_timeout_ms = 100
             r#"schema_version = 1
 [files]
 hubu_auth = {}
+hubu_agent = {}
 hubu_approval = {}
 hubu_reconciliation = {}
 gongbu_caller = {}
 "#,
             quote(root.path().join("hubu-auth").display().to_string()),
+            quote(root.path().join("hubu-agent").display().to_string()),
             quote(root.path().join("hubu-approval").display().to_string()),
             quote(
                 root.path()

@@ -25,6 +25,7 @@ browser, stop `hubu ui` and start it again.
 
 | Section | Actions |
 | --- | --- |
+| Decisions | Immutable decision history plus current reconciliation state. Outstanding expired claims have a review/action flow; resolved events retain their history and show outcome, time, evidence, provider reference, recorded amount, cost basis and resolver when available. |
 | Overview | Three groups: people and agents; the spend lifecycle (pending approvals, automatic denials, unresolved reconciliations, recent decisions); and policies and budgets (spend against limits, budgets near their limit, policies, spending targets). A non-zero approval or denial count is highlighted, and every tile opens the matching page, pre-filtered where it helps. |
 | Approvals | Review pending spend requests, then approve or deny them. |
 | Spend history | A spend summary with charts: total spent, the split by platform (billing merchant) and by agent, and spend per day over the last 7, 30, 90 or 365 days, filtered by agent. Each currency is totaled and charted separately, and the daily chart has a table view. Below it, authorization records filtered by agent and status, with details, and ledger transactions with their entries. |
@@ -109,9 +110,10 @@ this:
 - API calls must carry a custom header and, when the browser sends them, a
   same-origin `Origin` and `Sec-Fetch-Site`. Writes must be JSON. Other sites
   therefore cannot send requests on your behalf.
-- It holds the Hubu bearer and approval credentials itself and relays an
-  allow-list of admin routes. Agent spend, claim, settlement and reconciliation
-  routes are not reachable from the browser.
+- It holds the Hubu bearer, approval and reconciliation credentials itself and
+  relays an allow-list of admin routes. Agent spend and claim creation remain
+  unavailable. Settlement/release routes accept only a confirmed human
+  reconciliation envelope, never executor finalization fields.
 - Approving or denying spend and renaming an agent use the human approval
   capability. The UI asks for confirmation twice, and the process refuses
   these calls unless the confirmation header is present.
@@ -122,3 +124,67 @@ this:
 token file the CLI reads. Anyone who can run commands as your user can already
 read that file. Keep the approval token file out of agent sandboxes, as you
 would for `hubu spend approval approve`.
+
+
+## Human reconciliation in Decisions
+
+The outstanding list and count read the current owner-scoped expired-claim queue,
+including legacy claims without captured lifecycle events. Historical outcomes
+remain immutable: a reconciliation-entry event still says when reconciliation
+became necessary. Its **Current reconciliation** column reads the underlying
+claim today. The **Current work** filter distinguishes outstanding and resolved
+reconciliation events; Load more continues through history pages. Existing
+agent/category/time filters apply to history; the outstanding list is labeled as
+all agents and independent of those historical filters.
+
+Details show billing/settlement versus non-billing/release, resolution time,
+provider reference, supporting evidence, recorded settlement amount/cost basis,
+resolver and current budget balances. Missing evidence is explicitly unavailable.
+A legacy or quote-based receipt is not presented as independently confirmed
+vendor cost. The recorded amount and human evidence remain visible separately.
+
+To resolve an expired claim, choose **Resolve reconciliation**, enter the provider
+reference and evidence, then choose vendor billed or vendor did not bill. Billed
+cases also require the exact actual cost in major currency units (for example,
+`0.13512` USD means $0.13512), provider request ID, existing artifact/receipt
+reference, and price/model snapshot JSON with `provider`, `model` and matching
+`currency`. Do not copy a reserved estimate as evidence of an actual charge or
+invent an artifact reference. Review the claim, outcome, amount and resulting
+budget change before confirming. The accounting charge rounds up once to six
+decimal places; a confirmed overrun can make the remaining balance negative.
+
+The separate human reconciliation capability stays in the UI process, as with
+the CLI. It is attached only to confirmed reconciliation mutations. The server
+still validates ownership, lease expiry, receipt and evidence, and atomically
+settles/releases the hold. Active claims cannot be reconciled. Duplicate clicks
+are disabled, an identical retry is idempotent, and conflicting stale submissions
+show errors. Rejected submissions preserve entered evidence and require a fresh
+review. Success refreshes current details, outstanding counts and budget data.
+Reconciliation changes accounting; it does not recover images or rerun work.
+
+`GET /governance/records/{record_id}/reconciliation` is a bearer-authenticated,
+owner-derived current detail for reconciliation events. It returns `claim` and
+optional `receipt`; unlike the immutable redacted governance feed, this explicit
+human detail includes the existing claim evidence and receipt references. It
+accepts no snapshot or filters and does not rewrite historical facts. Missing or
+foreign records return 404. UI overview/outstanding counts use the current claim
+queue, while governance snapshot summaries retain their as-of semantics.
+
+Focused validation uses isolated fixtures only:
+
+```sh
+node --test scripts/test-ui-reconciliation.mjs
+cargo test -p hubu-cli ui::tests --locked
+cargo test -p hubu-api reconciliation --locked
+```
+
+The browser fixture suite intercepts every HTTP request and never contacts a
+running Hubu/Gongbu profile or provider. Install Playwright in a temporary folder,
+then run (set `HUBU_UI_CHROME` to an installed Chrome executable, or install
+Playwright Chromium):
+
+```sh
+ui_test_deps=$(mktemp -d)
+npm install --prefix "$ui_test_deps" playwright@1.65.1
+NODE_PATH="$ui_test_deps/node_modules" node scripts/test-ui-reconciliation-browser.cjs
+```

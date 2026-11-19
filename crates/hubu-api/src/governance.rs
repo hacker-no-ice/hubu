@@ -1,5 +1,6 @@
 //! Transport projection only: ownership, snapshots, filtering, totals and
 //! backlog are evaluated by the shared core read in one SQL transaction.
+//! Explicit human reconciliation details read current evidence separately.
 use super::*;
 use hubu_core::spend::{
     GovernanceBacklog, GovernanceCategory, GovernanceDetail, GovernanceFact, GovernanceOutcome,
@@ -74,6 +75,35 @@ fn response(
     request: &HttpRequest,
     state: &ServerState,
 ) -> std::result::Result<Option<Value>, GovernanceReadError> {
+    if let Some(id) = request
+        .path
+        .strip_prefix(RECORD_PREFIX)
+        .and_then(|p| p.strip_suffix("/reconciliation"))
+    {
+        if !request.query.is_empty() || id.is_empty() || id.contains('/') {
+            return Err(GovernanceReadError::InvalidQuery);
+        }
+        let owner = authenticated_user_context(state).map_err(|_| unavailable())?;
+        let evidence = {
+            let repository = state.governance.lock().map_err(|_| unavailable())?;
+            repository.governance_reconciliation_evidence(&owner.user_id, id)?
+        };
+        let Some(evidence) = evidence else {
+            return Ok(None);
+        };
+        let claim = get_executor_claim(Some(&evidence.claim_id.to_string()), state)
+            .map_err(|_| unavailable())?;
+        return Ok(Some(
+            json!({"claim":claim,"receipt":evidence.receipt.map(|r| json!({
+                "actual_vendor_cost":{"amount":r.receipt.actual_vendor_cost.amount.to_string(), "scale":r.receipt.actual_vendor_cost.scale,"currency":r.receipt.actual_vendor_cost.currency.to_string()},
+                "cost_basis":r.receipt.cost_basis,
+                "budget_charge":money(&LifecycleAmount { amount:r.budget_charge,currency:r.currency }),
+                "provider_request_id":r.receipt.provider_request_id,
+                "price_model_snapshot":r.receipt.price_model_snapshot,
+                "artifact_reference":r.receipt.artifact_reference
+            }))}),
+        ));
+    }
     let query = query(request)?;
     let owner = authenticated_user_context(state).map_err(|_| unavailable())?;
     let repository = state.governance.lock().map_err(|_| unavailable())?;

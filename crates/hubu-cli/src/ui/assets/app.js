@@ -256,7 +256,7 @@ function confirmCapability({ title, summary, confirmLabel, danger, onConfirm }) 
 // ---------- views ----------
 
 async function renderOverview(view) {
-  const [summary, budgets, records, agents, users, policies, targets] = await Promise.all([
+  const [summary, budgets, records, agents, users, policies, targets, pending] = await Promise.all([
     hubu("/governance/summary"),
     hubu("/budgets"),
     hubu("/governance/records", { limit: "8" }),
@@ -264,6 +264,7 @@ async function renderOverview(view) {
     hubu("/users"),
     hubu("/policies"),
     hubu("/user/spending-target"),
+    hubu("/spend/executor/reconciliation"),
   ]);
   const s = summary.summary || {};
   const backlog = s.backlog || {};
@@ -307,11 +308,11 @@ async function renderOverview(view) {
           { tone: "warn", href: "#/approvals" }),
         stat("Automatic denials", denials, "policy and budget · view →",
           { tone: "bad", href: "#/decisions?outcomes=automatic_deny" }),
-        stat("Unresolved reconciliations", backlog.unresolved_reconciliations ?? 0, "uncertain executor claims · view →",
-          { tone: "warn", href: "#/decisions?outcomes=reconciliation_required" }),
+        stat("Unresolved reconciliations", pending.claims.length, "uncertain executor claims · view →",
+          { tone: "warn", href: "#/decisions?reconciliation=pending" }),
         stat("Spend attempts", s.distinct_attempts ?? 0, `${s.distinct_operations ?? 0} operations · history →`, { href: "#/spend" }),
       ]),
-      card("Recent decisions", decisionTable(records.records || []),
+      card("Recent decisions", decisionTable(await withReconciliation(records.records || [])),
         [h("a", { href: "#/decisions", class: "hint" }, "All decisions →")], true),
     ]),
     section("Policies & budgets", "The limits that decide what agents may spend.", [
@@ -661,9 +662,13 @@ async function renderDecisions(view) {
   await loadAgents();
   const body = h("div", {});
   const summaryBox = h("div", {});
+  const pendingBox = h("div", {});
+  const resolution = h("select", { name: "reconciliation" }, [["", "All history"], ["pending", "Outstanding reconciliation"], ["resolved", "Resolved reconciliation"]].map(([value, label]) => h("option", { value }, label)));
+  resolution.value = state.routeParams.get("reconciliation") || "";
   const filters = h("form", { class: "filters" },
     h("label", {}, "Agent", h("select", { name: "agent_id" }, h("option", { value: "" }, "All agents"),
       state.agents.map((a) => h("option", { value: a.agent_id }, a.display_name)))),
+    h("label", {}, "Current work", resolution),
     h("label", {}, "Category", h("select", { name: "categories" }, h("option", { value: "" }, "Any"),
       CATEGORIES.map((c) => h("option", { value: c }, c.replaceAll("_", " "))))),
     h("label", {}, "Outcome", h("select", { name: "outcomes" }, h("option", { value: "" }, "Any"),
@@ -673,28 +678,46 @@ async function renderDecisions(view) {
     h("button", { type: "submit", class: "ghost" }, "Apply"));
   const query = () => {
     const v = formValues(filters);
-    return { agent_id: v.agent_id, categories: v.categories, outcomes: v.outcomes,
+    return { agent_id: v.agent_id, categories: v.reconciliation ? "reconciliation_entry,reconciliation_resolution" : v.categories, outcomes: v.reconciliation ? "" : v.outcomes,
       occurred_from: isoFromLocal(v.from), occurred_before: isoFromLocal(v.before) };
   };
   const load = pagedLoader(body, async (cursor) => {
     const data = await hubu("/governance/records", { ...query(), limit: "50", cursor });
-    if (!cursor) drawDecisionSummary(summaryBox, data.summary || {});
+    data.records = await withReconciliation(data.records || []);
+    if (resolution.value) data.records = data.records.filter((r) => r.currentError || (resolution.value === "pending"
+      ? r.current?.claim.reconciliation_required : ["settled", "released"].includes(r.current?.claim.status)));
+    if (!cursor) {
+      const pending = await hubu("/spend/executor/reconciliation");
+      drawDecisionSummary(summaryBox, data.summary || {}, pending.claims.length);
+      clear(pendingBox).append(table([
+        { label: "Expired claim", render: (c) => c.claim_id },
+        { label: "Reserved estimate", render: (c) => money(c.spend.amount) },
+        { label: "Status", render: () => "Pending reconciliation" },
+        { label: "", render: (c) => h("button", { type: "button", class: "ghost small", onclick: () => {
+          const box = h("div", {}, reconciliationDetails({ claim: c }));
+          if (state.session.reconciliation_capability) box.append(h("button", { type: "button", onclick: () => reconciliationForm(c, load) }, "Resolve reconciliation…"));
+          else box.append(h("p", { class: "notice warn" }, "Human reconciliation capability unavailable."));
+          openDialog("Pending reconciliation", box);
+        } }, "Review…") },
+      ], pending.claims, "No outstanding reconciliation claims."));
+    }
     return data;
-  }, (data) => data.records || [], (rows) => decisionTable(rows));
+  }, (data) => data.records || [], (rows) => decisionTable(rows, load));
   // Links such as the overview's denial tile open this view pre-filtered.
   for (const name of ["agent_id", "categories", "outcomes"]) {
     const value = state.routeParams.get(name);
     if (value && [...filters.elements[name].options].some((o) => o.value === value)) filters.elements[name].value = value;
   }
   filters.addEventListener("submit", (e) => { e.preventDefault(); load(); });
-  append(view, [summaryBox, card("Decision records", [h("div", { class: "body" }, filters), body], null, true)]);
+  append(view, [summaryBox, card("Outstanding reconciliation claims", pendingBox), card("Decision records", [h("div", { class: "body" }, filters, h("p", { class: "hint" }, "Historical outcomes remain immutable. Current work filters apply to reconciliation events; load more for later pages. Outstanding claims above include legacy cases without captured events.")), body], null, true)]);
   await load();
 }
 
-function drawDecisionSummary(container, s) {
+function drawDecisionSummary(container, s, pendingCount) {
   const backlog = s.backlog || {};
   const denials = (s.automatic_denials || []);
   clear(container).append(h("div", { class: "stats" }, [
+    stat("Outstanding reconciliations", pendingCount ?? "Unavailable", "current expired claims · all agents", { tone: "warn" }),
     stat("Facts", s.fact_count ?? 0, `${s.distinct_attempts ?? 0} attempts`),
     stat("Pending approvals", backlog.pending_human_approvals ?? 0, "backlog now", { tone: "warn", href: "#/approvals" }),
     stat("Automatic denials", denials.reduce((n, d) => n + d.distinct_attempts, 0),
@@ -703,18 +726,164 @@ function drawDecisionSummary(container, s) {
   ]));
 }
 
-function decisionTable(rows) {
+function decisionTable(rows, refresh = async () => {}) {
   return table([
     { label: "When", render: (r) => when(r.occurred_at) },
     { label: "Agent", render: (r) => agentName(r.agent_id) },
     { label: "Category", render: (r) => String(r.category || "").replaceAll("_", " ") },
-    { label: "Outcome", render: (r) => badge(r.outcome) },
+    { label: "Historical outcome", render: (r) => badge(r.outcome) },
+    { label: "Current reconciliation", render: (r) => isReconciliation(r) ? reconciliationLabel(r.current?.claim) : null },
     { label: "Amount", num: true, render: (r) => (r.requested_amount?.coverage === "known" ? money(r.requested_amount.value) : null) },
     { label: "Merchant", render: (r) => (r.execution_scope?.coverage === "known" ? r.execution_scope.value.billing_merchant : null) },
     { label: "Policy", render: (r) => (r.policy?.coverage === "known" ? short(r.policy.value.policy_id) : null) },
     { label: "", render: (r) => h("button", { class: "ghost small", type: "button",
-      onclick: () => showJsonDialog("Decision record", async () => (await hubu(`/governance/records/${encodeURIComponent(r.record_id)}`)).record) }, "Details") },
+      onclick: () => showDecision(r, refresh) }, "Details") },
   ], rows, "No decision records match.");
+}
+
+// Current claim state is deliberately separate from immutable governance facts.
+const isReconciliation = (r) => ["reconciliation_entry", "reconciliation_resolution"].includes(r.category);
+async function withReconciliation(rows) {
+  return Promise.all(rows.map(async (r) => {
+    if (!isReconciliation(r)) return r;
+    try {
+      return { ...r, current: await hubu(`/governance/records/${encodeURIComponent(r.record_id)}/reconciliation`) };
+    } catch (error) { return { ...r, currentError: error.message }; }
+  }));
+}
+function reconciliationLabel(claim) {
+  if (!claim) return "Current state unavailable";
+  if (claim.reconciliation_required) return "Pending reconciliation";
+  if (claim.status === "settled") return "Reconciled · billed / settled";
+  if (claim.status === "released") return "Reconciled · not billed / released";
+  return "Active claim · not eligible";
+}
+function reconciliationDetails(data) {
+  const c = data.claim;
+  const receipt = data.receipt;
+  return h("div", {}, kv([
+    ["Claim", c.claim_id], ["Current state", reconciliationLabel(c)],
+    ["Reserved estimate (not confirmed cost)", money(c.spend.amount)],
+    ["Resolved at", when(c.reconciled_at || c.finalized_at)],
+    ["Outcome", c.reconciliation_outcome || (c.status !== "claimed" ? c.status : "Pending")],
+    ["Recorded settlement amount", receipt ? formatUnits(exactUnits(receipt.actual_vendor_cost), receipt.actual_vendor_cost.currency) : "Not recorded"],
+    ["Cost basis", receipt?.cost_basis || "Not recorded"],
+    ["Confirmed vendor cost", receipt?.cost_basis === "provider_reported" ? formatUnits(exactUnits(receipt.actual_vendor_cost), receipt.actual_vendor_cost.currency) : "Unavailable (cost basis does not establish a provider-confirmed cost)"],
+    ["Budget charge", money(receipt?.budget_charge)],
+    ["Provider reference", c.provider_reference || "Not recorded"],
+    ["Evidence", c.evidence || (c.status === "claimed" ? "Not yet recorded" : "Not recorded (legacy evidence unavailable)")],
+    ["Resolver", c.reconciled_by_user_id || "Not recorded"],
+    ["Budget", c.spend.budget_hold.budget_id],
+    ["Consumed now", money(c.spend.budget_hold.consumed_amount)],
+    ["Frozen now", money(c.spend.budget_hold.frozen_amount)],
+    ["Remaining now", money(c.spend.budget_hold.remaining_amount)],
+  ]), receipt ? details("Recorded receipt", receipt) : null,
+  h("p", { class: "hint" }, "Reconciliation settles or releases accounting. It does not retrieve missing artifacts or rerun provider work."));
+}
+async function showDecision(r, refresh) {
+  if (!isReconciliation(r)) {
+    return showJsonDialog("Decision record", async () => (await hubu(`/governance/records/${encodeURIComponent(r.record_id)}`)).record);
+  }
+  const body = h("div", {}, "Loading current claim…");
+  openDialog("Reconciliation case", body);
+  try {
+    const data = await hubu(`/governance/records/${encodeURIComponent(r.record_id)}/reconciliation`);
+    clear(body).append(reconciliationDetails(data));
+    if (data.claim.reconciliation_required && state.session.reconciliation_capability) {
+      body.append(h("button", { type: "button", onclick: () => reconciliationForm(data.claim, refresh) }, "Resolve reconciliation…"));
+    } else if (data.claim.reconciliation_required) {
+      body.append(h("p", { class: "notice warn" }, "The separate human reconciliation capability is unavailable. Configure it for hubu ui to resolve this claim."));
+    }
+    body.append(details("Immutable historical event", Object.fromEntries(Object.entries(r).filter(([key]) => !["current", "currentError"].includes(key)))));
+  } catch (error) { clear(body).append(h("div", { class: "notice bad" }, error.message)); }
+}
+// Decimal major units -> exact receipt, without floating point conversion.
+function reconciliationPayload(claim, v) {
+  const payload = { claim_id: claim.claim_id, provider_reference: v.provider_reference.trim(), evidence: v.evidence.trim() };
+  if (!payload.provider_reference || !payload.evidence) throw new Error("Provider reference and supporting evidence are required.");
+  if (v.outcome === "billed") {
+    if (!/^\d+(\.\d{1,18})?$/.test(v.amount)) throw new Error("Enter a non-negative amount with up to 18 decimal places in major currency units.");
+    const [whole, fraction = ""] = v.amount.split(".");
+    let amount = BigInt(whole + fraction);
+    let scale = fraction.length;
+    while (scale && amount % 10n === 0n) { amount /= 10n; scale--; }
+    if (amount > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("Amount has too many significant digits for this form; use the exact-cost CLI.");
+    const snapshot = JSON.parse(v.price_model_snapshot);
+    if (!snapshot || Array.isArray(snapshot) || typeof snapshot !== "object") throw new Error("Price/model snapshot must be a JSON object.");
+    if (!v.provider_request_id.trim() || !v.artifact_reference.trim()) throw new Error("Provider request ID and artifact/receipt reference are required. Use real supporting references.");
+    payload.receipt = { cost_basis: "provider_reported", actual_vendor_cost: { amount: Number(amount), scale, currency: claim.spend.currency },
+      provider_request_id: v.provider_request_id.trim(), artifact_reference: v.artifact_reference.trim(), price_model_snapshot: snapshot };
+  }
+  return payload;
+}
+function reconciliationBudgetChange(claim, payload) {
+  const reserved = BigInt(claim.spend.amount.units) * 10n ** BigInt(EXACT_SCALE - claim.spend.amount.scale);
+  const exact = payload.receipt ? exactUnits(payload.receipt.actual_vendor_cost) : 0n;
+  // Accounting rounds up once to six decimal places.
+  const micro = 10n ** 12n;
+  const charge = ((exact + micro - 1n) / micro) * micro;
+  return `Consumed increases by ${formatUnits(charge, claim.spend.currency)}; frozen decreases by ${formatUnits(reserved, claim.spend.currency)}; available changes by ${formatUnits(reserved - charge, claim.spend.currency)}. Confirmed overruns can make remaining budget negative.`;
+}
+function reconciliationForm(claim, refresh = async () => {}) {
+  const status = h("div", {});
+  const review = h("div", {});
+  const billedFields = h("div", { class: "reconciliation-fields wide", hidden: true },
+    h("label", {}, `Confirmed actual cost (${claim.spend.currency.toUpperCase()})`, h("input", { name: "amount", inputmode: "decimal", placeholder: "0.13512" })),
+    h("p", { class: "hint" }, "Enter major currency units: 0.13512 means $0.13512 in USD, not cents or micro-units. The reserved estimate is not proof of vendor cost. Accounting rounds up to six decimal places."),
+    h("label", {}, "Provider request ID", h("input", { name: "provider_request_id" })),
+    h("label", {}, "Artifact / receipt reference", h("input", { name: "artifact_reference", placeholder: "Existing artifact or billing receipt reference" })),
+    h("label", { class: "wide" }, "Price/model snapshot (JSON with provider, model and matching currency)", h("textarea", { name: "price_model_snapshot", rows: 5 })));
+  const outcome = h("select", { name: "outcome" }, h("option", { value: "not_billed" }, "Confirm vendor did not bill"), h("option", { value: "billed" }, "Confirm vendor billed"));
+  const form = h("form", { class: "grid reconciliation-form" },
+    kv([["Claim", claim.claim_id], ["Reserved estimate", money(claim.spend.amount)]]),
+    h("label", {}, "Outcome", outcome),
+    h("label", {}, "Provider reference", h("input", { name: "provider_reference", required: true })),
+    h("label", { class: "wide" }, "Supporting evidence", h("textarea", { name: "evidence", rows: 4, required: true })), billedFields,
+    h("p", { class: "hint wide" }, "Use confirmed billing evidence. This changes accounting only; it does not recover artifacts or rerun work."),
+    h("button", { type: "submit" }, "Review reconciliation"));
+  const { dialog } = openDialog("Resolve expired claim", [form, status, review]);
+  const invalidate = () => clear(review);
+  form.addEventListener("input", invalidate);
+  outcome.addEventListener("change", () => { billedFields.hidden = outcome.value !== "billed"; invalidate(); });
+  let submitting = false;
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (submitting) return;
+    clear(status); clear(review);
+    try {
+      const v = formValues(form);
+      const payload = reconciliationPayload(claim, v);
+      const submit = h("button", { type: "button" }, "Confirm reconciliation");
+      form.hidden = true;
+      const edit = h("button", { type: "button", class: "ghost", onclick: () => { if (!submitting) { form.hidden = false; clear(review); } } }, "Edit evidence");
+      append(review, [kv([["Claim", claim.claim_id], ["Outcome", v.outcome === "billed" ? "Vendor billed / settle" : "Vendor did not bill / release"],
+        ["Confirmed amount", payload.receipt ? `${v.amount} ${claim.spend.currency.toUpperCase()}` : `0 ${claim.spend.currency.toUpperCase()}`],
+        ["Budget change", reconciliationBudgetChange(claim, payload)], ["Provider reference", payload.provider_reference], ["Evidence", payload.evidence]]),
+        payload.receipt ? details("Receipt to submit", payload.receipt) : null, h("div", { class: "form-actions" }, edit, submit)]);
+      submit.addEventListener("click", async () => {
+        if (submitting) return;
+        submitting = true; submit.disabled = true;
+        for (const control of form.elements) control.disabled = true;
+        try {
+          const current = await hubu("/spend/executor/claim", { claim_id: claim.claim_id });
+          if (!current.reconciliation_required) throw new Error(`Claim is no longer eligible: ${reconciliationLabel(current)}. Close this form and review its current details.`);
+          await hubuPost(`/spend/executor/${payload.receipt ? "settle" : "release"}`, payload, { confirmed: true });
+          toast("Reconciliation recorded. Accounting updated.");
+          // Close all case dialogs so no stale evidence or actions remain visible.
+          document.querySelectorAll("dialog").forEach((d) => { d.close(); d.remove(); });
+          await route(); refreshApprovalCount();
+        } catch (error) {
+          clear(status).append(h("div", { class: "notice bad" }, error.message));
+          clear(review); // Preserve all entered evidence; require a fresh review.
+          submitting = false; form.hidden = false;
+          for (const control of form.elements) control.disabled = false;
+          // Keep this form and evidence open, but discard stale parent details.
+          document.querySelectorAll("dialog").forEach((d) => { if (d !== dialog) { d.close(); d.remove(); } });
+          await refresh();
+        }
+      });
+    } catch (error) { clear(status).append(h("div", { class: "notice bad" }, error.message)); }
+  });
 }
 
 // Agents

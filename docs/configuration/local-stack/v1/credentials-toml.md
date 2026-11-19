@@ -49,6 +49,7 @@ must supply a reference owned outside the managed bootstrap:
 ```toml
 [files]
 hubu_auth = "/absolute/path/to/hubu.auth-token"
+hubu_agent = "/absolute/path/to/hubu.agent-token"
 hubu_approval = "/absolute/path/to/hubu.approval-token"
 hubu_reconciliation = "/absolute/path/to/hubu.reconciliation-token"
 gongbu_caller = "/absolute/path/to/gongbu.caller-token"
@@ -62,15 +63,25 @@ before first start and created by the final Hubu process.
 
 ### `files.hubu_auth`
 
-Required when Hubu is external. This is the client-side authentication bearer
-used by the Hubu CLI and unified MCP protected calls. For a managed Hubu it is
-normally omitted and derived internally.
+Required when Hubu is external. This is the owner credential: the bearer the
+Hubu CLI presents for owner actions and the bearer executor routes still accept.
+It is never handed to the unified MCP. For a managed Hubu it is normally
+omitted and derived internally.
 
 After the profile has an active generated handoff, the Hubu CLI resolves this
 file together with the profile's endpoint and other human capability files.
 Selecting a profile therefore overrides ambient CLI endpoint and token
 variables as one atomic connection context. An explicit global `--url` opts
 out of profile resolution and uses manual environment/file credentials.
+
+### `files.hubu_agent`
+
+Required when Hubu is external. This is the agent credential that
+`hubu init codex` hands to the unified MCP. It reaches only the agent
+allowlist (spend, status, and read routes); every other protected route
+answers HTTP 403 with `error_code: owner_authority_required`. It must be
+distinct from the owner credential. For a managed Hubu it is normally omitted
+and derived internally.
 
 ### `files.hubu_approval`
 

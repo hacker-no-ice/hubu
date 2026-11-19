@@ -173,9 +173,11 @@ trait Backend: Sync {
         path_and_query: &str,
         body: Option<Value>,
         approval: bool,
+        reconciliation: bool,
     ) -> Result<(u16, Value)>;
     fn hubu_endpoint(&self) -> String;
     fn approval_capability_available(&self) -> bool;
+    fn reconciliation_capability_available(&self) -> bool;
     fn providers(&self) -> Value;
     /// Prepare the canonical registration envelope exactly as
     /// `hubu register agent` does, and submit it only when `submit` is true.
@@ -200,8 +202,16 @@ impl Backend for LiveBackend<'_> {
         path_and_query: &str,
         body: Option<Value>,
         approval: bool,
+        reconciliation: bool,
     ) -> Result<(u16, Value)> {
-        super::request_json_status(self.client, method, path_and_query, body, approval, false)
+        super::request_json_status(
+            self.client,
+            method,
+            path_and_query,
+            body,
+            approval,
+            reconciliation,
+        )
     }
 
     fn hubu_endpoint(&self) -> String {
@@ -216,6 +226,13 @@ impl Backend for LiveBackend<'_> {
             .target()
             .and_then(|target| target.approval_token())
             .is_ok_and(|token| token.is_some())
+    }
+
+    fn reconciliation_capability_available(&self) -> bool {
+        self.client
+            .target()
+            .and_then(|t| t.reconciliation_token())
+            .is_ok_and(|t| t.is_some())
     }
 
     fn providers(&self) -> Value {
@@ -675,6 +692,7 @@ fn api<B: Backend>(request: &Request, state: &UiState<B>) -> Response {
                 "authenticated": true,
                 "hubu_endpoint": state.backend.hubu_endpoint(),
                 "approval_capability": state.backend.approval_capability_available(),
+                "reconciliation_capability": state.backend.reconciliation_capability_available(),
             }),
         ),
         ("GET", "/api/providers") => json_response(200, &state.backend.providers()),
@@ -793,6 +811,7 @@ enum RouteAccess {
     Standard,
     /// Sends the human approval capability; requires an explicit confirmation.
     HumanApproval,
+    HumanReconciliation,
 }
 
 /// The only Hubu routes the browser can reach. Anything else is refused here,
@@ -820,6 +839,8 @@ fn allowed_route(method: &str, path: &str) -> Option<RouteAccess> {
         "/ledger/summary",
         "/governance/summary",
         "/governance/records",
+        "/spend/executor/claim",
+        "/spend/executor/reconciliation",
     ];
     const POST_ROUTES: &[&str] = &[
         "/init",
@@ -838,8 +859,20 @@ fn allowed_route(method: &str, path: &str) -> Option<RouteAccess> {
     let governance_record = path
         .strip_prefix("/governance/records/")
         .is_some_and(safe_identifier);
+    let reconciliation_detail = path
+        .strip_prefix("/governance/records/")
+        .and_then(|rest| rest.strip_suffix("/reconciliation"))
+        .is_some_and(safe_identifier);
     match method {
-        "GET" if GET_ROUTES.contains(&path) || budget_versions || governance_record => {
+        "POST" if matches!(path, "/spend/executor/settle" | "/spend/executor/release") => {
+            Some(RouteAccess::HumanReconciliation)
+        }
+        "GET"
+            if GET_ROUTES.contains(&path)
+                || budget_versions
+                || governance_record
+                || reconciliation_detail =>
+        {
             Some(RouteAccess::Standard)
         }
         "POST" if POST_ROUTES.contains(&path) || budget_versions => Some(RouteAccess::Standard),
@@ -877,10 +910,10 @@ fn proxy<B: Backend>(request: &Request, state: &UiState<B>) -> Response {
             &format!("{} {path} is not available in the admin UI", request.method),
         );
     };
-    if access == RouteAccess::HumanApproval && request.header(CONFIRM_HEADER) != Some("1") {
+    if access != RouteAccess::Standard && request.header(CONFIRM_HEADER) != Some("1") {
         return error_response(
             428,
-            "this action uses the human approval capability and must be confirmed in the UI",
+            "this action uses a human capability and must be confirmed in the UI",
         );
     }
     let mut target = path.to_string();
@@ -899,11 +932,35 @@ fn proxy<B: Backend>(request: &Request, state: &UiState<B>) -> Response {
     } else {
         None
     };
+    // These shared executor endpoints may only receive the human reconciliation
+    // envelope here. Never forward executor finalization or authorization fields.
+    if access == RouteAccess::HumanReconciliation {
+        let Some(object) = body.as_ref().and_then(Value::as_object) else {
+            return error_response(400, "reconciliation requires an object");
+        };
+        if object.keys().any(|k| {
+            !matches!(
+                k.as_str(),
+                "claim_id" | "provider_reference" | "evidence" | "receipt"
+            )
+        }) || ["claim_id", "provider_reference", "evidence"]
+            .iter()
+            .any(|k| {
+                object
+                    .get(*k)
+                    .and_then(Value::as_str)
+                    .is_none_or(|v| v.trim().is_empty())
+            })
+        {
+            return error_response(400, "reconciliation requires claim_id, provider_reference and evidence; executor fields are forbidden");
+        }
+    }
     match state.backend.hubu(
         &request.method,
         &target,
         body,
         access == RouteAccess::HumanApproval,
+        access == RouteAccess::HumanReconciliation,
     ) {
         Ok((status, body)) => json_response(status, &body),
         Err(error) => error_response(502, &format!("Hubu request failed: {error:#}")),
@@ -916,7 +973,7 @@ mod tests {
     use std::sync::Mutex as StdMutex;
 
     /// (method, path and query, body, carries approval capability or submits)
-    type Call = (String, String, Option<Value>, bool);
+    type Call = (String, String, Option<Value>, bool, bool);
 
     #[derive(Default)]
     struct FakeBackend {
@@ -924,18 +981,23 @@ mod tests {
     }
 
     impl Backend for FakeBackend {
+        fn reconciliation_capability_available(&self) -> bool {
+            true
+        }
         fn hubu(
             &self,
             method: &str,
             path_and_query: &str,
             body: Option<Value>,
             approval: bool,
+            reconciliation: bool,
         ) -> Result<(u16, Value)> {
             self.calls.lock().unwrap().push((
                 method.to_string(),
                 path_and_query.to_string(),
                 body,
                 approval,
+                reconciliation,
             ));
             Ok((200, json!({ "ok": true })))
         }
@@ -959,6 +1021,7 @@ mod tests {
                 format!("{name:?}/{version}"),
                 None,
                 submit,
+                false,
             ));
             Ok((200, json!({ "review": [] })))
         }
@@ -1183,6 +1246,39 @@ mod tests {
         assert_eq!(calls[0].1, "/spend/approval/resolve");
         assert!(calls[0].3, "approval route must carry the capability");
         assert!(!calls[1].3, "standard route must not carry the capability");
+    }
+
+    #[test]
+    fn reconciliation_proxy_requires_confirmation_and_only_attaches_reconciliation_capability() {
+        let (state, _) = state();
+        for action in ["settle", "release"] {
+            let target = format!("/api/hubu/spend/executor/{action}");
+            let mut request = signed_in(&state, "POST", &target);
+            request.body =
+                br#"{"claim_id":"claim","provider_reference":"ref","evidence":"fixture"}"#.to_vec();
+            assert_eq!(handle(&request, &state).status, 428);
+            request.headers.insert(CONFIRM_HEADER.into(), "1".into());
+            assert_eq!(handle(&request, &state).status, 200);
+            for body in [
+                json!({"claim_id":"claim"}),
+                json!({"claim_id":"claim","provider_reference":"ref","evidence":" "}),
+                json!({"claim_id":"claim","provider_reference":"ref","evidence":"fixture","operation_key":"forbidden"}),
+                json!({"claim_id":"claim","receipt":{}}),
+            ] {
+                request.body = serde_json::to_vec(&body).unwrap();
+                assert_eq!(handle(&request, &state).status, 400);
+            }
+        }
+        let read = signed_in(
+            &state,
+            "GET",
+            "/api/hubu/governance/records/lev_fixture/reconciliation",
+        );
+        assert_eq!(handle(&read, &state).status, 200);
+        let calls = state.backend.calls.lock().unwrap();
+        assert_eq!(calls.len(), 3);
+        assert!(calls[..2].iter().all(|c| !c.3 && c.4));
+        assert!(!calls[2].3 && !calls[2].4);
     }
 
     #[test]

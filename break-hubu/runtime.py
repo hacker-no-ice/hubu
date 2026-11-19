@@ -136,7 +136,12 @@ class Runtime:
         durable = dict(label=label, method=method, route=route, body=body)
         save(request_file, durable)
         extra = dict(headers or {})
-        headers = {'Authorization': 'Bearer ' + Path(self.context['auth_file']).read_text().strip(),
+        # The synthetic executor presents the executor credential; every other
+        # route gets this process's own credential (the agent's, in the attack).
+        credential = self.context['auth_file']
+        if route.startswith('/spend/executor/'):
+            credential = self.context.get('executor_file', credential)
+        headers = {'Authorization': 'Bearer ' + Path(credential).read_text().strip(),
                    'Content-Type': 'application/json', **extra}
         # Exact persisted body is reused on ambiguous transport responses.
         for attempt in range(1, 4 if retry else 2):
@@ -349,13 +354,17 @@ def run_episode(attack, verify, *, episode, budget, short_lease=False, policy=PO
         with socket.socket() as listener:
             listener.bind(('127.0.0.1', 0)); port = listener.getsockname()[1]
         context['url'] = f'http://127.0.0.1:{port}'
-        for name in ('auth', 'approval', 'owner-reconciliation'):
+        for name in ('auth', 'agent', 'approval', 'owner-reconciliation'):
             path = private / (name + '.token'); path.write_text(secrets.token_urlsafe(48) + '\n'); path.chmod(0o600)
         context['auth_file'] = str(private / 'auth.token')
+        # Executor routes keep the owner bearer until the executor credential
+        # moves to its own signed model (v0.3.2).
+        context['executor_file'] = context['auth_file']
         lease = private / 'leases.yaml'
         lease.write_text('authorization_ttl_seconds: 300\ndefault_lease_profile: default\nlease_profiles:\n  default:\n    claim_ttl_seconds: 900\n  proof_short:\n    claim_ttl_seconds: 30\n')
         config = dict(schema_version=1, listen=f'127.0.0.1:{port}', database_path=str(private / 'hubu.sqlite'),
-                      auth_token_file=context['auth_file'], approval_token_file=str(private / 'approval.token'),
+                      auth_token_file=context['auth_file'], agent_token_file=str(private / 'agent.token'),
+                      approval_token_file=str(private / 'approval.token'),
                       reconciliation_token_file=str(private / 'owner-reconciliation.token'), lease_config=str(lease))
         save(private / 'server.json', config)
         rt = Runtime(context, owner=True)
@@ -363,7 +372,17 @@ def run_episode(attack, verify, *, episode, budget, short_lease=False, policy=PO
         rt.note('Verified binary versions: ' + json.dumps(metadata['binary_versions']))
         command = [str(Path(metadata['binary_directory']) / 'hubu-server'), 'validate-config', '--config', str(private / 'server.json')]
         rt.note('$ ' + shlex.join(command))
-        validation = subprocess.run(command, env=rt.environment(), capture_output=True, text=True, check=True)
+        validation = subprocess.run(command, env=rt.environment(), capture_output=True, text=True)
+        context['credential_split'] = validation.returncode == 0
+        if not context['credential_split']:
+            # Releases before v0.3.0 have one shared bearer: the agent holds it.
+            if 'agent_token_file' not in validation.stderr:
+                raise RuntimeError('hubu-server rejected the launch config: ' + validation.stderr)
+            rt.note('This release has no agent credential class; the attack process holds the shared bearer.')
+            del config['agent_token_file']; save(private / 'server.json', config)
+            rt.note('$ ' + shlex.join(command))
+            validation = subprocess.run(command, env=rt.environment(), capture_output=True, text=True, check=True)
+        context['agent_file'] = config.get('agent_token_file', context['auth_file'])
         rt.note(validation.stdout)
         rt.restart()
         rt.cli('register', 'human', '--username', 'proof-kit-owner', '--display-name', 'Synthetic proof-kit owner')
@@ -392,14 +411,19 @@ def run_episode(attack, verify, *, episode, budget, short_lease=False, policy=PO
         dirty = bool(subprocess.check_output(['git', '-C', str(kits_root), 'status', '--porcelain'], text=True).strip())
         save(output / 'run.json', dict(**metadata, episode=episode, budget=budget, currency='usd',
              lease_profile=context['lease_profile'], claim_ttl_seconds=30 if short_lease else 900,
+             credential_split=context['credential_split'],
              kits_commit=kits_commit, kits_worktree_dirty=dirty, platform=platform.platform(), machine=platform.machine(),
              python=sys.version, started_at=now(), ids=rt.ids, invocation=sys.argv))
-        child_context = private / 'attack-context.json'; save(child_context, context)
+        # The attack process holds only the agent credential (plus the executor
+        # credential for synthetic executor routes); owner capabilities stay here.
+        child_context = private / 'attack-context.json'
+        save(child_context, dict(context, auth_file=context['agent_file']))
+        child_environment = dict(rt.environment(), HUBU_AUTH_TOKEN_FILE=context['agent_file'])
         rt.snapshot('initial')
         command = [sys.executable, str(Path(sys.argv[0]).resolve()), '--attack-context', str(child_context)]
         error_path = private / 'attack-stderr.txt'
         with error_path.open('w') as errors:
-            child = subprocess.Popen(command, cwd=private, env=rt.environment(), stdin=subprocess.PIPE,
+            child = subprocess.Popen(command, cwd=private, env=child_environment, stdin=subprocess.PIPE,
                                      stdout=subprocess.PIPE, stderr=errors, text=True, bufsize=1, start_new_session=True)
             for line in child.stdout:
                 request = json.loads(line)
