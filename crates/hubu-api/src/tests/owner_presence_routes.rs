@@ -533,8 +533,68 @@ fn invalid_owner_requests_are_refused_before_any_prompt() {
         );
         assert_eq!(response.status, 400, "{body}: {}", response.body);
     }
-    let response = route(create_budget_request(&agent.agent_id, "ten"), &state);
+    for body in [
+        json!({ "agent_id": agent.agent_id, "amount": "ten" }),
+        json!({ "agent_id": agent.agent_id, "amount": "0" }),
+        json!({ "agent_id": agent.agent_id, "amount": "5.00", "starting_at": "yesterday" }),
+        json!({ "agent_id": agent.agent_id, "amount": "5.00", "currency": "doubloons" }),
+        json!({ "agent_id": agent.agent_id, "amount": "5.00", "extra": 1 }),
+        json!({ "agent_id": agent.agent_id, "amount": "5.00",
+                "starting_at": "2030-01-02T00:00:00Z", "ending_before": "2030-01-01T00:00:00Z" }),
+    ] {
+        let response = route(authenticated_json_request("/budgets", body.clone()), &state);
+        assert_eq!(response.status, 400, "{body}: {}", response.body);
+    }
+    for body in [
+        json!({ "amount": "0" }),
+        json!({ "amount": "5", "nope": 1 }),
+    ] {
+        let response = route(
+            authenticated_json_request("/user/spending-target", body.clone()),
+            &state,
+        );
+        assert_eq!(response.status, 400, "{body}: {}", response.body);
+    }
+    let budget = create_test_agent_budget(&state, &agent.agent_id, 1_000);
+    let response = route(
+        authenticated_json_request(
+            &format!("/budgets/{}/versions", budget.budget.budget_id),
+            json!({ "amount_limit": "0", "expected_revision": 1 }),
+        ),
+        &state,
+    );
     assert_eq!(response.status, 400, "{}", response.body);
+    assert_eq!(response.body["error_code"], "budget_update_invalid_amount");
     assert!(records(&state).is_empty(), "no prompt may be raised");
+    std::fs::remove_file(path).ok();
+}
+
+/// Codex P1 (spec 9): a tightening write whose record cannot be stored does
+/// not run.
+#[test]
+fn tightening_does_not_run_when_its_record_cannot_be_written() {
+    let (path, state, agent) = state_with_agent("presence-tighten-record");
+    let budget = create_test_agent_budget(&state, &agent.agent_id, 1_000);
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute_batch("DROP TABLE owner_presence_records;")
+        .unwrap();
+    let response = route(
+        authenticated_json_request(
+            "/budgets/revoke",
+            json!({ "budget_id": budget.budget.budget_id }),
+        ),
+        &state,
+    );
+    assert_eq!(response.status, 500, "{}", response.body);
+    assert_eq!(response.body["error_code"], "owner_presence_record_failed");
+    let budgets = route(authenticated_get_request("/budgets"), &state);
+    let status = budgets.body["budgets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["budget_id"] == json!(budget.budget.budget_id))
+        .map(|b| b["status"].clone());
+    assert_eq!(status, Some(json!("active")), "{}", budgets.body);
     std::fs::remove_file(path).ok();
 }

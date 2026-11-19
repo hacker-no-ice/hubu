@@ -147,27 +147,22 @@ fn tightening(request: HttpRequest, state: &ServerState, client: OwnerClient) ->
         &request.body,
         &["budget_id", "target_id", "approval_request_id"],
     );
-    let response = dispatch_route(request, state);
-    if response.status < 400 {
-        let record = OwnerPresenceRecord {
-            record_id: new_record_id(),
-            recorded_at: Utc::now(),
-            action: action.to_string(),
-            reason: String::new(),
-            outcome: "not_required".to_string(),
-            method: None,
-            client: client.as_str().to_string(),
-            targets,
-        };
-        if let Err(error) = record_presence(state, &record) {
-            log_event(
-                "error",
-                "owner_presence_record_failed",
-                json!({ "action": action, "error": error.to_string() }),
-            );
-        }
+    // Written before the action runs; if it cannot be stored, the action
+    // does not run (spec 9).
+    let record = OwnerPresenceRecord {
+        record_id: new_record_id(),
+        recorded_at: Utc::now(),
+        action: action.to_string(),
+        reason: String::new(),
+        outcome: "not_required".to_string(),
+        method: None,
+        client: client.as_str().to_string(),
+        targets,
+    };
+    if let Err(error) = record_presence(state, &record) {
+        return internal_presence_error(&error);
     }
-    response
+    dispatch_route(request, state)
 }
 
 #[derive(Deserialize)]
@@ -399,6 +394,9 @@ fn invalid_owner_action(request: &HttpRequest, error: &anyhow::Error) -> HttpRes
             "error": error.to_string(),
         }),
     );
+    if let Some(response) = budget_version_error_response(error) {
+        return response;
+    }
     let (status, error_code) = if error.downcast_ref::<UnknownOwnerTarget>().is_some() {
         (404, OWNER_ACTION_TARGET_NOT_FOUND_ERROR_CODE)
     } else {
@@ -422,7 +420,7 @@ fn internal_presence_error(error: &anyhow::Error) -> HttpResponse {
     HttpResponse {
         status: 500,
         body: json!({
-            "error": "owner presence could not be recorded; no owner action was performed",
+            "error": "owner presence could not be recorded; the owner action was not performed",
             "error_code": "owner_presence_record_failed",
         }),
     }
@@ -492,6 +490,7 @@ fn owner_action_spec(
     request: &HttpRequest,
     state: &ServerState,
 ) -> Result<Option<OwnerActionSpec>> {
+    precheck_owner_request(request, state)?;
     let action = |action, reason, targets| {
         Ok(Some(OwnerActionSpec {
             action,
@@ -558,7 +557,6 @@ fn owner_action_spec(
             )
         }
         ("POST", agent_identity::AGENT_RENAME_ROUTE) => {
-            agent_identity::precheck_rename(&request.body)?;
             let map = body_object(&request.body)?;
             let agent_id = body_str(&map, "agent_id")
                 .ok_or_else(|| anyhow!("agent rename requires `agent_id`"))?;
@@ -572,7 +570,6 @@ fn owner_action_spec(
             )
         }
         ("POST", "/policies") => {
-            precheck_policy(&request.body, state)?;
             let map = body_object(&request.body)?;
             let agent_id = body_str(&map, "agent_id");
             let scope = match agent_id {
@@ -634,6 +631,73 @@ fn owner_action_spec(
             request.method, request.path
         )))),
     }
+}
+
+/// Runs each owner handler's checks that do not depend on state that can
+/// change while the dialog is open (spec 5.4), so an invalid request is
+/// refused with no dialog. Each arm reuses the handler's own parsing.
+fn precheck_owner_request(request: &HttpRequest, state: &ServerState) -> Result<()> {
+    let body = request.body.as_str();
+    if request.method == "POST" {
+        if let Some(budget_id) = budget_versions_public_id(&request.path) {
+            if !is_valid_public_budget_id(budget_id) {
+                return Err(anyhow::Error::new(BudgetVersionHttpError::NotFound));
+            }
+            let update = parse_update_budget_limit_request(body).map_err(anyhow::Error::new)?;
+            decimal_amount(
+                update.amount_limit.as_deref(),
+                "amount_limit",
+                "budget update",
+            )
+            .map_err(|_| anyhow::Error::new(BudgetVersionHttpError::InvalidAmount))?;
+            if update.expected_revision <= 0 {
+                return Err(anyhow::Error::new(BudgetVersionHttpError::InvalidRevision));
+            }
+            return Ok(());
+        }
+    }
+    match (request.method.as_str(), request.path.as_str()) {
+        ("POST", "/init") => {
+            if !body.trim().is_empty() {
+                serde_json::from_str::<InitHttpRequest>(body)?;
+            }
+        }
+        ("POST", "/user/spending-target") => {
+            let target: SetSpendingTargetHttpRequest = serde_json::from_str(body)?;
+            decimal_amount(target.amount.as_deref(), "amount", "spending target")?;
+            precheck_period(target.starting_at, target.ending_before, "spending target")?;
+        }
+        ("POST", "/budgets") => {
+            let budget: CreateBudgetHttpRequest = serde_json::from_str(body)?;
+            decimal_amount(budget.amount.as_deref(), "amount", "budget")?;
+            normalize_spend_currency(budget.currency.as_deref())?;
+            precheck_period(budget.starting_at, budget.ending_before, "budget")?;
+        }
+        ("POST", "/policies") => precheck_policy(body, state)?,
+        ("POST", agent_identity::AGENT_RENAME_ROUTE) => agent_identity::precheck_rename(body)?,
+        ("POST", "/spend/approval/resolve") => {
+            serde_json::from_str::<ResolveSpendApprovalHttpRequest>(body)?;
+        }
+        ("POST", "/spend/executor/settle" | "/spend/executor/release") => {
+            ExecutorSpendFinalizationHttpRequest::parse(body)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// A period as the handlers build it. A missing start means "now", which can
+/// only make a valid end invalid if it is already past; that is rechecked by
+/// the handler after confirmation.
+fn precheck_period(
+    starting_at: Option<String>,
+    ending_before: Option<String>,
+    subject: &str,
+) -> Result<()> {
+    let start = parse_optional_datetime(starting_at)?.unwrap_or_else(Utc::now);
+    hubu_common::time::TimePeriod::new(start, parse_optional_datetime(ending_before)?)
+        .map_err(|error| anyhow!("invalid {subject} period: {error:?}"))?;
+    Ok(())
 }
 
 /// The policy handler's checks that need no stored state, run before the
