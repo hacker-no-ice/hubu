@@ -15,6 +15,7 @@ const VIEWS = [
   { id: "policies", label: "Policies", render: renderPolicies },
   { id: "budgets", label: "Budgets", render: renderBudgets },
   { id: "providers", label: "Providers & secrets", render: renderProviders },
+  { id: "settings", label: "Settings", render: renderSettings },
 ];
 
 const state = { session: null, agents: [], counts: {}, routeParams: new URLSearchParams() };
@@ -273,6 +274,59 @@ async function showJsonDialog(title, loader) {
 }
 
 // ---------- views ----------
+
+async function renderSettings(view) {
+  const { overrides } = await hubu("/governance/overrides");
+  const error = h("div", { class: "notice bad", role: "alert", hidden: true });
+
+  async function save(setting, button, feedback, close) {
+    button.disabled = true;
+    feedback.hidden = true;
+    try {
+      await ownerPost("/governance/overrides", {
+        action: setting.action,
+        enabled: !setting.enabled,
+        acknowledge_warning: !setting.enabled,
+      });
+      close?.();
+      if (view.isConnected) await route();
+    } catch (failure) {
+      feedback.textContent = failure.message;
+      feedback.hidden = false;
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  function confirmEnable(setting) {
+    const feedback = h("div", { class: "notice bad", role: "alert", hidden: true });
+    openDialog(`Enable override: ${setting.label}`, h("div", {},
+      h("p", {}, setting.permission),
+      h("p", { class: "notice bad" }, setting.risk),
+      feedback), (close) => {
+      const enable = h("button", { type: "button", class: "danger",
+        onclick: () => save(setting, enable, feedback, close) }, "I understand, enable override");
+      return enable;
+    });
+  }
+
+  view.append(
+    h("p", { class: "hint" }, "Strict is the default. Overrides apply to all agents in this Hubu profile."),
+    error,
+    card("Agent action overrides", table([
+      { label: "Action", key: "label" },
+      { label: "Status", render: (setting) => badge(setting.enabled ? "enabled" : "off") },
+      { label: "Change", render: (setting) => {
+        const button = h("button", { type: "button", class: setting.enabled ? "ghost" : "danger",
+          "aria-label": `${setting.enabled ? "Disable" : "Enable"} override: ${setting.label}`,
+          onclick: () => setting.enabled ? save(setting, button, error) : confirmEnable(setting),
+        }, setting.enabled ? "Disable…" : "Enable…");
+        return button;
+      } },
+    ], overrides), null, true),
+    h("p", { class: "hint" }, "Changing overrides, creating or raising budgets, approving spend, reconciliation, and loosening policy always require the owner."),
+  );
+}
 
 async function renderOverview(view) {
   const [summary, budgets, records, agents, users, policies, targets, pending] = await Promise.all([

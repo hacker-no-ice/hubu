@@ -36,6 +36,7 @@ bearer without a Touch ID dialog.
 | Policies | Read any revision of a policy (rules in plain language and the YAML source), compare a past revision with the current one, then switch to Edit to change the YAML, validate it and save it as a new revision. |
 | Budgets | Create budgets, change a limit, revoke, view version history. |
 | Providers & secrets | Read-only view grouped by platform: each platform's models, config versions, secret reference name and which targets Gongbu currently offers. |
+| Settings | Review and change per-action agent overrides for lowering a budget or adding a deny rule. |
 
 The spend summary comes from the read-only
 [`GET /ledger/summary`](ledger-history.md#spend-summary) endpoint, so totals
@@ -84,6 +85,21 @@ confirmation is unavailable, check that `hubu-server` runs in your Mac’s
 signed-in desktop session. After five denied or timed-out prompts in ten
 minutes, wait for the retry time shown by the portal. If another client has
 already resolved the spend request, the portal refreshes the pending list.
+
+## Agent action overrides
+
+Hubu starts in **Strict** with every override off. In **Settings**, choose
+**Enable…** for a specific action. Review what agents will be able to do and
+how a prompt-injected agent could disrupt work, then acknowledge the warning
+and confirm on your Mac. Disabling an override also requires owner confirmation.
+
+- **Lower an existing budget** lets agents decrease the current limit.
+- **Append a deny rule** lets agents block additional spend under an existing
+  assigned policy. Every agent using that policy can be affected.
+
+Only the owner can change these settings, create or raise a budget, approve
+spend, reconcile, or apply a policy change that could loosen controls.
+Delegated actions name the override in `GET /governance/owner-presence`.
 
 ## Connection
 
