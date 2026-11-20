@@ -1,5 +1,18 @@
 [
   {
+    "slug": "one-image-request-billed-10-images",
+    "title": "Postmortem: a one-image request billed 10 images",
+    "description": "Hubu authorized two Gemini 3 Pro Image edits for $0.27 and Google billed $1.92 for 14 images. What happened, why the cost check came too late, what we learned about Gemini image billing, and what is changing.",
+    "publishedOn": "2026-11-20",
+    "category": "incidents",
+    "cover": {
+      "src": "/blogs/one-image-request-billed-10-images/01-cover.png",
+      "width": 1672,
+      "height": 941,
+      "alt": "Hubu incident postmortem cover with the title A one-image request billed 10 images and the subtitle Authorized $0.27, billed $1.92. A table shows the patch request asked for 1 image, returned 4 and billed $0.55; the sticker request asked for 1, returned 10 and billed $1.37; in total 2 asked, 14 returned, $1.92 billed, about a 7 times overrun."
+    }
+  },
+  {
     "slug": "from-rust-adapters-to-provider-packs",
     "title": "From Rust adapters to provider packs",
     "description": "Why Hubu replaced hand-written Rust provider adapters with TOML provider packs run by reviewed engines, how the migration went, and how it sets up adding providers from a web UI.",

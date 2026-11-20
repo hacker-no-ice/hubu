@@ -47,6 +47,15 @@ export const engineeringIndexMetadata: Metadata = {
   ...shareMetadata(engineeringTitle, engineeringDescription, "/blogs"),
 };
 
+const incidentsTitle = "Incidents · Hubu Engineering Blogs";
+const incidentsDescription = "Postmortems of incidents in Hubu: what happened, why, and what we are changing.";
+
+export const incidentsIndexMetadata: Metadata = {
+  title: { absolute: incidentsTitle },
+  alternates: { canonical: "/blogs/incidents" },
+  ...shareMetadata(incidentsTitle, incidentsDescription, "/blogs/incidents"),
+};
+
 export function engineeringPostMetadata(post: EngineeringPost | undefined): Metadata {
   if (!post) return {};
   const title = `${post.title} · Hubu Engineering Blogs`;

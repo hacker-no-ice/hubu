@@ -578,9 +578,45 @@ test("publishes the provider packs article with its cover, four figures, and tab
   assert.equal(html.match(/<figcaption\b/g)?.length, 4, "each figure has a caption");
 });
 
+test("publishes an Incidents category that lists only incident postmortems", async () => {
+  const response = await render("/blogs/incidents");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /<h1[^>]*>Incidents<\/h1>/);
+  assert.match(html, /<title>Incidents · Hubu Engineering Blogs<\/title>/);
+  assert.match(html, /<link rel="canonical" href="https:\/\/hubustack.dev\/blogs\/incidents"/);
+  assert.match(html, /<a href="\/blogs\/incidents" aria-current="page">Incidents<\/a>/);
+  assert.match(html, /href="\/blogs\/one-image-request-billed-10-images"/);
+  assert.doesNotMatch(html, /href="\/blogs\/budgets-that-keep-up-with-agents"/);
+
+  const index = await (await render("/blogs")).text();
+  assert.match(index, /<a href="\/blogs\/incidents">Incidents<\/a>/);
+  assert.match(index, /href="\/blogs\/one-image-request-billed-10-images"/);
+  assert.match(index, /data-category="incidents">Incidents<\/span>/);
+  assert.ok(
+    index.indexOf("/blogs/one-image-request-billed-10-images") < index.indexOf("/blogs/from-rust-adapters-to-provider-packs"),
+    "the postmortem is the newest post",
+  );
+});
+
+test("publishes the one-image postmortem in the Incidents category", async () => {
+  const response = await render("/blogs/one-image-request-billed-10-images");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /<h1[^>]*>Postmortem: a one-image request billed 10 images<\/h1>/);
+  assert.equal(html.match(/<h1\b/g)?.length, 1, "the title is the only h1");
+  assert.match(html, /<time dateTime="2026-11-20">November 20, 2026<\/time>/);
+  assert.match(html, /<a class="engineering-category" data-category="incidents" href="\/blogs\/incidents">Incidents<\/a>/);
+  assert.match(html, /<link rel="canonical" href="https:\/\/hubustack.dev\/blogs\/one-image-request-billed-10-images"/);
+  assert.match(html, /<meta property="og:image" content="https:\/\/hubustack.dev\/blogs\/one-image-request-billed-10-images\/01-cover.png"/);
+  assert.match(html, /<h2 id="[^"]+">What&#39;s changing<a class="heading-anchor"/);
+  assert.equal(html.match(/<table\b/g)?.length, 2, "both tables render");
+  await access(new URL("../dist/client/blogs/one-image-request-billed-10-images/01-cover.png", import.meta.url));
+});
+
 test("includes Engineering Blogs and its published article in the sitemap", async () => {
   const sitemap = await readFile(new URL("../dist/client/sitemap.xml", import.meta.url), "utf8");
-  for (const pathname of ["/blogs", "/blogs/budgets-that-keep-up-with-agents", "/blogs/why-agents-need-a-call-id", "/blogs/from-rust-adapters-to-provider-packs"]) {
+  for (const pathname of ["/blogs", "/blogs/incidents", "/blogs/one-image-request-billed-10-images", "/blogs/budgets-that-keep-up-with-agents", "/blogs/why-agents-need-a-call-id", "/blogs/from-rust-adapters-to-provider-packs"]) {
     assert.ok(sitemap.includes(`<loc>https://hubustack.dev${pathname}</loc>`), pathname);
   }
 });

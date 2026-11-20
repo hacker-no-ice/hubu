@@ -10,6 +10,12 @@
 .engineering-card-copy h2 { margin: 18px 0 16px; font-size: clamp(28px, 3vw, 40px); line-height: 1.12; font-weight: 530; letter-spacing: -.04em; }
 .engineering-card-copy > p:not(.engineering-published) { color: var(--muted); font-size: 16px; line-height: 1.7; }
 .engineering-published { color: var(--muted); font: 12px/1.6 var(--font-geist-mono), monospace; }
+.engineering-categories { display: flex; flex-wrap: wrap; gap: 8px; margin: -24px 0 40px; }
+.engineering-categories a { padding: 6px 14px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font: 12px/1.6 var(--font-geist-mono), monospace; }
+.engineering-categories a:hover { color: var(--text); }
+.engineering-categories a[aria-current="page"] { border-color: var(--cyan); color: var(--text); }
+.engineering-category { color: var(--cyan); text-transform: uppercase; letter-spacing: .08em; }
+.engineering-category[data-category="incidents"] { color: var(--warning); }
 .engineering-read { display: inline-flex; gap: 22px; margin-top: 15px; color: var(--cyan); font-size: 14px; }
 .engineering-card > a:hover h2 { color: var(--cyan); }
 .engineering-article { padding: 76px 32px 100px; background: var(--bg); color: var(--text); }

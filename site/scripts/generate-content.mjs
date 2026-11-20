@@ -183,6 +183,10 @@ const engineeringMetadata = JSON.parse(await readFile(path.join(engineeringRoot,
 if (!Array.isArray(engineeringMetadata)) {
   throw new Error("Engineering posts.json must contain an array");
 }
+// Blog categories. Each non-default category has an index at /blogs/<id>, so
+// its id is reserved and cannot be used as a post slug.
+const blogCategories = ["engineering", "incidents"];
+const defaultBlogCategory = "engineering";
 const engineeringSlugs = new Set();
 const engineeringPosts = [];
 for (const metadata of engineeringMetadata) {
@@ -190,13 +194,17 @@ for (const metadata of engineeringMetadata) {
     throw new Error("Each engineering post must be a metadata object");
   }
   const slug = requiredString(metadata.slug, "slug");
-  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug) || engineeringSlugs.has(slug)) {
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug) || engineeringSlugs.has(slug) || blogCategories.includes(slug)) {
     throw new Error(`Engineering post slug must be unique and use lowercase words separated by hyphens: ${slug}`);
   }
   engineeringSlugs.add(slug);
   const title = requiredString(metadata.title, `${slug} title`);
   const description = requiredString(metadata.description, `${slug} description`);
   const publishedOn = publicationDate(metadata.publishedOn, slug);
+  const category = metadata.category == null ? defaultBlogCategory : requiredString(metadata.category, `${slug} category`);
+  if (!blogCategories.includes(category)) {
+    throw new Error(`Engineering post ${slug} category must be one of ${blogCategories.join(", ")}: ${category}`);
+  }
   const releaseStatus = metadata.releaseStatus == null ? null : requiredString(metadata.releaseStatus, `${slug} releaseStatus`);
   const cover = metadata.cover;
   if (!cover || typeof cover !== "object" || Array.isArray(cover)) {
@@ -221,6 +229,7 @@ for (const metadata of engineeringMetadata) {
     title,
     description,
     publishedOn,
+    category,
     releaseStatus,
     cover: { src, width: cover.width, height: cover.height, alt },
     href: `/blogs/${slug}`,
@@ -247,7 +256,7 @@ const releasePaths = (await readdir(path.join(siteRoot, "app/releases"), { withF
     const hasReport = statSync(path.join(siteRoot, "app/releases", name, "report/page.tsx"), { throwIfNoEntry: false })?.isFile();
     return hasReport ? [`/releases/${name}`, `/releases/${name}/report`] : [`/releases/${name}`];
   });
-const sitemapPaths = ["/", "/architecture/", "/blogs", "/mascot", "/releases", ...releasePaths, ...documents.map((document) => document.href), ...engineeringPosts.map((post) => post.href)];
+const sitemapPaths = ["/", "/architecture/", "/blogs", ...blogCategories.filter((category) => category !== defaultBlogCategory).map((category) => `/blogs/${category}`), "/mascot", "/releases", ...releasePaths, ...documents.map((document) => document.href), ...engineeringPosts.map((post) => post.href)];
 await writeFile(
   path.join(siteRoot, "public/sitemap.xml"),
   `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${sitemapPaths
