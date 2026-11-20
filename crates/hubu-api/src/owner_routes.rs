@@ -108,13 +108,22 @@ fn with_dispatch<T>(state: &ServerState, f: impl FnOnce() -> T) -> T {
 }
 
 fn owner_action(request: HttpRequest, state: &ServerState, client: OwnerClient) -> HttpResponse {
-    let spec = match with_dispatch(state, || owner_action_spec(&request, state)) {
+    let position = if client == OwnerClient::Cli && request.path == "/spend/approval/resolve" {
+        approval_position(&request)
+    } else {
+        None
+    };
+    let mut spec = match with_dispatch(state, || owner_action_spec(&request, state)) {
         Ok(Some(spec)) => spec,
+        Ok(None) if position.is_some() => return approval_not_pending(),
         // An approval that is no longer pending: the handler replays or
         // rejects it without granting anything new.
         Ok(None) => return dispatch_route(request, state),
         Err(error) => return invalid_owner_action(&request, &error),
     };
+    if let Some((position, total)) = position {
+        spec.reason.push_str(&format!(" ({position} of {total})"));
+    }
     if no_prompt(&request) {
         return presence_required(&spec);
     }
@@ -132,6 +141,13 @@ fn owner_action(request: HttpRequest, state: &ServerState, client: OwnerClient) 
         }
         (ActionKind::Action, Err((_, response))) => response,
     }
+}
+
+fn approval_position(request: &HttpRequest) -> Option<(usize, usize)> {
+    let (position, total) = header(request, "x-hubu-approval-position")?.split_once('/')?;
+    let position = position.parse().ok()?;
+    let total = total.parse().ok()?;
+    (position > 0 && position <= total).then_some((position, total))
 }
 
 /// Tightening writes need no prompt, but each one is recorded so a call made
@@ -189,19 +205,7 @@ fn approval_prompt(request: HttpRequest, state: &ServerState, client: OwnerClien
     };
     let spec = match with_dispatch(state, || approval_spec(&body.approval_request_id, state)) {
         Ok(Some(spec)) => spec,
-        Ok(None) => {
-            return HttpResponse {
-                status: 409,
-                body: json!({
-                    "error": "the approval request is no longer pending; it was already resolved (approved or denied)",
-                    "error_code": APPROVAL_NOT_PENDING_ERROR_CODE,
-                    "retry_guidance": {
-                        "action": "do_not_retry",
-                        "message": "a resolved request is closed; if it was denied, make a new spend request if the owner still wants it"
-                    },
-                }),
-            }
-        }
+        Ok(None) => return approval_not_pending(),
         Err(error) => return invalid_owner_action(&request, &error),
     };
     if no_prompt(&request) {
@@ -235,6 +239,20 @@ fn approval_prompt(request: HttpRequest, state: &ServerState, client: OwnerClien
         Err((refusal, response)) => {
             with_refusal_outcome(state, &body.approval_request_id, &refusal, response)
         }
+    }
+}
+
+fn approval_not_pending() -> HttpResponse {
+    HttpResponse {
+        status: 409,
+        body: json!({
+            "error": "the approval request is no longer pending; it was already resolved (approved or denied)",
+            "error_code": APPROVAL_NOT_PENDING_ERROR_CODE,
+            "retry_guidance": {
+                "action": "do_not_retry",
+                "message": "a resolved request is closed; if it was denied, make a new spend request if the owner still wants it"
+            },
+        }),
     }
 }
 

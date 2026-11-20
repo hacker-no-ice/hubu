@@ -23,11 +23,11 @@ fn write_active_handoff(profile: &Path, endpoint: &str, credentials: &Path) {
     initialized_profile(profile);
     fs::create_dir_all(credentials).unwrap();
     let auth = credentials.join("auth.token");
+    let agent = credentials.join("agent.token");
     let approval = credentials.join("approval.token");
     let reconciliation = credentials.join("reconciliation.token");
     fs::write(&auth, "profile-auth\n").unwrap();
-    fs::write(&approval, "profile-approval\n").unwrap();
-    fs::write(&reconciliation, "profile-reconciliation\n").unwrap();
+    fs::write(&agent, "profile-agent\n").unwrap();
 
     let generation_id = "a".repeat(64);
     let generation = profile.join("generated/generations").join(&generation_id);
@@ -37,6 +37,7 @@ fn write_active_handoff(profile: &Path, endpoint: &str, credentials: &Path) {
         "mcp_server": profile.join("bin/hubu-unified-mcp"),
         "hubu_endpoint": endpoint,
         "hubu_token_file": auth,
+        "agent_token_file": agent,
         "approval_token_file": approval,
         "reconciliation_token_file": reconciliation,
         "operation_state_path": profile.join("state/operations.json"),
@@ -80,6 +81,8 @@ fn clean_command(hubu_home: &Path) -> Command {
         .env_remove("HUBU_URL")
         .env_remove("HUBU_AUTH_TOKEN")
         .env_remove("HUBU_AUTH_TOKEN_FILE")
+        .env_remove("HUBU_AGENT_TOKEN")
+        .env_remove("HUBU_AGENT_TOKEN_FILE")
         .env_remove("HUBU_APPROVAL_TOKEN")
         .env_remove("HUBU_APPROVAL_TOKEN_FILE")
         .env_remove("HUBU_RECONCILIATION_TOKEN")
@@ -92,6 +95,8 @@ fn stale_environment(command: &mut Command) -> &mut Command {
         .env("HUBU_URL", "http://127.0.0.1:1")
         .env("HUBU_AUTH_TOKEN", "stale-auth")
         .env("HUBU_AUTH_TOKEN_FILE", STALE_TOKEN_FILE)
+        .env("HUBU_AGENT_TOKEN", "stale-agent")
+        .env("HUBU_AGENT_TOKEN_FILE", STALE_TOKEN_FILE)
         .env("HUBU_APPROVAL_TOKEN", "stale-approval")
         .env("HUBU_APPROVAL_TOKEN_FILE", STALE_TOKEN_FILE)
         .env("HUBU_RECONCILIATION_TOKEN", "stale-reconciliation")
@@ -180,7 +185,11 @@ fn selected_profile_replaces_stale_endpoint_and_all_credential_environment() {
     .output()
     .unwrap();
     assert!(!approval.status.success());
-    assert!(String::from_utf8_lossy(&approval.stderr).contains("captured"));
+    let stderr = String::from_utf8_lossy(&approval.stderr);
+    assert!(stderr.contains("captured"));
+    assert!(stderr.contains("Waiting for the owner to confirm on this Mac…"));
+    assert!(stderr.contains("HUBU_APPROVAL_TOKEN is deprecated and ignored"));
+    assert!(stderr.contains("HUBU_RECONCILIATION_TOKEN_FILE is deprecated and ignored"));
 
     let reconciliation = stale_environment(clean_command(&hubu_home).args([
         "spend",
@@ -199,11 +208,12 @@ fn selected_profile_replaces_stale_endpoint_and_all_credential_environment() {
     assert!(String::from_utf8_lossy(&reconciliation.stderr).contains("captured"));
 
     let requests = server.finish();
-    assert!(requests[0].contains("Authorization: Bearer profile-auth\r\n"));
+    assert!(requests[0].contains("Authorization: Bearer profile-agent\r\n"));
     assert!(requests[1].contains("Authorization: Bearer profile-auth\r\n"));
-    assert!(requests[1].contains("X-Hubu-Approval-Capability: profile-approval\r\n"));
+    assert!(requests[1].contains("X-Hubu-Client: cli\r\n"));
+    assert!(!requests[1].contains("X-Hubu-Approval-Capability:"));
     assert!(requests[2].contains("Authorization: Bearer profile-auth\r\n"));
-    assert!(requests[2].contains("X-Hubu-Reconciliation-Capability: profile-reconciliation\r\n"));
+    assert!(!requests[2].contains("X-Hubu-Reconciliation-Capability:"));
     assert!(requests.iter().all(|request| !request.contains("stale-")));
 }
 
@@ -242,7 +252,7 @@ fn active_default_profile_is_used_without_an_explicit_selection() {
         .unwrap();
     assert_success(&output);
     let requests = server.finish();
-    assert!(requests[0].contains("Authorization: Bearer profile-auth\r\n"));
+    assert!(requests[0].contains("Authorization: Bearer profile-agent\r\n"));
 }
 
 #[test]
@@ -324,7 +334,7 @@ fn watch_once_uses_selected_profile_without_human_capabilities() {
     assert!(stdout.lines().all(|line| line.chars().count() <= 70));
     let request = requests.join().unwrap().to_ascii_lowercase();
     assert!(request.starts_with("get /watch?currency=usd http/1.1"));
-    assert!(request.contains("authorization: bearer profile-auth"));
+    assert!(request.contains("authorization: bearer profile-agent"));
     assert!(!request.contains("approval"));
     assert!(!request.contains("reconciliation"));
     assert!(!request.contains("stale-"));

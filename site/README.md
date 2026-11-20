@@ -55,7 +55,14 @@ The Engineering Blogs index lives at `/blogs`, with articles at
 ```
 
 All fields shown above except `releaseStatus` are required. Omit `releaseStatus`
-for posts that are not tied to a release. Use a unique lowercase, hyphen-separated
+for posts that are not tied to a release.
+
+Posts may also set an optional `category`: `engineering` (the default when
+omitted) or `incidents`. Every post appears on `/blogs`; incident postmortems
+also appear on `/blogs/incidents`. Category ids are reserved and cannot be used
+as post slugs. To add a category, extend `blogCategories` in both
+`scripts/generate-content.mjs` and `app/lib/engineering.ts`, and add its index
+page under `app/blogs/<category>/`. Use a unique lowercase, hyphen-separated
 slug and an explicit, valid calendar date in `YYYY-MM-DD` form. The publication
 date appears on the index and article and supplies the article's share metadata;
 it stays the same across rebuilds and time zones. Preserve the original date

@@ -52,7 +52,7 @@ pub(super) fn command(context: &CliContext, mut args: Vec<String>) -> Result<()>
         .timeout(Duration::from_secs(5))
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
-    let token = target.auth_token()?;
+    let token = target.agent_token()?;
     let mut url = reqwest::Url::parse(&format!("{}/watch", target.base_url.trim_end_matches('/')))?;
     url.query_pairs_mut()
         .append_pair("currency", &opts.currency);

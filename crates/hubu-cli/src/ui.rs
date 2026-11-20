@@ -39,7 +39,6 @@ const MAX_CONNECTIONS: usize = 32;
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 const GONGBU_TIMEOUT: Duration = Duration::from_secs(5);
 const UI_HEADER: &str = "x-hubu-ui";
-const PORTAL_CLIENT_HEADER: &str = "X-Hubu-Client: portal\r\n";
 
 const INDEX_HTML: &str = include_str!("ui/assets/index.html");
 const APP_JS: &str = include_str!("ui/assets/app.js");
@@ -195,12 +194,12 @@ impl Backend for LiveBackend<'_> {
     ) -> Result<(u16, Value)> {
         // The shared transport waits for the reply without a response read
         // deadline. The server may spend up to 60 seconds on owner presence.
-        super::request_json_to_target(
-            self.client.target()?,
+        super::request_json_status(
+            self.client,
             method,
             path_and_query,
             body,
-            PORTAL_CLIENT_HEADER,
+            super::RequestMode::Portal,
         )
     }
 

@@ -39,12 +39,8 @@ const AGENT_TOKEN_FILE_ENV: &str = "HUBU_AGENT_TOKEN_FILE";
 const DEFAULT_AGENT_TOKEN_FILE: &str = "hubu.agent-token";
 const APPROVAL_TOKEN_ENV: &str = "HUBU_APPROVAL_TOKEN";
 const APPROVAL_TOKEN_FILE_ENV: &str = "HUBU_APPROVAL_TOKEN_FILE";
-const DEFAULT_APPROVAL_TOKEN_FILE: &str = "hubu.approval-token";
-const APPROVAL_CAPABILITY_HEADER: &str = "X-Hubu-Approval-Capability";
 const RECONCILIATION_TOKEN_ENV: &str = "HUBU_RECONCILIATION_TOKEN";
 const RECONCILIATION_TOKEN_FILE_ENV: &str = "HUBU_RECONCILIATION_TOKEN_FILE";
-const DEFAULT_RECONCILIATION_TOKEN_FILE: &str = "hubu.reconciliation-token";
-const RECONCILIATION_CAPABILITY_HEADER: &str = "X-Hubu-Reconciliation-Capability";
 const FINGERPRINT_PREFIX: &str = "sha256:";
 const DEFAULT_POLICY_TEMPLATE_PATH: &str = "policies/policy.yaml";
 const DEFAULT_POLICY_TEMPLATE: &str = include_str!("../../../policies/starter-policy.yaml");
@@ -53,8 +49,6 @@ const HUBU_HOME_ENV: &str = "HUBU_HOME";
 const HUBU_UNIFIED_MCP_SERVER_ENV: &str = "HUBU_UNIFIED_MCP_SERVER";
 const HUBU_UNIFIED_OPERATION_STATE_PATH_ENV: &str = "HUBU_UNIFIED_OPERATION_STATE_PATH";
 const DEFAULT_UNIFIED_OPERATION_STATE_FILE: &str = "hubu-unified-operations.sqlite3";
-#[cfg(test)]
-const TEST_APPROVAL_TOKEN: &str = "test-human-approval-token";
 
 #[derive(Debug, Default, PartialEq, Eq)]
 struct GlobalOptions {
@@ -83,6 +77,12 @@ struct HttpApplicationError {
     body: Value,
 }
 
+impl HttpApplicationError {
+    fn error_code(&self) -> Option<&str> {
+        self.body.get("error_code").and_then(Value::as_str)
+    }
+}
+
 impl std::fmt::Display for HttpApplicationError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let message = self
@@ -91,7 +91,7 @@ impl std::fmt::Display for HttpApplicationError {
             .and_then(Value::as_str)
             .unwrap_or("request failed");
         write!(formatter, "server returned HTTP {}", self.status)?;
-        if let Some(error_code) = self.body.get("error_code").and_then(Value::as_str) {
+        if let Some(error_code) = self.error_code() {
             write!(formatter, " ({error_code})")?;
         }
         write!(formatter, ": {message}")?;
@@ -111,8 +111,7 @@ impl std::error::Error for HttpApplicationError {}
 enum CredentialSources {
     ActiveProfile {
         auth: PathBuf,
-        approval: PathBuf,
-        reconciliation: PathBuf,
+        agent: Option<PathBuf>,
     },
     Legacy,
 }
@@ -160,8 +159,7 @@ impl CliContext {
                 base_url: handoff.hubu_endpoint,
                 credentials: CredentialSources::ActiveProfile {
                     auth: handoff.hubu_token_file,
-                    approval: handoff.approval_token_file,
-                    reconciliation: handoff.reconciliation_token_file,
+                    agent: handoff.agent_token_file,
                 },
             });
         }
@@ -245,7 +243,21 @@ fn main() {
     if let Err(error) = run() {
         let output = terminal::stderr();
         eprintln!("{}: {error:#}", output.error("error"));
-        std::process::exit(1);
+        let code = error
+            .downcast_ref::<HttpApplicationError>()
+            .and_then(HttpApplicationError::error_code);
+        let status = match code {
+            Some(
+                "owner_presence_required"
+                | "owner_presence_denied"
+                | "owner_presence_timeout"
+                | "owner_presence_unavailable"
+                | "owner_prompt_in_progress"
+                | "owner_prompt_rate_limited",
+            ) => 3,
+            _ => 1,
+        };
+        std::process::exit(status);
     }
 }
 
@@ -253,6 +265,7 @@ fn run() -> Result<()> {
     let mut args = env::args().skip(1).collect::<Vec<_>>();
     terminal::configure(GlobalOptions::color_choice(&args)?);
     let global = GlobalOptions::parse(&mut args)?;
+    warn_deprecated_capabilities(&mut args)?;
     money::configure(global.rounding);
     let hubu_home = hubu_home();
     let client = CliContext::new(global.base_url, hubu_home.clone());
@@ -277,6 +290,7 @@ fn run() -> Result<()> {
         "agent" => agent(&client, args),
         "budget" => budget(&client, args),
         "spend" => spend(&client, args),
+        "approvals" => approvals(&client, args),
         "ledger" => ledger(&client, args),
         "health" => health(&client),
         "watch" => watch::command(&client, args),
@@ -292,6 +306,26 @@ fn run() -> Result<()> {
         }
         _ => bail!("unknown command `{command}`"),
     }
+}
+
+fn warn_deprecated_capabilities(args: &mut Vec<String>) -> Result<()> {
+    for name in ["--approval-token-file", "--reconciliation-token-file"] {
+        while let Some(index) = args.iter().position(|arg| arg == name) {
+            take_global_option(args, index, name)?;
+            eprintln!("warning: {name} is deprecated and ignored");
+        }
+    }
+    for name in [
+        APPROVAL_TOKEN_ENV,
+        APPROVAL_TOKEN_FILE_ENV,
+        RECONCILIATION_TOKEN_ENV,
+        RECONCILIATION_TOKEN_FILE_ENV,
+    ] {
+        if env::var_os(name).is_some() {
+            eprintln!("warning: {name} is deprecated and ignored");
+        }
+    }
+    Ok(())
 }
 
 fn init(base_url: &str, explicit_base_url: bool, mut args: Vec<String>) -> Result<()> {
@@ -335,12 +369,6 @@ fn init_codex(base_url: &str, explicit_base_url: bool, mut args: Vec<String>) ->
     let manual_gongbu_token_file = take_value(&mut args, "--gongbu-token-file").map(PathBuf::from);
     let manual_token_file = take_value(&mut args, "--token-file").map(PathBuf::from);
     let manual_agent_token_file = take_value(&mut args, "--agent-token-file").map(PathBuf::from);
-    for flag in ["--approval-token-file", "--reconciliation-token-file"] {
-        if args.iter().any(|arg| arg == flag) {
-            take_value(&mut args, flag).ok_or_else(|| anyhow!("missing value for {flag}"))?;
-            eprintln!("{flag} is retired and ignored by hubu init codex.");
-        }
-    }
     let manual_operation_state_path = take_value(&mut args, "--mcp-state-file").map(PathBuf::from);
     let operation_key_db = take_value(&mut args, "--operation-key-db").map(PathBuf::from);
     if stack_profile.is_some()
@@ -492,6 +520,7 @@ fn init_codex(base_url: &str, explicit_base_url: bool, mut args: Vec<String>) ->
         "  spend_tools: Codex pre-approves Hubu spend tool calls; Hubu still returns needs_approval without payment when policy requires review"
     );
     println!("  spend_approval: the owner confirms each approval on the Mac");
+    println!("  pending_approvals: review with hubu approvals");
     Ok(())
 }
 
@@ -727,7 +756,7 @@ fn register_human(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
     let email = take_value(&mut args, "--email");
     ensure_no_args(args)?;
 
-    let response = post_json(
+    let response = post_owner_action(
         base_url,
         "/init",
         json!({
@@ -799,7 +828,7 @@ fn user_spending_target_set(base_url: &CliContext, mut args: Vec<String>) -> Res
     let ending_before = take_value(&mut args, "--ending-before");
     ensure_no_args(args)?;
 
-    let response = post_json(
+    let response = post_owner_action(
         base_url,
         "/user/spending-target",
         json!({
@@ -834,7 +863,7 @@ fn user_spending_target_show(base_url: &CliContext, mut args: Vec<String>) -> Re
     } else {
         "/user/spending-target"
     };
-    let response = get_json(base_url, path)?;
+    let response = get_owner_json(base_url, path)?;
     let targets = response
         .get("targets")
         .and_then(Value::as_array)
@@ -862,7 +891,7 @@ fn user_spending_target_revoke(base_url: &CliContext, mut args: Vec<String>) -> 
 
     let target_id = take_required(&mut args, "--target-id")?;
     ensure_no_args(args)?;
-    let response = post_json(
+    let response = post_owner_json(
         base_url,
         "/user/spending-target/revoke",
         json!({
@@ -880,7 +909,7 @@ fn user_spending_target_revoke(base_url: &CliContext, mut args: Vec<String>) -> 
 }
 
 fn user_list(base_url: &CliContext) -> Result<()> {
-    let response = get_json(base_url, "/users")?;
+    let response = get_owner_json(base_url, "/users")?;
     let users = response
         .get("users")
         .and_then(Value::as_array)
@@ -1381,7 +1410,7 @@ fn apply_policy(base_url: &CliContext, mut args: Vec<String>, legacy_add: bool) 
     }
     body["source"] = json!("cli");
 
-    let response = post_json(base_url, "/policies", body)?;
+    let response = post_owner_action(base_url, "/policies", body)?;
 
     let style = terminal::stdout();
     let outcome = if legacy_add {
@@ -1448,7 +1477,7 @@ fn print_policy_change_preview(
         None => "the owner default (all agents without their own policy)".to_string(),
     };
     let draft = strip_policy_owner(&policy.to_yaml_string()?);
-    let listing = get_json(base_url, "/policies")?;
+    let listing = get_owner_json(base_url, "/policies")?;
     let current = listing
         .get("policies")
         .and_then(Value::as_array)
@@ -1481,7 +1510,7 @@ fn print_policy_change_preview(
     };
 
     let policy_id = string_at(&current, "policy_id")?;
-    let exported = get_json(base_url, &format!("/policies/export?policy_id={policy_id}"))?;
+    let exported = get_owner_json(base_url, &format!("/policies/export?policy_id={policy_id}"))?;
     let before = strip_policy_owner(string_at(&exported, "policy_yaml")?);
     println!(
         "{}",
@@ -1588,10 +1617,11 @@ fn show_policy(base_url: &CliContext, args: Vec<String>, export: bool) -> Result
         if query.is_empty() { "" } else { "?" },
         query
     );
-    let response = get_json(base_url, &path)?;
     if export {
+        let response = get_owner_json(base_url, &path)?;
         print!("{}", string_at(&response, "policy_yaml")?);
     } else {
+        let response = get_json(base_url, &path)?;
         println!("{}", serde_json::to_string_pretty(&response)?);
     }
     Ok(())
@@ -1604,7 +1634,7 @@ fn policy_history(base_url: &CliContext, args: Vec<String>) -> Result<()> {
         if query.is_empty() { "" } else { "?" },
         query
     );
-    let response = get_json(base_url, &path)?;
+    let response = get_owner_json(base_url, &path)?;
     println!("{}", serde_json::to_string_pretty(&response)?);
     Ok(())
 }
@@ -1621,7 +1651,7 @@ fn policy_diff(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
     if let Some(to_revision) = to_revision {
         parameters.push(format!("to_revision={to_revision}"));
     }
-    let response = get_json(
+    let response = get_owner_json(
         base_url,
         &format!("/policies/diff?{}", parameters.join("&")),
     )?;
@@ -1728,8 +1758,7 @@ fn validate_public_agent_id(agent_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Owner-only relabel. Sends the human approval capability so agent sessions
-/// holding only the local bearer token cannot rename themselves.
+/// Relabel an agent after the server obtains owner confirmation.
 fn agent_rename(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
     if take_help(&mut args) {
         print_agent_help();
@@ -1741,13 +1770,10 @@ fn agent_rename(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
     ensure_no_args(args)?;
     validate_public_agent_id(&agent_id)?;
 
-    let response = request_json(
+    let response = post_owner_action(
         base_url,
-        "POST",
         "/agents/rename",
-        Some(json!({ "agent_id": agent_id, "name": name, "reason": reason })),
-        true,
-        false,
+        json!({ "agent_id": agent_id, "name": name, "reason": reason }),
     )?;
     if string_at(&response, "agent_id")? != agent_id {
         bail!("server renamed a different agent than requested");
@@ -1779,7 +1805,7 @@ fn agent_history(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
     ensure_no_args(args)?;
     validate_public_agent_id(&agent_id)?;
 
-    let response = get_json(base_url, &format!("/agents/history?agent_id={agent_id}"))?;
+    let response = get_owner_json(base_url, &format!("/agents/history?agent_id={agent_id}"))?;
     if string_at(&response, "agent_id")? != agent_id {
         bail!("server returned history for a different agent than requested");
     }
@@ -1954,7 +1980,7 @@ fn budget_create(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
     }
     body["agent_id"] = json!(agent_id);
 
-    let response = post_json(base_url, "/budgets", body)?;
+    let response = post_owner_action(base_url, "/budgets", body)?;
 
     println!("{}", terminal::stdout().success("Budget created"));
     print_budget(
@@ -2004,7 +2030,7 @@ fn budget_revoke(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
 
     let budget_id = take_required(&mut args, "--budget-id")?;
     ensure_no_args(args)?;
-    let response = post_json(
+    let response = post_owner_json(
         base_url,
         "/budgets/revoke",
         json!({
@@ -2045,11 +2071,11 @@ fn budget_update(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
         bail!("--expected-revision must be at least 1");
     }
     let reason = take_value(&mut args, "--reason");
-    let confirmed = take_flag(&mut args, "--yes");
+    take_flag(&mut args, "--yes");
     ensure_no_args(args)?;
 
     let path = budget_versions_path(&budget_id)?;
-    let history = get_json(base_url, &path)?;
+    let history = get_owner_json(base_url, &path)?;
     let current = history
         .get("current_budget")
         .ok_or_else(|| anyhow!("server response missing `current_budget`"))?;
@@ -2110,10 +2136,6 @@ fn budget_update(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
         }
     }
 
-    if !confirmed {
-        confirm_budget_update()?;
-    }
-
     let mut body = json!({
         "amount_limit": amount_limit,
         "expected_revision": pinned_revision,
@@ -2166,7 +2188,7 @@ fn budget_history(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
     let budget_id = take_required(&mut args, "--budget-id")?;
     validate_public_budget_id(&budget_id)?;
     ensure_no_args(args)?;
-    let response = get_json(base_url, &budget_versions_path(&budget_id)?)?;
+    let response = get_owner_json(base_url, &budget_versions_path(&budget_id)?)?;
     let current = response
         .get("current_budget")
         .ok_or_else(|| anyhow!("server response missing `current_budget`"))?;
@@ -2332,7 +2354,7 @@ fn spend_authorize(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
 fn spend_claim_status(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
     let claim_id = take_required(&mut args, "--claim-id")?;
     ensure_no_args(args)?;
-    let response = get_json(
+    let response = get_owner_json(
         base_url,
         &format!("/spend/executor/claim?claim_id={claim_id}"),
     )?;
@@ -2361,18 +2383,105 @@ fn spend_approval(base_url: &CliContext, mut args: Vec<String>) -> Result<()> {
             print_spend_approval_response(&response)
         }
         "approve" | "deny" => {
-            let response = post_approval_json(
-                base_url,
-                "/spend/approval/resolve",
-                json!({
-                    "approval_request_id": approval_request_id,
-                    "decision": action,
-                }),
-            )?;
+            let mode = if action == "approve" {
+                RequestMode::OwnerAction
+            } else {
+                RequestMode::Owner
+            };
+            let response = resolve_approval(base_url, &approval_request_id, &action, mode)?;
             print_spend_response(&response)
         }
         _ => bail!("unknown spend approval action `{action}`; use get, approve, or deny"),
     }
+}
+
+fn resolve_approval(
+    client: &CliContext,
+    id: &str,
+    decision: &str,
+    mode: RequestMode,
+) -> Result<Value> {
+    request_json(
+        client,
+        "POST",
+        "/spend/approval/resolve",
+        Some(json!({ "approval_request_id": id, "decision": decision })),
+        mode,
+    )
+}
+
+fn approvals(client: &CliContext, mut args: Vec<String>) -> Result<()> {
+    if take_help(&mut args) {
+        println!("Usage: hubu approvals\n\nList pending spend approvals and ask the owner to confirm each one, oldest first.");
+        return Ok(());
+    }
+    ensure_no_args(args)?;
+    let query = "/spend/authorizations?status=needs_approval&limit=100";
+    let mut path = query.to_string();
+    let mut pending = Vec::new();
+    loop {
+        let mut page = get_json(client, &path)?;
+        let records = page["authorization_records"]
+            .as_array_mut()
+            .ok_or_else(|| anyhow!("server response missing `authorization_records`"))?;
+        pending.append(records);
+        let Some(cursor) = page["next_cursor"].as_str() else {
+            break;
+        };
+        let encoded = reqwest::Url::parse_with_params("http://localhost", [("cursor", cursor)])?;
+        path = format!(
+            "{query}&{}",
+            encoded.query().expect("cursor query was added")
+        );
+    }
+    if pending.is_empty() {
+        println!("No spend is waiting for approval.");
+        return Ok(());
+    }
+
+    // The server paginates newest first, with a stable tie-breaker across pages.
+    pending.reverse();
+    let rows = pending
+        .iter()
+        .map(|record| -> Result<_> {
+            Ok(vec![
+                terminal_safe_text(string_at(record, "authorization_id")?),
+                terminal_safe_text(string_at(record, "agent_id")?),
+                money_at(record, "authorized_max")?,
+                local_timestamp(string_at(record, "created_at")?),
+            ])
+        })
+        .collect::<Result<Vec<_>>>()?;
+    print_table(&["Approval request", "Agent", "Amount", "Requested"], &rows);
+
+    let total = pending.len();
+    let mut denied = None;
+    for (index, record) in pending.iter().enumerate() {
+        let id = string_at(record, "authorization_id")?;
+        let label = &rows[index][0];
+        let position = index + 1;
+        println!("Reviewing {position} of {total} ({label})");
+        match resolve_approval(
+            client,
+            id,
+            "approve",
+            RequestMode::QueuedApproval { position, total },
+        ) {
+            Ok(_) => println!("Approved {label}"),
+            Err(error) => {
+                let application = error.downcast_ref::<HttpApplicationError>();
+                match application.and_then(HttpApplicationError::error_code) {
+                    Some("approval_not_pending") => println!("Already resolved {label}"),
+                    Some("owner_presence_denied") => {
+                        println!("Owner refused {label}");
+                        denied.get_or_insert(error);
+                    }
+                    _ => return Err(error.context(format!("review approval {label}"))),
+                }
+            }
+        }
+    }
+    denied.map_or(Ok(()), Err)
 }
 
 fn take_execution_scope(args: &mut Vec<String>) -> Result<(Option<String>, Option<Value>)> {
@@ -2506,7 +2615,7 @@ fn spend_reconcile(base_url: &CliContext, args: Vec<String>) -> Result<()> {
 
 fn spend_reconcile_list(base_url: &CliContext, args: Vec<String>) -> Result<()> {
     ensure_no_args(args)?;
-    let response = get_json(base_url, "/spend/executor/reconciliation")?;
+    let response = get_owner_json(base_url, "/spend/executor/reconciliation")?;
     let claims = response
         .get("claims")
         .and_then(Value::as_array)
@@ -2620,7 +2729,7 @@ fn spend_reconcile_resolve(
     if let Some(receipt) = receipt {
         body["receipt"] = receipt;
     }
-    let response = post_reconciliation_json(base_url, &format!("/spend/executor/{action}"), body)?;
+    let response = post_owner_action(base_url, &format!("/spend/executor/{action}"), body)?;
     let style = terminal::stdout();
     println!(
         "{}: {}",
@@ -3071,21 +3180,6 @@ fn print_budget_update_review(
     );
 }
 
-fn confirm_budget_update() -> Result<()> {
-    if !std::io::stdin().is_terminal() {
-        bail!("budget update requires interactive confirmation; rerun with --yes in noninteractive environments");
-    }
-    print!("Apply this budget update? [y/N] ");
-    std::io::stdout().flush()?;
-    let mut response = String::new();
-    std::io::stdin().read_line(&mut response)?;
-    if matches!(response.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
-        Ok(())
-    } else {
-        bail!("budget update cancelled")
-    }
-}
-
 fn print_budget_version(version: &Value, marker: Option<&str>) -> Result<()> {
     let revision = u64_at(version, "revision")?;
     let version_id = string_at(version, "version_id")?;
@@ -3190,81 +3284,73 @@ fn version() -> Result<()> {
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+enum RequestMode {
+    Agent,
+    Owner,
+    OwnerAction,
+    BudgetRetry,
+    QueuedApproval { position: usize, total: usize },
+    Portal,
+}
+
 fn request_json(
     client: &CliContext,
     method: &str,
     path: &str,
     body: Option<Value>,
-    include_approval_capability: bool,
-    include_reconciliation_capability: bool,
+    mode: RequestMode,
 ) -> Result<Value> {
-    let (status, json) = request_json_status(
-        client,
-        method,
-        path,
-        body,
-        include_approval_capability,
-        include_reconciliation_capability,
-    )?;
+    let (status, json) = request_json_status(client, method, path, body, mode)?;
     if !(200..300).contains(&status) {
         return Err(HttpApplicationError { status, body: json }.into());
     }
     Ok(json)
 }
 
-/// Send one request to the Hubu server and return its status and JSON body
-/// without turning application errors into `Err`, so callers such as the
-/// admin UI proxy can relay structured rejections unchanged.
+/// Return the status and body separately so the portal can relay structured
+/// rejections unchanged.
 fn request_json_status(
     client: &CliContext,
     method: &str,
     path: &str,
     body: Option<Value>,
-    include_approval_capability: bool,
-    include_reconciliation_capability: bool,
+    mode: RequestMode,
 ) -> Result<(u16, Value)> {
     let target = client.target()?;
-    // v0.3.0: hubu-server ignores the retired approval and reconciliation
-    // capabilities and asks for the owner's presence instead. The CLI still
-    // sends a capability it can read, for older servers, and no longer fails
-    // when the file is gone. HUB-349 removes them from managed-profile use.
-    let reconciliation_header =
-        match include_reconciliation_capability.then(|| target.reconciliation_token()) {
-            Some(Ok(Some(token))) => format!("{RECONCILIATION_CAPABILITY_HEADER}: {token}\r\n"),
-            _ => String::new(),
-        };
-    let approval_header = match include_approval_capability.then(|| target.approval_token()) {
-        Some(Ok(Some(token))) => format!("{APPROVAL_CAPABILITY_HEADER}: {token}\r\n"),
-        _ => String::new(),
-    };
-    request_json_to_target(
-        target,
-        method,
-        path,
-        body,
-        &format!("{approval_header}{reconciliation_header}"),
-    )
-}
-
-fn request_json_to_target(
-    target: &ClientTarget,
-    method: &str,
-    path: &str,
-    body: Option<Value>,
-    extra_headers: &str,
-) -> Result<(u16, Value)> {
     let (host, port) = parse_base_url(&target.base_url)?;
     let body_text = body.map(|body| body.to_string()).unwrap_or_default();
-    let authorization_header = target
-        .auth_token()?
+    let token = match mode {
+        RequestMode::Agent => target.agent_token()?,
+        _ => target.owner_token()?,
+    };
+    let authorization_header = token
         .map(|token| format!("Authorization: Bearer {token}\r\n"))
         .unwrap_or_default();
+    let client_name = if matches!(mode, RequestMode::Portal) {
+        "portal"
+    } else {
+        "cli"
+    };
+    let options_header = match mode {
+        RequestMode::BudgetRetry => "X-Hubu-No-Prompt: 1\r\n".to_string(),
+        RequestMode::QueuedApproval { position, total } => {
+            format!("X-Hubu-Approval-Position: {position}/{total}\r\n")
+        }
+        _ => String::new(),
+    };
     let mut stream = TcpStream::connect((host.as_str(), port))
         .with_context(|| format!("connect to Hubu server at {}", target.base_url))?;
 
+    if matches!(
+        mode,
+        RequestMode::OwnerAction | RequestMode::QueuedApproval { .. }
+    ) {
+        eprintln!("Waiting for the owner to confirm on this Mac…");
+    }
     write!(
         stream,
-        "{method} {path} HTTP/1.1\r\nHost: {host}:{port}\r\n{authorization_header}{extra_headers}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "{method} {path} HTTP/1.1\r\nHost: {host}:{port}\r\n{authorization_header}X-Hubu-Client: {client_name}\r\n{options_header}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         body_text.len(),
         body_text
     )?;
@@ -3279,11 +3365,23 @@ fn request_json_to_target(
 }
 
 fn get_json(client: &CliContext, path: &str) -> Result<Value> {
-    request_json(client, "GET", path, None, false, false)
+    request_json(client, "GET", path, None, RequestMode::Agent)
+}
+
+fn get_owner_json(client: &CliContext, path: &str) -> Result<Value> {
+    request_json(client, "GET", path, None, RequestMode::Owner)
 }
 
 fn post_json(client: &CliContext, path: &str, body: Value) -> Result<Value> {
-    request_json(client, "POST", path, Some(body), false, false)
+    request_json(client, "POST", path, Some(body), RequestMode::Agent)
+}
+
+fn post_owner_json(client: &CliContext, path: &str, body: Value) -> Result<Value> {
+    request_json(client, "POST", path, Some(body), RequestMode::Owner)
+}
+
+fn post_owner_action(client: &CliContext, path: &str, body: Value) -> Result<Value> {
+    request_json(client, "POST", path, Some(body), RequestMode::OwnerAction)
 }
 
 fn post_budget_update_with_retry(
@@ -3292,8 +3390,8 @@ fn post_budget_update_with_retry(
     budget_id: &str,
     body: &Value,
 ) -> Result<Value> {
-    let send = || {
-        let response = post_json(client, path, body.clone())?;
+    let send = |mode| {
+        let response = request_json(client, "POST", path, Some(body.clone()), mode)?;
         validate_budget_update_response(&response)?;
         let applied = &response["applied_version"];
         let requested_reason = body
@@ -3317,7 +3415,7 @@ fn post_budget_update_with_retry(
         }
         Ok(response)
     };
-    match send() {
+    match send(RequestMode::OwnerAction) {
         Ok(response) => Ok(response),
         Err(error) if !is_ambiguous_budget_update_error(&error) => Err(error),
         Err(first_error) => {
@@ -3327,7 +3425,12 @@ fn post_budget_update_with_retry(
                     "Budget update outcome was ambiguous; retrying once with the exact same intent."
                 )
             );
-            match send() {
+            match send(RequestMode::BudgetRetry) {
+                Err(error) if error.downcast_ref::<HttpApplicationError>()
+                    .and_then(HttpApplicationError::error_code) == Some("owner_presence_required") =>
+                {
+                    Err(error.context("budget update outcome is unknown; check budget history before resubmitting"))
+                }
                 Ok(response) => Ok(response),
                 Err(error) if !is_ambiguous_budget_update_error(&error) => Err(error),
                 Err(second_error) => {
@@ -3432,39 +3535,31 @@ fn validate_budget_update_response(response: &Value) -> Result<()> {
     Ok(())
 }
 
-fn post_approval_json(client: &CliContext, path: &str, body: Value) -> Result<Value> {
-    request_json(client, "POST", path, Some(body), true, false)
-}
-
-fn post_reconciliation_json(client: &CliContext, path: &str, body: Value) -> Result<Value> {
-    request_json(client, "POST", path, Some(body), false, true)
-}
-
 impl ClientTarget {
-    fn auth_token(&self) -> Result<Option<String>> {
+    fn owner_token(&self) -> Result<Option<String>> {
         match &self.credentials {
             CredentialSources::ActiveProfile { auth, .. } => {
-                read_active_profile_token(auth, "authentication").map(Some)
+                read_active_profile_token(auth, "owner").map(Some)
             }
             CredentialSources::Legacy => legacy_auth_token(),
         }
     }
 
-    fn reconciliation_token(&self) -> Result<Option<String>> {
+    fn agent_token(&self) -> Result<Option<String>> {
         match &self.credentials {
-            CredentialSources::ActiveProfile { reconciliation, .. } => {
-                read_active_profile_token(reconciliation, "reconciliation").map(Some)
+            CredentialSources::ActiveProfile { agent, .. } => {
+                let path = agent.as_deref().ok_or_else(|| anyhow!(
+                    "this stack profile predates the agent credential; run `hubu stack start` to issue it"
+                ))?;
+                read_active_profile_token(path, "agent").map(Some)
             }
-            CredentialSources::Legacy => legacy_reconciliation_token(),
-        }
-    }
-
-    fn approval_token(&self) -> Result<Option<String>> {
-        match &self.credentials {
-            CredentialSources::ActiveProfile { approval, .. } => {
-                read_active_profile_token(approval, "approval").map(Some)
+            CredentialSources::Legacy => {
+                if let Some(token) = configured_token(AGENT_TOKEN_ENV, AGENT_TOKEN_FILE_ENV)? {
+                    Ok(Some(token))
+                } else {
+                    legacy_auth_token()
+                }
             }
-            CredentialSources::Legacy => legacy_approval_token(),
         }
     }
 }
@@ -3484,85 +3579,39 @@ fn read_active_profile_token(path: &Path, capability: &str) -> Result<String> {
     Ok(token)
 }
 
+fn configured_token(value_env: &str, file_env: &str) -> Result<Option<String>> {
+    if let Ok(value) = env::var(value_env) {
+        let value = value.trim();
+        if value.is_empty() {
+            bail!("{value_env} cannot be empty");
+        }
+        return Ok(Some(value.to_string()));
+    }
+    env::var_os(file_env)
+        .map(|path| {
+            let path = PathBuf::from(path);
+            let contents = fs::read_to_string(&path)
+                .with_context(|| format!("read Hubu credential file `{}`", path.display()))?;
+            let token = contents.trim();
+            if token.is_empty() {
+                bail!("Hubu credential file `{}` is empty", path.display());
+            }
+            Ok(token.to_string())
+        })
+        .transpose()
+}
+
 fn legacy_auth_token() -> Result<Option<String>> {
-    if let Ok(token) = env::var(AUTH_TOKEN_ENV) {
-        let token = token.trim().to_string();
-        if token.is_empty() {
-            return Err(anyhow!("{AUTH_TOKEN_ENV} cannot be empty"));
-        }
+    if let Some(token) = configured_token(AUTH_TOKEN_ENV, AUTH_TOKEN_FILE_ENV)? {
         return Ok(Some(token));
     }
-
-    let path =
-        env::var(AUTH_TOKEN_FILE_ENV).unwrap_or_else(|_| DEFAULT_AUTH_TOKEN_FILE.to_string());
-    match fs::read_to_string(&path) {
-        Ok(contents) => {
-            let token = contents.trim().to_string();
-            if token.is_empty() {
-                Err(anyhow!("Hubu auth token file `{path}` is empty"))
-            } else {
-                Ok(Some(token))
-            }
+    match fs::read_to_string(DEFAULT_AUTH_TOKEN_FILE) {
+        Ok(contents) if contents.trim().is_empty() => {
+            bail!("Hubu auth token file `{DEFAULT_AUTH_TOKEN_FILE}` is empty")
         }
+        Ok(contents) => Ok(Some(contents.trim().to_string())),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error).with_context(|| format!("read Hubu auth token file `{path}`")),
-    }
-}
-
-fn legacy_reconciliation_token() -> Result<Option<String>> {
-    if let Ok(token) = env::var(RECONCILIATION_TOKEN_ENV) {
-        let token = token.trim().to_string();
-        if token.is_empty() {
-            return Err(anyhow!("{RECONCILIATION_TOKEN_ENV} cannot be empty"));
-        }
-        return Ok(Some(token));
-    }
-
-    let path = env::var(RECONCILIATION_TOKEN_FILE_ENV)
-        .unwrap_or_else(|_| DEFAULT_RECONCILIATION_TOKEN_FILE.to_string());
-    match fs::read_to_string(&path) {
-        Ok(contents) => {
-            let token = contents.trim().to_string();
-            if token.is_empty() {
-                Err(anyhow!("Hubu reconciliation token file `{path}` is empty"))
-            } else {
-                Ok(Some(token))
-            }
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => {
-            Err(error).with_context(|| format!("read Hubu reconciliation token file `{path}`"))
-        }
-    }
-}
-
-fn legacy_approval_token() -> Result<Option<String>> {
-    #[cfg(test)]
-    if env::var(APPROVAL_TOKEN_ENV).is_err() && env::var(APPROVAL_TOKEN_FILE_ENV).is_err() {
-        return Ok(Some(TEST_APPROVAL_TOKEN.to_string()));
-    }
-
-    if let Ok(token) = env::var(APPROVAL_TOKEN_ENV) {
-        let token = token.trim().to_string();
-        if token.is_empty() {
-            return Err(anyhow!("{APPROVAL_TOKEN_ENV} cannot be empty"));
-        }
-        return Ok(Some(token));
-    }
-
-    let path = env::var(APPROVAL_TOKEN_FILE_ENV)
-        .unwrap_or_else(|_| DEFAULT_APPROVAL_TOKEN_FILE.to_string());
-    match fs::read_to_string(&path) {
-        Ok(contents) => {
-            let token = contents.trim().to_string();
-            if token.is_empty() {
-                Err(anyhow!("Hubu approval token file `{path}` is empty"))
-            } else {
-                Ok(Some(token))
-            }
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error).with_context(|| format!("read Hubu approval token file `{path}`")),
+        Err(error) => Err(error).context("read Hubu auth token file"),
     }
 }
 
@@ -3724,6 +3773,7 @@ Commands:
   agent      Read registered agents
   budget     Create, review, update, and list agent budgets
   spend      Test spend and reconcile uncertain executor claims
+  approvals  Review pending spend requests oldest first
   watch      Watch live agent budgets and recent decisions
   ledger     Read ledger transactions
   artifact   Save a governed artifact into an allowlisted folder
@@ -3740,6 +3790,8 @@ Global options:
   --round exact|cents                  Show exact amounts (default) or cent-rounded
                                        values marked ≈ (usage rounds up, limits and
                                        remaining round down)
+
+Owner actions require confirmation on the Mac running hubu-server.
 
 Connection precedence:
   explicit --url and legacy credential environment/files; otherwise the selected
@@ -3964,7 +4016,7 @@ fn print_init_help() {
 
 Usage:
   hubu init [--policy FILE] [--force]
-  hubu init codex [--stack-profile ABSOLUTE_DIR] [--config FILE] [--mcp-server FILE] [--token-file FILE] [--agent-token-file FILE] [--approval-token-file FILE] [--reconciliation-token-file FILE] [--mcp-state-file FILE] [--operation-key-db FILE] [--gongbu-endpoint URL --gongbu-token-file FILE] [--force] [--dry-run]
+  hubu init codex [--stack-profile ABSOLUTE_DIR] [--config FILE] [--mcp-server FILE] [--token-file FILE] [--agent-token-file FILE] [--mcp-state-file FILE] [--operation-key-db FILE] [--gongbu-endpoint URL --gongbu-token-file FILE] [--force] [--dry-run]
 
 Options:
   --policy FILE   Policy template path (default: policy.yaml)
@@ -4005,7 +4057,7 @@ Notes:
   Omit --operation-key-db until a guarded workflow requires the key-redacted preallocation bridge. The option configures only a non-secret path and never creates or reads a key.
   The command writes the only supported agent-facing surface, hubu-unified-mcp.
   The MCP holds only the agent credential, which reaches spend, status, and read routes; owner routes answer owner_authority_required.
-  Owner actions happen on the Hubu admin portal. Re-run this command to refresh an existing managed Codex config.
+  Owner actions happen through the Hubu CLI or admin portal. Re-run this command to refresh an existing managed Codex config.
   Start hubu-server with the same HUBU_AUTH_TOKEN_FILE and HUBU_AGENT_TOKEN_FILE shown by this command.
 
 Examples:
@@ -4116,7 +4168,7 @@ Usage:
 Options:
   --expected-revision N  Pin the immutable predecessor revision; defaults to the reviewed current revision
   --reason TEXT          Optional provenance recorded on the immutable successor
-  --yes                  Skip the prompt after printing the required review (needed for noninteractive use)
+  --yes                  Accepted for compatibility. The owner confirmation dialog is always required.
 
 The amount is the new total budget cap, not an added allowance. Hubu preserves consumed and frozen usage. After confirmation the CLI never refreshes or rebases the pinned intent. Create a new budget to change the agent, currency, or period."
     );
@@ -4174,7 +4226,7 @@ Usage:
   hubu spend approval approve --approval-request-id ID
   hubu spend approval deny --approval-request-id ID
 
-The review is immutable. Approving reserves budget and returns an authorization token; it does not invoke a provider. Denial is terminal for that request. Repeating the same decision is idempotent, while a conflicting decision is rejected."
+Approving requires the owner to confirm on the Mac running Hubu. Denying is prompt-free. The review is immutable. Approving reserves budget and returns an authorization token; it does not invoke a provider. Denial is terminal for that request. Repeating the same decision is idempotent, while a conflicting decision is rejected."
     );
 }
 
@@ -4209,7 +4261,7 @@ Usage:
 
 --actual-vendor-cost takes the exact provider cost as a decimal, such as 0.0031 (up to 18 decimal places, never rounded).
 
-The provider reference and evidence are stored with the atomic settlement or release. A billed resolution also records the exact integer vendor-cost coefficient, decimal scale, ISO currency, full frozen pricing snapshot, provider request id, and artifact reference. Hubu rounds budget consumption up only beyond six decimal places (micro-units); a human-confirmed overrun is recorded rather than discarded. Do not include vendor credentials or sensitive payloads."
+Both resolutions require the owner to confirm on the Mac running Hubu. The provider reference and evidence are stored with the atomic settlement or release. A billed resolution also records the exact integer vendor-cost coefficient, decimal scale, ISO currency, full frozen pricing snapshot, provider request id, and artifact reference. Hubu rounds budget consumption up only beyond six decimal places (micro-units); a human-confirmed overrun is recorded rather than discarded. Do not include vendor credentials or sensitive payloads."
     );
 }
 
