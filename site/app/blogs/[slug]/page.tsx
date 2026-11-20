@@ -2,7 +2,7 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { EngineeringHeader } from "../../components/EngineeringHeader";
-import { getEngineeringPost, formatPublicationDate } from "../../lib/engineering";
+import { blogCategories, getEngineeringPost, formatPublicationDate } from "../../lib/engineering";
 import { engineeringPostMetadata } from "../../lib/metadata";
 
 type Props = { params: Promise<{ slug: string }> };
@@ -16,6 +16,7 @@ export default async function EngineeringPostPage({ params }: Props) {
   const { slug } = await params;
   const post = getEngineeringPost(slug);
   if (!post) notFound();
+  const category = blogCategories[post.category];
 
   return (
     <div className="engineering-shell">
@@ -27,6 +28,7 @@ export default async function EngineeringPostPage({ params }: Props) {
             <h1>{post.title}</h1>
             <p className="engineering-deck">{post.description}</p>
             <div className="engineering-article-meta">
+              <p><a className="engineering-category" data-category={post.category} href={category.href}>{category.label}</a></p>
               <p>Published <time dateTime={post.publishedOn}>{formatPublicationDate(post.publishedOn)}</time></p>
               {post.releaseStatus ? <p className="engineering-release-status">{post.releaseStatus}</p> : null}
             </div>
