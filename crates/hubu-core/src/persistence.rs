@@ -491,6 +491,14 @@ impl SqliteGovernanceRepository {
         Self::from_connection(Connection::open_in_memory()?)
     }
 
+    pub fn load_policy_by_id(
+        &self,
+        owner_user_id: &UserId,
+        policy_id: &str,
+    ) -> Result<Option<PolicyResource>, StorageError> {
+        lookup_policy_resource(&self.conn, owner_user_id, policy_id, false)
+    }
+
     pub fn save_executor_claim_with_budget_hold(
         &mut self,
         claim: &SpendExecutorClaimRecord,
@@ -2172,8 +2180,11 @@ impl ExecutorClaimRepository for SqliteGovernanceRepository {
     }
 }
 
-impl PolicyRepository for SqliteGovernanceRepository {
-    fn apply_policy(
+impl SqliteGovernanceRepository {
+    /// Apply a revision, optionally requiring the scope to keep its exact
+    /// assigned policy and the resource to keep its display name.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_policy_with_assignment_check(
         &mut self,
         owner_user_id: &UserId,
         declarative_key: &str,
@@ -2182,6 +2193,7 @@ impl PolicyRepository for SqliteGovernanceRepository {
         policy: &Policy,
         expected_revision: Option<u64>,
         expected_hash: Option<&str>,
+        expected_policy_id: Option<&str>,
         actor: &str,
         source: &str,
     ) -> Result<PolicyApplyResult, StorageError> {
@@ -2252,6 +2264,25 @@ impl PolicyRepository for SqliteGovernanceRepository {
             }
         }
 
+        let prior_assignment: Option<String> = transaction
+            .query_row(
+                "SELECT policy_id FROM policy_assignments
+                 WHERE owner_user_id = ?1 AND scope_type = ?2 AND scope_id = ?3",
+                params![owner, scope.scope_type(), scope.scope_id()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(expected) = expected_policy_id {
+            if policy_id != expected
+                || prior_assignment.as_deref() != Some(expected)
+                || previous_name != display_name
+            {
+                return Err(StorageError::InvalidData(
+                    "policy compare-and-set failed: assigned policy or display name changed".into(),
+                ));
+            }
+        }
+
         let content_changed = previous_revision == 0 || previous_hash != payload_hash;
         let name_changed = previous_revision != 0 && previous_name != display_name;
         let revision = if content_changed {
@@ -2301,14 +2332,6 @@ impl PolicyRepository for SqliteGovernanceRepository {
             )?;
         }
 
-        let prior_assignment: Option<String> = transaction
-            .query_row(
-                "SELECT policy_id FROM policy_assignments
-                 WHERE owner_user_id = ?1 AND scope_type = ?2 AND scope_id = ?3",
-                params![owner, scope.scope_type(), scope.scope_id()],
-                |row| row.get(0),
-            )
-            .optional()?;
         let assignment_changed = prior_assignment.as_deref() != Some(policy_id.as_str());
         if assignment_changed {
             transaction.execute(
@@ -2384,11 +2407,9 @@ impl PolicyRepository for SqliteGovernanceRepository {
                 ],
             )?;
         }
-        transaction.commit()?;
-
-        let resource = self
-            .load_policy(owner_user_id, &policy_id)?
+        let resource = lookup_policy_resource(&transaction, owner_user_id, &policy_id, false)?
             .ok_or_else(|| StorageError::InvalidData("applied policy disappeared".to_string()))?;
+        transaction.commit()?;
         let assignment = self
             .load_policy_assignments()?
             .into_iter()
@@ -2404,6 +2425,34 @@ impl PolicyRepository for SqliteGovernanceRepository {
             changed,
             assignment_changed,
         })
+    }
+}
+
+impl PolicyRepository for SqliteGovernanceRepository {
+    fn apply_policy(
+        &mut self,
+        owner_user_id: &UserId,
+        declarative_key: &str,
+        display_name: &str,
+        scope: &PolicyAssignmentScope,
+        policy: &Policy,
+        expected_revision: Option<u64>,
+        expected_hash: Option<&str>,
+        actor: &str,
+        source: &str,
+    ) -> Result<PolicyApplyResult, StorageError> {
+        self.apply_policy_with_assignment_check(
+            owner_user_id,
+            declarative_key,
+            display_name,
+            scope,
+            policy,
+            expected_revision,
+            expected_hash,
+            None,
+            actor,
+            source,
+        )
     }
 
     fn load_policy_assignments(&self) -> Result<Vec<PolicyAssignmentRecord>, StorageError> {
@@ -2466,18 +2515,7 @@ impl PolicyRepository for SqliteGovernanceRepository {
         owner_user_id: &UserId,
         selector: &str,
     ) -> Result<Option<PolicyResource>, StorageError> {
-        self.conn
-            .query_row(
-                "SELECT p.policy_id, p.owner_user_id, p.declarative_key, p.display_name,
-                        p.current_revision, p.current_hash, r.policy_json, p.created_at, p.updated_at
-                 FROM policies p JOIN policy_revisions r
-                   ON r.policy_id = p.policy_id AND r.revision = p.current_revision
-                 WHERE p.owner_user_id = ?1 AND (p.policy_id = ?2 OR p.declarative_key = ?2)",
-                params![owner_user_id.to_string(), selector],
-                policy_resource_from_row,
-            )
-            .optional()
-            .map_err(Into::into)
+        lookup_policy_resource(&self.conn, owner_user_id, selector, true)
     }
 
     fn load_policy_history(
@@ -2602,6 +2640,25 @@ fn legacy_declarative_key(authored_id: &str, payload_hash: &str) -> String {
             &payload_hash["sha256:".len().."sha256:".len() + 16]
         )
     }
+}
+
+fn lookup_policy_resource(
+    conn: &Connection,
+    owner_user_id: &UserId,
+    selector: &str,
+    match_declarative_key: bool,
+) -> Result<Option<PolicyResource>, StorageError> {
+    conn.query_row(
+        "SELECT p.policy_id, p.owner_user_id, p.declarative_key, p.display_name,
+                p.current_revision, p.current_hash, r.policy_json, p.created_at, p.updated_at
+         FROM policies p JOIN policy_revisions r
+           ON r.policy_id = p.policy_id AND r.revision = p.current_revision
+         WHERE p.owner_user_id = ?1 AND (p.policy_id = ?2 OR (?3 AND p.declarative_key = ?2))",
+        params![owner_user_id.to_string(), selector, match_declarative_key],
+        policy_resource_from_row,
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 fn policy_resource_from_row(row: &rusqlite::Row<'_>) -> Result<PolicyResource, rusqlite::Error> {
@@ -5809,6 +5866,83 @@ mod tests {
         let holds = repo.load_budget_holds().unwrap();
         assert_eq!(holds.len(), 1);
         assert_eq!(holds[0].id, hold.id);
+    }
+
+    #[test]
+    fn assigned_policy_update_refuses_stale_assignment_without_changing_either_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("policy-assignment.sqlite");
+        let mut repo = SqliteGovernanceRepository::open(&path).unwrap();
+        let scope = PolicyAssignmentScope::UserDefault;
+        let owner = user_id();
+        let current = repo
+            .apply_policy(
+                &owner,
+                "old",
+                "Old policy",
+                &scope,
+                &policy(),
+                None,
+                None,
+                "usr_test",
+                "test",
+            )
+            .unwrap()
+            .resource;
+
+        let mut other = SqliteGovernanceRepository::open(path).unwrap();
+        let replacement = other
+            .apply_policy(
+                &owner,
+                &current.policy_id,
+                "Replacement",
+                &scope,
+                &policy(),
+                None,
+                None,
+                "usr_test",
+                "test",
+            )
+            .unwrap();
+        assert_ne!(replacement.resource.policy_id, current.policy_id);
+        assert_eq!(
+            repo.load_policy_by_id(&owner, &current.policy_id)
+                .unwrap()
+                .unwrap()
+                .declarative_key,
+            "old"
+        );
+
+        let mut proposed = policy();
+        proposed.rules[0].effect = Effect::Deny;
+        let error = repo
+            .apply_policy_with_assignment_check(
+                &owner,
+                "old",
+                "Old policy",
+                &scope,
+                &proposed,
+                Some(current.current_revision),
+                Some(&current.current_hash),
+                Some(&current.policy_id),
+                "usr_test",
+                "test",
+            )
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("assigned policy or display name changed"));
+        let assigned = repo.load_policy_assignments().unwrap();
+        assert_eq!(assigned.len(), 1);
+        assert_eq!(assigned[0].policy_id, replacement.resource.policy_id);
+        assert_eq!(assigned[0].policy_revision, 1);
+        assert_eq!(
+            repo.load_policy_by_id(&owner, &current.policy_id)
+                .unwrap()
+                .unwrap()
+                .current_revision,
+            1
+        );
     }
 
     #[test]

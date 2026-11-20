@@ -211,7 +211,7 @@ fn append_deny_rule(body: &str, state: &ServerState) -> Result<Option<String>> {
         return Ok(None);
     };
     let resource = governance
-        .load_policy(&user.user_id, &assignment.policy_id)?
+        .load_policy_by_id(&user.user_id, &assignment.policy_id)?
         .ok_or_else(|| anyhow!("assigned policy resource is missing"))?;
 
     // The apply handler must update the same resource and keep its assignment
