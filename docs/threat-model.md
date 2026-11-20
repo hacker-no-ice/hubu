@@ -55,13 +55,11 @@ MCP server, with no other route to Hubu's credentials:
   `hubu agent list`, `hubu policy show`, `hubu budget list` and
   `hubu spend authorizations`, or in the [admin web UI](admin-ui.md).
 
-### The MCP admin gate is not a security boundary
+### The v0.2.5 MCP admin gate
 
-`hubu init codex` asks once whether Codex may use Hubu's setup and admin
-tools, and `--trust-client-approval` / `--no-trust-client-approval` change
-the answer. Turning them off hides registration, policy, budget,
-spending-target and reconciliation tools from the MCP surface. See the
-[approval boundary](unified-mcp.md#approval-boundary).
+v0.2.5 used client-configurable gates for MCP administration. v0.3.0
+retires the gates and exposes only agent routes through MCP. Owner actions
+use [server-side owner confirmation](owner-presence.md).
 
 That gate only binds an agent with no other way to reach the same authority.
 In the common local setup, Codex runs in your terminal and can run the `hubu`
@@ -77,7 +75,7 @@ directly: for example ChatGPT through the
 [MCP tunnel](operations/chatgpt-mcp-tunnel.md), Claude Desktop with no shell
 tools, or a Codex sandbox that can't read the stack profile.
 
-### What an agent with a shell can reach today
+### What an agent with a shell could reach in v0.2.5
 
 - **Owner credentials on disk.** The profile's Hubu bearer, approval and
   reconciliation credential files are readable by your macOS user, and so by

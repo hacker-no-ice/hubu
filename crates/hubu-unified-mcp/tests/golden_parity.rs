@@ -87,38 +87,6 @@ fn cases() -> Vec<GoldenCase> {
             meta: None,
         },
         GoldenCase {
-            name: "hubu_governance_summary",
-            owner: hubu,
-            method: "GET",
-            path: "/governance/summary",
-            arguments: json!({}),
-            meta: None,
-        },
-        GoldenCase {
-            name: "hubu_list_governance_records",
-            owner: hubu,
-            method: "GET",
-            path: "/governance/records",
-            arguments: json!({}),
-            meta: None,
-        },
-        GoldenCase {
-            name: "hubu_get_governance_record",
-            owner: hubu,
-            method: "GET",
-            path: "/governance/records/lev_0123456789abcdef0123456789abcdef",
-            arguments: json!({"record_id":"lev_0123456789abcdef0123456789abcdef"}),
-            meta: None,
-        },
-        GoldenCase {
-            name: "hubu_apply_policy",
-            owner: hubu,
-            method: "POST",
-            path: "/policies",
-            arguments: json!({"policy_yaml":"fixture"}),
-            meta: None,
-        },
-        GoldenCase {
             name: "hubu_authorize_spend",
             owner: hubu,
             method: "POST",
@@ -132,22 +100,6 @@ fn cases() -> Vec<GoldenCase> {
             method: "POST",
             path: "/v2/executions",
             arguments: execution_arguments(),
-            meta: None,
-        },
-        GoldenCase {
-            name: "hubu_create_budget",
-            owner: hubu,
-            method: "POST",
-            path: "/budgets",
-            arguments: json!({}),
-            meta: None,
-        },
-        GoldenCase {
-            name: "hubu_get_executor_claim",
-            owner: hubu,
-            method: "GET",
-            path: "/spend/executor/claim?claim_id=claim-107",
-            arguments: json!({"claim_id":"claim-107"}),
             meta: None,
         },
         GoldenCase {
@@ -171,14 +123,6 @@ fn cases() -> Vec<GoldenCase> {
             owner: hubu,
             method: "GET",
             path: "/budgets",
-            arguments: json!({}),
-            meta: None,
-        },
-        GoldenCase {
-            name: "hubu_list_claims_requiring_reconciliation",
-            owner: hubu,
-            method: "GET",
-            path: "/spend/executor/reconciliation",
             arguments: json!({}),
             meta: None,
         },
@@ -208,58 +152,10 @@ fn cases() -> Vec<GoldenCase> {
             meta: None,
         },
         GoldenCase {
-            name: "hubu_list_users",
-            owner: hubu,
-            method: "GET",
-            path: "/users",
-            arguments: json!({}),
-            meta: None,
-        },
-        GoldenCase {
-            name: "hubu_policy_diff",
-            owner: hubu,
-            method: "GET",
-            path: "/policies/diff?from_revision=1",
-            arguments: json!({"from_revision":1}),
-            meta: None,
-        },
-        GoldenCase {
-            name: "hubu_policy_history",
-            owner: hubu,
-            method: "GET",
-            path: "/policies/history",
-            arguments: json!({}),
-            meta: None,
-        },
-        GoldenCase {
-            name: "hubu_reconcile_vendor_billed_claim",
-            owner: hubu,
-            method: "POST",
-            path: "/spend/executor/settle",
-            arguments: json!({}),
-            meta: None,
-        },
-        GoldenCase {
-            name: "hubu_reconcile_vendor_did_not_bill_claim",
-            owner: hubu,
-            method: "POST",
-            path: "/spend/executor/release",
-            arguments: json!({}),
-            meta: None,
-        },
-        GoldenCase {
             name: "hubu_register_agent",
             owner: hubu,
             method: "POST",
             path: "/agents/register",
-            arguments: json!({}),
-            meta: None,
-        },
-        GoldenCase {
-            name: "hubu_register_human",
-            owner: hubu,
-            method: "POST",
-            path: "/init",
             arguments: json!({}),
             meta: None,
         },
@@ -272,56 +168,11 @@ fn cases() -> Vec<GoldenCase> {
             meta: None,
         },
         GoldenCase {
-            name: "hubu_update_budget",
+            name: "hubu_prompt_spend_approval",
             owner: hubu,
             method: "POST",
-            path: "/budgets/bgt_0123456789ab/versions",
-            arguments: json!({
-                "budget_id":"bgt_0123456789ab",
-                "expected_revision":1,
-                "amount_limit": "50.00",
-                "reason":"golden total cap update"
-            }),
-            meta: None,
-        },
-        GoldenCase {
-            name: "hubu_budget_history",
-            owner: hubu,
-            method: "GET",
-            path: "/budgets/bgt_0123456789ab/versions",
-            arguments: json!({"budget_id":"bgt_0123456789ab"}),
-            meta: None,
-        },
-        GoldenCase {
-            name: "hubu_resolve_spend_approval",
-            owner: hubu,
-            method: "POST",
-            path: "/spend/approval/resolve",
-            arguments: json!({"approval_request_id":"approval-107","decision":"approve"}),
-            meta: None,
-        },
-        GoldenCase {
-            name: "hubu_revoke_budget",
-            owner: hubu,
-            method: "POST",
-            path: "/budgets/revoke",
-            arguments: json!({}),
-            meta: None,
-        },
-        GoldenCase {
-            name: "hubu_revoke_spending_target",
-            owner: hubu,
-            method: "POST",
-            path: "/user/spending-target/revoke",
-            arguments: json!({}),
-            meta: None,
-        },
-        GoldenCase {
-            name: "hubu_set_spending_target",
-            owner: hubu,
-            method: "POST",
-            path: "/user/spending-target",
-            arguments: json!({}),
+            path: "/spend/approval/prompt",
+            arguments: json!({"approval_request_id":"approval-107"}),
             meta: None,
         },
         GoldenCase {
@@ -329,14 +180,6 @@ fn cases() -> Vec<GoldenCase> {
             owner: hubu,
             method: "GET",
             path: "/policies/show",
-            arguments: json!({}),
-            meta: None,
-        },
-        GoldenCase {
-            name: "hubu_show_spending_targets",
-            owner: hubu,
-            method: "GET",
-            path: "/user/spending-target",
             arguments: json!({}),
             meta: None,
         },
@@ -367,8 +210,8 @@ fn assert_complete_unique_matrix(cases: &[GoldenCase]) {
     );
     assert_eq!(
         cases.len(),
-        37,
-        "golden matrix must contain exactly 37 cases"
+        18,
+        "golden matrix must contain exactly 18 cases"
     );
     let fixture = routing_fixture();
     let expected_names = fixture["tools"]
@@ -381,8 +224,8 @@ fn assert_complete_unique_matrix(cases: &[GoldenCase]) {
     let expected = expected_names.iter().copied().collect::<BTreeSet<_>>();
     assert_eq!(
         expected_names.len(),
-        37,
-        "routing fixture must map 37 tools"
+        18,
+        "routing fixture must map 18 tools"
     );
     assert_eq!(
         expected.len(),
@@ -398,7 +241,7 @@ fn assert_complete_unique_matrix(cases: &[GoldenCase]) {
             .iter()
             .filter(|case| case.owner == Owner::Hubu)
             .count(),
-        31
+        12
     );
     assert_eq!(
         cases
@@ -454,22 +297,6 @@ fn success_body(case: &GoldenCase) -> Value {
             json!({"schema_version":1,"configured":false,"images":[]})
         }
         "gongbu_get_artifact" => unreachable!("artifact success uses image bytes"),
-        "hubu_governance_summary"
-        | "hubu_list_governance_records"
-        | "hubu_get_governance_record" => {
-            let fixture: Value =
-                serde_json::from_str(include_str!("../../../fixtures/governance-mcp-v1.json"))
-                    .unwrap();
-            let mut body = json!({"schema_version":"hubu-governance-v1","filters":fixture["filters"],"summary":fixture["summary"]});
-            if case.name == "hubu_list_governance_records" {
-                body["records"] = fixture["records"].clone();
-                body["next_cursor"] = Value::Null;
-            } else if case.name == "hubu_get_governance_record" {
-                body["record"] = fixture["records"][0].clone();
-            }
-            body
-        }
-
         "hubu_authorize_spend" => json!({
             "fixture":"HUB-125",
             "tool":case.name,
@@ -495,7 +322,7 @@ fn success_body(case: &GoldenCase) -> Value {
                 "policy_reasons":["fixture"]
             }
         }),
-        "hubu_resolve_spend_approval" => json!({
+        "hubu_prompt_spend_approval" => json!({
             "operation_key":"fixture-private-approval-operation",
             "decision":"allow",
             "decision_id":"approval-107",
@@ -506,81 +333,6 @@ fn success_body(case: &GoldenCase) -> Value {
             },
             "auth_token_id":"fixture-private-approval-token",
             "authorization_expires_at":"2099-01-01T00:00:00Z"
-        }),
-        "hubu_update_budget" => json!({
-            "applied_version": {
-                "version_id": "bgv_0123456789ac",
-                "revision": 2,
-                "predecessor_version_id": "bgv_0123456789ab",
-                "predecessor_revision": 1,
-                "amount_limit": "50.00",
-                "effective_at": "2026-08-28T00:00:00Z",
-                "actor": "usr_0123456789ab",
-                "source": "hubu-api:update-budget-limit",
-                "reason": "golden total cap update",
-                "request_fingerprint": "sha256:golden-budget-update",
-                "created_at": "2026-08-28T00:00:00Z"
-            },
-            "current_budget": {
-                "budget_id": "bgt_0123456789ab",
-                "agent_id": "agt_0123456789ab",
-                "current_version_id": "bgv_0123456789ac",
-                "current_revision": 2,
-                "amount_limit": "50.00",
-                "currency": "USD",
-                "starting_at": "2026-08-01T00:00:00Z",
-                "ending_before": "2026-09-01T00:00:00Z",
-                "status": "active",
-                "consumed_amount_cents": 1_000,
-                "frozen_amount_cents": 500,
-                "remaining_amount_cents": 3_500
-            },
-            "idempotent_replay": false,
-            "spending_target_warnings": []
-        }),
-        "hubu_budget_history" => json!({
-            "current_budget": {
-                "budget_id": "bgt_0123456789ab",
-                "agent_id": "agt_0123456789ab",
-                "current_version_id": "bgv_0123456789ac",
-                "current_revision": 2,
-                "amount_limit": "50.00",
-                "currency": "USD",
-                "starting_at": "2026-08-01T00:00:00Z",
-                "ending_before": "2026-09-01T00:00:00Z",
-                "status": "active",
-                "consumed_amount_cents": 1_000,
-                "frozen_amount_cents": 500,
-                "remaining_amount_cents": 3_500
-            },
-            "versions": [
-                {
-                    "version_id": "bgv_0123456789ab",
-                    "revision": 1,
-                    "predecessor_version_id": null,
-                    "predecessor_revision": null,
-                    "amount_limit": "40.00",
-                    "effective_at": "2026-08-01T00:00:00Z",
-                    "actor": "usr_0123456789ab",
-                    "source": "hubu-api:create-budget",
-                    "reason": null,
-                    "request_fingerprint": "sha256:golden-budget-create",
-                    "created_at": "2026-08-01T00:00:00Z"
-                },
-                {
-                    "version_id": "bgv_0123456789ac",
-                    "revision": 2,
-                    "predecessor_version_id": "bgv_0123456789ab",
-                    "predecessor_revision": 1,
-                    "amount_limit": "50.00",
-                    "effective_at": "2026-08-28T00:00:00Z",
-                    "actor": "usr_0123456789ab",
-                    "source": "hubu-api:update-budget-limit",
-                    "reason": "golden total cap update",
-                    "request_fingerprint": "sha256:golden-budget-update",
-                    "created_at": "2026-08-28T00:00:00Z"
-                }
-            ]
         }),
         "hubu_submit_spend" => json!({
             "fixture":"HUB-125",
@@ -704,24 +456,6 @@ fn all_mapped_tools_have_unified_owned_golden_routing_coverage() {
             "{} forwarded trusted MCP metadata",
             case.name
         );
-        if case.name == "hubu_update_budget" {
-            let body: Value = serde_json::from_str(
-                request
-                    .raw
-                    .split_once("\r\n\r\n")
-                    .expect("captured update request has a body")
-                    .1,
-            )
-            .expect("captured update body is JSON");
-            assert_eq!(
-                body,
-                json!({
-                    "amount_limit": "50.00",
-                    "expected_revision": 1,
-                    "reason": "golden total cap update"
-                })
-            );
-        }
     }
 
     unified.finish(&[HUBU_TOKEN, GONGBU_TOKEN]);
@@ -763,7 +497,7 @@ fn backend_application_failures_are_owned_redacted_and_isolated() {
     let gongbu = BackendStub::start(BackendKind::Gongbu);
     hubu.respond_json(
         "GET",
-        "/users",
+        "/agents",
         400,
         json!({"error":format!("rejected {HUBU_TOKEN}")}),
     );
@@ -782,7 +516,7 @@ fn backend_application_failures_are_owned_redacted_and_isolated() {
     let mut unified = McpProcess::start(Some((&hubu, HUBU_TOKEN)), Some((&gongbu, GONGBU_TOKEN)));
     unified.initialize();
 
-    let hubu_error = unified.call(10, "hubu_list_users", json!({}));
+    let hubu_error = unified.call(10, "hubu_list_agents", json!({}));
     assert_eq!(hubu_error["error"]["code"], -32000);
     assert!(!hubu_error.to_string().contains(HUBU_TOKEN));
 

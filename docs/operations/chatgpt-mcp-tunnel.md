@@ -139,16 +139,10 @@ set -eu
 umask 077
 
 export HUBU_UNIFIED_HUBU_ENDPOINT="http://127.0.0.1:8787"
-export HUBU_UNIFIED_HUBU_BEARER_TOKEN_FILE="/absolute/path/to/hubu/auth"
+export HUBU_UNIFIED_HUBU_BEARER_TOKEN_FILE="/absolute/path/to/hubu/agent"
 export HUBU_UNIFIED_GONGBU_ENDPOINT="http://127.0.0.1:8788"
 export HUBU_UNIFIED_GONGBU_BEARER_TOKEN_FILE="/absolute/path/to/gongbu/caller"
 export HUBU_UNIFIED_OPERATION_STATE_PATH="$HOME/.local/state/hubu-chatgpt/operations.sqlite3"
-
-# Do not trust unverified client human-approval gates during initial setup.
-export HUBU_MCP_TRUST_CLIENT_APPROVAL=0
-export HUBU_MCP_TRUST_SPEND_APPROVAL=0
-unset HUBU_APPROVAL_TOKEN HUBU_APPROVAL_TOKEN_FILE
-unset HUBU_RECONCILIATION_TOKEN HUBU_RECONCILIATION_TOKEN_FILE
 
 # Use these credential files and the router's default operation-key allocation.
 unset HUBU_UNIFIED_HUBU_BEARER_TOKEN HUBU_UNIFIED_GONGBU_BEARER_TOKEN
@@ -178,8 +172,7 @@ registry dedicated to this integration. Preserve it across restarts/upgrades;
 deleting it loses operation identity and recovery state. This is adapter state,
 separate from the backend databases.
 
-The initial flags disable protected approval/admin actions, not all billable
-operations. Do not submit spending as a connectivity test. Registry availability
+The agent connection can discover spend tools when its backend and operation store are ready. Do not submit spending as a connectivity test. Registry availability
 also does not prove the client supplies the required
 [trusted invocation metadata](../unified-mcp.md#trusted-invocation-metadata).
 
@@ -262,10 +255,8 @@ Look for both backends to be available and this capability object:
 ```
 
 Inspect actual tool results, not only the assistant's summary. Advertised tools
-may still reject calls because of approval or identity requirements. Before
-enabling protected actions, verify the client's human prompts against the
-[approval contract](../unified-mcp.md#approval-boundary). Do not set trust flags
-just to remove an error. Any later paid test needs explicit authorization and a
+may still reject calls because of approval or identity requirements. See the [approval contract](../unified-mcp.md#approval-boundary) for the Mac
+confirmation flow. Any later paid test needs explicit authorization and a
 budget; this runbook stops at connectivity and capability checks.
 
 For an optional icon, the tested setup UI accepts PNG, recommends at least
@@ -325,8 +316,8 @@ client's metadata. Remove the variable and redirect afterward.
 | Tunnel absent in ChatGPT | Check its ChatGPT workspace association and operator permissions, not only the Platform organization. |
 | Calls time out | Check Mac sleep, network, tunnel client, and stack readiness; run `doctor --explain`. |
 | Health works but spending tools are missing | Inspect `operation_registry`: `configuration_missing` needs the persistent path; `state_unavailable` needs path/permission diagnosis. Restart and refresh afterward. |
-| Protected actions are rejected | Initial trust flags are off and approval/reconciliation credentials are withheld. Verify the client approval contract before changing them. |
-| Spending fails on identity metadata | Transport alone does not supply trusted harness identity. [Capture the metadata shape](#capture-identity-metadata-shape) and compare it with a working client; do not put private operation keys in model arguments or change approval trust flags to clear it. |
+| Protected actions are rejected | Use the Hubu admin portal for owner actions. |
+| Spending fails on identity metadata | Transport alone does not supply trusted harness identity. [Capture the metadata shape](#capture-identity-metadata-shape) and compare it with a working client; do not put private operation keys in model arguments. |
 | A launcher change seems ineffective | Restart the tunnel-owned MCP process, refresh the connection's metadata, and start a new conversation. |
 | Icon crops the wordmark | Export a padded square PNG under the upload limit. |
 

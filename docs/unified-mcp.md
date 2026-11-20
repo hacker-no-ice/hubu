@@ -123,20 +123,15 @@ inspect, or allocate a key. Omit it for ordinary operation. Create the private
 store and its first scoped record only after the workflow's separate human
 authorization gate.
 
-On first interactive run, `hubu init codex` asks once whether Codex may use the
-setup and administration tools (default: no). Re-runs keep the choice recorded
-in the managed Codex config block. `--trust-client-approval` and
-`--no-trust-client-approval` override it; with `--dry-run` or without a
-terminal, nothing is asked and the recorded choice (or off) is used.
+Re-run `hubu init codex` with your existing setup options to replace the
+managed block and remove legacy trust flags and owner capability settings.
+A server launched from an old config ignores the retired
+`HUBU_MCP_TRUST_CLIENT_APPROVAL` variable and reports it once on stderr.
 
-With `--stack-profile`, the command consumes the verified handoff from an
-already running stack and writes the managed MCP entry; managed startup has
-already created the required capabilities. The non-stack setup form may create
-or reuse its manual local defaults. Both forms generate per-tool approval
-settings alongside Hubu's tool approval annotations. The resolver is rendered with
-`approval_mode = "prompt"`; spend submission and public-handle resume retain
-their non-interactive client policy because Hubu's durable decision remains the
-authority. Restart Codex after changing the generated configuration.
+With `--stack-profile`, the command uses the running stack's handoff. Both
+setup forms configure the Hubu agent credential and set a 75-second Codex
+tool timeout so Hubu can complete its 60-second owner confirmation dialog.
+Restart Codex after changing the configuration.
 
 The lifecycle is:
 
@@ -168,13 +163,8 @@ Manual MCP clients configure these inputs for the router:
   Managed setup renders `$HUBU_HOME/save-folders.json`.
 - `HUBU_UNIFIED_HUBU_ENDPOINT`
 - `HUBU_UNIFIED_HUBU_BEARER_TOKEN` or
-  `HUBU_UNIFIED_HUBU_BEARER_TOKEN_FILE`
+  `HUBU_UNIFIED_HUBU_BEARER_TOKEN_FILE`, using the Hubu agent credential
 - the corresponding Gongbu endpoint and installation-scoped caller token
-- `HUBU_APPROVAL_TOKEN` or `HUBU_APPROVAL_TOKEN_FILE` when protected approval
-  resolution is enabled
-- `HUBU_MCP_TRUST_SPEND_APPROVAL=1` only when the client shows a human prompt
-  that confirms the already chosen approve-or-deny resolver call
-- `HUBU_RECONCILIATION_TOKEN` or its file form when reconciliation is enabled
 
 Endpoint and credential values are never returned by capability discovery.
 The Gongbu caller token carries no execution identity claim. One configured
@@ -224,52 +214,24 @@ input schemas are checked against the router's catalog and the Gongbu
 
 ## Approval boundary
 
-The MCP catalog distinguishes reads, spend submission, and protected human
-actions through tool annotations. Generated client configuration preserves
-the per-tool human prompts and separate trust/capability gates.
+The Hubu side of the unified MCP exposes agent routes for registration
+submission, policy inspection, spend, approval status, and budget and ledger
+reads. Owner administration, governance evidence reads, YAML policy export,
+and executor or reconciliation operations use their owner or executor surfaces.
+Calling a retired tool returns an MCP tool error directing the caller to the
+Hubu admin portal.
 
-Registration, policy mutation, spending-target changes, budget mutation, and
-claim reconciliation require a client-enforced human prompt. Those broad
-administrative tools remain disabled unless the process is started with
-`HUBU_MCP_TRUST_CLIENT_APPROVAL=1`. `hubu init codex` renders that variable
-only when the human answers yes at its one-time prompt or passes
-`--trust-client-approval`, and keeps the setting on re-runs unless
-`--no-trust-client-approval` is passed.
-
-Spend approval resolution uses the narrower
-`HUBU_MCP_TRUST_SPEND_APPROVAL=1` gate. `hubu init codex` always renders that
-gate together with the per-tool native prompt, without enabling the broader
-administrative surface. The broad gate also satisfies the resolver gate when
-an operator deliberately enables it. Approval authority is loaded from the
-separate local capability and is never accepted as a model-owned tool argument.
-
-Spend submission, authorization, and composite governed execution do not
-receive a generic pre-call prompt. Hubu evaluates policy and may return
-`requires_human_approval: true`; the composite projects that state as
-`approval_required` and returns immediately. In that case no payment, Gongbu
-execution, or provider work has occurred. The client shows the returned
-immutable review. After the human says approve or deny, the client forms the
-protected `hubu_resolve_spend_approval` call and shows its native MCP prompt.
-The composite never holds its MCP call open while the human decides. A canceled
-prompt submits no decision and leaves the request pending; it must not be
-reported as a Hubu denial. A successful resolution changes only Hubu and the
-router's durable approval projection. It never invokes Gongbu or a provider.
-After approval through MCP or an external owner-authorized surface,
-`hubu_operation_status` synchronizes the decision and
-`hubu_resume_operation` continues the same immutable intent by public handle.
-
-Reconciliation requires a separate server-side capability in addition to the
-MCP prompt. An executor with only the normal Hubu bearer credential cannot
-reconcile a claim.
-
-These controls define a local trust boundary. A same-user process that can read
-the capability files or control an authorized MCP client can act with that
-client's authority. Do not expose this configuration to an untrusted network or
-connect it to a real payment rail without a stronger authentication design.
-An agent that can run the `hubu` CLI with the profile's credentials can make
-the same administrative changes without these MCP tools, so for such an agent
-the admin gate is not a security boundary; see the
-[threat model](threat-model.md).
+Spend submission, authorization, and composite governed execution follow
+Hubu policy. When policy requires human approval, the composite returns
+`approval_required` before payment or provider work. Show the immutable
+approval review. After the owner says to approve in the conversation, call
+`hubu_prompt_spend_approval` with the existing approval request ID. Hubu
+shows the confirmation dialog on the owner's Mac and waits for the result.
+Deny in the dialog closes the request. Timeout or an unavailable provider
+leaves the request pending. The owner can also decide through the admin portal
+or CLI. After approval, `hubu_resume_operation` continues the same operation
+by public handle. See [owner presence](owner-presence.md) for server-side
+authorization and prompt outcomes.
 
 ## MCP behavior and responses
 
@@ -304,9 +266,9 @@ trusted harness identity and a newly allocated private operation key.
   later calls can project an approved or completed durable state.
 - `hubu_get_spend_approval` reads the owner-scoped immutable review and durable
   `pending`, `approved`, or `denied` status without using approval authority.
-- `hubu_resolve_spend_approval` submits exactly one explicit human `approve` or
-  `deny` decision behind the client prompt and the separate Hubu approval
-  capability. It never starts Gongbu execution or provider work.
+- `hubu_prompt_spend_approval` raises the server's owner confirmation dialog
+  for one pending request. The response withholds authorization continuations
+  so the agent resumes separately by public handle.
 - `hubu_resume_operation` accepts only a public operation handle. After an
   approval, it replays the stored immutable Hubu intent. Primitive operations
   return their original authorization or spend outcome; a governed operation
@@ -315,47 +277,10 @@ trusted harness identity and a newly allocated private operation key.
 - `gongbu_get_artifact` returns safe metadata followed by PNG or JPEG content.
 - Gongbu application errors remain `isError: true` with their sanitized error
   object.
-- Only `hubu_update_budget` and `hubu_budget_history` translate typed Hubu
-  application rejections into MCP tool results with `isError: true`. Their text
-  and `structuredContent` contain the same sanitized `error`, `http_status`,
-  `error_code`, and optional `details` and `retry_guidance`. Other Hubu tools
-  retain their existing JSON-RPC application-error behavior.
-
-### Versioned budget tools
-
-`hubu_update_budget` is approval-gated and idempotent. Its strict input requires
-`budget_id`, `expected_revision >= 1`, and a positive decimal `amount_limit`, with an
-optional `reason`. The amount is the budget's new cumulative total cap, not an
-increment. The router validates the public budget ID, places it only in
-`/budgets/{budget_id}/versions`, and forwards only the revision, amount, and
-optional reason in the POST body. `hubu_budget_history` is the read-only GET on
-the same safe dynamic path.
-
-An update success distinguishes the requested immutable `applied_version` from
-the authoritative `current_budget`. This matters when an exact historical
-retry recovers its original successor after the head has advanced.
-`idempotent_replay` labels that case. History returns the current logical
-snapshot once and then immutable versions in ascending revision order.
-
-Typed rejections use HTTP 400 for invalid amount or revision, 404 for unknown
-or not-owned budgets, 409 for revision conflict, revocation, or expiry, and 422
-when the total would fall below committed usage. Numeric conflict and floor
-values remain in `details`. Generic HTTP 500 responses expose no storage or
-invariant detail. Every configured Hubu bearer or capability string is removed
-recursively from the error, details, retry guidance, and rendered text.
-
-The stable public codes are:
-
-- `budget_update_invalid_amount` (400) and
-  `budget_update_invalid_revision` (400) identify boundary validation failures.
-- `budget_not_found` (404) deliberately covers both unknown and not-owned IDs.
-- `budget_revision_conflict` (409) includes expected and current revisions;
-  refresh and review history before creating a new intent.
-- `budget_revoked` (409) and `budget_expired` (409) reject lifecycle-invalid
-  updates.
-- `budget_limit_below_committed` (422) includes requested and committed cents.
-- `budget_update_storage_error` (500) is generic. After an ambiguous outcome,
-  retry only with the same budget ID, expected revision, amount, and reason.
+- The approval prompt returns Hubu application rejections as `isError: true`
+  with sanitized `error`, `http_status`, `error_code`, and any returned
+  `approval_status` and `retry_guidance`. Read the approval status before
+  deciding whether a pending request needs another owner prompt.
 
 ## Composite governed execution
 
@@ -448,12 +373,10 @@ The approval tools have deliberately separate jobs:
 
 - `hubu_get_spend_approval` accepts only `approval_request_id`. It is an
   owner-scoped read and returns the immutable review plus its durable status.
-- `hubu_resolve_spend_approval` accepts only `approval_request_id` and
-  `decision`, whose value is `approve` or `deny`. It requires both the normal
-  Hubu bearer and the distinct approval capability. Repeating the same decision
-  is idempotent; a conflicting decision is rejected. Its public result withholds
-  any authorization continuation so resolution cannot bypass the separate
-  public-handle resume boundary.
+- `hubu_prompt_spend_approval` accepts only `approval_request_id`. Call it
+  after the owner says to approve in the conversation. The owner confirms
+  the request on the Mac. The result carries the durable approval state and
+  withholds the private authorization continuation.
 - `hubu_resume_operation` accepts only `operation_handle`. It is not an approval
   operation. It synchronizes the decision if necessary, requires an approved
   immutable operation, and replays only the stored Hubu intent. Primitive
@@ -462,13 +385,10 @@ The approval tools have deliberately separate jobs:
   worker. Repeating it observes or resumes that same operation rather than
   creating another Gongbu execution or provider attempt.
 
-In Codex, the human first says `approve` or `deny` in the chat after reviewing
-the structured request. Codex then forms a
-`hubu_resolve_spend_approval` call, and the native MCP tool prompt asks for a
-second confirmation before the resolver is invoked. Canceling or rejecting
-that native prompt does not call Hubu: the durable decision remains `pending`.
-It is not recorded as a Hubu denial. A denial exists only after an explicit
-`decision: "deny"` call reaches Hubu successfully.
+If the owner presses Deny, Hubu records the denial and closes the request.
+If a prompt times out, the request remains pending and the owner can ask to
+raise it again. For a denial without raising the dialog, the owner uses the
+admin portal or CLI.
 
 Neither reading nor resolving an approval starts Gongbu execution, payment, or
 provider work. An approval reserves the original immutable maximum and moves
@@ -945,10 +865,5 @@ full-budget coverage and safe evidence references follow the
 
 ## Governance observability
 
-`hubu_governance_summary`, `hubu_list_governance_records` and
-`hubu_get_governance_record` expose the shared owner-scoped HTTP read model.
-They preserve its exact money, immutable snapshots, full-filter totals and
-coverage in both text and structured results. These Hubu-only reads work during
-Gongbu or operation-store outages and never change spend state. Filter, paging
-and weekly-answer guidance lives in the
-[governance query contract](governance-observability.md#agent-queries-through-unified-mcp).
+The [owner governance HTTP API](governance-observability.md) serves lifecycle
+evidence to owner clients.

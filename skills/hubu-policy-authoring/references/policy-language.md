@@ -142,13 +142,8 @@ hubu policy apply --path policies/POLICY.yaml \
   --expected-hash CURRENT_SHA256
 ```
 
-Equivalent unified MCP operations are:
-
-- `hubu_show_policy` (with `include_yaml: true` for YAML), `hubu_policy_history`, and
-  `hubu_policy_diff` for read-only inspection;
-- `hubu_apply_policy` for reconciliation and assignment. It requires
-  `policy_yaml`; optional fields are `declarative_key`, `display_name`,
-  `agent_id`, `expected_revision`, and `expected_hash`.
+Agents can read the current policy and assignments with `hubu_show_policy`.
+Use the Hubu admin portal or CLI for policy changes and owner inspection.
 
 Applying without `agent_id` targets the user default. Applying with `agent_id`
 targets that exact agent override. Applying identical canonical content is

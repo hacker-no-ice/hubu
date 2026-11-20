@@ -1,5 +1,4 @@
 mod catalog;
-mod governance;
 mod response;
 mod routing;
 mod transport;
@@ -12,12 +11,11 @@ use crate::{
 };
 
 use response::ForwardError;
-pub(crate) use routing::{denied_retry_guidance, DENIED_OPERATION_GUIDANCE};
+pub(crate) use routing::{denied_retry_guidance, owner_action_result, DENIED_OPERATION_GUIDANCE};
 use routing::{
     public_spend_result, route_tool_call_v1, tool_error_result_v1, tool_result_v1,
     validate_model_spend_arguments,
 };
-pub use transport::RoutingConfig;
 
 pub(crate) use catalog::{
     execution_scope_input_schema, spend_amount_input_schema, spend_currency_input_schema,
@@ -37,16 +35,12 @@ pub(crate) fn void_rejected_authorization(
         .account_id
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("authorization account binding missing"))?;
-    let response = client.execute_hubu(
-        routing::HubuHttpRequestV1 {
-            method: "POST",
-            path: "/spend/void".into(),
-            body: Some(json!({"spend_auth_token_id":operation.auth_token_id,
+    let response = client.execute_hubu(routing::HubuHttpRequestV1 {
+        method: "POST",
+        path: "/spend/void".into(),
+        body: Some(json!({"spend_auth_token_id":operation.auth_token_id,
             "operation_key":operation.operation_key, "account_id":account})),
-            capability: routing::HubuRequestCapabilityV1::None,
-        },
-        &server.hubu_routing,
-    );
+    });
     let response = match response {
         Ok(response) => response,
         Err(error) if matches!(error.downcast_ref::<ForwardError>(), Some(ForwardError::Application { status:409, error_code:Some(code), .. }) if code == "authorization_not_voidable") =>
@@ -127,13 +121,9 @@ pub(crate) fn dispatch_resolved_spend(
         "name": tool_name,
         "arguments": arguments,
     });
-    match route_tool_call_v1(
-        params,
-        server.hubu_routing.trusted_client_approval,
-        server.hubu_routing.trusted_spend_approval,
-        Some(operation.clone()),
-        |request| client.execute_hubu(request, &server.hubu_routing),
-    ) {
+    match route_tool_call_v1(params, Some(operation.clone()), |request| {
+        client.execute_hubu(request)
+    }) {
         Ok(result) => {
             let response = result
                 .get("structuredContent")
@@ -248,13 +238,9 @@ fn call_tool_with_operation_identity(
         "arguments": call.arguments,
         "_meta": call.meta
     });
-    match route_tool_call_v1(
-        params,
-        server.hubu_routing.trusted_client_approval,
-        server.hubu_routing.trusted_spend_approval,
-        operation.clone(),
-        |request| client.execute_hubu(request, &server.hubu_routing),
-    ) {
+    match route_tool_call_v1(params, operation.clone(), |request| {
+        client.execute_hubu(request)
+    }) {
         Ok(result) => {
             if let Some(operation) = operation.as_ref() {
                 let response = result
@@ -296,20 +282,8 @@ fn call_tool_with_operation_identity(
             )
         }
         Err(error) => {
-            if governance::is_tool(&name) {
-                if let Some(result) = governance_application_error_tool_result(&error) {
-                    return success_response(id, result);
-                }
-                // New governance reads never echo an unexpected backend body.
-                if matches!(
-                    error.downcast_ref::<ForwardError>(),
-                    Some(ForwardError::Application { .. })
-                ) {
-                    return error_response(id, -32000, "Hubu governance request failed");
-                }
-            }
-            if matches!(name.as_str(), "hubu_update_budget" | "hubu_budget_history") {
-                if let Some(result) = budget_application_error_tool_result(&error) {
+            if name == "hubu_prompt_spend_approval" {
+                if let Some(result) = approval_prompt_error(&error) {
                     return success_response(id, result);
                 }
             }
@@ -331,32 +305,12 @@ fn call_tool_with_operation_identity(
     }
 }
 
-fn governance_application_error_tool_result(error: &anyhow::Error) -> Option<Value> {
-    let ForwardError::Application {
-        status,
-        error_code: Some(code),
-        ..
-    } = error.downcast_ref::<ForwardError>()?
-    else {
-        return None;
-    };
-    let message = match (*status, code.as_str()) {
-        (400, "governance_invalid_query") => "invalid governance query",
-        (404, "governance_record_not_found") => "governance record not found",
-        (500, "governance_unavailable") => "governance evidence is unavailable",
-        _ => return None,
-    };
-    Some(tool_error_result_v1(
-        json!({"error":message, "http_status":status, "error_code":code}),
-    ))
-}
-
-fn budget_application_error_tool_result(error: &anyhow::Error) -> Option<Value> {
+fn approval_prompt_error(error: &anyhow::Error) -> Option<Value> {
     let ForwardError::Application {
         status,
         message,
-        error_code: Some(error_code),
-        details,
+        error_code,
+        approval_status,
         retry_guidance,
     } = error.downcast_ref::<ForwardError>()?
     else {
@@ -365,10 +319,12 @@ fn budget_application_error_tool_result(error: &anyhow::Error) -> Option<Value> 
     let mut envelope = json!({
         "error": message,
         "http_status": status,
-        "error_code": error_code,
     });
-    if let Some(details) = details {
-        envelope["details"] = details.clone();
+    if let Some(code) = error_code {
+        envelope["error_code"] = json!(code);
+    }
+    if let Some(status) = approval_status {
+        envelope["approval_status"] = json!(status);
     }
     if let Some(retry_guidance) = retry_guidance {
         envelope["retry_guidance"] = retry_guidance.clone();

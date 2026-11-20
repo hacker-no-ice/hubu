@@ -44,14 +44,13 @@ mod stdio;
 
 use capability::{capabilities_value, CapabilitySnapshot};
 use diagnostics::{backend_error_response, tool_availability, ToolRejection};
-pub use hubu::RoutingConfig as HubuRoutingConfig;
 use notification::TransitionState;
 
 pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 pub const UNIFIED_CONTRACT_VERSION: &str = "hubu-gongbu-mcp-v1";
 pub const EXECUTOR_CONTRACT_VERSION: &str = "hubu-spend-executor-v4.5";
 pub const HUBU_ROUTING_CONTRACT_VERSION: &str = "hubu-mcp-routing-v1";
-pub const ROUTING_REVISION: u32 = 18;
+pub const ROUTING_REVISION: u32 = 19;
 
 const HUBU_ENDPOINT_ENV: &str = "HUBU_UNIFIED_HUBU_ENDPOINT";
 const HUBU_TOKEN_ENV: &str = "HUBU_UNIFIED_HUBU_BEARER_TOKEN";
@@ -67,11 +66,6 @@ const OPERATION_KEY_DB_ENV: &str = "HUBU_UNIFIED_OPERATION_KEY_DB";
 const SAVE_FOLDERS_FILE_ENV: &str = "HUBU_UNIFIED_SAVE_FOLDERS_FILE";
 const META_SHAPE_DIAGNOSTICS_ENV: &str = "HUBU_UNIFIED_META_SHAPE_DIAGNOSTICS";
 const TRUST_CLIENT_APPROVAL_ENV: &str = "HUBU_MCP_TRUST_CLIENT_APPROVAL";
-const TRUST_SPEND_APPROVAL_ENV: &str = "HUBU_MCP_TRUST_SPEND_APPROVAL";
-const APPROVAL_TOKEN_ENV: &str = "HUBU_APPROVAL_TOKEN";
-const APPROVAL_TOKEN_FILE_ENV: &str = "HUBU_APPROVAL_TOKEN_FILE";
-const RECONCILIATION_TOKEN_ENV: &str = "HUBU_RECONCILIATION_TOKEN";
-const RECONCILIATION_TOKEN_FILE_ENV: &str = "HUBU_RECONCILIATION_TOKEN_FILE";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 const DEFAULT_CAPABILITY_POLL_INTERVAL: Duration = Duration::from_secs(30);
@@ -92,43 +86,41 @@ const DOMAIN_TOOLS: &[(&str, BackendOwner)] = &[
     ("gongbu_list_artifacts", BackendOwner::Gongbu),
     ("gongbu_list_execution_targets", BackendOwner::Gongbu),
     ("gongbu_list_reference_images", BackendOwner::Gongbu),
-    ("hubu_apply_policy", BackendOwner::Hubu),
     ("hubu_authorize_spend", BackendOwner::Hubu),
-    ("hubu_budget_history", BackendOwner::Hubu),
-    ("hubu_create_budget", BackendOwner::Hubu),
-    ("hubu_get_executor_claim", BackendOwner::Hubu),
-    ("hubu_get_governance_record", BackendOwner::Hubu),
-    ("hubu_governance_summary", BackendOwner::Hubu),
     ("hubu_get_spend_approval", BackendOwner::Hubu),
     ("hubu_get_authorization_record", BackendOwner::Hubu),
     ("hubu_list_agents", BackendOwner::Hubu),
     ("hubu_list_budgets", BackendOwner::Hubu),
-    (
-        "hubu_list_claims_requiring_reconciliation",
-        BackendOwner::Hubu,
-    ),
-    ("hubu_list_governance_records", BackendOwner::Hubu),
     ("hubu_list_ledger", BackendOwner::Hubu),
     ("hubu_list_authorization_records", BackendOwner::Hubu),
-    ("hubu_list_users", BackendOwner::Hubu),
-    ("hubu_policy_diff", BackendOwner::Hubu),
-    ("hubu_policy_history", BackendOwner::Hubu),
-    ("hubu_reconcile_vendor_billed_claim", BackendOwner::Hubu),
-    (
-        "hubu_reconcile_vendor_did_not_bill_claim",
-        BackendOwner::Hubu,
-    ),
+    ("hubu_prompt_spend_approval", BackendOwner::Hubu),
     ("hubu_register_agent", BackendOwner::Hubu),
-    ("hubu_register_human", BackendOwner::Hubu),
     ("hubu_registration_guidance", BackendOwner::Hubu),
-    ("hubu_resolve_spend_approval", BackendOwner::Hubu),
-    ("hubu_revoke_budget", BackendOwner::Hubu),
-    ("hubu_revoke_spending_target", BackendOwner::Hubu),
-    ("hubu_set_spending_target", BackendOwner::Hubu),
     ("hubu_show_policy", BackendOwner::Hubu),
-    ("hubu_show_spending_targets", BackendOwner::Hubu),
     ("hubu_submit_spend", BackendOwner::Hubu),
-    ("hubu_update_budget", BackendOwner::Hubu),
+];
+
+const REMOVED_OWNER_TOOLS: &[&str] = &[
+    "hubu_apply_policy",
+    "hubu_budget_history",
+    "hubu_create_budget",
+    "hubu_get_executor_claim",
+    "hubu_get_governance_record",
+    "hubu_governance_summary",
+    "hubu_list_claims_requiring_reconciliation",
+    "hubu_list_governance_records",
+    "hubu_list_users",
+    "hubu_policy_diff",
+    "hubu_policy_history",
+    "hubu_reconcile_vendor_billed_claim",
+    "hubu_reconcile_vendor_did_not_bill_claim",
+    "hubu_register_human",
+    "hubu_resolve_spend_approval",
+    "hubu_revoke_budget",
+    "hubu_revoke_spending_target",
+    "hubu_set_spending_target",
+    "hubu_show_spending_targets",
+    "hubu_update_budget",
 ];
 
 pub fn product_version() -> &'static str {
@@ -207,7 +199,6 @@ impl BackendConfig {
 pub struct Config {
     pub hubu: Option<BackendConfig>,
     pub gongbu: Option<BackendConfig>,
-    pub hubu_routing: HubuRoutingConfig,
     pub capability_poll_interval: Duration,
     pub operation_tick: Duration,
     pub governed_execution_wait: Duration,
@@ -225,7 +216,6 @@ impl Default for Config {
         Self {
             hubu: None,
             gongbu: None,
-            hubu_routing: HubuRoutingConfig::default(),
             capability_poll_interval: DEFAULT_CAPABILITY_POLL_INTERVAL,
             operation_tick: DEFAULT_OPERATION_TICK,
             governed_execution_wait: DEFAULT_GOVERNED_EXECUTION_WAIT,
@@ -239,6 +229,9 @@ impl Default for Config {
 
 impl Config {
     pub fn from_env() -> Result<Self, ConfigError> {
+        if env::var_os(TRUST_CLIENT_APPROVAL_ENV).is_some() {
+            eprintln!("{TRUST_CLIENT_APPROVAL_ENV} is retired and ignored. Owner actions are done on the Hubu admin portal.");
+        }
         let hubu_token =
             credential::from_env(BackendOwner::Hubu, HUBU_TOKEN_ENV, HUBU_TOKEN_FILE_ENV)?;
         let gongbu_token = credential::from_env(
@@ -275,16 +268,6 @@ impl Config {
         {
             return Err(ConfigError::InvalidSaveFoldersPath);
         }
-        let mut hubu_routing = HubuRoutingConfig::new_with_spend_approval(
-            lookup(TRUST_CLIENT_APPROVAL_ENV).is_some_and(|value| env_flag_value(&value)),
-            lookup(TRUST_SPEND_APPROVAL_ENV).is_some_and(|value| env_flag_value(&value)),
-            lookup(APPROVAL_TOKEN_ENV),
-            lookup(RECONCILIATION_TOKEN_ENV),
-        );
-        hubu_routing.approval_capability_file =
-            lookup(APPROVAL_TOKEN_FILE_ENV).unwrap_or_else(|| "hubu.approval-token".to_string());
-        hubu_routing.reconciliation_capability_file = lookup(RECONCILIATION_TOKEN_FILE_ENV)
-            .unwrap_or_else(|| "hubu.reconciliation-token".to_string());
         Ok(Self {
             hubu: backend_from_values(
                 BackendOwner::Hubu,
@@ -296,7 +279,6 @@ impl Config {
                 lookup(GONGBU_ENDPOINT_ENV),
                 lookup(GONGBU_TOKEN_ENV),
             )?,
-            hubu_routing,
             capability_poll_interval: poll_interval(lookup(CAPABILITY_POLL_INTERVAL_ENV))?,
             operation_tick: operation_tick(lookup(OPERATION_TICK_ENV))?,
             governed_execution_wait: governed_execution_wait(lookup(GOVERNED_EXECUTION_WAIT_ENV))?,
@@ -530,7 +512,6 @@ pub struct Server {
     probe_timings: Arc<Mutex<ProbeTimings>>,
     probe_schedule_waker: Arc<Mutex<Option<mpsc::Sender<()>>>>,
     operation_worker_waker: Arc<Mutex<Option<mpsc::Sender<()>>>>,
-    hubu_routing: HubuRoutingConfig,
     operation_registry: Arc<OperationRegistryCapability>,
     meta_shape_diagnostics: bool,
     save_folders_path: Option<PathBuf>,
@@ -634,7 +615,6 @@ impl Server {
                 reason_code: "configuration_missing",
             },
         };
-        let hubu_routing = config.hubu_routing.clone();
         let capability_poll_interval = config.capability_poll_interval;
         let operation_tick = config.operation_tick;
         let governed_execution_wait = config.governed_execution_wait;
@@ -673,7 +653,6 @@ impl Server {
             probe_timings: Arc::new(Mutex::new(probe_timings)),
             probe_schedule_waker: Arc::new(Mutex::new(None)),
             operation_worker_waker: Arc::new(Mutex::new(None)),
-            hubu_routing,
             operation_registry: Arc::new(operation_registry),
             meta_shape_diagnostics,
             save_folders_path,
@@ -785,6 +764,9 @@ impl Server {
             self.refresh_governed_execution_capabilities();
             return governed_execution::call_tool(self, id, call, started, deadline);
         }
+        if REMOVED_OWNER_TOOLS.contains(&call.name.as_str()) {
+            return success_response(id, hubu::owner_action_result(&call.name));
+        }
         let Some(owner) = DOMAIN_TOOLS
             .iter()
             .find_map(|(name, owner)| (*name == call.name).then_some(*owner))
@@ -865,6 +847,9 @@ impl Server {
             let deadline = started + self.governed_execution_wait;
             return governed_execution::call_tool(self, id, call, started, deadline);
         }
+        if REMOVED_OWNER_TOOLS.contains(&call.name.as_str()) {
+            return success_response(id, hubu::owner_action_result(&call.name));
+        }
         let Some(owner) = DOMAIN_TOOLS
             .iter()
             .find_map(|(name, owner)| (*name == call.name).then_some(*owner))
@@ -889,7 +874,7 @@ impl Server {
     fn call_hubu_tool_and_sync_approval(&self, id: Value, call: ToolCall) -> Value {
         let approval_request_id = matches!(
             call.name.as_str(),
-            "hubu_get_spend_approval" | "hubu_resolve_spend_approval"
+            "hubu_get_spend_approval" | "hubu_prompt_spend_approval"
         )
         .then(|| {
             call.arguments
@@ -908,6 +893,23 @@ impl Server {
         let Some(structured) = response.pointer("/result/structuredContent") else {
             return error_response(id, -32000, "Hubu returned an invalid approval result");
         };
+        if response.pointer("/result/isError") == Some(&Value::Bool(true)) {
+            // A refusal can close the request as denied. The prompt endpoint
+            // reports this status for the approval ID supplied in the request.
+            if structured["approval_status"] == "denied"
+                && self.operation_registry_available()
+                && self
+                    .synchronize_approval_status(&approval_request_id, "denied")
+                    .is_err()
+            {
+                return error_response(
+                    id,
+                    -32000,
+                    "approval status could not be synchronized safely",
+                );
+            }
+            return response;
+        }
         let approval = structured.get("approval").unwrap_or(structured);
         let Some(response_approval_request_id) =
             approval.get("approval_request_id").and_then(Value::as_str)
@@ -1603,7 +1605,7 @@ fn operation_status_result(status: &operation_registry::DurableOperationStatus) 
                 "Submit this authorization continuation once with gongbu_create_execution."
             }
             "approval_required" => {
-                "Human approval is required. Inspect and resolve the existing approval; do not submit a replacement operation."
+                "Human approval is required. Inspect the existing approval. After the owner says to approve in the conversation, call hubu_prompt_spend_approval. Keep using the existing operation."
             }
             "resume_required" => {
                 "Human approval is recorded. Resume this exact operation once with hubu_resume_operation and its existing operation_handle; do not submit a replacement."
@@ -2452,9 +2454,6 @@ mod tests {
             .to_string();
         assert!(!error.contains("url-secret"));
         assert!(!error.contains(secret));
-
-        let routing = HubuRoutingConfig::new(true, Some(secret.to_string()));
-        assert!(!format!("{routing:?}").contains(secret));
     }
 
     #[test]
@@ -2524,7 +2523,6 @@ mod tests {
                 BackendConfig::new(BackendOwner::Gongbu, "https://gongbu.test", "gongbu-secret")
                     .unwrap(),
             ),
-            hubu_routing: HubuRoutingConfig::default(),
             ..Config::default()
         };
         let server = Server::new(config).unwrap();
@@ -2533,7 +2531,7 @@ mod tests {
 
         assert_eq!(capability["contract_version"], UNIFIED_CONTRACT_VERSION);
         assert_eq!(capability["routing_revision"], ROUTING_REVISION);
-        assert_eq!(capability["tools"].as_array().unwrap().len(), 44);
+        assert_eq!(capability["tools"].as_array().unwrap().len(), 25);
         assert_eq!(capability["backends"]["hubu"]["state"], "unavailable");
         assert!(!serialized.contains("hubu.test"));
         assert!(!serialized.contains("gongbu.test"));

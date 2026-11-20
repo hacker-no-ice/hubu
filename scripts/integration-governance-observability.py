@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Qualify governance answers through real Hubu HTTP and unified MCP reads.
+"""Qualify governance answers through the owner HTTP API.
 
 All business records are synthetic and created through authenticated HTTP in a
 fresh temporary database. No Gongbu or provider is configured. v4.5 is the
@@ -79,14 +79,13 @@ class IsolatedHubu(base.HubuServer):
 
 
 class Qualification:
-    def __init__(self, hubu_bin: Path, mcp_bin: Path, root: Path, contract: str):
+    def __init__(self, hubu_bin: Path, root: Path, contract: str):
         # Imported scaffold receives only isolated Hubu settings, never a user's
         # selected profile, log destination, backend endpoint or capability file.
         for key in list(os.environ):
             if key.startswith(("HUBU_", "GONGBU_")):
                 os.environ.pop(key)
         self.hubu = IsolatedHubu(hubu_bin, root)
-        self.mcp = None
         self.root, self.contract = root, contract
         self.private = [PRIVATE, base.NORMAL_BEARER, base.APPROVAL_TOKEN, base.RECONCILIATION_TOKEN]
         self.read_outputs: list[dict] = []
@@ -97,14 +96,11 @@ class Qualification:
                   f"expected {contract}, got {guidance['protocol_version']}; integrate the published precision baseline first")
             self.build = self.http("GET", "/version")
             self.http("POST", "/init", {"username": "governance", "display_name": "Synthetic governance owner"})
-            self.mcp = base.UnifiedMcp(mcp_bin, self.hubu, root)
         except Exception:
             self.close()
             raise
 
     def close(self) -> None:
-        if self.mcp:
-            self.mcp.close()
         self.hubu.stop()
 
     def http(self, method: str, path: str, body=None, *, expected=200, headers=None):
@@ -112,29 +108,23 @@ class Qualification:
         check(status == expected, f"{method} {path}: expected {expected}, got {status}: {result}")
         return result
 
-    def read(self, tool: str, arguments: dict, *, error=False) -> dict:
-        assert self.mcp
-        response = self.mcp.request("tools/call", {"name": tool, "arguments": arguments})
-        self.read_outputs.append(response)
-        check("result" in response, f"{tool} returned a JSON-RPC error")
-        result = response["result"]
-        check(bool(result.get("isError")) == error, f"unexpected {tool} error state: {result}")
-        structured = result.get("structuredContent")
-        content = result.get("content", [])
-        check(isinstance(structured, dict) and len(content) == 1 and
-              content[0].get("type") == "text" and json.loads(content[0]["text"]) == structured,
-              "MCP text and structured governance projections diverged")
-        return structured
+    def read(self, path: str, arguments: dict, *, expected=200) -> dict:
+        encoded = {key: ",".join(value) if isinstance(value, list) else value
+                   for key, value in arguments.items()}
+        query = urllib.parse.urlencode(encoded)
+        result = self.http("GET", f"{path}?{query}" if query else path, expected=expected)
+        self.read_outputs.append(result)
+        return result
 
     def summary(self, filters: dict, **extra) -> dict:
-        return self.read("hubu_governance_summary", {**filters, **extra})["summary"]
+        return self.read("/governance/summary", {**filters, **extra})["summary"]
 
     def records(self, filters: dict, summary=None) -> tuple[dict, list[dict]]:
         summary = summary or self.summary(filters)
         args = {**filters, "snapshot": summary["snapshot"]["token"], "limit": 2}
         records, seen = [], set()
         while True:
-            page = self.read("hubu_list_governance_records", args)
+            page = self.read("/governance/records", args)
             check(page["summary"] == summary, "pagination changed whole-filter summary or frozen boundary")
             records.extend(page["records"])
             cursor = page["next_cursor"]
@@ -148,18 +138,11 @@ class Qualification:
         return summary, records
 
     def detail(self, filters: dict, summary: dict, record: dict) -> dict:
-        result = self.read("hubu_get_governance_record", {
-            **filters, "snapshot": summary["snapshot"]["token"], "record_id": record["record_id"],
+        result = self.read("/governance/records/" + record["record_id"], {
+            **filters, "snapshot": summary["snapshot"]["token"],
         })
         check(result["summary"] == summary and result["record"] == record, "detail diverged from its list snapshot")
         return result["record"]
-
-    def parity(self, filters: dict, summary: dict) -> None:
-        args = {**filters, "snapshot": summary["snapshot"]["token"]}
-        encoded = {key: ",".join(value) if isinstance(value, list) else value for key, value in args.items()}
-        response = self.http("GET", "/governance/summary?" + urllib.parse.urlencode(encoded))
-        self.read_outputs.append(response)
-        check(response["summary"] == summary, "HTTP and MCP summary projections diverged")
 
     def agent(self, name: str, *, policy=POLICY, usd=None, usdc=None) -> dict:
         agent = self.http("POST", "/agents/register", {"name": name, "version": "qualification-v1"})
@@ -368,7 +351,6 @@ class Qualification:
         check(breakdown == {"policy": 5, "insufficient_budget": 1, "no_available_budget": 1}, f"weekly denial source counts wrong: {breakdown}")
         for row in denied_rows:
             self.detail(week, weekly, row)
-        self.parity(week, weekly)
         intervention_filters = {"outcomes": ["human_approved", "human_declined"]}
         interventions, intervention_rows = self.records(intervention_filters)
         for row in intervention_rows:
@@ -390,9 +372,9 @@ class Qualification:
         check(self.records({})[1] == all_rows, "restart duplicated or rewrote facts")
         # A different owner cannot reuse old scope, tokens, or supporting IDs.
         self.http("POST", "/init", {"username": "other-governance", "display_name": "Other synthetic owner"})
-        self.read("hubu_governance_summary", filters, error=True)
-        self.read("hubu_governance_summary", {"snapshot": frozen}, error=True)
-        self.read("hubu_get_governance_record", {"record_id": denial["record_id"]}, error=True)
+        self.read("/governance/summary", filters, expected=400)
+        self.read("/governance/summary", {"snapshot": frozen}, expected=400)
+        self.read("/governance/records/" + denial["record_id"], {}, expected=404)
         check(self.summary({})["fact_count"] == 0, "another owner's records appeared in the new owner")
         serialized = json.dumps(self.read_outputs)
         for value in [*self.private, "operation_key", "correlation", "source_evidence", "auth_token_id", "spend_auth_token_id", "provider_request_id", "reconciliation_evidence"]:
@@ -411,14 +393,13 @@ class Qualification:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--hubu-server-bin", type=Path, required=True)
-    parser.add_argument("--unified-mcp-bin", type=Path, required=True)
     parser.add_argument("--expected-contract", choices=["v4.4", "v4.5"], default="v4.5")
     parser.add_argument("--keep-state", action="store_true")
     args = parser.parse_args()
     root = Path(tempfile.mkdtemp(prefix="hubu-governance-qualification-"))
     qualification = None
     try:
-        qualification = Qualification(args.hubu_server_bin, args.unified_mcp_bin, root, args.expected_contract)
+        qualification = Qualification(args.hubu_server_bin, root, args.expected_contract)
         report = qualification.run()
         (root / "qualification.json").write_text(json.dumps(report, indent=2) + "\n")
         print(json.dumps(report, sort_keys=True), flush=True)

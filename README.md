@@ -137,40 +137,18 @@ on the versioned contract are an [advanced integration](docs/external-executor.m
 ### 3. Connect Codex
 
 ```sh
-hubu init codex --stack-profile "$profile" --trust-client-approval
+hubu init codex --stack-profile "$profile"
 ```
 
-`--trust-client-approval` lets Codex use Hubu setup and administration tools, so
-it can register identities, apply policies, and create budgets in step 4; Codex
-still asks for your confirmation before each of those calls. To do that
-administration from the terminal instead, pass `--no-trust-client-approval` and
-follow the [CLI administration reference](docs/cli.md). Restart Codex
-afterwards. Codex in your terminal can also run the `hubu` CLI, so this
-choice isn't a security boundary; the [threat model](docs/threat-model.md)
-explains what does bind an agent.
+Restart Codex after updating the configuration. Codex connects to Hubu with
+the agent credential.
 
-### 4. Set up governance from Codex
+### 4. Set up governance
 
-In a new Codex thread (any repository), ask:
-
-```text
-Read hubu_registration_guidance. Register the human Alice Example with username
-alice-example and an agent named image-designer with version local-dev. Then
-read and follow /absolute/path/to/hubu/skills/hubu-policy-authoring/SKILL.md to
-draft a user-default policy that allows image generation only through the
-configured execution targets, caps each request at $0.10, and requires approval
-for anything unmatched. Show me the policy and wait for my approval before
-applying it. After I approve, create a $1 USD budget for the agent.
-```
-
-Replace `/absolute/path/to/hubu` with your clone. Then verify the result
-independently from the terminal:
-
-```sh
-hubu agent list
-hubu policy show
-hubu budget list
-```
+Register the owner, create an agent, and apply a policy and budget from the
+admin portal or CLI. Use the sandbox fixture for the first request. Keep the
+agent's account ID for the spend request. See the
+[local stack walkthrough](docs/local-stack.md#make-your-first-governed-request).
 
 ### 5. Run a governed request
 
@@ -178,7 +156,8 @@ hubu budget list
 Call gongbu_list_execution_targets and choose the sandbox fixture. Use
 hubu_submit_governed_execution with the agent's account ID and the target's
 returned execution scope to generate one image of a blue circle. Show any
-approval request before asking me to approve or deny it, and return the artifact.
+approval request. If I say to approve, raise the Mac confirmation dialog.
+Return the artifact after the operation completes.
 ```
 
 Hubu evaluates the policy and reserves budget before Gongbu runs the fixture.

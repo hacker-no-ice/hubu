@@ -117,6 +117,7 @@ done
 port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
 HUBU_DB_PATH="${smoke_dir}/hubu.sqlite3" \
 HUBU_AUTH_TOKEN_FILE="${smoke_dir}/hubu.auth-token" \
+HUBU_AGENT_TOKEN_FILE="${smoke_dir}/hubu.agent-token" \
 HUBU_RECONCILIATION_TOKEN_FILE="${smoke_dir}/hubu.reconciliation-token" \
   "${package_dir}/hubu-server" "127.0.0.1:${port}" >"${smoke_dir}/hubu-server.log" 2>&1 &
 server_pid="$!"
@@ -158,8 +159,7 @@ initialize='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
 tools_list='{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
 unified_mcp_response="$(printf '%s\n%s\n' "${initialize}" "${tools_list}" | \
   HUBU_UNIFIED_HUBU_ENDPOINT="http://127.0.0.1:${port}" \
-  HUBU_UNIFIED_HUBU_BEARER_TOKEN_FILE="${smoke_dir}/hubu.auth-token" \
-  HUBU_RECONCILIATION_TOKEN_FILE="${smoke_dir}/hubu.reconciliation-token" \
+  HUBU_UNIFIED_HUBU_BEARER_TOKEN_FILE="${smoke_dir}/hubu.agent-token" \
   "${package_dir}/hubu-unified-mcp")"
 jq -s -e \
   --arg product_version "${product_version}" \
@@ -173,8 +173,6 @@ generated_config="$("${package_dir}/hubu" init codex \
   --dry-run \
   --mcp-server "${package_dir}/hubu-unified-mcp" \
   --token-file "${smoke_dir}/hubu.auth-token" \
-  --reconciliation-token-file "${smoke_dir}/hubu.reconciliation-token" \
-  --approval-token-file "${smoke_dir}/hubu.approval-token" \
   --gongbu-endpoint "http://127.0.0.1:8788" \
   --gongbu-token-file "${smoke_dir}/gongbu.mcp-token")"
 grep -F '[mcp_servers.hubu]' <<<"${generated_config}" >/dev/null

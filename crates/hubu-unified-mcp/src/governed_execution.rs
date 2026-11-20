@@ -963,7 +963,7 @@ fn authorization_projection_for_outcome(
                 json!({
                     "action": "resolve_then_resume",
                     "operation_handle": operation_handle,
-                    "message": "Resolve the existing human approval, then continue only with hubu_resume_operation and this public handle."
+                    "message": "Show the existing approval review. After the owner says to approve in the conversation, call hubu_prompt_spend_approval. After confirmation, continue with hubu_resume_operation and this public handle."
                 }),
             );
         }
@@ -1067,7 +1067,7 @@ fn outcome_guidance(outcome: &str, result_code: Option<&str>) -> &'static str {
     }
     match outcome {
         "approval_required" => {
-            "Human approval is required and no provider work started. Resolve the existing approval, then continue only with hubu_resume_operation and this operation_handle; do not redeliver the original composite call or submit a replacement."
+            "Human approval is required and no provider work started. After the owner says to approve in the conversation, call hubu_prompt_spend_approval for the existing approval. After confirmation, continue with hubu_resume_operation and this operation_handle."
         }
         "resume_required" => {
             "Human approval is recorded and no provider work started. Continue this exact operation with hubu_resume_operation and this operation_handle; do not redeliver the original composite call or submit a replacement."
