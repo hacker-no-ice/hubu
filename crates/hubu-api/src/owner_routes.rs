@@ -204,6 +204,13 @@ fn approval_prompt(request: HttpRequest, state: &ServerState, client: OwnerClien
         }
         Err(error) => return invalid_owner_action(&request, &error),
     };
+    if no_prompt(&request) {
+        let mut response = presence_required(&spec);
+        if let Value::Object(map) = &mut response.body {
+            map.insert("approval_status".to_string(), json!("pending"));
+        }
+        return response;
+    }
     match prompt_and_record(state, &spec, client) {
         Ok(_) => {
             let mut response = resolve_approval(state, &body.approval_request_id, "approve");

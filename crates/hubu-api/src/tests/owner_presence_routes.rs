@@ -610,3 +610,27 @@ fn tightening_does_not_run_when_its_record_cannot_be_written() {
     assert_eq!(status, Some(json!("active")), "{}", budgets.body);
     std::fs::remove_file(path).ok();
 }
+
+/// Codex P1 (spec 5.4): `X-Hubu-No-Prompt` is honoured on agent-raised
+/// approval prompts too.
+#[test]
+fn agent_raised_approval_honours_no_prompt() {
+    let (path, state, _agent, pending) = setup_pending_approval("presence-agent-no-prompt");
+    let id = pending.body["approval"]["approval_request_id"]
+        .as_str()
+        .unwrap();
+    fixture(&state, "confirm");
+    let response = route(
+        with_header(prompt_request(id), owner_presence::NO_PROMPT_HEADER, "1"),
+        &state,
+    );
+    assert_eq!(response.status, 403, "{}", response.body);
+    assert_eq!(
+        response.body["error_code"],
+        OWNER_PRESENCE_REQUIRED_ERROR_CODE
+    );
+    assert_eq!(response.body["approval_status"], "pending");
+    assert_eq!(approval_status(&state, id), "pending");
+    assert!(records(&state).is_empty(), "no dialog may be raised");
+    std::fs::remove_file(path).ok();
+}
