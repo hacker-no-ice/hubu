@@ -193,11 +193,11 @@ fn approval_prompt(request: HttpRequest, state: &ServerState, client: OwnerClien
             return HttpResponse {
                 status: 409,
                 body: json!({
-                    "error": "the approval request is no longer pending; it was resolved or expired",
+                    "error": "the approval request is no longer pending; it was already resolved (approved or denied)",
                     "error_code": APPROVAL_NOT_PENDING_ERROR_CODE,
                     "retry_guidance": {
                         "action": "do_not_retry",
-                        "message": "a denied or expired request is closed; make a new spend request if the owner still wants it"
+                        "message": "a resolved request is closed; if it was denied, make a new spend request if the owner still wants it"
                     },
                 }),
             }
@@ -394,9 +394,6 @@ fn invalid_owner_action(request: &HttpRequest, error: &anyhow::Error) -> HttpRes
             "error": error.to_string(),
         }),
     );
-    if let Some(response) = budget_version_error_response(error) {
-        return response;
-    }
     let (status, error_code) = if error.downcast_ref::<UnknownOwnerTarget>().is_some() {
         (404, OWNER_ACTION_TARGET_NOT_FOUND_ERROR_CODE)
     } else {
@@ -490,7 +487,6 @@ fn owner_action_spec(
     request: &HttpRequest,
     state: &ServerState,
 ) -> Result<Option<OwnerActionSpec>> {
-    precheck_owner_request(request, state)?;
     let action = |action, reason, targets| {
         Ok(Some(OwnerActionSpec {
             action,
@@ -631,92 +627,6 @@ fn owner_action_spec(
             request.method, request.path
         )))),
     }
-}
-
-/// Runs each owner handler's checks that do not depend on state that can
-/// change while the dialog is open (spec 5.4), so an invalid request is
-/// refused with no dialog. Each arm reuses the handler's own parsing.
-fn precheck_owner_request(request: &HttpRequest, state: &ServerState) -> Result<()> {
-    let body = request.body.as_str();
-    if request.method == "POST" {
-        if let Some(budget_id) = budget_versions_public_id(&request.path) {
-            if !is_valid_public_budget_id(budget_id) {
-                return Err(anyhow::Error::new(BudgetVersionHttpError::NotFound));
-            }
-            let update = parse_update_budget_limit_request(body).map_err(anyhow::Error::new)?;
-            decimal_amount(
-                update.amount_limit.as_deref(),
-                "amount_limit",
-                "budget update",
-            )
-            .map_err(|_| anyhow::Error::new(BudgetVersionHttpError::InvalidAmount))?;
-            if update.expected_revision <= 0 {
-                return Err(anyhow::Error::new(BudgetVersionHttpError::InvalidRevision));
-            }
-            return Ok(());
-        }
-    }
-    match (request.method.as_str(), request.path.as_str()) {
-        ("POST", "/init") => {
-            if !body.trim().is_empty() {
-                serde_json::from_str::<InitHttpRequest>(body)?;
-            }
-        }
-        ("POST", "/user/spending-target") => {
-            let target: SetSpendingTargetHttpRequest = serde_json::from_str(body)?;
-            decimal_amount(target.amount.as_deref(), "amount", "spending target")?;
-            precheck_period(target.starting_at, target.ending_before, "spending target")?;
-        }
-        ("POST", "/budgets") => {
-            let budget: CreateBudgetHttpRequest = serde_json::from_str(body)?;
-            decimal_amount(budget.amount.as_deref(), "amount", "budget")?;
-            normalize_spend_currency(budget.currency.as_deref())?;
-            precheck_period(budget.starting_at, budget.ending_before, "budget")?;
-        }
-        ("POST", "/policies") => precheck_policy(body, state)?,
-        ("POST", agent_identity::AGENT_RENAME_ROUTE) => agent_identity::precheck_rename(body)?,
-        ("POST", "/spend/approval/resolve") => {
-            serde_json::from_str::<ResolveSpendApprovalHttpRequest>(body)?;
-        }
-        ("POST", "/spend/executor/settle" | "/spend/executor/release") => {
-            ExecutorSpendFinalizationHttpRequest::parse(body)?;
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-/// A period as the handlers build it. A missing start means "now", which can
-/// only make a valid end invalid if it is already past; that is rechecked by
-/// the handler after confirmation.
-fn precheck_period(
-    starting_at: Option<String>,
-    ending_before: Option<String>,
-    subject: &str,
-) -> Result<()> {
-    let start = parse_optional_datetime(starting_at)?.unwrap_or_else(Utc::now);
-    hubu_common::time::TimePeriod::new(start, parse_optional_datetime(ending_before)?)
-        .map_err(|error| anyhow!("invalid {subject} period: {error:?}"))?;
-    Ok(())
-}
-
-/// The policy handler's checks that need no stored state, run before the
-/// owner is asked to confirm: the request shape, and the policy itself (the
-/// YAML parsed and validated, or the starter `daily_limit` amount).
-fn precheck_policy(body: &str, state: &ServerState) -> Result<()> {
-    let request: AddPolicyHttpRequest = serde_json::from_str(body)?;
-    match request.policy_yaml {
-        Some(policy_yaml) => {
-            let mut policy = Policy::from_yaml_str(&policy_yaml)
-                .map_err(|error| anyhow!("{}", policy_load_error_message(error)))?;
-            policy.owner_user_id = authenticated_user_context(state)?.user_id;
-            validate_policy(&policy)?;
-        }
-        None => {
-            decimal_amount(request.daily_limit.as_deref(), "daily_limit", "policy add")?;
-        }
-    }
-    Ok(())
 }
 
 /// The approval reason from the stored request, or `None` when it is no

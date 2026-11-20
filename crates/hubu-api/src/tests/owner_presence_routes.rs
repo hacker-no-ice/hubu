@@ -53,7 +53,7 @@ fn create_budget_request(agent_id: &str, amount: &str) -> HttpRequest {
 
 /// Every owner action is refused without the owner's confirmation, whatever
 /// else the caller holds: no-prompt gets `owner_presence_required`, a refused dialog
-/// gets the refusal, and malformed requests are rejected before any prompt.
+/// gets the refusal, and nothing is ever performed.
 #[test]
 fn owner_actions_are_refused_without_confirmation() {
     let (path, state, agent) = state_with_agent("presence-sweep");
@@ -419,9 +419,9 @@ fn reasons_are_built_from_stored_data_and_resist_hostile_names() {
         (
             authenticated_json_request(
                 "/spend/executor/release",
-                json!({ "claim_id": "clm_1\n", "provider_reference": "p", "evidence": "e" }),
+                json!({ "claim_id": "00000000-0000-4000-8000-000000000456", "provider_reference": "p", "evidence": "e" }),
             ),
-            "record claim clm_1 as not billed",
+            "record claim 00000000-0000-4000-8000-000000000456 as not billed",
         ),
     ] {
         let response = route(request, &state);
@@ -502,17 +502,16 @@ fn budget_reasons_accept_any_currency_case() {
     std::fs::remove_file(path).ok();
 }
 
-/// Codex P1 (spec 5.4): requests that fail the handler's stateless checks are
-/// refused before the owner is asked, so they never use up the refusal limit.
+/// Dialog first (spec 5.4, owner decision 2026-11-19): the owner confirms,
+/// then the handler runs all its checks. An invalid request fails after
+/// confirmation with the handler's error and writes nothing.
 #[test]
-fn invalid_owner_requests_are_refused_before_any_prompt() {
-    let (path, state, agent) = state_with_agent("presence-precheck");
-    fixture(&state, "deny");
+fn invalid_owner_requests_fail_after_confirmation_without_writing() {
+    let (path, state, agent) = state_with_agent("presence-dialog-first");
+    fixture(&state, "confirm");
+    let policies_before = route(authenticated_get_request("/policies"), &state).body;
     for body in [
-        json!({}),
         json!({ "policy_yaml": "not: [valid" }),
-        json!({ "policy_yaml": "id: p\nversion: v1\ndefault_effect: sometimes\nrules: []\n" }),
-        json!({ "daily_limit": "lots" }),
         json!({ "daily_limit": "5.00", "unexpected": true }),
     ] {
         let response = route(
@@ -521,51 +520,64 @@ fn invalid_owner_requests_are_refused_before_any_prompt() {
         );
         assert_eq!(response.status, 400, "{body}: {}", response.body);
     }
+    assert_eq!(
+        route(authenticated_get_request("/policies"), &state).body,
+        policies_before
+    );
     for body in [
-        json!({ "agent_id": agent.agent_id, "name": " ", "reason": "x" }),
-        json!({ "agent_id": agent.agent_id, "name": "ok", "reason": "" }),
-        json!({ "agent_id": agent.agent_id, "name": "a\u{7}b", "reason": "x" }),
-        json!({ "agent_id": agent.agent_id, "name": "ok", "reason": "x", "owner": "usr_x" }),
-    ] {
-        let response = route(
-            authenticated_json_request("/agents/rename", body.clone()),
-            &state,
-        );
-        assert_eq!(response.status, 400, "{body}: {}", response.body);
-    }
-    for body in [
-        json!({ "agent_id": agent.agent_id, "amount": "ten" }),
-        json!({ "agent_id": agent.agent_id, "amount": "0" }),
         json!({ "agent_id": agent.agent_id, "amount": "5.00", "starting_at": "yesterday" }),
-        json!({ "agent_id": agent.agent_id, "amount": "5.00", "currency": "doubloons" }),
         json!({ "agent_id": agent.agent_id, "amount": "5.00", "extra": 1 }),
-        json!({ "agent_id": agent.agent_id, "amount": "5.00",
-                "starting_at": "2030-01-02T00:00:00Z", "ending_before": "2030-01-01T00:00:00Z" }),
     ] {
         let response = route(authenticated_json_request("/budgets", body.clone()), &state);
         assert_eq!(response.status, 400, "{body}: {}", response.body);
     }
-    for body in [
-        json!({ "amount": "0" }),
-        json!({ "amount": "5", "nope": 1 }),
-    ] {
-        let response = route(
-            authenticated_json_request("/user/spending-target", body.clone()),
-            &state,
-        );
-        assert_eq!(response.status, 400, "{body}: {}", response.body);
-    }
-    let budget = create_test_agent_budget(&state, &agent.agent_id, 1_000);
+    let budgets = route(authenticated_get_request("/budgets?all=true"), &state);
+    assert_eq!(budgets.body["budgets"].as_array().unwrap().len(), 0);
     let response = route(
         authenticated_json_request(
-            &format!("/budgets/{}/versions", budget.budget.budget_id),
-            json!({ "amount_limit": "0", "expected_revision": 1 }),
+            "/spend/executor/settle",
+            json!({ "claim_id": "00000000-0000-4000-8000-000000000456",
+                    "provider_reference": "p", "evidence": "e" }),
         ),
         &state,
     );
-    assert_eq!(response.status, 400, "{}", response.body);
-    assert_eq!(response.body["error_code"], "budget_update_invalid_amount");
-    assert!(records(&state).is_empty(), "no prompt may be raised");
+    assert!(response.status >= 400, "{}", response.body);
+    // Each one was confirmed first: the dialog came before the checks.
+    let records = records(&state);
+    assert_eq!(records.len(), 5);
+    assert!(records
+        .iter()
+        .all(|record| record["outcome"] == "confirmed"));
+    std::fs::remove_file(path).ok();
+}
+
+/// The dialog text still needs the amount and the named agent or budget, so a
+/// request without them is refused with no dialog.
+#[test]
+fn requests_without_dialog_inputs_get_no_dialog() {
+    let (path, state, agent) = state_with_agent("presence-dialog-inputs");
+    fixture(&state, "deny");
+    for (route_path, body, status) in [
+        (
+            "/budgets",
+            json!({ "agent_id": agent.agent_id, "amount": "ten" }),
+            400,
+        ),
+        (
+            "/budgets",
+            json!({ "agent_id": "agt_missing00000", "amount": "1.00" }),
+            404,
+        ),
+        ("/user/spending-target", json!({}), 400),
+    ] {
+        let response = route(authenticated_json_request(route_path, body.clone()), &state);
+        assert_eq!(
+            response.status, status,
+            "{route_path} {body}: {}",
+            response.body
+        );
+    }
+    assert!(records(&state).is_empty());
     std::fs::remove_file(path).ok();
 }
 

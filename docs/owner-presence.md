@@ -33,11 +33,10 @@ prompts, so the owner can always stop spending at once.
 - Every spend approval prompts, so the owner always sees the amount. Pressing
   Deny in an approval dialog closes the request as denied, whether the owner
   or an agent raised the dialog. A timeout leaves it pending.
-- Before prompting, Hubu runs every check that doesn't depend on changing
-  state: the request shape, amounts, the policy YAML, rename labels, and that
-  the named agent or budget exists. A request that fails them gets no dialog.
-  Checks such as budget overlaps or revision conflicts run after the owner
-  confirms.
+- Dialog first: Hubu checks only what the dialog text needs (the amount, and
+  that the named agent or budget exists). All other checks run in the handler
+  after the owner confirms. A request that fails there returns its error and
+  writes nothing.
 - `X-Hubu-No-Prompt: 1` returns `owner_presence_required` instead of raising
   the dialog. Executors always send it.
 
@@ -69,7 +68,7 @@ returns `approval_not_pending`.
 | `owner_presence_unavailable` | 403 | No presence provider can run, for example with no GUI session |
 | `owner_prompt_in_progress` | 409 | Another dialog is on screen |
 | `owner_prompt_rate_limited` | 429 | 5 refused or timed-out prompts in the last 10 minutes; confirmed prompts do not count |
-| `approval_not_pending` | 409 | The approval was already resolved or expired |
+| `approval_not_pending` | 409 | The approval was already resolved (approved or denied) |
 
 Requests that name an unknown agent or budget are refused before any prompt.
 
