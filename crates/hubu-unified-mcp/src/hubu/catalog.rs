@@ -1,145 +1,38 @@
 use serde_json::{json, Value};
 
-use crate::{BackendOwner, DOMAIN_TOOLS};
-
-pub(crate) fn is_approved_tool(name: &str) -> bool {
-    DOMAIN_TOOLS
-        .iter()
-        .any(|(candidate, owner)| *owner == BackendOwner::Hubu && *candidate == name)
-}
-
 pub(crate) fn tool_definitions() -> Vec<Value> {
-    all_tool_definitions()
-        .into_iter()
-        .filter(|tool| tool["name"].as_str().is_some_and(is_approved_tool))
-        .collect()
-}
-
-fn all_tool_definitions() -> Vec<Value> {
     vec![
         read_tool(
             "hubu_registration_guidance",
             "Read compact agent registration guidance.",
             json_schema(json!({})),
         ),
-        read_tool(
-            "hubu_list_users",
-            "List registered human users and public user ids.",
-            json_schema(json!({})),
-        ),
-        approval_tool(
-            "hubu_register_human",
-            "Register or select the active human user. Requires a human click.",
-            json_schema(json!({
-                "username": { "type": "string" },
-                "display_name": { "type": "string" },
-                "email": { "type": "string" }
-            })),
-        ),
         approval_tool(
             "hubu_register_agent",
-            "Register an agent for an explicit Hubu user. Requires a human click.",
-            json_schema(json!({
-                "owner_user_id": { "type": "string" },
-                "name": { "type": "string" },
-                "version": { "type": "string" }
-            })),
-        ),
-        approval_tool(
-            "hubu_apply_policy",
-            "Declaratively reconcile a policy resource and assignment with optional compare-and-set. Requires a human click.",
-            json_schema_required(json!({
-                "policy_yaml": { "type": "string" },
-                "declarative_key": { "type": "string" },
-                "display_name": { "type": "string" },
-                "agent_id": { "type": "string" },
-                "expected_revision": { "type": "integer" },
-                "expected_hash": { "type": "string" }
-            }), &["policy_yaml"]),
+            "Submit the reviewed agent registration envelope from hubu_registration_guidance, or register by name and version for the active Hubu user.",
+            json!({
+                "oneOf": [
+                    json_schema_required(json!({
+                        "name": { "type": "string" },
+                        "version": { "type": "string" }
+                    }), &["name", "version"]),
+                    json_schema_required(json!({
+                        "protocol_version": { "type": "string" },
+                        "identity": registration_payload_schema(),
+                        "version": registration_payload_schema(),
+                        "review": { "type": "object" },
+                        "signature": {}
+                    }), &["protocol_version", "identity", "version"])
+                ],
+                "type": "object"
+            }),
         ),
         read_tool(
             "hubu_show_policy",
-            "Show complete current policy content and every assignment; optionally include canonical YAML.",
-            json_schema(json!({
-                "include_yaml": { "type": "boolean", "default": false },
-                "policy_id": { "type": "string" },
-                "agent_id": { "type": "string" }
-            })),
-        ),
-        read_tool(
-            "hubu_policy_history",
-            "Inspect immutable policy revisions, payload hashes, actors, sources, and timestamps.",
+            "Show the current policy content and assignments.",
             json_schema(json!({
                 "policy_id": { "type": "string" },
                 "agent_id": { "type": "string" }
-            })),
-        ),
-        read_tool(
-            "hubu_policy_diff",
-            "Compare two immutable policy revisions; to_revision defaults to current.",
-            json_schema_required(json!({
-                "policy_id": { "type": "string" },
-                "agent_id": { "type": "string" },
-                "from_revision": { "type": "integer" },
-                "to_revision": { "type": "integer" }
-            }), &["from_revision"]),
-        ),
-        approval_tool(
-            "hubu_create_budget",
-            "Create a budget owned by one agent. Budgets are per currency: spend only counts against a budget in its own currency. Requires a human click.",
-            json_schema(json!({
-                "amount": spend_amount_input_schema(),
-                "currency": { "type": "string", "enum": ["usd", "usdc"] },
-                "agent_id": { "type": "string" },
-                "starting_at": { "type": "string" },
-                "ending_before": { "type": "string" }
-            })),
-        ),
-        approval_tool(
-            "hubu_revoke_budget",
-            "Administratively revoke a budget so it cannot reserve future spend. Requires a human click.",
-            json_schema(json!({
-                "budget_id": { "type": "string" }
-            })),
-        ),
-        idempotent_approval_tool(
-            "hubu_update_budget",
-            "Update the total cap of one stable logical budget from an explicitly pinned revision. The amount is the complete cap, not an added allowance. Requires a human click.",
-            json_schema_required(json!({
-                "budget_id": { "type": "string", "minLength": 1 },
-                "expected_revision": { "type": "integer", "minimum": 1 },
-                "amount_limit": spend_amount_input_schema(),
-                "reason": { "type": "string" }
-            }), &["budget_id", "expected_revision", "amount_limit"]),
-        ),
-        read_tool(
-            "hubu_budget_history",
-            "Read one stable logical budget and its immutable versions in ascending revision order.",
-            json_schema_required(json!({
-                "budget_id": { "type": "string", "minLength": 1 }
-            }), &["budget_id"]),
-        ),
-        approval_tool(
-            "hubu_set_spending_target",
-            "Set an advisory spending target for the active Hubu user. Requires a human click.",
-            json_schema(json!({
-                "amount": spend_amount_input_schema(),
-                "starting_at": { "type": "string" },
-                "ending_before": { "type": "string" }
-            })),
-        ),
-        approval_tool(
-            "hubu_revoke_spending_target",
-            "Revoke an advisory spending target for the active Hubu user. Requires a human click.",
-            json_schema(json!({
-                "target_id": { "type": "string" }
-            })),
-        ),
-        read_tool(
-            "hubu_show_spending_targets",
-            "Show advisory spending targets and current agent budget allocations for the active Hubu user.",
-            json_schema(json!({
-                "include_all": { "type": "boolean" }
             })),
         ),
         write_tool(
@@ -175,13 +68,12 @@ fn all_tool_definitions() -> Vec<Value> {
                 "approval_request_id": { "type": "string" }
             }), &["approval_request_id"]),
         ),
-        approval_resolution_tool(
-            "hubu_resolve_spend_approval",
-            "Resolve a pending spend approval after the human explicitly chooses approve or deny in chat. The native client prompt confirms or cancels this formed resolver call; cancelling does not submit a denial.",
+        approval_prompt_tool(
+            "hubu_prompt_spend_approval",
+            "Raise the server’s confirmation dialog for a pending spend approval. Call only after the owner says to approve in the conversation. The owner confirms on the Mac.",
             json_schema_required(json!({
-                "approval_request_id": { "type": "string" },
-                "decision": { "type": "string", "enum": ["approve", "deny"] }
-            }), &["approval_request_id", "decision"]),
+                "approval_request_id": { "type": "string" }
+            }), &["approval_request_id"]),
         ),
         read_tool(
             "hubu_list_agents",
@@ -194,21 +86,6 @@ fn all_tool_definitions() -> Vec<Value> {
             json_schema(json!({
                 "include_all": { "type": "boolean" }
             })),
-        ),
-        read_tool(
-            "hubu_governance_summary",
-            "Read governance counts, exact requested amounts per currency, coverage and snapshot backlog for the active owner. For 'past week', send explicit UTC occurred_from/occurred_before spanning the preceding seven days and state the actual returned bounds. Distinguish automatic_deny from human_declined. Lifecycle stages overlap; do not add their counts. Backlog includes older unresolved work regardless of period/stage filters. Qualify incomplete or unsupported history, including empty results; blocked requested amounts are not cost or savings.",
-            super::governance::input_schema("hubu_governance_summary"),
-        ),
-        read_tool(
-            "hubu_list_governance_records",
-            "List supporting governance lifecycle facts with the same complete-filter summary, exact amounts and coverage. Reuse summary.snapshot.token with the same filters; follow next_cursor unchanged. Snapshot backlog includes pre-period unresolved work. Automatic denials and human declines are distinct; stages overlap and incomplete history cannot prove zero activity. This is a read; it does not approve, execute, retry or reconcile spending.",
-            super::governance::input_schema("hubu_list_governance_records"),
-        ),
-        read_tool(
-            "hubu_get_governance_record",
-            "Inspect one public governance record and its complete-filter summary. Supply only its public lev_ record_id, plus the same filters and snapshot token used for discovery. Preserve evidence/coverage gaps and exact money strings. Claim acceptance does not prove provider work started; unsupported provider failure or pre-expiry uncertainty is not a zero count. This read has no spending or reconciliation side effects.",
-            super::governance::input_schema("hubu_get_governance_record"),
         ),
         read_tool(
             "hubu_list_ledger",
@@ -233,62 +110,17 @@ fn all_tool_definitions() -> Vec<Value> {
             "Inspect one authorization record by its public authorization_id, including safe lifecycle and accounting references.",
             json_schema_required(json!({ "authorization_id": { "type": "string" } }), &["authorization_id"]),
         ),
-        read_tool(
-            "hubu_get_executor_claim",
-            "Look up executor claim status, spend scope, hold balance, and reconciliation evidence.",
-            json_schema_required(json!({
-                "claim_id": { "type": "string" }
-            }), &["claim_id"]),
-        ),
-        read_tool(
-            "hubu_list_claims_requiring_reconciliation",
-            "List expired executor claims whose budget remains frozen pending human review.",
-            json_schema(json!({})),
-        ),
-        approval_tool(
-            "hubu_reconcile_vendor_billed_claim",
-            "Confirm after human review that an expired claim was billed and settle its frozen hold. Requires a human click.",
-            json_schema_required(json!({
-                "claim_id": { "type": "string" },
-                "provider_reference": { "type": "string" },
-                "evidence": { "type": "string" },
-                "receipt": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "properties": {
-                        "cost_basis": { "type": "string", "enum": ["provider_reported", "catalog_usage", "frozen_quote", "legacy_unspecified"], "description": "Provenance of the settlement amount; omitted legacy receipts do not establish provider confirmation." },
-                        "actual_vendor_cost": {
-                            "type": "object",
-                            "additionalProperties": false,
-                            "properties": {
-                                "amount": { "type": "integer", "minimum": 0 },
-                                "scale": { "type": "integer", "minimum": 0, "maximum": 18 },
-                                "currency": { "type": "string", "enum": ["usd", "usdc"] }
-                            },
-                            "required": ["amount", "scale", "currency"]
-                        },
-
-                        "provider_request_id": { "type": "string" },
-                        "price_model_snapshot": {
-                            "type": "object",
-                            "description": "The complete immutable pricing snapshot captured before provider work."
-                        },
-                        "artifact_reference": { "type": "string" }
-                    },
-                    "required": ["actual_vendor_cost", "provider_request_id", "price_model_snapshot", "artifact_reference"]
-                }
-            }), &["claim_id", "provider_reference", "evidence", "receipt"]),
-        ),
-        approval_tool(
-            "hubu_reconcile_vendor_did_not_bill_claim",
-            "Confirm after human review that an expired claim was not billed and release its frozen hold. Requires a human click.",
-            json_schema_required(json!({
-                "claim_id": { "type": "string" },
-                "provider_reference": { "type": "string" },
-                "evidence": { "type": "string" }
-            }), &["claim_id", "provider_reference", "evidence"]),
-        ),
     ]
+}
+
+fn registration_payload_schema() -> Value {
+    json_schema_required(
+        json!({
+            "payload": { "type": "object" },
+            "fingerprint": { "type": "string" }
+        }),
+        &["payload", "fingerprint"],
+    )
 }
 
 fn json_schema(properties: Value) -> Value {
@@ -410,7 +242,7 @@ fn approval_tool(name: &str, description: &str, input_schema: Value) -> Value {
     )
 }
 
-fn idempotent_approval_tool(name: &str, description: &str, input_schema: Value) -> Value {
+fn approval_prompt_tool(name: &str, description: &str, input_schema: Value) -> Value {
     tool(
         name,
         description,
@@ -418,26 +250,10 @@ fn idempotent_approval_tool(name: &str, description: &str, input_schema: Value) 
         ToolAnnotations {
             read_only: false,
             destructive: true,
-            idempotent: true,
+            idempotent: false,
             human_approval: "required",
-            client_approval_mode: "prompt_before_call",
-            runtime_approval: "client_human_approval_required",
-        },
-    )
-}
-
-fn approval_resolution_tool(name: &str, description: &str, input_schema: Value) -> Value {
-    tool(
-        name,
-        description,
-        input_schema,
-        ToolAnnotations {
-            read_only: false,
-            destructive: true,
-            idempotent: true,
-            human_approval: "required",
-            client_approval_mode: "prompt_before_call",
-            runtime_approval: "client_human_approval_required",
+            client_approval_mode: "auto",
+            runtime_approval: "hubu_owner_presence_required",
         },
     )
 }

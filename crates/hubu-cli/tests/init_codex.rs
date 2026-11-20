@@ -19,10 +19,6 @@ fn dry_run(root: &Path, operation_key_db: &Path) -> std::process::Output {
         .arg(&mcp_server)
         .args(["--token-file"])
         .arg(root.join("hubu-token"))
-        .args(["--approval-token-file"])
-        .arg(root.join("approval-token"))
-        .args(["--reconciliation-token-file"])
-        .arg(root.join("reconciliation-token"))
         .args(["--mcp-state-file"])
         .arg(root.join("unified-operations.sqlite3"))
         .args(["--operation-key-db"])
@@ -62,10 +58,34 @@ fn operation_key_db_is_explicit_absolute_and_dry_run_is_non_mutating() {
 }
 
 #[test]
-fn unified_mcp_receives_only_the_agent_credential() {
+fn migrates_existing_managed_config_to_agent_credential_and_prompt() {
     let root = tempdir().unwrap();
     let mcp_server = root.path().join("hubu-unified-mcp");
     fs::write(&mcp_server, b"offline fixture\n").unwrap();
+    let config_path = root.path().join("codex-home/config.toml");
+    fs::create_dir(config_path.parent().unwrap()).unwrap();
+    fs::write(
+        &config_path,
+        r#"model = "test-model"
+
+# >>> hubu managed codex mcp
+[mcp_servers.hubu]
+command = "old-mcp"
+[mcp_servers.hubu.env]
+HUBU_UNIFIED_HUBU_BEARER_TOKEN_FILE = "old-owner-token"
+HUBU_MCP_TRUST_CLIENT_APPROVAL = "1"
+HUBU_MCP_TRUST_SPEND_APPROVAL = "1"
+HUBU_APPROVAL_TOKEN_FILE = "old-approval-token"
+HUBU_RECONCILIATION_TOKEN_FILE = "old-reconciliation-token"
+[mcp_servers.hubu.tools.hubu_resolve_spend_approval]
+approval_mode = "prompt"
+# <<< hubu managed codex mcp
+
+[mcp_servers.other]
+command = "other-mcp"
+"#,
+    )
+    .unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_hubu"))
         .current_dir(root.path())
         .env("CODEX_HOME", root.path().join("codex-home"))
@@ -79,12 +99,7 @@ fn unified_mcp_receives_only_the_agent_credential() {
         .env_remove("HUBU_APPROVAL_TOKEN_FILE")
         .env_remove("HUBU_RECONCILIATION_TOKEN")
         .env_remove("HUBU_RECONCILIATION_TOKEN_FILE")
-        .args([
-            "init",
-            "codex",
-            "--no-trust-client-approval",
-            "--mcp-server",
-        ])
+        .args(["init", "codex", "--mcp-server"])
         .arg(&mcp_server)
         .args(["--token-file"])
         .arg(root.path().join("owner/hubu.auth-token"))
@@ -102,7 +117,22 @@ fn unified_mcp_receives_only_the_agent_credential() {
     assert!(agent_token.starts_with("hubu_agent_"));
     assert_ne!(owner_token.trim(), agent_token.trim());
 
-    let config = fs::read_to_string(root.path().join("codex-home/config.toml")).unwrap();
+    let config = fs::read_to_string(config_path).unwrap();
+    for retired in [
+        "old-owner-token",
+        "HUBU_MCP_TRUST_CLIENT_APPROVAL",
+        "HUBU_MCP_TRUST_SPEND_APPROVAL",
+        "HUBU_APPROVAL_TOKEN_FILE",
+        "HUBU_RECONCILIATION_TOKEN_FILE",
+        "hubu_resolve_spend_approval",
+    ] {
+        assert!(!config.contains(retired), "{retired}");
+    }
+    assert!(config.contains(r#"model = "test-model""#));
+    assert!(config.contains("[mcp_servers.other]"));
+    assert!(config.contains("[mcp_servers.hubu.tools.hubu_prompt_spend_approval]"));
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("HUBU_MCP_TRUST_CLIENT_APPROVAL is retired and ignored"));
     let canonical_agent = fs::canonicalize(&agent).unwrap();
     let canonical_owner = fs::canonicalize(&owner).unwrap();
     assert!(config.contains(&format!(

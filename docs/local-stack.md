@@ -157,14 +157,9 @@ Write Codex's MCP configuration from the running profile, then restart Codex:
 hubu init codex --stack-profile "$profile"
 ```
 
-On first run in a terminal, the command asks whether Codex may use Hubu setup
-and admin tools (registering agents, applying policies, changing budgets).
-Answer yes to do the setup in "Make your first governed request" from Codex
-instead of the CLI; Codex still asks you to approve each call. The choice is
-remembered on re-runs. Override it with `--trust-client-approval` or
-`--no-trust-client-approval`. An agent that can run the `hubu` CLI can make
-the same changes either way; read the [threat model](threat-model.md) before
-deciding how much to delegate.
+Re-running setup replaces the managed config block with the current settings.
+The MCP uses the Hubu agent credential. Use the admin portal or CLI for owner
+actions.
 
 Codex starts `hubu-unified-mcp` itself; the stack does not own that process.
 Other MCP clients can connect to `hubu-unified-mcp` with manual configuration;
@@ -196,8 +191,8 @@ Then, in a new Codex thread, ask:
 Call gongbu_list_execution_targets and choose the sandbox fixture. Then use
 hubu_submit_governed_execution with account ID aga_EXACT_ACCOUNT_ID and the
 target's returned execution scope to generate one image of a blue circle.
-Show any approval request before asking me to approve or deny it, and return
-the resulting artifact.
+Show any approval request. If I say to approve, raise the Mac confirmation
+dialog. Return the artifact after the operation completes.
 ```
 
 The agent discovers the approved target, then submits one request. Hubu
@@ -208,9 +203,8 @@ tool returns one of these outcomes:
 - `in_progress`: the work continues in the background; ask the agent to check
   it with `hubu_operation_status`.
 - `approval_required`: nothing has run yet. Review the request, then say
-  `approve` or `deny` in the chat. Codex shows its own confirmation prompt
-  before recording your decision; canceling that prompt leaves the request
-  pending rather than denying it. After approval, the agent continues with
+  `approve` in the chat to ask Codex to raise the Hubu confirmation dialog.
+  Confirm or deny on the Mac. After confirmation the agent continues with
   `hubu_resume_operation`.
 - `denied`: the policy refused the request and nothing ran.
 - `failed`: the execution reached a terminal failure. Do not submit a

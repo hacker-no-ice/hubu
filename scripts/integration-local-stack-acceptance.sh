@@ -263,6 +263,7 @@ active_manifest="${profile}/generated/active-manifest.json"
 active_generation="$(jq -r '.generation' "${active_manifest}")"
 client_handoff="${profile}/generated/${active_generation}/client-handoff.json"
 hubu_auth="$(jq -r '.hubu_token_file' "${client_handoff}")"
+hubu_agent="$(jq -r '.agent_token_file' "${client_handoff}")"
 hubu_approval="$(jq -r '.approval_token_file' "${client_handoff}")"
 hubu_reconciliation="$(jq -r '.reconciliation_token_file' "${client_handoff}")"
 gongbu_caller="$(jq -r '.gongbu_token_file' "${client_handoff}")"
@@ -271,9 +272,11 @@ codex_config="${workspace}/codex-config.toml"
 "${hubu_bin}" init codex \
   --stack-profile "${profile}" \
   --config "${codex_config}" >/dev/null
-grep -F "HUBU_APPROVAL_TOKEN_FILE = \"${hubu_approval}\"" "${codex_config}" >/dev/null || fail "Codex config omitted the approval capability file"
-grep -F 'HUBU_MCP_TRUST_SPEND_APPROVAL = "1"' "${codex_config}" >/dev/null || fail "Codex config omitted the narrow spend-approval gate"
-grep -A1 -F '[mcp_servers.hubu.tools.hubu_resolve_spend_approval]' "${codex_config}" | grep -F 'approval_mode = "prompt"' >/dev/null || fail "Codex config did not prompt for spend approval resolution"
+grep -F "HUBU_UNIFIED_HUBU_BEARER_TOKEN_FILE = \"${hubu_agent}\"" "${codex_config}" >/dev/null || fail "Codex config omitted the agent credential"
+grep -F '[mcp_servers.hubu.tools.hubu_prompt_spend_approval]' "${codex_config}" >/dev/null || fail "Codex config omitted the approval prompt"
+if grep -Eq 'HUBU_(APPROVAL_TOKEN|RECONCILIATION_TOKEN|MCP_TRUST_)' "${codex_config}"; then
+  fail "Codex config retained a retired capability or trust setting"
+fi
 for directory in "${managed_credential_root}" "${managed_credential_root}/hubu" "${managed_credential_root}/gongbu"; do
   [[ "$(file_mode "${directory}")" == "700" ]] || fail "managed credential directory permissions are not private"
 done
@@ -368,8 +371,7 @@ python3 - \
   "${hubu_endpoint}" \
   "${gongbu_endpoint}" \
   "${hubu_auth}" \
-  "${hubu_approval}" \
-  "${hubu_reconciliation}" \
+  "${hubu_agent}" \
   "${gongbu_caller}" \
   "${workspace}/approval-operations.sqlite3" \
   "${workspace}/gongbu.sqlite3" \
@@ -388,8 +390,7 @@ import time
     hubu_endpoint,
     gongbu_endpoint,
     hubu_auth,
-    hubu_approval,
-    hubu_reconciliation,
+    hubu_agent,
     gongbu_caller,
     operation_state_path,
     gongbu_database,
@@ -418,13 +419,10 @@ for name in (
 environment.update(
     {
         "HUBU_UNIFIED_HUBU_ENDPOINT": hubu_endpoint,
-        "HUBU_UNIFIED_HUBU_BEARER_TOKEN_FILE": hubu_auth,
+        "HUBU_UNIFIED_HUBU_BEARER_TOKEN_FILE": hubu_agent,
         "HUBU_UNIFIED_GONGBU_ENDPOINT": gongbu_endpoint,
         "HUBU_UNIFIED_GONGBU_BEARER_TOKEN_FILE": gongbu_caller,
-        "HUBU_APPROVAL_TOKEN_FILE": hubu_approval,
-        "HUBU_RECONCILIATION_TOKEN_FILE": hubu_reconciliation,
         "HUBU_UNIFIED_OPERATION_STATE_PATH": operation_state_path,
-        "HUBU_MCP_TRUST_SPEND_APPROVAL": "1",
         "HUBU_UNIFIED_CAPABILITY_POLL_INTERVAL_MS": "50",
         "HUBU_UNIFIED_OPERATION_TICK_MS": "10",
         "HUBU_UNIFIED_GOVERNED_EXECUTION_WAIT_MS": "2000",
@@ -576,36 +574,46 @@ try:
     start_process()
 
     expected_tools = {
-        "hubu_budget_history",
         "hubu_feedback_guidance",
         "hubu_prepare_feedback",
         "gongbu_list_execution_targets",
         "gongbu_list_reference_images",
         "hubu_get_spend_approval",
-        "hubu_resolve_spend_approval",
+        "hubu_prompt_spend_approval",
         "hubu_resume_operation",
-        "hubu_update_budget",
     }
     tools = request("tools/list").get("tools", [])
     tool_names = {tool.get("name") for tool in tools}
     if (
-        len(tool_names) != 40
-        or not expected_tools.issubset(tool_names)
+        not expected_tools.issubset(tool_names)
         or tool_names.intersection({
             "hubu_replace_budget", "hubu_add_policy", "hubu_export_policy",
             "hubu_health", "hubu_client_approval_profile",
+            "hubu_budget_history", "hubu_update_budget", "hubu_resolve_spend_approval",
             "gongbu_get_provider_catalog", "gongbu_get_redaction_attestation",
         })
     ):
         fail(f"unexpected unified MCP tool catalog: {len(tool_names)} tools")
 
-    denied_before, denied_approval_id, denied_handle = pending_operation("deny")
-    denied = call(
-        "hubu_resolve_spend_approval",
-        {"approval_request_id": denied_approval_id, "decision": "deny"},
+    cli_environment = os.environ.copy()
+    for name in ("HUBU_AUTH_TOKEN", "HUBU_APPROVAL_TOKEN"):
+        cli_environment.pop(name, None)
+    cli_environment.update(
+        {
+            "HUBU_URL": hubu_endpoint,
+            "HUBU_AUTH_TOKEN_FILE": hubu_auth,
+        }
     )
-    if denied.get("decision") != "deny":
-        fail(f"unified MCP denial was not recorded: {denied}")
+    def decide(approval_id, decision):
+        result = subprocess.run(
+            [hubu_bin, "spend", "approval", decision, "--approval-request-id", approval_id],
+            env=cli_environment, capture_output=True, text=True, encoding="utf-8", check=False,
+        )
+        if result.returncode != 0:
+            fail(f"CLI approval {decision} failed: {result.stderr}{result.stdout}")
+
+    denied_before, denied_approval_id, denied_handle = pending_operation("deny")
+    decide(denied_approval_id, "deny")
     denied_status = call(
         "hubu_operation_status", {"operation_handle": denied_handle}
     )
@@ -617,33 +625,8 @@ try:
         fail("denial started Gongbu or provider work")
 
     approved_before, approved_approval_id, approved_handle = pending_operation("approve")
-    cli_environment = os.environ.copy()
-    for name in ("HUBU_AUTH_TOKEN", "HUBU_APPROVAL_TOKEN"):
-        cli_environment.pop(name, None)
-    cli_environment.update(
-        {
-            "HUBU_URL": hubu_endpoint,
-            "HUBU_AUTH_TOKEN_FILE": hubu_auth,
-            "HUBU_APPROVAL_TOKEN_FILE": hubu_approval,
-        }
-    )
-    approved = subprocess.run(
-        [
-            hubu_bin,
-            "spend",
-            "approval",
-            "approve",
-            "--approval-request-id",
-            approved_approval_id,
-        ],
-        env=cli_environment,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        check=False,
-    )
-    if approved.returncode != 0:
-        fail(f"CLI approval failed: {approved.stderr}{approved.stdout}")
+    approved_before, approved_approval_id, approved_handle = pending_operation("approve")
+    decide(approved_approval_id, "approve")
 
     stop_process()
     start_process()

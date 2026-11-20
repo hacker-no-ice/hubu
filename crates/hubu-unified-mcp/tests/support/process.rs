@@ -14,9 +14,6 @@ use std::{
 
 use super::BackendStub;
 
-const RECONCILIATION_TOKEN: &str = "hub107-reconciliation-capability";
-const APPROVAL_TOKEN: &str = "hub107-approval-capability";
-
 pub struct McpProcess {
     _state: Option<tempfile::TempDir>,
     state_path: PathBuf,
@@ -107,11 +104,7 @@ impl McpProcess {
                 .env("HUBU_UNIFIED_GONGBU_ENDPOINT", stub.endpoint())
                 .env("HUBU_UNIFIED_GONGBU_BEARER_TOKEN", token);
         }
-        command
-            .env("HUBU_MCP_TRUST_CLIENT_APPROVAL", "1")
-            .env("HUBU_MCP_TRUST_SPEND_APPROVAL", "1")
-            .env("HUBU_APPROVAL_TOKEN", APPROVAL_TOKEN)
-            .env("HUBU_RECONCILIATION_TOKEN", RECONCILIATION_TOKEN);
+        command.env("HUBU_MCP_TRUST_CLIENT_APPROVAL", "1");
         Self::spawn(command, state, operation_state_path.to_path_buf())
     }
 
@@ -251,7 +244,7 @@ impl McpProcess {
         }))
     }
 
-    pub fn finish(mut self, secret_canaries: &[&str]) {
+    pub fn finish(mut self, secret_canaries: &[&str]) -> String {
         drop(self.stdin.take());
         let status = self.child.wait().unwrap();
         if let Some(stdout_thread) = self.stdout_thread.take() {
@@ -278,6 +271,7 @@ impl McpProcess {
                 "secret canary leaked into public MCP output: {secret}"
             );
         }
+        stderr
     }
 }
 

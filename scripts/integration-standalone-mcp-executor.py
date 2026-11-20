@@ -33,6 +33,7 @@ from pathlib import Path
 NORMAL_BEARER = "hubu_standalone_normal_bearer"
 RECONCILIATION_TOKEN = "hubu_standalone_human_reconciliation"
 APPROVAL_TOKEN = "hubu_standalone_human_approval"
+AGENT_BEARER = "hubu_standalone_agent_bearer"
 LEASE_CONFIG = (
     "authorization_ttl_seconds: 3\n"
     "default_lease_profile: default\n"
@@ -93,6 +94,7 @@ FORBIDDEN_IN_AGENT_OUTPUT = (
     "hubu:operation:v1:",
     "operation_key",
     NORMAL_BEARER,
+    AGENT_BEARER,
     RECONCILIATION_TOKEN,
     APPROVAL_TOKEN,
 )
@@ -138,6 +140,7 @@ class HubuServer:
             os.environ,
             HUBU_DB_PATH=str(root / "hubu.sqlite3"),
             HUBU_AUTH_TOKEN=NORMAL_BEARER,
+            HUBU_AGENT_TOKEN=AGENT_BEARER,
             HUBU_RECONCILIATION_TOKEN=RECONCILIATION_TOKEN,
             HUBU_APPROVAL_TOKEN=APPROVAL_TOKEN,
             HUBU_LEASE_CONFIG=str(lease),
@@ -180,14 +183,10 @@ class UnifiedMcp:
         }
         env.update(
             HUBU_UNIFIED_HUBU_ENDPOINT=hubu.base,
-            HUBU_UNIFIED_HUBU_BEARER_TOKEN=NORMAL_BEARER,
+            HUBU_UNIFIED_HUBU_BEARER_TOKEN=AGENT_BEARER,
             HUBU_UNIFIED_OPERATION_STATE_PATH=str(root / "unified-operations.sqlite3"),
             HUBU_UNIFIED_CAPABILITY_POLL_INTERVAL_MS="1000",
             HUBU_UNIFIED_OPERATION_TICK_MS="10",
-            HUBU_MCP_TRUST_CLIENT_APPROVAL="1",
-            HUBU_MCP_TRUST_SPEND_APPROVAL="1",
-            HUBU_APPROVAL_TOKEN=APPROVAL_TOKEN,
-            HUBU_RECONCILIATION_TOKEN=RECONCILIATION_TOKEN,
         )
         self.stderr_path = root / "unified-mcp.stderr"
         self.stderr = open(self.stderr_path, "w")
@@ -380,7 +379,7 @@ def run(hubu_bin: Path, mcp_bin: Path, root: Path) -> None:
         pending_handle = pending["operation_handle"]
         approval_id = pending["approval"]["approval_request_id"]
         check(mcp.status(pending_handle)["state"] == "approval_required", "pending approval status")
-        resolved = mcp.call("hubu_resolve_spend_approval", {"approval_request_id": approval_id, "decision": "approve"})
+        resolved = mcp.call("hubu_prompt_spend_approval", {"approval_request_id": approval_id})
         check(resolved.get("approval", resolved).get("status") == "approved", f"approval: {resolved}")
         resumed = mcp.call("hubu_resume_operation", {"operation_handle": pending_handle})
         # A resumed standalone authorization returns its continuation for the

@@ -335,10 +335,12 @@ fn init_codex(base_url: &str, explicit_base_url: bool, mut args: Vec<String>) ->
     let manual_gongbu_token_file = take_value(&mut args, "--gongbu-token-file").map(PathBuf::from);
     let manual_token_file = take_value(&mut args, "--token-file").map(PathBuf::from);
     let manual_agent_token_file = take_value(&mut args, "--agent-token-file").map(PathBuf::from);
-    let manual_approval_token_file =
-        take_value(&mut args, "--approval-token-file").map(PathBuf::from);
-    let manual_reconciliation_token_file =
-        take_value(&mut args, "--reconciliation-token-file").map(PathBuf::from);
+    for flag in ["--approval-token-file", "--reconciliation-token-file"] {
+        if args.iter().any(|arg| arg == flag) {
+            take_value(&mut args, flag).ok_or_else(|| anyhow!("missing value for {flag}"))?;
+            eprintln!("{flag} is retired and ignored by hubu init codex.");
+        }
+    }
     let manual_operation_state_path = take_value(&mut args, "--mcp-state-file").map(PathBuf::from);
     let operation_key_db = take_value(&mut args, "--operation-key-db").map(PathBuf::from);
     if stack_profile.is_some()
@@ -347,8 +349,6 @@ fn init_codex(base_url: &str, explicit_base_url: bool, mut args: Vec<String>) ->
             || manual_gongbu_token_file.is_some()
             || manual_token_file.is_some()
             || manual_agent_token_file.is_some()
-            || manual_approval_token_file.is_some()
-            || manual_reconciliation_token_file.is_some()
             || manual_operation_state_path.is_some()
             || explicit_base_url)
     {
@@ -388,16 +388,6 @@ fn init_codex(base_url: &str, explicit_base_url: bool, mut args: Vec<String>) ->
         None => manual_agent_token_file
             .unwrap_or_else(|| default_codex_agent_token_file_path(&token_file)),
     };
-    let approval_token_file = handoff
-        .as_ref()
-        .map(|value| value.approval_token_file.clone())
-        .or(manual_approval_token_file)
-        .unwrap_or_else(|| default_codex_approval_token_file_path(&token_file));
-    let reconciliation_token_file = handoff
-        .as_ref()
-        .map(|value| value.reconciliation_token_file.clone())
-        .or(manual_reconciliation_token_file)
-        .unwrap_or_else(|| default_codex_reconciliation_token_file_path(&token_file));
     let operation_state_path = handoff
         .as_ref()
         .map(|value| value.operation_state_path.clone())
@@ -405,13 +395,7 @@ fn init_codex(base_url: &str, explicit_base_url: bool, mut args: Vec<String>) ->
         .unwrap_or_else(|| default_unified_operation_state_path(&token_file));
     let force = take_flag(&mut args, "--force");
     let dry_run = take_flag(&mut args, "--dry-run");
-    let trust_on = take_flag(&mut args, "--trust-client-approval");
-    let trust_off = take_flag(&mut args, "--no-trust-client-approval");
     ensure_no_args(args)?;
-    if trust_on && trust_off {
-        bail!("--trust-client-approval and --no-trust-client-approval cannot be combined");
-    }
-
     let mcp_server = absolute_existing_file(&mcp_server, mcp_server_bin_name())
         .with_context(|| format!("resolve MCP server path `{}`", mcp_server.display()))?;
 
@@ -438,30 +422,6 @@ fn init_codex(base_url: &str, explicit_base_url: bool, mut args: Vec<String>) ->
     if !dry_run && agent_token_file == token_file {
         bail!("the agent token file must differ from the owner token file");
     }
-    let reconciliation_token_file = if dry_run {
-        absolute_path(&reconciliation_token_file)?
-    } else if handoff.is_some() {
-        absolute_existing_file_path(&reconciliation_token_file)?
-    } else {
-        ensure_reconciliation_token_file(&reconciliation_token_file).with_context(|| {
-            format!(
-                "prepare Hubu reconciliation token file `{}`",
-                reconciliation_token_file.display()
-            )
-        })?
-    };
-    let approval_token_file = if dry_run {
-        absolute_path(&approval_token_file)?
-    } else if handoff.is_some() {
-        absolute_existing_file_path(&approval_token_file)?
-    } else {
-        ensure_approval_token_file(&approval_token_file).with_context(|| {
-            format!(
-                "prepare Hubu approval token file `{}`",
-                approval_token_file.display()
-            )
-        })?
-    };
     let operation_state_path = absolute_path(&operation_state_path)?;
     let operation_key_db = operation_key_db
         .map(|path| {
@@ -487,30 +447,15 @@ fn init_codex(base_url: &str, explicit_base_url: bool, mut args: Vec<String>) ->
         .as_ref()
         .map(|value| value.hubu_endpoint.as_str())
         .unwrap_or(base_url);
-    let existing_config = codex_mcp::read_config(&config_path)
-        .with_context(|| format!("read Codex config `{}`", config_path.display()))?;
-    let existing_trust = codex_mcp::existing_trust_client_approval(&existing_config)
-        .with_context(|| format!("inspect Codex config `{}`", config_path.display()))?;
-    let interactive = !dry_run && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
-    let (trust_client_approval, trust_source) = resolve_trust_client_approval(
-        trust_on,
-        trust_off,
-        existing_trust,
-        interactive,
-        prompt_trust_client_approval,
-    )?;
     let save_folders_file = save_folders::file_path(&hubu_home())?;
     let block = codex_mcp::unified_block(codex_mcp::UnifiedConfig {
         mcp_server: &mcp_server,
         hubu_endpoint,
         hubu_token_file: &agent_token_file,
-        approval_token_file: &approval_token_file,
-        reconciliation_token_file: &reconciliation_token_file,
         operation_state_path: &operation_state_path,
         operation_key_db: operation_key_db.as_deref(),
         save_folders_file: &save_folders_file,
         gongbu: gongbu_endpoint.as_deref().zip(gongbu_token_file.as_deref()),
-        trust_client_approval,
     });
 
     if dry_run {
@@ -526,11 +471,6 @@ fn init_codex(base_url: &str, explicit_base_url: bool, mut args: Vec<String>) ->
     println!("  mcp_server: {}", mcp_server.display());
     println!("  hubu_url: {hubu_endpoint}");
     println!("  agent_token_file: {}", agent_token_file.display());
-    println!("  approval_token_file: {}", approval_token_file.display());
-    println!(
-        "  reconciliation_token_file: {}",
-        reconciliation_token_file.display()
-    );
     println!("  mcp_state_file: {}", operation_state_path.display());
     println!("  save_folders_file: {}", save_folders_file.display());
     if let Some(operation_key_db) = &operation_key_db {
@@ -543,95 +483,16 @@ fn init_codex(base_url: &str, explicit_base_url: bool, mut args: Vec<String>) ->
     println!("  next: restart Codex, then use /mcp or ask Codex to list Hubu tools");
     if stack_profile.is_none() {
         println!(
-            "  server: start hubu-server with {AUTH_TOKEN_FILE_ENV}={} {AGENT_TOKEN_FILE_ENV}={} {APPROVAL_TOKEN_FILE_ENV}={} {RECONCILIATION_TOKEN_FILE_ENV}={}",
+            "  server: start hubu-server with {AUTH_TOKEN_FILE_ENV}={} {AGENT_TOKEN_FILE_ENV}={}",
             token_file.display(),
-            agent_token_file.display(),
-            approval_token_file.display(),
-            reconciliation_token_file.display()
+            agent_token_file.display()
         );
     }
     println!(
         "  spend_tools: Codex pre-approves Hubu spend tool calls; Hubu still returns needs_approval without payment when policy requires review"
     );
-    println!(
-        "  spend_approval: enabled with a native Codex confirmation after the human chooses approve or deny in chat"
-    );
-    println!(
-        "  setup_admin_tools: {}",
-        trust_summary(trust_client_approval, trust_source)
-    );
+    println!("  spend_approval: the owner confirms each approval on the Mac");
     Ok(())
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TrustSource {
-    Flag,
-    ExistingConfig,
-    Prompt,
-    Default,
-}
-
-fn resolve_trust_client_approval(
-    explicit_on: bool,
-    explicit_off: bool,
-    existing: Option<bool>,
-    interactive: bool,
-    ask: impl FnOnce() -> Result<bool>,
-) -> Result<(bool, TrustSource)> {
-    if explicit_on && explicit_off {
-        bail!("--trust-client-approval and --no-trust-client-approval cannot be combined");
-    }
-    if explicit_on {
-        return Ok((true, TrustSource::Flag));
-    }
-    if explicit_off {
-        return Ok((false, TrustSource::Flag));
-    }
-    if let Some(value) = existing {
-        return Ok((value, TrustSource::ExistingConfig));
-    }
-    if interactive {
-        return Ok((ask()?, TrustSource::Prompt));
-    }
-    Ok((false, TrustSource::Default))
-}
-
-fn trust_summary(enabled: bool, source: TrustSource) -> &'static str {
-    match (enabled, source) {
-        (true, TrustSource::Flag) => "enabled (--trust-client-approval)",
-        (false, TrustSource::Flag) => "disabled (--no-trust-client-approval)",
-        (true, TrustSource::ExistingConfig) => "enabled (kept from existing Codex config)",
-        (false, TrustSource::ExistingConfig) => {
-            "disabled (kept from existing Codex config; pass --trust-client-approval to enable)"
-        }
-        (true, TrustSource::Prompt) => "enabled (chosen at prompt)",
-        (false, TrustSource::Prompt) => {
-            "disabled (chosen at prompt; pass --trust-client-approval to enable later)"
-        }
-        (true, TrustSource::Default) => "enabled (default)",
-        (false, TrustSource::Default) => {
-            "disabled (default; pass --trust-client-approval to enable)"
-        }
-    }
-}
-
-fn parse_trust_answer(answer: &str) -> bool {
-    matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
-}
-
-fn prompt_trust_client_approval() -> Result<bool> {
-    println!("Let Codex use Hubu setup and admin tools?");
-    println!("  These let Codex register agents, apply policies, change budgets and spending");
-    println!("  targets, and reconcile claims. Codex asks you to approve each call.");
-    println!("  Not a security boundary if Codex can run the hubu CLI: see docs/threat-model.md.");
-    println!("  Change later with --trust-client-approval or --no-trust-client-approval.");
-    print!("Enable? [y/N]: ");
-    std::io::stdout().flush().context("flush prompt")?;
-    let mut answer = String::new();
-    std::io::stdin()
-        .read_line(&mut answer)
-        .context("read prompt answer")?;
-    Ok(parse_trust_answer(&answer))
 }
 
 fn default_codex_config_path() -> PathBuf {
@@ -666,28 +527,6 @@ fn default_codex_agent_token_file_path(auth_token_file: &Path) -> PathBuf {
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."))
         .join(DEFAULT_AGENT_TOKEN_FILE)
-}
-
-fn default_codex_reconciliation_token_file_path(auth_token_file: &Path) -> PathBuf {
-    if let Ok(path) = env::var(RECONCILIATION_TOKEN_FILE_ENV) {
-        return PathBuf::from(path);
-    }
-    auth_token_file
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."))
-        .join(DEFAULT_RECONCILIATION_TOKEN_FILE)
-}
-
-fn default_codex_approval_token_file_path(auth_token_file: &Path) -> PathBuf {
-    if let Ok(path) = env::var(APPROVAL_TOKEN_FILE_ENV) {
-        return PathBuf::from(path);
-    }
-    auth_token_file
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."))
-        .join(DEFAULT_APPROVAL_TOKEN_FILE)
 }
 
 fn default_unified_operation_state_path(auth_token_file: &Path) -> PathBuf {
@@ -777,18 +616,6 @@ fn ensure_agent_token_file(path: &Path) -> Result<PathBuf> {
     ensure_token_file(path, AGENT_TOKEN_ENV, generate_local_agent_token)
 }
 
-fn ensure_reconciliation_token_file(path: &Path) -> Result<PathBuf> {
-    ensure_token_file(
-        path,
-        RECONCILIATION_TOKEN_ENV,
-        generate_local_reconciliation_token,
-    )
-}
-
-fn ensure_approval_token_file(path: &Path) -> Result<PathBuf> {
-    ensure_token_file(path, APPROVAL_TOKEN_ENV, generate_local_approval_token)
-}
-
 fn ensure_token_file(
     path: &Path,
     token_env: &str,
@@ -825,16 +652,8 @@ fn generate_local_auth_token() -> String {
     format!("hubu_{}", Uuid::new_v4().simple())
 }
 
-fn generate_local_reconciliation_token() -> String {
-    format!("hubu_reconcile_{}", Uuid::new_v4().simple())
-}
-
 fn generate_local_agent_token() -> String {
     format!("hubu_agent_{}", Uuid::new_v4().simple())
-}
-
-fn generate_local_approval_token() -> String {
-    format!("hubu_approve_{}", Uuid::new_v4().simple())
 }
 
 #[cfg(unix)]
@@ -4007,7 +3826,7 @@ fn print_init_codex_help() {
         "Configure Codex to discover Hubu MCP tools
 
 Usage:
-  hubu init codex [--stack-profile ABSOLUTE_DIR] [--config FILE] [--mcp-server FILE] [--token-file FILE] [--agent-token-file FILE] [--approval-token-file FILE] [--reconciliation-token-file FILE] [--mcp-state-file FILE] [--operation-key-db FILE] [--gongbu-endpoint URL --gongbu-token-file FILE] [--force] [--dry-run] [--trust-client-approval | --no-trust-client-approval]
+  hubu init codex [--stack-profile ABSOLUTE_DIR] [--config FILE] [--mcp-server FILE] [--token-file FILE] [--agent-token-file FILE] [--mcp-state-file FILE] [--operation-key-db FILE] [--gongbu-endpoint URL --gongbu-token-file FILE] [--force] [--dry-run]
 
 Options:
   --config FILE             Codex config path (default: $CODEX_HOME/config.toml or ~/.codex/config.toml)
@@ -4015,36 +3834,24 @@ Options:
   --mcp-server FILE         Selected MCP executable (default: hubu-unified-mcp sibling, then PATH)
   --token-file FILE         Hubu owner credential file for the server; never given to the MCP (default: $HUBU_AUTH_TOKEN_FILE, ./hubu.auth-token, or ~/.hubu/hubu.auth-token)
   --agent-token-file FILE   Hubu agent credential file the MCP holds (default: $HUBU_AGENT_TOKEN_FILE or hubu.agent-token beside --token-file)
-  --approval-token-file FILE
-                             Separate human approval capability file (default: beside --token-file)
-  --reconciliation-token-file FILE
-                             Separate human reconciliation capability file (default: beside --token-file)
   --mcp-state-file FILE      Durable unified MCP operation registry (default: $HUBU_UNIFIED_OPERATION_STATE_PATH or beside --token-file)
   --operation-key-db FILE    Absolute private helper database for explicitly authorized, preallocated billable operation keys
   --gongbu-endpoint URL     Optional Gongbu backend URL for the unified entry
   --gongbu-token-file FILE  Gongbu bearer token file; required with --gongbu-endpoint
   --force                   Replace an existing unmanaged [mcp_servers.hubu] config block
   --dry-run                 Print the managed Codex config block without writing files
-  --trust-client-approval   Enable MCP setup/admin tools when the Codex client prompts for destructive tool approval
-  --no-trust-client-approval
-                             Disable MCP setup/admin tools, overriding an earlier choice
 
 Notes:
   Hubu spend tools are pre-approved in Codex; Hubu policy still controls needs_approval outcomes.
   Omit --operation-key-db until a guarded workflow requires the key-redacted preallocation bridge. The option configures only a non-secret path and never creates or reads a key.
   The command writes the only supported agent-facing surface, hubu-unified-mcp.
-  Setup/admin tools (register agents, apply policies, change budgets and spending targets, reconcile claims) are not needed for normal agent spend workflows.
-  Disabling them is not a security boundary for an agent that can run the hubu CLI with this profile's credentials; see docs/threat-model.md.
-  On first interactive setup the command asks once whether to enable them (default: no). Re-runs keep the choice stored in the managed Codex config block.
-  --trust-client-approval and --no-trust-client-approval override the stored choice. Without a terminal, or with --dry-run, nothing is asked and the stored choice (or off) is used.
   The MCP holds only the agent credential, which reaches spend, status, and read routes; owner routes answer owner_authority_required.
-  Start hubu-server with the same HUBU_AUTH_TOKEN_FILE, HUBU_AGENT_TOKEN_FILE, HUBU_APPROVAL_TOKEN_FILE, and HUBU_RECONCILIATION_TOKEN_FILE shown by this command.
+  Owner actions happen on the Hubu admin portal. Re-run this command to refresh an existing managed Codex config.
+  Start hubu-server with the same HUBU_AUTH_TOKEN_FILE and HUBU_AGENT_TOKEN_FILE shown by this command.
 
 Examples:
   hubu init codex --token-file ~/.hubu/hubu.auth-token
   hubu init codex --operation-key-db /absolute/private/operation-keys.sqlite3 --dry-run
-  hubu init codex --trust-client-approval
-  hubu init codex --no-trust-client-approval
   hubu init codex --dry-run"
     );
 }
@@ -4269,61 +4076,6 @@ mod tests {
     }
 
     use super::*;
-
-    fn no_ask() -> Result<bool> {
-        panic!("ask must not be called")
-    }
-
-    #[test]
-    fn trust_resolution_honors_flags_first() {
-        assert_eq!(
-            resolve_trust_client_approval(true, false, Some(false), true, no_ask).unwrap(),
-            (true, TrustSource::Flag)
-        );
-        assert_eq!(
-            resolve_trust_client_approval(false, true, Some(true), true, no_ask).unwrap(),
-            (false, TrustSource::Flag)
-        );
-        assert!(resolve_trust_client_approval(true, true, None, true, no_ask).is_err());
-    }
-
-    #[test]
-    fn trust_resolution_keeps_existing_config_without_asking() {
-        assert_eq!(
-            resolve_trust_client_approval(false, false, Some(true), true, no_ask).unwrap(),
-            (true, TrustSource::ExistingConfig)
-        );
-        assert_eq!(
-            resolve_trust_client_approval(false, false, Some(false), true, no_ask).unwrap(),
-            (false, TrustSource::ExistingConfig)
-        );
-    }
-
-    #[test]
-    fn trust_resolution_prompts_only_when_interactive_and_unset() {
-        assert_eq!(
-            resolve_trust_client_approval(false, false, None, true, || Ok(true)).unwrap(),
-            (true, TrustSource::Prompt)
-        );
-        assert_eq!(
-            resolve_trust_client_approval(false, false, None, true, || Ok(false)).unwrap(),
-            (false, TrustSource::Prompt)
-        );
-        assert_eq!(
-            resolve_trust_client_approval(false, false, None, false, no_ask).unwrap(),
-            (false, TrustSource::Default)
-        );
-    }
-
-    #[test]
-    fn trust_answer_parsing_defaults_to_no() {
-        for yes in ["y", "Y", "yes", "YES", " yes\n"] {
-            assert!(parse_trust_answer(yes), "{yes:?}");
-        }
-        for no in ["", "\n", "n", "no", "maybe", "yep"] {
-            assert!(!parse_trust_answer(no), "{no:?}");
-        }
-    }
 
     #[test]
     fn history_queries_encode_keys_and_validate_scope() {

@@ -1,12 +1,12 @@
 # Core MCP tool set
 
 Hubu exposes one supported tool set through `hubu-unified-mcp`. Identity,
-spending authority, policy and budget management, approvals and recovery are
+spending authority, policy and budget reads, approval prompts, and recovery are
 available without adopting Gongbu. Managed execution is optional.
 
-This page is the canonical catalog of supported tools. Backend availability and
-the existing human-approval gates determine which tools are usable. There are
-no standard/advanced exposure profiles or tool-exposure configuration flags.
+Backend availability determines tool discovery. The Hubu catalog follows the
+agent route allowlist. Owner reads and administration use the admin portal,
+CLI, or owner HTTP API.
 At runtime, `tools/list` returns the currently callable tools, and
 `hubu_unified_capabilities` reports the router's `routing_revision` plus every
 public tool's owner, availability and reason code. See the
@@ -22,9 +22,8 @@ Hubu. **Store** means the persistent MCP operation store is available. It record
 operation identity and recovery state across restarts for retries, status and
 approval resume. Hubu owns financial state; Gongbu owns managed execution.
 
-Prerequisites below describe availability, not permission. Credential scopes,
-request validation and human-approval gates still apply. A listed protected
-tool does not imply that a client has configured its human prompt.
+Prerequisites below describe availability. Credential scopes, request
+validation, and server-side owner confirmation still apply.
 
 ### Discovery and support
 
@@ -38,44 +37,24 @@ tool does not imply that a client has configured its human prompt.
 
 | Tool | Prerequisites | Purpose |
 | --- | --- | --- |
-| `hubu_list_users` | Hubu | Human identity selection |
-| `hubu_register_human` | Hubu | Onboard/select owner; human gate |
 | `hubu_list_agents` | Hubu | Identity discovery |
 | `hubu_registration_guidance` | Hubu | Machine-readable registration protocol |
-| `hubu_register_agent` | Hubu | Structured identity registration; human gate |
+| `hubu_register_agent` | Hubu | Submit reviewed registration |
 
 ### Policy
 
 | Tool | Prerequisites | Purpose |
 | --- | --- | --- |
-| `hubu_show_policy` | Hubu | Canonical inspection; optional YAML |
-| `hubu_apply_policy` | Hubu | Canonical policy mutation; human gate |
-| `hubu_policy_history` | Hubu | Policy audit |
-| `hubu_policy_diff` | Hubu | Compare immutable revisions |
+| `hubu_show_policy` | Hubu | View current policy content and assignments |
 
-`hubu_apply_policy` requires explicit `policy_yaml`; human approval and optional
-revision/hash compare-and-set checks apply.
+Choose an optional `policy_id` or `agent_id`. Omit both to use the default
+selection. Policy YAML export and history require the owner surface.
 
-`hubu_show_policy` accepts optional boolean `include_yaml`, default `false`.
-False or omitted returns the standard response. True returns the same policy,
-metadata and assignments plus `policy_yaml` from the canonical backend
-serializer. Optional `policy_id` and `agent_id` selectors are mutually exclusive;
-omitting both uses the default selection. Non-boolean flags and unknown fields
-are rejected before dispatch. The YAML flag is local to the MCP adapter and is
-not forwarded as a backend query parameter.
-
-### Budgets and spending targets
+### Budgets
 
 | Tool | Prerequisites | Purpose |
 | --- | --- | --- |
 | `hubu_list_budgets` | Hubu | Budget visibility |
-| `hubu_create_budget` | Hubu | Owner administration; human gate |
-| `hubu_update_budget` | Hubu | Version-pinned cap change; human gate |
-| `hubu_budget_history` | Hubu | Inspect immutable revisions |
-| `hubu_revoke_budget` | Hubu | Emergency owner control; human gate |
-| `hubu_show_spending_targets` | Hubu | Advisory targets and allocations |
-| `hubu_set_spending_target` | Hubu | Advisory target administration; human gate |
-| `hubu_revoke_spending_target` | Hubu | Advisory target administration; human gate |
 
 ### Spend authority
 
@@ -105,35 +84,19 @@ they remain available through authenticated Gongbu operator endpoints.
 | Tool | Prerequisites | Purpose |
 | --- | --- | --- |
 | `hubu_get_spend_approval` | Hubu | Immutable approval review |
-| `hubu_resolve_spend_approval` | Hubu | Explicit human approve/deny gate |
+| `hubu_prompt_spend_approval` | Hubu | Raise the Mac confirmation dialog after the owner says to approve in chat |
 | `hubu_operation_status` | store | Observe a public operation handle in the MCP store |
 | `hubu_resume_operation` | Hubu + store | Resume the stored, approved intent |
 
 Resuming a stored governed-execution intent also requires ready Gongbu.
 
-### Governance observability
-
-| Tool | Prerequisites | Purpose |
-| --- | --- | --- |
-| `hubu_governance_summary` | Hubu | Captured lifecycle counts, exact requested totals, backlog and coverage |
-| `hubu_list_governance_records` | Hubu | Snapshot-bound supporting records with public identity filters |
-| `hubu_get_governance_record` | Hubu | Inspect one public lifecycle record within the same snapshot |
-
-These reads work without Gongbu or an operation store. See the
-[governance query contract](governance-observability.md#agent-queries-through-unified-mcp)
-for weekly questions, overlapping stages, incomplete history and snapshot reuse.
-
-### Ledger, authorization records and reconciliation
+### Ledger and authorization records
 
 | Tool | Prerequisites | Purpose |
 | --- | --- | --- |
 | `hubu_list_ledger` | Hubu | Canonical recorded spend, agent-budget filters and coverage |
 | `hubu_list_authorization_records` | Hubu | Paginated owner-scoped authorization discovery |
 | `hubu_get_authorization_record` | Hubu | Owner-scoped public authorization record inspection |
-| `hubu_get_executor_claim` | Hubu | External executor settlement/recovery inspection |
-| `hubu_list_claims_requiring_reconciliation` | Hubu | Find frozen claims without retained IDs |
-| `hubu_reconcile_vendor_billed_claim` | Hubu | Human-gated settlement with evidence |
-| `hubu_reconcile_vendor_did_not_bill_claim` | Hubu | Human-gated release with evidence |
 
 Backend outages can reduce discovery. The current inventory is maintained in
 the [routing fixture](../fixtures/unified-mcp-routing-v1.json),
@@ -173,9 +136,10 @@ to resolve, claim and settle or release that operation. Read-only validation
 alone is insufficient before irreversible provider work. Executor credentials
 and private operation keys are not model-authored tool arguments.
 
-Human approval uses the existing inspect, resolve, status and resume tools.
-Resolution records a decision; resume continues the same stored immutable
-intent. Resuming standalone authorization must not start Gongbu. Exact replay
+Inspect the review with `hubu_get_spend_approval`. After the owner says to
+approve in chat, `hubu_prompt_spend_approval` raises the Mac confirmation
+dialog. After confirmation, `hubu_resume_operation` continues the same
+stored immutable intent. Resuming standalone authorization must not start Gongbu. Exact replay
 must not create a second logical operation or duplicate payment/hold. A
 terminal denial requires a new logical invocation for corrected work.
 

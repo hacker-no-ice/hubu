@@ -4,19 +4,15 @@ use anyhow::{anyhow, bail, Context, Result};
 
 const MANAGED_BEGIN: &str = "# >>> hubu managed codex mcp";
 const MANAGED_END: &str = "# <<< hubu managed codex mcp";
-const TRUST_CLIENT_APPROVAL_LINE: &str = "HUBU_MCP_TRUST_CLIENT_APPROVAL = \"1\"";
 
 pub(crate) struct UnifiedConfig<'a> {
     pub mcp_server: &'a Path,
     pub hubu_endpoint: &'a str,
     pub hubu_token_file: &'a Path,
-    pub approval_token_file: &'a Path,
-    pub reconciliation_token_file: &'a Path,
     pub operation_state_path: &'a Path,
     pub operation_key_db: Option<&'a Path>,
     pub save_folders_file: &'a Path,
     pub gongbu: Option<(&'a str, &'a Path)>,
-    pub trust_client_approval: bool,
 }
 
 pub(crate) fn read_config(config_path: &Path) -> Result<String> {
@@ -27,32 +23,28 @@ pub(crate) fn read_config(config_path: &Path) -> Result<String> {
     }
 }
 
-/// Reports whether the Hubu managed block in `existing` enables setup/admin
-/// tools. Returns `None` when the config has no managed block. Lines outside
-/// the managed block are ignored.
-pub(crate) fn existing_trust_client_approval(existing: &str) -> Result<Option<bool>> {
-    let Some((start, end)) = managed_block_range(existing)? else {
-        return Ok(None);
-    };
-    let enabled = existing
-        .lines()
-        .skip(start + 1)
-        .take(end - start - 1)
-        .any(|line| line.trim() == TRUST_CLIENT_APPROVAL_LINE);
-    Ok(Some(enabled))
-}
-
 pub(crate) fn write_config(config_path: &Path, block: &str, force: bool) -> Result<()> {
     if let Some(parent) = config_path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("create Codex config directory `{}`", parent.display()))?;
     }
-    // Re-read immediately before writing so edits made while the trust prompt
-    // was open are preserved.
     let existing = read_config(config_path)?;
     let updated = upsert(&existing, block, force)?;
-    fs::write(config_path, updated)
-        .with_context(|| format!("write Codex config `{}`", config_path.display()))
+    fs::write(config_path, &updated)
+        .with_context(|| format!("write Codex config `{}`", config_path.display()))?;
+    const RETIRED_FLAG: &str = "HUBU_MCP_TRUST_CLIENT_APPROVAL";
+    let has_flag = |config: &str| {
+        config.lines().any(|line| {
+            line.split_once('=')
+                .is_some_and(|(key, _)| key.trim() == RETIRED_FLAG)
+        })
+    };
+    if has_flag(&existing) && !has_flag(&updated) {
+        eprintln!(
+            "{RETIRED_FLAG} is retired and ignored. Removed it from the managed Codex config."
+        );
+    }
+    Ok(())
 }
 
 pub(crate) fn unified_block(config: UnifiedConfig<'_>) -> String {
@@ -61,20 +53,15 @@ pub(crate) fn unified_block(config: UnifiedConfig<'_>) -> String {
          [mcp_servers.hubu]\n\
          command = \"{}\"\n\
          startup_timeout_sec = 10\n\
-         tool_timeout_sec = 60\n\n\
+         tool_timeout_sec = 75\n\n\
          [mcp_servers.hubu.env]\n\
          HUBU_UNIFIED_HUBU_ENDPOINT = \"{}\"\n\
          HUBU_UNIFIED_HUBU_BEARER_TOKEN_FILE = \"{}\"\n\
-         HUBU_APPROVAL_TOKEN_FILE = \"{}\"\n\
-         HUBU_MCP_TRUST_SPEND_APPROVAL = \"1\"\n\
-         HUBU_RECONCILIATION_TOKEN_FILE = \"{}\"\n\
          HUBU_UNIFIED_OPERATION_STATE_PATH = \"{}\"\n\
          HUBU_UNIFIED_SAVE_FOLDERS_FILE = \"{}\"\n",
         toml_string(&config.mcp_server.display().to_string()),
         toml_string(config.hubu_endpoint),
         toml_string(&config.hubu_token_file.display().to_string()),
-        toml_string(&config.approval_token_file.display().to_string()),
-        toml_string(&config.reconciliation_token_file.display().to_string()),
         toml_string(&config.operation_state_path.display().to_string()),
         toml_string(&config.save_folders_file.display().to_string()),
     );
@@ -93,14 +80,6 @@ pub(crate) fn unified_block(config: UnifiedConfig<'_>) -> String {
             toml_string(&operation_key_db.display().to_string()),
         );
     }
-    finish_block(&mut block, config.trust_client_approval);
-    block
-}
-
-fn finish_block(block: &mut String, trust_client_approval: bool) {
-    if trust_client_approval {
-        let _ = writeln!(block, "{TRUST_CLIENT_APPROVAL_LINE}");
-    }
     block.push_str(
         "\n[mcp_servers.hubu.tools.hubu_authorize_spend]\n\
          approval_mode = \"approve\"\n\n\
@@ -108,10 +87,11 @@ fn finish_block(block: &mut String, trust_client_approval: bool) {
          approval_mode = \"approve\"\n\n\
          [mcp_servers.hubu.tools.hubu_submit_spend]\n\
          approval_mode = \"approve\"\n\n\
-         [mcp_servers.hubu.tools.hubu_resolve_spend_approval]\n\
-         approval_mode = \"prompt\"\n",
+         [mcp_servers.hubu.tools.hubu_prompt_spend_approval]\n\
+         approval_mode = \"approve\"\n",
     );
     let _ = writeln!(block, "{MANAGED_END}");
+    block
 }
 
 fn upsert(existing: &str, block: &str, force: bool) -> Result<String> {
@@ -226,20 +206,15 @@ mod tests {
             mcp_server: Path::new("/tmp/hubu \"dev\"/hubu-unified-mcp"),
             hubu_endpoint: "http://127.0.0.1:8787",
             hubu_token_file: Path::new("/tmp/hubu\\token"),
-            approval_token_file: Path::new("/tmp/hubu\\approval-token"),
-            reconciliation_token_file: Path::new("/tmp/hubu\\reconciliation-token"),
             operation_state_path: Path::new("/tmp/hubu\\unified-operations.sqlite3"),
             operation_key_db: Some(Path::new("/tmp/hubu\\operation-keys.sqlite3")),
             save_folders_file: Path::new("/tmp/hubu/save-folders.json"),
             gongbu: Some(("http://127.0.0.1:8788", Path::new("/tmp/gongbu-token"))),
-            trust_client_approval: false,
         });
         assert_eq!(block.matches("[mcp_servers.hubu]").count(), 1);
         assert!(!block.contains("[mcp_servers.gongbu]"));
         assert!(block.contains("command = \"/tmp/hubu \\\"dev\\\"/hubu-unified-mcp\""));
         assert!(block.contains("HUBU_UNIFIED_HUBU_BEARER_TOKEN_FILE = \"/tmp/hubu\\\\token\""));
-        assert!(block.contains("HUBU_APPROVAL_TOKEN_FILE = \"/tmp/hubu\\\\approval-token\""));
-        assert!(block.contains("HUBU_MCP_TRUST_SPEND_APPROVAL = \"1\""));
         assert!(block.contains("HUBU_UNIFIED_GONGBU_ENDPOINT"));
         assert!(block.contains(
             "HUBU_UNIFIED_OPERATION_STATE_PATH = \"/tmp/hubu\\\\unified-operations.sqlite3\""
@@ -256,7 +231,7 @@ mod tests {
         assert!(block
             .contains("[mcp_servers.hubu.tools.hubu_submit_spend]\napproval_mode = \"approve\""));
         assert!(block.contains(
-            "[mcp_servers.hubu.tools.hubu_resolve_spend_approval]\napproval_mode = \"prompt\""
+            "[mcp_servers.hubu.tools.hubu_prompt_spend_approval]\napproval_mode = \"approve\""
         ));
         toml::from_str::<toml::Value>(&block).unwrap();
     }
@@ -267,70 +242,13 @@ mod tests {
             mcp_server: Path::new("/tmp/hubu-unified-mcp"),
             hubu_endpoint: "http://127.0.0.1:8787",
             hubu_token_file: Path::new("/tmp/hubu-token"),
-            approval_token_file: Path::new("/tmp/approval-token"),
-            reconciliation_token_file: Path::new("/tmp/reconciliation-token"),
             operation_state_path: Path::new("/tmp/unified-operations.sqlite3"),
             operation_key_db: None,
             save_folders_file: Path::new("/tmp/hubu/save-folders.json"),
             gongbu: None,
-            trust_client_approval: false,
         });
 
         assert!(!block.contains("HUBU_UNIFIED_OPERATION_KEY_DB"));
         toml::from_str::<toml::Value>(&block).unwrap();
-    }
-
-    fn managed(extra: &str) -> String {
-        format!(
-            "{MANAGED_BEGIN}\n[mcp_servers.hubu.env]\nHUBU_MCP_TRUST_SPEND_APPROVAL = \"1\"\n{extra}{MANAGED_END}\n"
-        )
-    }
-
-    #[test]
-    fn existing_trust_is_none_without_managed_block() {
-        assert_eq!(existing_trust_client_approval("").unwrap(), None);
-        assert_eq!(
-            existing_trust_client_approval("[mcp_servers.other]\ncommand = \"x\"\n").unwrap(),
-            None
-        );
-    }
-
-    #[test]
-    fn existing_trust_reads_the_managed_block() {
-        let on = managed("HUBU_MCP_TRUST_CLIENT_APPROVAL = \"1\"\n");
-        assert_eq!(existing_trust_client_approval(&on).unwrap(), Some(true));
-        let off = managed("");
-        assert_eq!(existing_trust_client_approval(&off).unwrap(), Some(false));
-    }
-
-    #[test]
-    fn existing_trust_ignores_lines_outside_the_managed_block() {
-        let config = format!(
-            "HUBU_MCP_TRUST_CLIENT_APPROVAL = \"1\"\n{}HUBU_MCP_TRUST_CLIENT_APPROVAL = \"1\"\n",
-            managed("")
-        );
-        assert_eq!(
-            existing_trust_client_approval(&config).unwrap(),
-            Some(false)
-        );
-    }
-
-    #[test]
-    fn existing_trust_round_trips_through_unified_block() {
-        for trust in [false, true] {
-            let block = unified_block(UnifiedConfig {
-                mcp_server: Path::new("/tmp/hubu-unified-mcp"),
-                hubu_endpoint: "http://127.0.0.1:8787",
-                hubu_token_file: Path::new("/tmp/hubu-token"),
-                approval_token_file: Path::new("/tmp/approval-token"),
-                reconciliation_token_file: Path::new("/tmp/reconciliation-token"),
-                operation_state_path: Path::new("/tmp/unified-operations.sqlite3"),
-                operation_key_db: None,
-                save_folders_file: Path::new("/tmp/hubu/save-folders.json"),
-                gongbu: None,
-                trust_client_approval: trust,
-            });
-            assert_eq!(existing_trust_client_approval(&block).unwrap(), Some(trust));
-        }
     }
 }
