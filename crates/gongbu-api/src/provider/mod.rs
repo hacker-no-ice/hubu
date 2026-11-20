@@ -1,6 +1,7 @@
 //! Provider contracts, target configuration, and adapter-facing types.
 
 pub mod contract;
+pub mod cost_containment;
 pub mod flux_contract;
 pub mod http_kernel;
 pub mod pack;

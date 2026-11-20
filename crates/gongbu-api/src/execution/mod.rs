@@ -984,6 +984,26 @@ impl Repository {
         self.get_execution(execution_id)
     }
     pub fn complete_provider_attempt(&self, id: &str, r: &AttemptResult) -> Result<()> {
+        self.finish_provider_attempt(id, r, true)
+    }
+
+    /// Record a proven failure for an attempt that never began transmission,
+    /// such as a refusal of a blocked target. A transmitted attempt is never
+    /// matched, so this cannot hide a request that may have reached the
+    /// provider.
+    pub fn refuse_untransmitted_provider_attempt(&self, id: &str, r: &AttemptResult) -> Result<()> {
+        if r.outcome != "failed" {
+            return Err(Error::Invalid("attempt result"));
+        }
+        self.finish_provider_attempt(id, r, false)
+    }
+
+    fn finish_provider_attempt(
+        &self,
+        id: &str,
+        r: &AttemptResult,
+        transmitted: bool,
+    ) -> Result<()> {
         safe_usage_json(&r.usage)?;
         if r.usage_schema_version < 1
             || r.actual_vendor_cost
@@ -1020,7 +1040,7 @@ impl Repository {
             r.provider_operation_id.as_deref().unwrap_or(""),
             id,
         ])?;
-        let n=self.0.lock().unwrap().execute("UPDATE provider_attempts SET outcome=?1,completed_at=?2,usage_json=?3,usage_schema_version=?4,actual_vendor_cost_amount=?5,actual_vendor_cost_scale=?6,actual_vendor_cost_currency=?7,failure_code=?8,failure_message_redacted=?9,provider_request_id=?10,provider_operation_id=?11 WHERE provider_attempt_id=?12 AND completed_at IS NULL AND transmission_started_at IS NOT NULL",params![
+        let n=self.0.lock().unwrap().execute("UPDATE provider_attempts SET outcome=?1,completed_at=?2,usage_json=?3,usage_schema_version=?4,actual_vendor_cost_amount=?5,actual_vendor_cost_scale=?6,actual_vendor_cost_currency=?7,failure_code=?8,failure_message_redacted=?9,provider_request_id=?10,provider_operation_id=?11 WHERE provider_attempt_id=?12 AND completed_at IS NULL AND (transmission_started_at IS NOT NULL)=?13",params![
             r.outcome,
             r.completed_at,
             j(&r.usage),
@@ -1033,6 +1053,7 @@ impl Repository {
             r.provider_request_id,
             r.provider_operation_id,
             id,
+            transmitted,
         ])?;
         if n == 1 {
             Ok(())

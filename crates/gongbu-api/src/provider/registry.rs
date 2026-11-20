@@ -2,6 +2,7 @@
 
 use super::{
     contract::{ContractError, PriceComponent, PricingCatalog, PricingSelector, ProviderAdapter},
+    cost_containment,
     flux_contract::{
         ADAPTER_ID as FLUX_ADAPTER_ID, MODEL_ID as FLUX_MODEL_ID, PROVIDER_ID as FLUX_PROVIDER_ID,
         SUPPORTED_PRESETS as FLUX_SUPPORTED_PRESETS,
@@ -418,6 +419,7 @@ impl ValidatedProviderCatalog {
         self.targets
             .revisions()
             .filter(|target| target.is_active() && target.is_execution_enabled())
+            .filter(|target| !cost_containment::blocks_target(&target.target_key()))
             .filter_map(|target| {
                 let key = target.target_key();
                 let scope = for_workload_target(&key.workload_type, &key.provider, &key.adapter)?;
@@ -479,6 +481,7 @@ impl ValidatedProviderCatalog {
             .targets
             .resolve_target_id(target_id)
             .map_err(|_| RegistryError::TargetUnavailable)?;
+        refuse_unbounded_cost(target)?;
         self.bound(target)?;
         Ok(target)
     }
@@ -488,10 +491,15 @@ impl ValidatedProviderCatalog {
             .targets
             .resolve_active(key)
             .map_err(|_| RegistryError::TargetUnavailable)?;
+        refuse_unbounded_cost(target)?;
         self.bound(target)?;
         Ok(target)
     }
 
+    /// Resolve the exact revision a persisted execution was frozen with.
+    /// This stays open for blocked targets so existing records and owner
+    /// reconciliation remain usable; the workflow refuses new provider
+    /// submissions for them separately.
     pub fn resolve_persisted<'a>(
         &'a self,
         key: &TargetKey,
@@ -520,6 +528,14 @@ impl ValidatedProviderCatalog {
     pub fn needs_stable_idempotency_key(target: &ProviderConfigVersion) -> bool {
         matches!(target.settings(), AdapterSettings::Fixture)
     }
+}
+
+/// New work may not select a target whose cost Gongbu cannot bound.
+fn refuse_unbounded_cost(target: &ProviderConfigVersion) -> Result<(), RegistryError> {
+    if cost_containment::blocks_target(&target.target_key()) {
+        return Err(RegistryError::TargetUnavailable);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -813,21 +829,37 @@ mod tests {
             // Every image model edits too, through its own edit target.
             for workload in ["image_generation", "image_edit"] {
                 let key = TargetKey::new(workload, provider, adapter, model).unwrap();
-                assert_eq!(catalog.resolve_active(&key).unwrap().adapter, adapter);
+                let revision = catalog.targets().resolve_active(&key).unwrap();
+                // Gemini stays bound, so its existing records still resolve,
+                // but new work cannot select it (HUB-388).
+                let (persisted, _) = catalog
+                    .resolve_persisted(&key, &revision.provider_config_version, revision.digest())
+                    .unwrap();
+                assert_eq!(persisted.adapter, adapter);
+                if provider == "google" {
+                    assert!(matches!(
+                        catalog.resolve_active(&key),
+                        Err(RegistryError::TargetUnavailable)
+                    ));
+                    assert!(matches!(
+                        catalog.resolve_target_id(&key.public_id()),
+                        Err(RegistryError::TargetUnavailable)
+                    ));
+                } else {
+                    assert_eq!(catalog.resolve_active(&key).unwrap().adapter, adapter);
+                    assert_eq!(
+                        catalog.resolve_target_id(&key.public_id()).unwrap().adapter,
+                        adapter
+                    );
+                }
             }
         }
         let execution_targets = catalog.execution_targets();
-        assert_eq!(execution_targets.len(), 22);
-        // Pro is its own target, discovered by model beside Flash and Lite,
-        // with an aspect-ratio certified size at every tier.
-        let pro = execution_targets
+        // The 8 Gemini generation and edit targets are not offered.
+        assert_eq!(execution_targets.len(), 14);
+        assert!(execution_targets
             .iter()
-            .find(|target| {
-                target.model == "gemini-3-pro-image" && target.workload_type == "image_generation"
-            })
-            .unwrap();
-        assert_eq!(pro.image_sizes, ["1k", "2k", "4k"]);
-        assert_eq!(pro.output_sizes.len(), 30);
+            .all(|target| target.provider != "google"));
         // The new FLUX.2 models are explicit targets with megapixel pricing
         // and the shared aspect-ratio sizes; none stands in for another.
         for model in [
@@ -866,33 +898,6 @@ mod tests {
         assert_eq!(klein.image_sizes, ["1.5k", "1k", "2k", "768sq"]);
         assert_eq!(klein.pricing.len(), 4);
         assert_ne!(klein.target_id, flux_3.target_id);
-        let gemini_full = execution_targets
-            .iter()
-            .find(|target| {
-                target.model == "gemini-3.1-flash-image"
-                    && target.workload_type == "image_generation"
-            })
-            .unwrap();
-        let gemini_edit = execution_targets
-            .iter()
-            .find(|target| {
-                target.model == "gemini-3.1-flash-image" && target.workload_type == "image_edit"
-            })
-            .unwrap();
-        assert_eq!(
-            gemini_edit.execution_scope.capability,
-            "capability:image:edit"
-        );
-        assert_eq!(
-            gemini_full.execution_scope.capability,
-            "capability:image:generate"
-        );
-        assert_ne!(gemini_edit.target_id, gemini_full.target_id);
-        assert!(gemini_edit
-            .pricing
-            .iter()
-            .all(|rule| rule.components.len() == 2));
-        assert_eq!(gemini_full.image_sizes, ["1k", "2k", "4k"]);
         let flux = execution_targets
             .iter()
             .find(|target| {

@@ -1,5 +1,17 @@
 # Gemini Developer API provider contract
 
+> **Disabled for new work.** Gongbu does not submit any Gemini Developer API
+> image request, for generation or editing, in any of the four verified packs
+> described below. Each is token-metered and none sends an image-count,
+> output-token or monetary cap, so Gongbu cannot verify a provider-enforced
+> cost ceiling. The targets are withheld from `/v2/execution-targets`;
+> admission refuses them with `target_not_selectable` before the
+> authorization is resolved; and work admitted or claimed earlier fails with
+> `target_cost_unbounded` before the budget claim, or before transmission
+> with its authorization released. Existing executions stay readable, and an
+> earlier ambiguous submission is reconciled without generating again. The
+> contracts below describe the pinned behavior should the block be lifted.
+
 Hubu ships deliberately narrow Gemini Developer API contracts beside the FLUX
 contracts: the v1 text-to-image and [image-edit](#image-editing) contracts for
 Gemini 3.1 Flash Image and Flash Lite Image, and the

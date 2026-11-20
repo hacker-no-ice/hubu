@@ -7,6 +7,7 @@ use crate::{
         AttemptResult, CreateReceiptParams, Error as PersistenceError, Execution, ExecutionUpdate,
         LifecycleOutcome, Repository, StagedProviderArtifact,
     },
+    provider::cost_containment,
     provider_contract::{
         ActualVendorCost, AsyncProviderOperation, ContractError, NormalizedUsage, PricingSnapshot,
     },
@@ -51,6 +52,17 @@ pub enum ActivityError {
         request_id: Option<String>,
         operation_id: Option<String>,
     },
+}
+
+/// Refuse new provider work for a target whose cost Gongbu cannot bound
+/// (HUB-388), before the budget claim and again before transmission.
+fn refuse_unbounded_cost(execution: &Execution) -> Result<(), ActivityError> {
+    if cost_containment::blocks_new_work(&execution.provider, &execution.adapter) {
+        return Err(ActivityError::Proven(
+            cost_containment::UNBOUNDED_COST_CODE.into(),
+        ));
+    }
+    Ok(())
 }
 
 pub trait HubuActivities {
@@ -397,6 +409,16 @@ impl ExecutionWorkflow<'_> {
                 None,
             )?;
             return Ok(ProviderPhaseOutcome::Complete(held.into()));
+        }
+        // Work admitted or claimed before a target was blocked must still
+        // never reach the provider. Nothing has been transmitted, so the
+        // refusal is proven and the authorization is released.
+        if let Err(error) = refuse_unbounded_cost(&execution) {
+            self.repository.refuse_untransmitted_provider_attempt(
+                &attempt.provider_attempt_id,
+                &attempt_failure("failed", &activity_error_code(error), phase_at),
+            )?;
+            return Ok(ProviderPhaseOutcome::ReleaseAuthorization);
         }
         let transmission_started_at = clock();
         self.repository
@@ -1102,6 +1124,7 @@ impl ExecutionWorkflow<'_> {
         }
     }
     fn preflight(&self, e: &Execution) -> Result<(), ActivityError> {
+        refuse_unbounded_cost(e)?;
         self.hubu.preflight(e)?;
         self.provider.preflight(e)?;
         self.artifacts.preflight()
@@ -1400,7 +1423,49 @@ mod tests {
     }
 
     fn execution_with_quantity(repo: &Repository, key: &str, quantity: i64) -> Execution {
-        repo.create_execution(&CreateExecutionParams { account_id:"account".into(),operation_key:key.into(),hubu_authorization_id:"token-ref".into(),hubu_claim_id:None,hubu_token_reference:HubuTokenReference::new("token-ref").unwrap(),authorized_units:500_0000,authorization_currency:"USD".into(),normalized_input:json!({"prompt":"cat"}),input_hash:"hash".into(),input_schema_version:1,target:"example/image-v1".into(),config_version:"cfg-1".into(),workload_type:"image_generation".into(),provider:"example".into(),adapter:"fixture".into(),model:"image-v1".into(),provider_config_version:"pcv-1".into(),provider_config_digest:format!("sha256:{}","a".repeat(64)),pricing_snapshot:json!({"schema_version":2,"provider":"example","model":"image-v1","catalog_version":"prices-v2","catalog_digest":format!("sha256:{}","a".repeat(64)),"pricing_rule_id":"image","components":[{"unit":"image","rate_numerator_minor":100,"rate_denominator":1,"quantity":quantity}],"exact_estimate_numerator":(100 * quantity).to_string(),"exact_estimate_denominator":"1","estimated_amount_minor":100 * quantity,"currency":"USD"}),pricing_schema_version:2,execution_scope:None,created_at:"2026-08-05T00:00:00Z".into() }).unwrap()
+        repo.create_execution(&params_with_quantity(key, quantity))
+            .unwrap()
+    }
+
+    /// An execution frozen for a Gemini Interactions image target, as work
+    /// admitted before HUB-388 blocked those targets would be.
+    fn gemini_execution(repo: &Repository, key: &str) -> Execution {
+        let mut params = params_with_quantity(key, 1);
+        params.provider = "google".into();
+        params.adapter = "gemini_developer_image".into();
+        params.model = "gemini-3.1-flash-image".into();
+        params.pricing_snapshot["provider"] = json!("google");
+        params.pricing_snapshot["model"] = json!("gemini-3.1-flash-image");
+        params.target =
+            "image_generation/google/gemini_developer_image/gemini-3.1-flash-image".into();
+        repo.create_execution(&params).unwrap()
+    }
+
+    fn params_with_quantity(key: &str, quantity: i64) -> CreateExecutionParams {
+        CreateExecutionParams {
+            account_id: "account".into(),
+            operation_key: key.into(),
+            hubu_authorization_id: "token-ref".into(),
+            hubu_claim_id: None,
+            hubu_token_reference: HubuTokenReference::new("token-ref").unwrap(),
+            authorized_units: 500_0000,
+            authorization_currency: "USD".into(),
+            normalized_input: json!({"prompt":"cat"}),
+            input_hash: "hash".into(),
+            input_schema_version: 1,
+            target: "example/image-v1".into(),
+            config_version: "cfg-1".into(),
+            workload_type: "image_generation".into(),
+            provider: "example".into(),
+            adapter: "fixture".into(),
+            model: "image-v1".into(),
+            provider_config_version: "pcv-1".into(),
+            provider_config_digest: format!("sha256:{}", "a".repeat(64)),
+            pricing_snapshot: json!({"schema_version":2,"provider":"example","model":"image-v1","catalog_version":"prices-v2","catalog_digest":format!("sha256:{}","a".repeat(64)),"pricing_rule_id":"image","components":[{"unit":"image","rate_numerator_minor":100,"rate_denominator":1,"quantity":quantity}],"exact_estimate_numerator":(100 * quantity).to_string(),"exact_estimate_denominator":"1","estimated_amount_minor":100 * quantity,"currency":"USD"}),
+            pricing_schema_version: 2,
+            execution_scope: None,
+            created_at: "2026-08-05T00:00:00Z".into(),
+        }
     }
     struct Hubu {
         claims: Cell<u32>,
@@ -2459,6 +2524,188 @@ mod tests {
         );
         assert_eq!(p.calls.get(), 0);
         assert_eq!(h.releases.get(), 1);
+    }
+
+    fn claim_and_start_attempt(
+        repo: &Repository,
+        e: &Execution,
+    ) -> crate::execution::ProviderAttempt {
+        let pre = repo
+            .update_execution(
+                &e.execution_id,
+                e.version,
+                &ExecutionUpdate {
+                    status: "preflighting".into(),
+                    outcome: None,
+                    started_at: Some("now".into()),
+                    completed_at: None,
+                    failure_code: None,
+                    failure_message_redacted: None,
+                    provider_outcome: None,
+                    artifact_outcome: None,
+                    settlement_outcome: None,
+                },
+                "now",
+            )
+            .unwrap();
+        let claimed = repo
+            .set_claim(&e.execution_id, pre.version, "claim-1", "now")
+            .unwrap();
+        repo.start_provider_attempt(&claimed, "now").unwrap()
+    }
+
+    #[test]
+    fn unbounded_cost_target_is_refused_before_claim_even_after_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("unbounded-cost.sqlite3");
+        let hubu = Hubu::default();
+        let provider = Provider::default();
+        let (blocked, eligible);
+        {
+            let repository = Repository::open(&database, Redactor::default()).unwrap();
+            blocked = gemini_execution(&repository, "gemini-queued").execution_id;
+            eligible = execution(&repository, "eligible-queued").execution_id;
+            let artifacts = Artifacts {
+                repo: &repository,
+                calls: Cell::new(0),
+            };
+            let workflow = ExecutionWorkflow {
+                repository: &repository,
+                hubu: &hubu,
+                provider: &provider,
+                artifacts: &artifacts,
+            };
+            let failed = workflow.run(&blocked, "now").unwrap();
+            assert_eq!(failed.status, "failed");
+            assert_eq!(
+                failed.failure_code.as_deref(),
+                Some(cost_containment::UNBOUNDED_COST_CODE)
+            );
+            assert_eq!(workflow.run(&eligible, "now").unwrap().status, "succeeded");
+        }
+        // The eligible target executed once; the blocked one was never
+        // claimed and sent nothing.
+        assert_eq!(provider.calls.get(), 1);
+        assert_eq!(hubu.claims.get(), 1);
+
+        let repository = Repository::open(&database, Redactor::default()).unwrap();
+        let artifacts = Artifacts {
+            repo: &repository,
+            calls: Cell::new(0),
+        };
+        let workflow = ExecutionWorkflow {
+            repository: &repository,
+            hubu: &hubu,
+            provider: &provider,
+            artifacts: &artifacts,
+        };
+        assert_eq!(workflow.run(&blocked, "restart").unwrap().status, "failed");
+        assert_eq!(
+            workflow
+                .recover(&blocked, "restart-timer", None)
+                .unwrap()
+                .status,
+            "failed"
+        );
+        assert!(repository
+            .get_provider_attempt_for_execution(&blocked)
+            .is_err());
+        assert_eq!(provider.calls.get(), 1);
+        assert_eq!(hubu.claims.get(), 1);
+        assert_eq!(hubu.releases.get(), 0);
+    }
+
+    #[test]
+    fn unbounded_cost_target_claimed_earlier_is_released_without_transmission() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("unbounded-claimed.sqlite3");
+        let hubu = Hubu::default();
+        let provider = Provider::default();
+        let execution_id;
+        {
+            let repository = Repository::open(&database, Redactor::default()).unwrap();
+            let created = gemini_execution(&repository, "gemini-claimed");
+            execution_id = created.execution_id.clone();
+            claim_and_start_attempt(&repository, &created);
+        }
+        // A restart between the claim and the provider phase.
+        let repository = Repository::open(&database, Redactor::default()).unwrap();
+        let artifacts = Artifacts {
+            repo: &repository,
+            calls: Cell::new(0),
+        };
+        let workflow = ExecutionWorkflow {
+            repository: &repository,
+            hubu: &hubu,
+            provider: &provider,
+            artifacts: &artifacts,
+        };
+        assert_eq!(
+            workflow.provider_phase(&execution_id, "provider").unwrap(),
+            ProviderPhaseOutcome::ReleaseAuthorization
+        );
+        assert_eq!(
+            workflow.run(&execution_id, "release").unwrap().status,
+            "released"
+        );
+        let attempt = repository
+            .get_provider_attempt_for_execution(&execution_id)
+            .unwrap();
+        assert_eq!(attempt.transmission_started_at, None);
+        assert_eq!(attempt.outcome, "failed");
+        assert_eq!(
+            attempt.failure_code.as_deref(),
+            Some(cost_containment::UNBOUNDED_COST_CODE)
+        );
+        workflow.run(&execution_id, "replay").unwrap();
+        assert_eq!(provider.calls.get(), 0);
+        assert_eq!(hubu.releases.get(), 1);
+        assert_eq!(hubu.settles.get(), 0);
+    }
+
+    #[test]
+    fn earlier_ambiguous_unbounded_cost_submission_reconciles_without_resubmission() {
+        let repo = Repository::in_memory().unwrap();
+        let created = gemini_execution(&repo, "gemini-ambiguous");
+        let attempt = claim_and_start_attempt(&repo, &created);
+        repo.begin_provider_transmission(&attempt.provider_attempt_id, "now")
+            .unwrap();
+        let h = Hubu::default();
+        let p = Provider::default();
+        let a = Artifacts {
+            repo: &repo,
+            calls: Cell::new(0),
+        };
+        let w = ExecutionWorkflow {
+            repository: &repo,
+            hubu: &h,
+            provider: &p,
+            artifacts: &a,
+        };
+        assert_eq!(
+            w.run(&created.execution_id, "later").unwrap().status,
+            "reconciliation_required"
+        );
+        let reinspect = OperatorReconciliationRequest {
+            action_id: "action-1".into(),
+            action: ReconciliationAction::Reinspect,
+            evidence: json!({"provider_outcome":"unknown"}),
+        };
+        assert_eq!(
+            w.recover(&created.execution_id, "operator", Some(&reinspect))
+                .unwrap()
+                .status,
+            "reconciliation_required"
+        );
+        assert_eq!(p.calls.get(), 0);
+        assert_eq!(h.releases.get(), 0);
+        assert_eq!(
+            repo.get_provider_attempt_for_execution(&created.execution_id)
+                .unwrap()
+                .provider_attempt_id,
+            attempt.provider_attempt_id
+        );
+        assert!(repo.get_reconciliation(&created.execution_id).is_ok());
     }
 
     #[test]

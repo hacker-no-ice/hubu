@@ -22,6 +22,16 @@ Live provider execution can incur charges. Ordinary tests, demos, CI, catalog
 inspection, doctor, render, and production validation must remain non-billable
 and must not contact a provider.
 
+> **Gemini execution is disabled.** Gongbu refuses every Gemini Developer API
+> image target (`google` / `gemini_developer_image`, generation and editing,
+> all four verified packs) at admission and again before the first provider
+> request, because it cannot verify a provider-enforced cost ceiling for them.
+> They are not offered by `/v2/execution-targets`, and a new execution fails
+> with `target_not_selectable`, or `target_cost_unbounded` for work queued
+> earlier, without a budget claim. Existing records stay readable and an
+> earlier ambiguous submission can still be reconciled. See the
+> [Gemini provider contract](gemini-provider-contract.md).
+
 | Integration | Gongbu identity | Provider-specific behavior |
 | --- | --- | --- |
 | Gemini Developer API | `google` / `gemini_developer_image` through the Lite and non-Lite Gemini 3.1 Flash Image contracts | AI Studio API key, synchronous inline response; Lite is 1K-only, non-Lite supports 1K/2K/4K |
