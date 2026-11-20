@@ -27,7 +27,7 @@ const event = { record_id: 'lev_fixture', category: 'reconciliation_entry', outc
         if (url.pathname === '/app.js') return route.fulfill({ contentType: 'text/javascript', body: asset('app.js') });
         if (url.pathname === '/app.css') return route.fulfill({ contentType: 'text/css', body: asset('app.css') });
         if (url.pathname.endsWith('.svg')) return route.fulfill({ contentType: 'image/svg+xml', body: '<svg xmlns="http://www.w3.org/2000/svg"/>' });
-        if (url.pathname === '/api/session') data = { authenticated: true, reconciliation_capability: true };
+        if (url.pathname === '/api/session') data = { authenticated: true };
         if (url.pathname === '/api/hubu/agents') data = { agents: [] };
         if (url.pathname === '/api/hubu/user') data = { display_name: 'Fixture owner' };
         if (url.pathname === '/api/hubu/governance/summary') data = { summary: { backlog: {} } };
@@ -40,7 +40,7 @@ const event = { record_id: 'lev_fixture', category: 'reconciliation_entry', outc
         }
         if (request.method() === 'POST') {
           posts++; posted = request.postDataJSON();
-          assert.equal(request.headers()['x-hubu-ui-confirmed'], '1');
+          assert.equal(request.headers()['x-hubu-ui-confirmed'], undefined);
           if (scenario === 'validation' && posts === 1) return route.fulfill({ status: 400, json: { error: 'Fixture receipt validation failed' } });
           claim = { ...claim, reconciliation_required: false, status: posted.receipt ? 'settled' : 'released',
             evidence: posted.evidence, provider_reference: posted.provider_reference, reconciled_at: '2026-11-18T01:00:00Z', reconciled_by_user_id: 'usr_fixture' };

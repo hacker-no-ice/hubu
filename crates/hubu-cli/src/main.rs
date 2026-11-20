@@ -3086,12 +3086,6 @@ fn request_json_status(
     include_reconciliation_capability: bool,
 ) -> Result<(u16, Value)> {
     let target = client.target()?;
-    let (host, port) = parse_base_url(&target.base_url)?;
-    let body_text = body.map(|body| body.to_string()).unwrap_or_default();
-    let authorization_header = target
-        .auth_token()?
-        .map(|token| format!("Authorization: Bearer {token}\r\n"))
-        .unwrap_or_default();
     // v0.3.0: hubu-server ignores the retired approval and reconciliation
     // capabilities and asks for the owner's presence instead. The CLI still
     // sends a capability it can read, for older servers, and no longer fails
@@ -3105,12 +3099,34 @@ fn request_json_status(
         Some(Ok(Some(token))) => format!("{APPROVAL_CAPABILITY_HEADER}: {token}\r\n"),
         _ => String::new(),
     };
+    request_json_to_target(
+        target,
+        method,
+        path,
+        body,
+        &format!("{approval_header}{reconciliation_header}"),
+    )
+}
+
+fn request_json_to_target(
+    target: &ClientTarget,
+    method: &str,
+    path: &str,
+    body: Option<Value>,
+    extra_headers: &str,
+) -> Result<(u16, Value)> {
+    let (host, port) = parse_base_url(&target.base_url)?;
+    let body_text = body.map(|body| body.to_string()).unwrap_or_default();
+    let authorization_header = target
+        .auth_token()?
+        .map(|token| format!("Authorization: Bearer {token}\r\n"))
+        .unwrap_or_default();
     let mut stream = TcpStream::connect((host.as_str(), port))
         .with_context(|| format!("connect to Hubu server at {}", target.base_url))?;
 
     write!(
         stream,
-        "{method} {path} HTTP/1.1\r\nHost: {host}:{port}\r\n{authorization_header}{approval_header}{reconciliation_header}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "{method} {path} HTTP/1.1\r\nHost: {host}:{port}\r\n{authorization_header}{extra_headers}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         body_text.len(),
         body_text
     )?;

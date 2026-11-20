@@ -2,7 +2,7 @@
 //!
 //! The Hubu server deliberately refuses browser-origin requests, so the browser
 //! never talks to it directly. This process serves the static UI, holds the
-//! Hubu bearer and approval credentials itself, and relays an allow-listed set
+//! Hubu owner bearer itself, and relays an allow-listed set
 //! of admin routes. A browser obtains a session only by opening the one-time
 //! login link printed to the operator's terminal.
 //!
@@ -10,8 +10,7 @@
 //! rebinding), an `HttpOnly; SameSite=Strict` session cookie, a custom
 //! `X-Hubu-UI` header (forces a CORS preflight that is never approved), a
 //! same-origin `Origin`/`Sec-Fetch-Site` when present, and JSON bodies for
-//! writes. Routes that use the human approval capability additionally require
-//! an explicit `X-Hubu-UI-Confirmed` header sent only from a confirmation step.
+//! writes. The Hubu server handles owner-presence prompts.
 
 use std::{
     collections::HashMap,
@@ -40,7 +39,7 @@ const MAX_CONNECTIONS: usize = 32;
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 const GONGBU_TIMEOUT: Duration = Duration::from_secs(5);
 const UI_HEADER: &str = "x-hubu-ui";
-const CONFIRM_HEADER: &str = "x-hubu-ui-confirmed";
+const PORTAL_CLIENT_HEADER: &str = "X-Hubu-Client: portal\r\n";
 
 const INDEX_HTML: &str = include_str!("ui/assets/index.html");
 const APP_JS: &str = include_str!("ui/assets/app.js");
@@ -106,8 +105,8 @@ Options:
 The UI manages users' spending targets, agents, policies, budgets and spend
 approvals, and shows spend history, decisions, provider revisions and secret
 reference names. It never displays secret values. It uses the same Hubu
-connection and credentials as other CLI commands. Approving spend or renaming an
-agent uses the human approval capability and asks for confirmation in the UI.
+connection and owner bearer as other CLI commands. Hubu server prompts for
+owner actions such as approving spend or changing a budget.
 
 Open the one-time login link printed at startup. The UI accepts only loopback
 connections and refuses requests from other browser origins."
@@ -167,17 +166,9 @@ fn resolve_gongbu(
 /// Everything the UI needs from outside this process, so routing and guards
 /// can be tested without live Hubu or Gongbu servers.
 trait Backend: Sync {
-    fn hubu(
-        &self,
-        method: &str,
-        path_and_query: &str,
-        body: Option<Value>,
-        approval: bool,
-        reconciliation: bool,
-    ) -> Result<(u16, Value)>;
+    fn hubu(&self, method: &str, path_and_query: &str, body: Option<Value>)
+        -> Result<(u16, Value)>;
     fn hubu_endpoint(&self) -> String;
-    fn approval_capability_available(&self) -> bool;
-    fn reconciliation_capability_available(&self) -> bool;
     fn providers(&self) -> Value;
     /// Prepare the canonical registration envelope exactly as
     /// `hubu register agent` does, and submit it only when `submit` is true.
@@ -201,16 +192,15 @@ impl Backend for LiveBackend<'_> {
         method: &str,
         path_and_query: &str,
         body: Option<Value>,
-        approval: bool,
-        reconciliation: bool,
     ) -> Result<(u16, Value)> {
-        super::request_json_status(
-            self.client,
+        // The shared transport waits for the reply without a response read
+        // deadline. The server may spend up to 60 seconds on owner presence.
+        super::request_json_to_target(
+            self.client.target()?,
             method,
             path_and_query,
             body,
-            approval,
-            reconciliation,
+            PORTAL_CLIENT_HEADER,
         )
     }
 
@@ -219,20 +209,6 @@ impl Backend for LiveBackend<'_> {
             .target()
             .map(|target| target.base_url.clone())
             .unwrap_or_default()
-    }
-
-    fn approval_capability_available(&self) -> bool {
-        self.client
-            .target()
-            .and_then(|target| target.approval_token())
-            .is_ok_and(|token| token.is_some())
-    }
-
-    fn reconciliation_capability_available(&self) -> bool {
-        self.client
-            .target()
-            .and_then(|t| t.reconciliation_token())
-            .is_ok_and(|t| t.is_some())
     }
 
     fn providers(&self) -> Value {
@@ -276,14 +252,8 @@ impl Backend for LiveBackend<'_> {
                 json!({ "review": review, "envelope": prepared.envelope }),
             ));
         }
-        let (status, mut response) = super::request_json_status(
-            self.client,
-            "POST",
-            "/agents/register",
-            Some(prepared.envelope),
-            false,
-            false,
-        )?;
+        let (status, mut response) =
+            self.hubu("POST", "/agents/register", Some(prepared.envelope))?;
         if let Value::Object(fields) = &mut response {
             fields.insert("review".into(), Value::Array(review));
         }
@@ -554,6 +524,7 @@ fn write_response(stream: &mut TcpStream, response: Response) -> std::io::Result
         409 => "Conflict",
         415 => "Unsupported Media Type",
         428 => "Precondition Required",
+        429 => "Too Many Requests",
         502 => "Bad Gateway",
         503 => "Service Unavailable",
         _ => "Status",
@@ -691,8 +662,6 @@ fn api<B: Backend>(request: &Request, state: &UiState<B>) -> Response {
             &json!({
                 "authenticated": true,
                 "hubu_endpoint": state.backend.hubu_endpoint(),
-                "approval_capability": state.backend.approval_capability_available(),
-                "reconciliation_capability": state.backend.reconciliation_capability_available(),
             }),
         ),
         ("GET", "/api/providers") => json_response(200, &state.backend.providers()),
@@ -809,9 +778,7 @@ fn policy_tool(request: &Request, tool: PolicyTool) -> Response {
 #[derive(Debug, PartialEq, Eq)]
 enum RouteAccess {
     Standard,
-    /// Sends the human approval capability; requires an explicit confirmation.
-    HumanApproval,
-    HumanReconciliation,
+    Reconciliation,
 }
 
 /// The only Hubu routes the browser can reach. Anything else is refused here,
@@ -849,8 +816,9 @@ fn allowed_route(method: &str, path: &str) -> Option<RouteAccess> {
         "/budgets/revoke",
         "/user/spending-target",
         "/user/spending-target/revoke",
+        "/agents/rename",
+        "/spend/approval/resolve",
     ];
-    const APPROVAL_ROUTES: &[&str] = &["/agents/rename", "/spend/approval/resolve"];
 
     let budget_versions = path
         .strip_prefix("/budgets/")
@@ -865,7 +833,7 @@ fn allowed_route(method: &str, path: &str) -> Option<RouteAccess> {
         .is_some_and(safe_identifier);
     match method {
         "POST" if matches!(path, "/spend/executor/settle" | "/spend/executor/release") => {
-            Some(RouteAccess::HumanReconciliation)
+            Some(RouteAccess::Reconciliation)
         }
         "GET"
             if GET_ROUTES.contains(&path)
@@ -876,7 +844,6 @@ fn allowed_route(method: &str, path: &str) -> Option<RouteAccess> {
             Some(RouteAccess::Standard)
         }
         "POST" if POST_ROUTES.contains(&path) || budget_versions => Some(RouteAccess::Standard),
-        "POST" if APPROVAL_ROUTES.contains(&path) => Some(RouteAccess::HumanApproval),
         _ => None,
     }
 }
@@ -910,12 +877,6 @@ fn proxy<B: Backend>(request: &Request, state: &UiState<B>) -> Response {
             &format!("{} {path} is not available in the admin UI", request.method),
         );
     };
-    if access != RouteAccess::Standard && request.header(CONFIRM_HEADER) != Some("1") {
-        return error_response(
-            428,
-            "this action uses a human capability and must be confirmed in the UI",
-        );
-    }
     let mut target = path.to_string();
     if let Some(query) = request.query.as_deref().filter(|query| !query.is_empty()) {
         if !safe_query(query) {
@@ -934,7 +895,7 @@ fn proxy<B: Backend>(request: &Request, state: &UiState<B>) -> Response {
     };
     // These shared executor endpoints may only receive the human reconciliation
     // envelope here. Never forward executor finalization or authorization fields.
-    if access == RouteAccess::HumanReconciliation {
+    if access == RouteAccess::Reconciliation {
         let Some(object) = body.as_ref().and_then(Value::as_object) else {
             return error_response(400, "reconciliation requires an object");
         };
@@ -955,13 +916,7 @@ fn proxy<B: Backend>(request: &Request, state: &UiState<B>) -> Response {
             return error_response(400, "reconciliation requires claim_id, provider_reference and evidence; executor fields are forbidden");
         }
     }
-    match state.backend.hubu(
-        &request.method,
-        &target,
-        body,
-        access == RouteAccess::HumanApproval,
-        access == RouteAccess::HumanReconciliation,
-    ) {
+    match state.backend.hubu(&request.method, &target, body) {
         Ok((status, body)) => json_response(status, &body),
         Err(error) => error_response(502, &format!("Hubu request failed: {error:#}")),
     }
@@ -972,8 +927,8 @@ mod tests {
     use super::*;
     use std::sync::Mutex as StdMutex;
 
-    /// (method, path and query, body, carries approval capability or submits)
-    type Call = (String, String, Option<Value>, bool, bool);
+    /// (method, path and query, body, registration submit)
+    type Call = (String, String, Option<Value>, bool);
 
     #[derive(Default)]
     struct FakeBackend {
@@ -981,31 +936,22 @@ mod tests {
     }
 
     impl Backend for FakeBackend {
-        fn reconciliation_capability_available(&self) -> bool {
-            true
-        }
         fn hubu(
             &self,
             method: &str,
             path_and_query: &str,
             body: Option<Value>,
-            approval: bool,
-            reconciliation: bool,
         ) -> Result<(u16, Value)> {
             self.calls.lock().unwrap().push((
                 method.to_string(),
                 path_and_query.to_string(),
                 body,
-                approval,
-                reconciliation,
+                false,
             ));
             Ok((200, json!({ "ok": true })))
         }
         fn hubu_endpoint(&self) -> String {
             "http://127.0.0.1:8787".into()
-        }
-        fn approval_capability_available(&self) -> bool {
-            true
         }
         fn providers(&self) -> Value {
             json!({ "stack": null })
@@ -1021,7 +967,6 @@ mod tests {
                 format!("{name:?}/{version}"),
                 None,
                 submit,
-                false,
             ));
             Ok((200, json!({ "review": [] })))
         }
@@ -1227,37 +1172,25 @@ mod tests {
     }
 
     #[test]
-    fn approval_capability_routes_require_explicit_confirmation() {
+    fn approval_and_rename_are_relayed_without_browser_confirmation_headers() {
         let (state, _) = state();
-        let unconfirmed = signed_in(&state, "POST", "/api/hubu/spend/approval/resolve");
-        assert_eq!(handle(&unconfirmed, &state).status, 428);
-        assert!(state.backend.calls.lock().unwrap().is_empty());
-
-        let mut confirmed = signed_in(&state, "POST", "/api/hubu/spend/approval/resolve");
-        confirmed.headers.insert(CONFIRM_HEADER.into(), "1".into());
-        assert_eq!(handle(&confirmed, &state).status, 200);
-
-        // The confirmation header never upgrades a standard route.
-        let mut budgets = signed_in(&state, "POST", "/api/hubu/budgets");
-        budgets.headers.insert(CONFIRM_HEADER.into(), "1".into());
-        assert_eq!(handle(&budgets, &state).status, 200);
-
+        for path in ["/spend/approval/resolve", "/agents/rename"] {
+            let request = signed_in(&state, "POST", &format!("/api/hubu{path}"));
+            assert_eq!(handle(&request, &state).status, 200);
+        }
         let calls = state.backend.calls.lock().unwrap();
         assert_eq!(calls[0].1, "/spend/approval/resolve");
-        assert!(calls[0].3, "approval route must carry the capability");
-        assert!(!calls[1].3, "standard route must not carry the capability");
+        assert_eq!(calls[1].1, "/agents/rename");
     }
 
     #[test]
-    fn reconciliation_proxy_requires_confirmation_and_only_attaches_reconciliation_capability() {
+    fn reconciliation_proxy_relays_only_human_envelopes() {
         let (state, _) = state();
         for action in ["settle", "release"] {
             let target = format!("/api/hubu/spend/executor/{action}");
             let mut request = signed_in(&state, "POST", &target);
             request.body =
                 br#"{"claim_id":"claim","provider_reference":"ref","evidence":"fixture"}"#.to_vec();
-            assert_eq!(handle(&request, &state).status, 428);
-            request.headers.insert(CONFIRM_HEADER.into(), "1".into());
             assert_eq!(handle(&request, &state).status, 200);
             for body in [
                 json!({"claim_id":"claim"}),
@@ -1277,8 +1210,6 @@ mod tests {
         assert_eq!(handle(&read, &state).status, 200);
         let calls = state.backend.calls.lock().unwrap();
         assert_eq!(calls.len(), 3);
-        assert!(calls[..2].iter().all(|c| !c.3 && c.4));
-        assert!(!calls[2].3 && !calls[2].4);
     }
 
     #[test]

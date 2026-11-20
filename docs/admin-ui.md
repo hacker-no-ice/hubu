@@ -19,7 +19,8 @@ Hubu admin UI is running
 ```
 
 Open the link in your browser. It works once. To sign in from another
-browser, stop `hubu ui` and start it again.
+browser, stop `hubu ui` and start it again. Sign-in and reads use the owner
+bearer without a Touch ID dialog.
 
 ## What you can do
 
@@ -62,6 +63,27 @@ rejected instead of overwritten.
 
 Changing a budget limit is pinned to the revision you saw. If someone else
 changed the budget first, the server rejects the change.
+
+## Confirming owner actions
+
+When you approve spend, create or change a budget, save a policy, rename an
+agent, set a spending target, initialize Hubu or reconcile a claim, the portal
+shows **Confirm on your Mac…** while `hubu-server` waits for the Touch ID
+dialog. Each action has its own dialog and may wait up to 60 seconds.
+**Deny**, **Revoke budget** and **Revoke spending target** take effect without
+Touch ID.
+
+On **Approvals**, each pending row has **Review**, **Approve** and **Deny**.
+Approving reserves budget for the agent and clears the request from the pending
+list. Pressing **Deny** in the Touch ID dialog also closes the request. The
+agent can submit a new spend request if needed. If the dialog times out, the
+request stays pending so you can approve it again when you’re at your Mac.
+
+If another dialog is open, finish it on your Mac before retrying. If owner
+confirmation is unavailable, check that `hubu-server` runs in your Mac’s
+signed-in desktop session. After five denied or timed-out prompts in ten
+minutes, wait for the retry time shown by the portal. If another client has
+already resolved the spend request, the portal refreshes the pending list.
 
 ## Connection
 
@@ -110,21 +132,11 @@ this:
 - API calls must carry a custom header and, when the browser sends them, a
   same-origin `Origin` and `Sec-Fetch-Site`. Writes must be JSON. Other sites
   therefore cannot send requests on your behalf.
-- It holds the Hubu bearer, approval and reconciliation credentials itself and
-  relays an allow-list of admin routes. Agent spend and claim creation remain
-  unavailable. Settlement/release routes accept only a confirmed human
-  reconciliation envelope, never executor finalization fields.
-- Approving or denying spend and renaming an agent use the human approval
-  capability. The UI asks for confirmation twice, and the process refuses
-  these calls unless the confirmation header is present.
+- It holds the Hubu owner bearer and relays an allow-list of admin routes.
+  The server enforces owner presence. Settlement/release routes accept only
+  the human reconciliation envelope and reject executor finalization fields.
 - Pages are served with a strict Content Security Policy, and server data is
-  rendered as text, never as HTML.
-
-`hubu ui` can use the approval capability because it reads the same approval
-token file the CLI reads. Anyone who can run commands as your user can already
-read that file. Keep the approval token file out of agent sandboxes, as you
-would for `hubu spend approval approve`.
-
+  rendered as text.
 
 ## Human reconciliation in Decisions
 
@@ -153,10 +165,9 @@ invent an artifact reference. Review the claim, outcome, amount and resulting
 budget change before confirming. The accounting charge rounds up once to six
 decimal places; a confirmed overrun can make the remaining balance negative.
 
-The separate human reconciliation capability stays in the UI process, as with
-the CLI. It is attached only to confirmed reconciliation mutations. The server
-still validates ownership, lease expiry, receipt and evidence, and atomically
-settles/releases the hold. Active claims cannot be reconciled. Duplicate clicks
+After you review the evidence, **Confirm reconciliation** opens the Touch ID
+dialog. The server validates ownership, lease expiry, receipt and evidence,
+and atomically settles or releases the hold after confirmation. Active claims cannot be reconciled. Duplicate clicks
 are disabled, an identical retry is idempotent, and conflicting stale submissions
 show errors. Rejected submissions preserve entered evidence and require a fresh
 review. Success refreshes current details, outstanding counts and budget data.
@@ -175,16 +186,21 @@ Focused validation uses isolated fixtures only:
 ```sh
 node --test scripts/test-ui-reconciliation.mjs
 cargo test -p hubu-cli ui::tests --locked
+cargo test -p hubu-api owner_presence --locked
 cargo test -p hubu-api reconciliation --locked
 ```
 
-The browser fixture suite intercepts every HTTP request and never contacts a
-running Hubu/Gongbu profile or provider. Install Playwright in a temporary folder,
-then run (set `HUBU_UI_CHROME` to an installed Chrome executable, or install
-Playwright Chromium):
+The reconciliation browser test intercepts HTTP requests. The owner-presence
+browser test starts both binaries on loopback with a temporary database and
+the fixture provider. It adds a 31.5-second delay at the relay to test the
+browser and relay wait. Install Playwright in a temporary directory and set
+`HUBU_UI_CHROME` to an installed Chrome executable or install Playwright
+Chromium before running the tests:
 
 ```sh
 ui_test_deps=$(mktemp -d)
 npm install --prefix "$ui_test_deps" playwright@1.65.1
+cargo build --locked -p hubu-cli -p hubu-api --bins
 NODE_PATH="$ui_test_deps/node_modules" node scripts/test-ui-reconciliation-browser.cjs
+NODE_PATH="$ui_test_deps/node_modules" node scripts/test-ui-owner-presence-browser.cjs
 ```

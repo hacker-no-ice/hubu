@@ -724,7 +724,7 @@ const components = {
       ["Credential handoff", "Starts Hubu first, hands credentials to Gongbu through a protected step, then starts Gongbu."],
       ["Agent setup", "Writes the Codex MCP configuration with the Hubu agent credential and builds registration envelopes from server guidance."],
       ["Acceptance canary", "One command verifies the full stack end to end without billable provider spend."],
-      ["Admin web UI", "`hubu ui` serves a loopback-only browser UI behind a one-time login link. It holds the Hubu bearer, approval and reconciliation credentials itself and relays only allow-listed admin routes; the Hubu server keeps refusing browser origins. Approval and rename need an explicit confirmation step. Decisions overlays immutable reconciliation history with current claim evidence and balances; expired claims can be settled or released only after evidence review and confirmation using the separate human reconciliation capability. Provider revisions and secret reference names are read-only from the active generation, and live targets come from Gongbu's sanitized catalog."],
+      ["Admin web UI", "`hubu ui` serves a loopback-only browser UI behind a one-time login link. It relays allow-listed admin routes with the owner bearer. The UI waits while the Hubu server prompts for each owner action. Deny and revoke take effect without a prompt. In Decisions, the owner can review claim evidence and balances before confirming reconciliation. Provider revisions and secret reference names come from the active generation, and live targets come from Gongbu's catalog."],
       ["Read-only watch", "Polls owner-scoped GET /watch every second for current-version budget bars and the combined current decision feed with trusted providers, rules, reservations and exact settlement; no runtime telemetry or execution."],
     ],
     links: [sharedLinks.feedback, sharedLinks.cli, sharedLinks.watch, sharedLinks.adminUi, sharedLinks.adminUiDoc, sharedLinks.saveFolders, sharedLinks.stackProviderContract, sharedLinks.stackProviderDoctor, sharedLinks.stackLifecycle, sharedLinks.managedCredentialHandoff, sharedLinks.gongbuProviderContracts, sharedLinks.liveProviders, sharedLinks.fluxProviderContract, sharedLinks.localStack, sharedLinks.localStackAcceptance, sharedLinks.api, sharedLinks.registrationProtocol],
@@ -760,7 +760,7 @@ const components = {
       ["handoff", "commands", "endpoint + capabilities", { fromSide: "bottom", toSide: "left", waypoints: [{ x: 745, y: 700 }, { x: 10, y: 700 }, { x: 10, y: 141 }], labelSegment: 1, labelDy: -12 }],
       ["handoff", "adminUi", "hubu ui"],
       ["adminUi", "managedGongbu", "read targets", { fromSide: "top", toSide: "bottom" }],
-      ["adminUi", "managedHubu", "admin routes", { fromSide: "right", toSide: "right", waypoints: [{ x: 1250, y: 581 }, { x: 1250, y: 116 }], labelSegment: 1, labelDx: -40 }],
+      ["adminUi", "managedHubu", "owner bearer", { fromSide: "right", toSide: "right", waypoints: [{ x: 1250, y: 581 }, { x: 1250, y: 116 }], labelSegment: 1, labelDx: -40 }],
     ],
   },
   mcp: {
