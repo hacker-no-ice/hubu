@@ -258,10 +258,12 @@ class ManagedServer(Target):
             os.environ,
             HUBU_DB_PATH=str(self.directory / "hubu.sqlite3"),
             HUBU_AUTH_TOKEN=auth,
+            HUBU_AGENT_TOKEN_FILE=str(self.directory / "hubu.agent-token"),
+            HUBU_AGENT_TOKEN_FILE_GENERATED="1",
             HUBU_RECONCILIATION_TOKEN=reconciliation,
             HUBU_LEASE_CONFIG=str(lease),
         )
-        for name in ("HUBU_AUTH_TOKEN_FILE", "HUBU_RECONCILIATION_TOKEN_FILE"):
+        for name in ("HUBU_AUTH_TOKEN_FILE", "HUBU_AGENT_TOKEN", "HUBU_RECONCILIATION_TOKEN_FILE"):
             self.env.pop(name, None)
         self.process: subprocess.Popen | None = None
         self.starts = 0

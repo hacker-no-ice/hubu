@@ -2,22 +2,17 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# Owner actions need owner presence (v0.3.0). These temp-database servers use
-# the scripted fixture provider, which confirms every prompt; hubu-server
-# refuses it for a database inside a managed profile.
-export HUBU_OWNER_PRESENCE_PROVIDER=fixture
-export HUBU_AUTH_TOKEN=core-flow-owner-fixture
-export HUBU_AGENT_TOKEN=core-flow-agent-fixture
 FLOW_ADDR="${HUBU_CORE_FLOW_ADDR:-127.0.0.1:8788}"
 FLOW_URL="http://${FLOW_ADDR}"
-SERVER_LOG="$(mktemp -t hubu-core-flow-server.XXXXXX.log)"
-DB_PATH="$(mktemp -t hubu-core-flow.XXXXXX.sqlite3)"
-POLICY_FILE="$(mktemp -t hubu-core-flow-policy.XXXXXX.yaml)"
+WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/hubu-core-flow.XXXXXX")"
+SERVER_LOG="${WORK_DIR}/hubu-server.log"
+DB_PATH="${WORK_DIR}/hubu.sqlite3"
+POLICY_FILE="${WORK_DIR}/policy.yaml"
 SERVER_PID=""
 
 cleanup() {
   stop_server
-  rm -f "${SERVER_LOG}" "${DB_PATH}" "${POLICY_FILE}"
+  rm -rf -- "${WORK_DIR}"
 }
 
 stop_server() {
@@ -28,6 +23,18 @@ stop_server() {
   SERVER_PID=""
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# Use fresh credentials even when the caller has a local stack configured.
+unset HUBU_AUTH_TOKEN HUBU_AGENT_TOKEN HUBU_APPROVAL_TOKEN HUBU_RECONCILIATION_TOKEN
+unset HUBU_APPROVAL_TOKEN_FILE HUBU_RECONCILIATION_TOKEN_FILE
+export HUBU_AUTH_TOKEN_FILE="${WORK_DIR}/hubu.auth-token"
+export HUBU_AGENT_TOKEN_FILE="${WORK_DIR}/hubu.agent-token"
+export HUBU_AUTH_TOKEN_FILE_GENERATED=1 HUBU_AGENT_TOKEN_FILE_GENERATED=1
+
+# Owner actions in this flow use the scripted test provider.
+export HUBU_OWNER_PRESENCE_PROVIDER=fixture
 
 fail() {
   printf 'integration-core-flow failed: %s\n' "$*" >&2
@@ -138,7 +145,6 @@ assert_contains "repeat agent registration" "${REPEAT_AGENT_OUTPUT}" "Agent alre
 [[ "$(extract_field "${REPEAT_AGENT_OUTPUT}" "agent_id")" == "${AGENT_ID}" ]] || fail "repeat registration returned a different agent_id"
 [[ "$(extract_field "${REPEAT_AGENT_OUTPUT}" "account_id")" == "${ACCOUNT_ID}" ]] || fail "repeat registration returned a different account_id"
 
-rm -f "${POLICY_FILE}"
 hubu policy new-template --path "${POLICY_FILE}" >/dev/null
 POLICY_VALIDATE_OUTPUT="$(hubu policy validate --path "${POLICY_FILE}")"
 assert_contains "policy validate" "${POLICY_VALIDATE_OUTPUT}" "Policy valid"
@@ -306,7 +312,7 @@ RETIRED_COMMAND_STATUS=$?
 set -e
 [[ "${RETIRED_COMMAND_STATUS}" -ne 0 ]] || fail "retired budget replace command unexpectedly succeeded"
 assert_contains "retired budget command" "${RETIRED_COMMAND_OUTPUT}" 'unknown budget command `replace`'
-FLOW_AUTH_TOKEN="${HUBU_AUTH_TOKEN}"
+FLOW_AUTH_TOKEN="$(<"${HUBU_AUTH_TOKEN_FILE}")"
 RETIRED_ROUTE_RESPONSE="$(curl --silent --show-error --write-out $'\n%{http_code}' --request POST --header "Authorization: Bearer ${FLOW_AUTH_TOKEN}" --header 'Content-Type: application/json' --data '{"budget_id":"'"${ACTIVE_BUDGET_ID}"'","amount_cents":8000}' "${FLOW_URL}/budgets/replace")"
 RETIRED_ROUTE_STATUS="${RETIRED_ROUTE_RESPONSE##*$'\n'}"
 [[ "${RETIRED_ROUTE_STATUS}" != "200" ]] || fail "retired /budgets/replace route unexpectedly succeeded"
