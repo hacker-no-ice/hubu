@@ -19,6 +19,10 @@ every response, including unexpected successes:
 2. Apply an allow-all policy to itself.
 3. Request $0.50, five times the original budget.
 
+On v0.3.0 and later, EP09 also requests a change to an override with the agent
+credential. The verifier requires a refusal and compares the owner's initial
+and final settings exports.
+
 The attack process holds only the normal agent credential. Owner steps (human
 approval and reconciliation) run in the parent process, which keeps those
 capabilities. No LLM, provider credentials or paid work is used.

@@ -51,6 +51,247 @@ fn create_budget_request(agent_id: &str, amount: &str) -> HttpRequest {
     )
 }
 
+const OVERRIDES: &str = "/governance/overrides";
+
+fn override_settings(state: &ServerState) -> Value {
+    let response = route(authenticated_get_request(OVERRIDES), state);
+    assert_eq!(response.status, 200, "{}", response.body);
+    response.body
+}
+
+fn override_body(action: &str, enabled: bool) -> Value {
+    json!({ "action": action, "enabled": enabled, "acknowledge_warning": true })
+}
+
+fn set_override(state: &ServerState, action: &str, enabled: bool) {
+    let response = route(
+        authenticated_json_request(OVERRIDES, override_body(action, enabled)),
+        state,
+    );
+    assert_eq!(response.status, 200, "{}", response.body);
+}
+
+fn agent_post(state: &ServerState, path: &str, body: Value) -> HttpResponse {
+    route(
+        credential_request_with_body("POST", path, TEST_AGENT_TOKEN, body),
+        state,
+    )
+}
+
+#[test]
+fn override_settings_are_strict_and_can_only_change_after_warned_owner_confirmation() {
+    let (path, state) = temp_state("override-settings");
+    let initial = override_settings(&state);
+    let settings = initial["overrides"].as_array().unwrap();
+    assert_eq!(settings.len(), 2);
+    assert!(settings.iter().all(|setting| setting["enabled"] == false));
+
+    let body = override_body("lower_budget", true);
+    assert!(is_owner_authority_rejection(&agent_post(
+        &state,
+        OVERRIDES,
+        body.clone()
+    )));
+    let rejected = route(
+        with_header(
+            authenticated_json_request(OVERRIDES, body.clone()),
+            owner_presence::NO_PROMPT_HEADER,
+            "1",
+        ),
+        &state,
+    );
+    assert_eq!(rejected.body["error_code"], "owner_presence_required");
+    let rejected = route(
+        authenticated_json_request(
+            OVERRIDES,
+            json!({ "action": "lower_budget", "enabled": true }),
+        ),
+        &state,
+    );
+    assert_eq!(rejected.status, 400);
+
+    for never in [
+        "change_overrides",
+        "raise_budget",
+        "create_budget",
+        "approve_spend",
+        "reconcile",
+        "loosen_policy",
+        "register_agent",
+    ] {
+        let rejected = route(
+            authenticated_json_request(OVERRIDES, override_body(never, true)),
+            &state,
+        );
+        assert_eq!(rejected.status, 400, "accepted {never}: {}", rejected.body);
+    }
+    assert!(records(&state).is_empty());
+    fixture(&state, "deny");
+    let rejected = route(authenticated_json_request(OVERRIDES, body), &state);
+    assert_eq!(rejected.body["error_code"], "owner_presence_denied");
+    assert_eq!(initial, override_settings(&state));
+    let record = &records(&state)[0];
+    assert_eq!(record["target"], json!(["lower_budget"]));
+    assert!(record["reason"]
+        .as_str()
+        .unwrap()
+        .contains("A prompt-injected agent could cut spending limits"));
+
+    fixture(&state, "confirm");
+    set_override(&state, "lower_budget", true);
+    drop(state);
+    let state = ServerState::new_with_db_path(&path).unwrap();
+    assert_eq!(override_settings(&state)["overrides"][0]["enabled"], true);
+    set_override(&state, "lower_budget", false);
+    assert_eq!(initial, override_settings(&state));
+    std::fs::remove_file(path).ok();
+}
+
+#[test]
+fn lower_budget_override_only_allows_a_decrease_from_the_current_revision() {
+    let (path, state, agent) = state_with_agent("override-budget");
+    let budget_id = create_test_agent_budget(&state, &agent.agent_id, 1_000)
+        .budget
+        .budget_id;
+    let version_route = format!("/budgets/{budget_id}/versions");
+    let update =
+        |amount, revision| json!({ "amount_limit": amount, "expected_revision": revision });
+    assert!(is_owner_authority_rejection(&agent_post(
+        &state,
+        &version_route,
+        update("5.00", 1)
+    )));
+    set_override(&state, "lower_budget", true);
+    set_override(&state, "add_deny_rule", true);
+    fixture(&state, "deny");
+
+    for (route, body) in [
+        (version_route.as_str(), update("20.00", 1)),
+        (version_route.as_str(), update("10.00", 1)),
+        (
+            "/budgets",
+            json!({ "agent_id": agent.agent_id, "amount": "20.00" }),
+        ),
+        (
+            "/spend/approval/resolve",
+            json!({ "approval_request_id": "fixture", "decision": "approve" }),
+        ),
+        (
+            "/spend/executor/settle",
+            json!({ "claim_id": "fixture", "evidence": "fixture" }),
+        ),
+        (OVERRIDES, override_body("add_deny_rule", false)),
+    ] {
+        let rejected = agent_post(&state, route, body);
+        assert!(
+            is_owner_authority_rejection(&rejected),
+            "{route}: {}",
+            rejected.body
+        );
+    }
+    let lowered = agent_post(&state, &version_route, update("5.00", 1));
+    assert_eq!(lowered.status, 200, "{}", lowered.body);
+    assert_eq!(
+        lowered.body["current_budget"]["amount_limit"]["display"],
+        "5.00"
+    );
+    for (amount, revision) in [("2.00", 1), ("7.00", 2)] {
+        assert!(is_owner_authority_rejection(&agent_post(
+            &state,
+            &version_route,
+            update(amount, revision)
+        )));
+    }
+    let audit = records(&state);
+    assert_eq!(audit.len(), 3);
+    assert_eq!(audit[0]["outcome"], "delegated");
+    assert_eq!(audit[0]["client"], "agent");
+    assert_eq!(audit[0]["override_action"], "lower_budget");
+    assert_eq!(audit[0]["target"], json!([budget_id]));
+
+    fixture(&state, "confirm");
+    set_override(&state, "lower_budget", false);
+    assert!(is_owner_authority_rejection(&agent_post(
+        &state,
+        &version_route,
+        update("4.00", 2)
+    )));
+    let listed = route(authenticated_get_request("/budgets"), &state);
+    assert_eq!(listed.body["budgets"][0]["amount_limit"]["display"], "5.00");
+    std::fs::remove_file(path).ok();
+}
+
+#[test]
+fn deny_rule_override_preserves_the_current_policy_and_assignment() {
+    let (path, state, agent) = state_with_agent("override-policy");
+    let original = "id: demo\nversion: v1\ndefault_effect: needs_approval\nrules: []";
+    let with_deny = "id: demo\nversion: v1\ndefault_effect: needs_approval\nrules:
+  - id: block_fixture
+    effect: deny
+    reason: fixture rule
+    when: { op: eq, field: merchant, value: { string: fixture } }";
+    let applied = route(
+        authenticated_json_request("/policies", json!({ "policy_yaml": original })),
+        &state,
+    );
+    assert_eq!(applied.status, 200, "{}", applied.body);
+    let revision = |yaml: &str| {
+        json!({
+            "policy_yaml": yaml,
+            "expected_revision": applied.body["revision"],
+            "expected_hash": applied.body["payload_hash"],
+        })
+    };
+    assert!(is_owner_authority_rejection(&agent_post(
+        &state,
+        "/policies",
+        revision(with_deny)
+    )));
+    set_override(&state, "add_deny_rule", true);
+    fixture(&state, "deny");
+
+    let mut reassign = revision(with_deny);
+    reassign["agent_id"] = json!(agent.agent_id);
+    let mut stale = revision(with_deny);
+    stale["expected_revision"] = json!(2);
+    for rejected in [
+        reassign,
+        stale,
+        revision(&with_deny.replace("needs_approval", "allow")),
+        revision(&with_deny.replace("effect: deny", "effect: allow")),
+    ] {
+        assert!(is_owner_authority_rejection(&agent_post(
+            &state,
+            "/policies",
+            rejected
+        )));
+    }
+    let tightened = agent_post(&state, "/policies", revision(with_deny));
+    assert_eq!(tightened.status, 200, "{}", tightened.body);
+    assert_eq!(tightened.body["revision"], 2);
+    assert_eq!(tightened.body["policy_id"], applied.body["policy_id"]);
+    assert_eq!(tightened.body["assignment_changed"], false);
+    let rejected = agent_post(
+        &state,
+        "/policies",
+        json!({
+            "policy_yaml": original,
+            "expected_revision": tightened.body["revision"],
+            "expected_hash": tightened.body["payload_hash"],
+        }),
+    );
+    assert!(is_owner_authority_rejection(&rejected));
+    let current = route(authenticated_get_request("/policies/show"), &state);
+    assert_eq!(current.body["revision"], 2);
+    assert_eq!(current.body["policy"]["rules"][0]["effect"], "deny");
+    let audit = records(&state);
+    assert_eq!(audit.len(), 3);
+    assert_eq!(audit[0]["outcome"], "delegated");
+    assert_eq!(audit[0]["override_action"], "add_deny_rule");
+    assert_eq!(audit[0]["target"], json!([applied.body["policy_id"]]));
+    std::fs::remove_file(path).ok();
+}
+
 /// Every owner action is refused without the owner's confirmation, whatever
 /// else the caller holds: no-prompt gets `owner_presence_required`, a refused dialog
 /// gets the refusal, and nothing is ever performed.

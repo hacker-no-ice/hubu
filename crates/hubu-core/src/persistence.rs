@@ -1120,8 +1120,7 @@ impl SqliteGovernanceRepository {
         restore?;
         self.initialize_provider_accounting()?;
         self.in_init_transaction(Self::init_lifecycle_schema)?;
-        self.conn
-            .execute_batch(owner_presence::OWNER_PRESENCE_SCHEMA)?;
+        self.in_init_transaction(Self::init_owner_presence_schema)?;
         Ok(())
     }
 

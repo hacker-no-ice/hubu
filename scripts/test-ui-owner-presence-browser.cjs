@@ -38,8 +38,8 @@ async function main() {
     HUBU_AGENT_TOKEN: 'isolated-portal-agent-fixture',
     HUBU_OWNER_PRESENCE_PROVIDER: 'fixture',
     HUBU_OWNER_PRESENCE_FIXTURE_RATE_LIMIT: 'on',
-    // Init, policy, budget, first approval, two budget changes, then refusals.
-    HUBU_OWNER_PRESENCE_FIXTURE: 'confirm,confirm,confirm,confirm,confirm,confirm,timeout,deny,unavailable,timeout',
+    // Init, policy, budget, two override changes, approval, two budget changes, then refusals.
+    HUBU_OWNER_PRESENCE_FIXTURE: 'confirm,confirm,confirm,confirm,confirm,confirm,confirm,confirm,timeout,deny,unavailable,timeout',
   });
   let server, portal, proxy, browser;
   try {
@@ -131,6 +131,30 @@ async function main() {
     const errors = [];
     page.on('pageerror', (error) => errors.push(error.message));
     await page.goto(login);
+    await page.getByRole('link', { name: 'Settings', exact: true }).click();
+    const lowerBudget = page.getByRole('row', { name: /Lower an existing budget/ });
+    const addDenyRule = page.getByRole('row', { name: /Append a deny rule/ });
+    await lowerBudget.getByText('off', { exact: true }).waitFor();
+    await addDenyRule.getByText('off', { exact: true }).waitFor();
+    assert.equal(await page.getByRole('table').getByRole('row').count(), 3);
+    const enableBudget = lowerBudget.getByRole('button', { name: /Enable override/ });
+    await enableBudget.click();
+    const overrideWarning = page.getByRole('dialog');
+    await overrideWarning.getByText('Agents can lower existing budgets without your confirmation.').waitFor();
+    await overrideWarning.getByText(/A prompt-injected agent could cut spending limits/).waitFor();
+    await overrideWarning.getByRole('button', { name: 'Close', exact: true }).click();
+    assert.ok((await serverRequest('/governance/overrides')).overrides.every((setting) => !setting.enabled));
+    await enableBudget.click();
+    await overrideWarning.getByRole('button', { name: 'I understand, enable override' }).click();
+    await lowerBudget.getByText('enabled', { exact: true }).waitFor();
+    await addDenyRule.getByText('off', { exact: true }).waitFor();
+    await lowerBudget.getByRole('button', { name: /Disable override/ }).click();
+    await lowerBudget.getByText('off', { exact: true }).waitFor();
+    const overrideRecords = (await serverRequest('/governance/owner-presence')).records
+      .filter((record) => record.action === 'governance.override.set');
+    assert.equal(overrideRecords.length, 2);
+    assert.ok(overrideRecords.every((record) => record.outcome === 'confirmed' && record.client === 'portal'));
+
     await page.getByRole('link', { name: /^Approvals/ }).click();
     const approve = page.getByRole('button', { name: 'Approve', exact: true });
     const assertApproval = async (id, status) => {
@@ -139,7 +163,8 @@ async function main() {
     };
     const presence = async () => (await serverRequest('/governance/owner-presence')).records.filter((r) => r.client === 'portal');
 
-    assert.equal((await presence()).length, 0);
+    const approvalConfirmations = async () => (await presence()).filter((r) => r.action === 'spend.approval.approve');
+    assert.equal((await approvalConfirmations()).length, 0);
     const waiting = page.getByText('Confirm on your Mac…', { exact: true });
     const startedAt = Date.now();
     await approve.click();
@@ -148,7 +173,7 @@ async function main() {
     assert.ok(Date.now() - startedAt > 30_000);
     await waiting.waitFor({ state: 'hidden' });
     await assertApproval(approvedId, 'approved');
-    const confirmations = await presence();
+    const confirmations = await approvalConfirmations();
     assert.equal(confirmations.length, 1);
     assert.equal(confirmations[0].outcome, 'confirmed');
     assert.equal(confirmations[0].method, 'fixture');
@@ -215,7 +240,7 @@ async function main() {
       assert.doesNotMatch(headers, /capability|X-Hubu-UI-Confirmed/i);
     }
     assert.deepEqual(errors, []);
-    console.log('PASS portal owner presence, refusals, pending state, and >30-second wait');
+    console.log('PASS portal owner presence, override warnings, refusals, pending state, and >30-second wait');
   } finally {
     await browser?.close();
     await stop(portal);
