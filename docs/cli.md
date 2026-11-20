@@ -14,6 +14,29 @@ exact syntax supported by your installed release.
 To do the same administration in a browser, run `hubu ui` and see the
 [admin web UI guide](admin-ui.md).
 
+## Confirm owner actions
+
+Hubu asks the owner to confirm each action on the Mac running `hubu-server`.
+This applies to registering the human owner, applying policies, creating or
+updating budgets, setting a spending target, renaming agents, approving spends,
+and reconciling claims. The CLI prints
+`Waiting for the owner to confirm on this Mac…` while the request is open.
+A refusal, timeout, or unavailable dialog exits with status 3 and the server
+error code. Budget updates still ask for owner confirmation when run with
+`--yes`.
+
+Denying a spend and revoking a budget or spending target require the owner
+credential and take effect without a dialog. Ordinary reads, agent registration,
+and spend use the selected profile's agent credential. Owner-only reads such
+as budget version history use the owner credential without a dialog.
+
+For a manual connection with `--url`, set `HUBU_AGENT_TOKEN_FILE` (or
+`HUBU_AGENT_TOKEN`) for agent commands and `HUBU_AUTH_TOKEN_FILE` (or
+`HUBU_AUTH_TOKEN`) for owner commands. Manual connections still accept the
+owner bearer for agent routes when an agent credential was omitted. The old
+approval and reconciliation token options and environment variables are
+ignored with a deprecation warning in v0.3.0.
+
 ## Register the owner and agents
 
 Register the human owner once, then register each agent separately. The agent
@@ -43,11 +66,9 @@ documented in [Agent registration](agent-registration.md).
 
 ## Rename an agent
 
-Fix an agent's owner-facing name without changing its `agt_...` ID. Budgets,
-policy assignments, the account, and ledger history stay attached. Rename is
-human-owner only: it sends the human approval capability
-(`HUBU_APPROVAL_TOKEN` or `HUBU_APPROVAL_TOKEN_FILE`) and is not available
-through the unified MCP.
+Fix an agent's owner-facing name while keeping its `agt_...` ID. Budgets,
+policy assignments, the account, and ledger history stay attached. The
+owner confirms the rename in the Hubu dialog.
 
 ```sh
 hubu agent rename --agent-id agt_EXACT_AGENT_ID --name research-agent --reason "fix typo"
@@ -119,6 +140,17 @@ hubu budget revoke --budget-id bgt_EXACT_BUDGET_ID
 See [Spend lifecycle](spend-lifecycle.md) for reservation, settlement, and
 ledger behavior. Policies govern individual requests; budgets govern cumulative
 spending over their active period.
+
+## Review pending spends
+
+Run `hubu approvals` to list pending spend requests and review them oldest
+first. Each dialog identifies the request's position in the list. Denying a
+dialog closes that request and moves to the next. If a dialog times out or
+is unavailable, the queue stops and the request stays pending.
+
+For a single request, use `hubu spend approval get --approval-request-id ID`
+to inspect it or use `approve` and `deny` with the same ID. Approving a spend
+reserves budget under the existing policy and leaves execution to the agent.
 
 ## Amounts
 
