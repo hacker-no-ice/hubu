@@ -1790,24 +1790,19 @@ mod tests {
                 }
             }
             if let Some(rest) = spend_auth_token_id.strip_prefix("edit-") {
-                // A 1k Flash edit of one input image is exactly 6.756¢.
+                // A 1k FLUX 3 edit is exactly 4.8¢, whatever its input count.
                 if !rest.starts_with("draft") {
                     response.execution_scope = if rest.starts_with("generate-scope") {
-                        for_target("google", "gemini_developer_image")
+                        for_target("flux", "flux2_api")
                     } else {
-                        for_workload_target("image_edit", "google", "gemini_developer_image")
+                        for_workload_target("image_edit", "flux", "flux2_api")
                     };
-                    response.amount_cents = 7;
+                    response.amount_cents = 5;
                     response.budget_hold.amount =
                         crate::hubu::ExactAmount::from_units(response.amount_cents * 10000, "usd");
                     response.budget_hold.frozen_amount =
-                        crate::hubu::ExactAmount::from_units(70000, "usd");
-                    // Two input images add another 0.056¢.
-                    response.amount = Some(exact(if rest.starts_with("two-") {
-                        "68120"
-                    } else {
-                        "67560"
-                    }));
+                        crate::hubu::ExactAmount::from_units(50000, "usd");
+                    response.amount = Some(exact("48000"));
                 }
             }
             // A v4.5 Hubu reports the exact authorization beside its cents.
@@ -2703,47 +2698,46 @@ mod tests {
     }
 
     #[test]
-    fn gemini_pro_is_discovered_explicitly_and_admitted_only_when_authorized() {
+    fn gemini_pro_is_neither_offered_nor_admitted_and_its_records_stay_readable() {
+        // HUB-388: Gongbu cannot bound a Gemini Interactions image cost, so
+        // even a bound, fully authorized Pro target is refused at admission,
+        // before Hubu's authorization is resolved or anything is scheduled.
         let mut fixture = fixture();
+        let catalog = flux_contract_catalog("hubu.gemini-3-pro-image.text-to-image/v1");
+        let key = TargetKey::new(
+            "image_generation",
+            "google",
+            "gemini_developer_image",
+            "gemini-3-pro-image",
+        )
+        .unwrap();
+        let revision = catalog.targets().resolve_active(&key).unwrap().clone();
+        let pack = catalog.pack(&revision).unwrap().clone();
+        let pricing = catalog.pricing().clone();
         fixture.api = Api::new_with_authorization_resolver(
             fixture.repository.clone(),
             fixture.artifacts.clone(),
-            flux_contract_catalog("hubu.gemini-3-pro-image.text-to-image/v1"),
+            catalog,
             fixture.scheduler.clone(),
             i64::MAX,
             fixture.resolver.clone(),
             || "2026-08-05T20:00:00Z".into(),
         );
-        let catalog: Value = serde_json::from_slice(
+        let targets: Value = serde_json::from_slice(
             &fixture
                 .api
                 .handle("GET", "/v2/execution-targets", Some(&fixture.caller), &[])
                 .body,
         )
         .unwrap();
-        let [target] = catalog["targets"].as_array().unwrap().as_slice() else {
-            panic!("only the bound Pro contract is discoverable");
-        };
-        assert_eq!(target["model"], "gemini-3-pro-image");
-        assert_eq!(target["image_sizes"], json!(["1k", "2k", "4k"]));
-        assert_eq!(target["output_sizes"].as_array().unwrap().len(), 30);
-        let rule_ids: Vec<&str> = target["pricing"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|rule| rule["rule_id"].as_str().unwrap())
-            .collect();
-        assert_eq!(
-            rule_ids,
-            [
-                "google-gemini-3-pro-image-1k-2026-10-28-v1",
-                "google-gemini-3-pro-image-2k-2026-10-28-v1",
-                "google-gemini-3-pro-image-4k-2026-10-28-v1"
-            ]
-        );
-        let target_id = target["target_id"].clone();
-        let create = |token: &str, image_size: &str, aspect_ratio: &str| {
-            call_create(
+        assert_eq!(targets["targets"], json!([]));
+
+        // Authorizations Hubu issued for Pro before the block, which would
+        // otherwise be admitted.
+        for (token, image_size, aspect_ratio) in
+            [("gpro-1k", "1k", "16:9"), ("gpro-4k", "4k", "9:16")]
+        {
+            let refused = call_create(
                 &fixture,
                 &json!({
                     "schema_version": 2,
@@ -2751,57 +2745,66 @@ mod tests {
                     "input": {"prompt": "a product hero shot", "image_size": image_size,
                               "aspect_ratio": aspect_ratio},
                     "input_schema_version": 1,
-                    "target_id": target_id,
+                    "target_id": key.public_id(),
                 }),
-            )
-        };
-        for (token, image_size, aspect_ratio, units, size) in [
-            ("gpro-1k", "1k", "16:9", 134_000, (1376, 768)),
-            ("gpro-4k", "4k", "9:16", 240_000, (3072, 5504)),
-        ] {
-            let created = create(token, image_size, aspect_ratio);
-            assert_eq!(
-                created.status,
-                200,
-                "{token}: {}",
-                String::from_utf8_lossy(&created.body)
             );
-            let stored = fixture
-                .repository
-                .get_execution(&execution(&created).execution_id)
-                .unwrap();
-            assert_eq!(
-                stored.provider_config_version,
-                "hubu-gemini-3-pro-image-t2i-2026-10-28-v1"
-            );
-            assert_eq!(stored.authorized_units, units, "{token}");
-            let snapshot: crate::provider_contract::PricingSnapshot =
-                serde_json::from_value(stored.pricing_snapshot).unwrap();
-            assert_eq!(snapshot.estimated_units, units, "{token}");
-            assert_eq!(
-                snapshot.output_dimensions,
-                Some(OutputDimensions {
-                    width: size.0,
-                    height: size.1
-                }),
-                "{token}"
-            );
-        }
-        let scheduled = fixture.scheduler.0.lock().unwrap().len();
-        assert_eq!(scheduled, 2);
-        // An authorization still waiting for human approval, a 13.4¢
-        // authorization stretched to a 4k render, and a ratio Google does
-        // not publish for Pro are refused before anything is scheduled, so
-        // Google is never contacted.
-        for (token, image_size, aspect_ratio) in [
-            ("gpro-pending-1k", "1k", "1:1"),
-            ("gpro-1k-as-large", "4k", "1:1"),
-            ("gpro-1k-uncertified", "1k", "1:4"),
-        ] {
-            let refused = create(token, image_size, aspect_ratio);
             assert_eq!(refused.status, 400, "{token}");
+            let body = error(&refused);
+            assert_eq!(
+                body.error.reason_code.as_deref(),
+                Some("target_not_selectable")
+            );
+            assert_eq!(body.error.fields, Some(vec!["target_id".into()]));
+            assert!(matches!(
+                fixture.repository.get_execution_by_spend_auth_token(token),
+                Err(PersistenceError::NotFound)
+            ));
         }
-        assert_eq!(fixture.scheduler.0.lock().unwrap().len(), scheduled);
+        assert_eq!(fixture.resolver.calls.load(Ordering::SeqCst), 0);
+        assert!(fixture.scheduler.0.lock().unwrap().is_empty());
+
+        // A Pro execution admitted before the block is still readable.
+        let input = json!({"prompt": "a product hero shot", "image_size": "1k",
+                           "aspect_ratio": "16:9"});
+        let request = pack.prepare(&revision.model, &input).unwrap().request;
+        let snapshot = pricing.snapshot_for_target(&key, &request).unwrap();
+        let existing = fixture
+            .repository
+            .create_execution(&crate::execution::CreateExecutionParams {
+                account_id: "account-a".into(),
+                operation_key: "hubu-decision:decision-gpro-earlier".into(),
+                hubu_authorization_id: "gpro-earlier".into(),
+                hubu_claim_id: None,
+                hubu_token_reference: crate::execution::HubuTokenReference::new("gpro-earlier")
+                    .unwrap(),
+                authorized_units: snapshot.estimated_units,
+                authorization_currency: "USD".into(),
+                normalized_input: input,
+                input_hash: "hash".into(),
+                input_schema_version: 1,
+                target: key.canonical_name(),
+                config_version: revision.provider_config_version.clone(),
+                workload_type: revision.workload_type.clone(),
+                provider: revision.provider.clone(),
+                adapter: revision.adapter.clone(),
+                model: revision.model.clone(),
+                provider_config_version: revision.provider_config_version.clone(),
+                provider_config_digest: revision.digest().to_owned(),
+                pricing_snapshot: serde_json::to_value(&snapshot).unwrap(),
+                pricing_schema_version: i64::from(snapshot.schema_version),
+                execution_scope: None,
+                created_at: "2026-08-05T19:00:00Z".into(),
+            })
+            .unwrap();
+        let read = fixture.api.handle(
+            "GET",
+            &format!("/v1/executions/{}", existing.execution_id),
+            Some(&fixture.caller),
+            &[],
+        );
+        assert_eq!(read.status, 200, "{}", String::from_utf8_lossy(&read.body));
+        let read: Value = serde_json::from_slice(&read.body).unwrap();
+        assert_eq!(read["execution_id"], existing.execution_id.as_str());
     }
 
     fn megapixel_fixture() -> (Fixture, Value) {
@@ -2957,9 +2960,9 @@ mod tests {
 
         let pack = crate::provider::verified_packs::verified_packs()
             .into_iter()
-            .find(|pack| pack.workload_type() == "image_edit")
+            .find(|pack| pack.pack_id() == "bfl-flux-3-image-edit")
             .unwrap();
-        let secret = SecretReference::new("gongbu.google", "fixture").unwrap();
+        let secret = SecretReference::new("gongbu.flux", "fixture").unwrap();
         let targets: ProviderTargetConfig = serde_json::from_value(json!({
             "schema_version": 2,
             "provider_configs": pack.provider_configs(&secret),
@@ -2968,22 +2971,22 @@ mod tests {
         let pricing = PricingCatalog::from_json(
             &serde_json::to_vec(&json!({
                 "schema_version": 2,
-                "catalog_version": "gemini-edit-http-test",
+                "catalog_version": "flux-edit-http-test",
                 "rules": pack.pricing_rules(),
             }))
             .unwrap(),
         )
         .unwrap();
         let target_id = pack
-            .target_key(pack.model("gemini-3.1-flash-image").unwrap())
+            .target_key(pack.model("flux-3-image").unwrap())
             .public_id();
         let mut registry = ProviderRegistry::new();
         registry.register_pack(pack);
         registry.register_pack_engine(
-            crate::provider::pack::Archetype::SyncFixed,
+            crate::provider::pack::Archetype::AsyncPoll,
             |target, pack| {
                 Ok(Arc::new(
-                    crate::provider::pack_sync::SyncFixedEngine::from_target(
+                    crate::provider::pack_async::AsyncPollEngine::from_target(
                         target,
                         pack,
                         1 << 20,
@@ -3004,7 +3007,8 @@ mod tests {
             json!({
                 "schema_version": 2,
                 "spend_auth_token_id": token,
-                "input": {"prompt": "make it blue", "image_size": "1k", "input_images": [artifact_id]},
+                "input": {"prompt": "make it blue", "image_size": "1k", "aspect_ratio": "1:1",
+                          "input_images": [artifact_id]},
                 "input_schema_version": 1,
                 "target_id": target_id,
             })
@@ -3022,8 +3026,8 @@ mod tests {
             .get_execution(&execution(&created).execution_id)
             .unwrap();
         assert_eq!(stored.workload_type, "image_edit");
-        // 6.7¢ for the output image plus 0.056¢ for the one input image.
-        assert_eq!(stored.authorized_units, 67_560);
+        // 4.8¢ for the one 1k output image.
+        assert_eq!(stored.authorized_units, 48_000);
         assert_eq!(
             stored.execution_scope.unwrap().capability.id,
             "capability:image:edit"
@@ -3104,7 +3108,7 @@ mod tests {
             "schema_version": 2,
             "spend_auth_token_id": "edit-two-mixed",
             "input": {"prompt": "put the mascot in the draft", "image_size": "1k",
-                      "input_images": [token, artifact.artifact_id]},
+                      "aspect_ratio": "1:1", "input_images": [token, artifact.artifact_id]},
             "input_schema_version": 1,
             "target_id": target_id,
         });
@@ -3121,7 +3125,7 @@ mod tests {
                 .get_execution(&execution(&created).execution_id)
                 .unwrap()
                 .authorized_units,
-            68_120
+            48_000
         );
         // A reference whose file changed no longer matches its pinned digest.
         std::fs::write(&mascot, b"changed").unwrap();

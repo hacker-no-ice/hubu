@@ -1510,7 +1510,11 @@ mod tests {
     }
 
     #[test]
-    fn verified_gemini_pack_runs_through_durable_workflow_artifacts_and_settlement() {
+    fn verified_gemini_pack_is_refused_before_claim_and_never_reaches_the_provider() {
+        // HUB-388: Gemini Interactions image cost cannot be bounded. Work
+        // queued for it before the block, valid or not, fails before the
+        // budget claim and sends no provider request, including after a
+        // worker restart.
         use crate::{
             artifact::{ArtifactLimits, LocalFsStorage},
             execution::{CreateExecutionParams, HubuTokenReference},
@@ -1522,12 +1526,9 @@ mod tests {
             },
             secrets::{ProviderSecret, SecretError, SecretReference},
         };
-        use base64::{engine::general_purpose::STANDARD, Engine};
-        use image::{DynamicImage, ImageFormat, RgbaImage};
         use serde_json::json;
         use std::{
             collections::BTreeMap,
-            io::Cursor,
             sync::atomic::{AtomicUsize, Ordering},
             time::Duration,
         };
@@ -1539,36 +1540,18 @@ mod tests {
                 Ok(crate::secrets::secret_for_test("fixture-secret"))
             }
         }
-        struct FixtureTransport(AtomicUsize, Vec<u8>);
+        struct FixtureTransport(AtomicUsize);
         impl SyncTransport for FixtureTransport {
             fn post_json(
                 &self,
-                endpoint: &reqwest::Url,
-                auth: (&str, &str),
+                _: &reqwest::Url,
+                _: (&str, &str),
                 _: &BTreeMap<String, String>,
-                body: &serde_json::Value,
+                _: &serde_json::Value,
                 _: Duration,
             ) -> Result<TransportResponse, TransportFailure> {
-                assert_eq!(
-                    endpoint.as_str(),
-                    "https://generativelanguage.googleapis.com/v1beta/interactions"
-                );
-                assert_eq!(auth, ("x-goog-api-key", "fixture-secret"));
-                assert_eq!(
-                    body,
-                    &json!({"model": "gemini-3.1-flash-lite-image",
-                        "input": [{"type": "text", "text": "draw a cat"}],
-                        "response_format": {"type": "image", "image_size": "1K"}})
-                );
                 self.0.fetch_add(1, Ordering::SeqCst);
-                Ok(TransportResponse {
-                    status: 200,
-                    headers: BTreeMap::from([(
-                        "x-goog-request-id".into(),
-                        "google-request-1".into(),
-                    )]),
-                    body: json!({"id":"interaction-1","status":"completed","steps":[{"type":"model_output","content":[{"type":"image","mime_type":"image/png","data":STANDARD.encode(&self.1)}]}],"usage":{"input_tokens":3,"output_tokens":7}}),
-                })
+                Err(TransportFailure::BeforeSend)
             }
             fn download(
                 &self,
@@ -1576,13 +1559,13 @@ mod tests {
                 _: &ArtifactDownloadPolicy,
                 _: InvocationDeadline,
             ) -> Result<Vec<u8>, ArtifactFetchError> {
-                unreachable!("Gemini images are inline")
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Err(ArtifactFetchError::Failed)
             }
         }
         #[derive(Default)]
         struct FixtureHubu {
             claims: AtomicUsize,
-            settlements: AtomicUsize,
         }
         impl HubuActivities for FixtureHubu {
             fn preflight(&self, _: &Execution) -> Result<(), WorkflowActivityError> {
@@ -1599,23 +1582,16 @@ mod tests {
                 &self,
                 _: &Execution,
                 _: &str,
-                units: i64,
+                _: i64,
             ) -> Result<String, WorkflowActivityError> {
-                // 3.36¢ for one 1k Flash-Lite image, exactly.
-                assert_eq!(units, 33_600);
-                self.settlements.fetch_add(1, Ordering::SeqCst);
-                Ok("hubu-settlement-1".into())
+                unreachable!("a refused execution never settles")
             }
             fn release(&self, _: &Execution) -> Result<(), WorkflowActivityError> {
-                unreachable!("happy path does not release")
+                unreachable!("an unclaimed execution has nothing to release")
             }
         }
 
-        let mut png = Vec::new();
-        DynamicImage::ImageRgba8(RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255])))
-            .write_to(&mut Cursor::new(&mut png), ImageFormat::Png)
-            .unwrap();
-        let calls = Arc::new(FixtureTransport(AtomicUsize::new(0), png.clone()));
+        let calls = Arc::new(FixtureTransport(AtomicUsize::new(0)));
         let pack = verified_packs()
             .into_iter()
             .find(|pack| pack.pack_id() == "google-gemini-developer-image")
@@ -1670,27 +1646,13 @@ mod tests {
             execution_scope: None,
             created_at: "now".into(),
         };
-        let mut mismatched = params.clone();
-        mismatched.operation_key = "gemini-digest-mismatch".into();
-        mismatched.provider_config_digest = format!("sha256:{}", "b".repeat(64));
         let execution = repository.create_execution(&params).unwrap();
-        let mismatched = repository.create_execution(&mismatched).unwrap();
-        let invalid = [
-            (
-                "gemini-invalid-prompt",
-                json!({"prompt":"   ","image_count":1,"image_size":"1k"}),
-            ),
-            (
-                "gemini-invalid-options",
-                json!({"prompt":"cat","image_count":1,"image_size":"1k","options":{"seed":1}}),
-            ),
-        ]
-        .map(|(operation_key, normalized_input)| {
+        let invalid = {
             let mut invalid = params.clone();
-            invalid.operation_key = operation_key.into();
-            invalid.normalized_input = normalized_input;
+            invalid.operation_key = "gemini-invalid-prompt".into();
+            invalid.normalized_input = json!({"prompt":"   ","image_count":1,"image_size":"1k"});
             repository.create_execution(&invalid).unwrap()
-        });
+        };
         let root = tempdir().unwrap();
         let artifact_service = ArtifactService::new(
             repository.clone(),
@@ -1710,391 +1672,41 @@ mod tests {
             )?))
         });
         let providers = ValidatedProviderCatalog::bind(targets, pricing, &registry).unwrap();
-        let runner = PersistedExecutionRunner::new(
-            repository.clone(),
-            hubu.clone(),
-            Arc::new(GenericProviderActivities::new(
+        let runner = || {
+            PersistedExecutionRunner::new(
                 repository.clone(),
-                providers,
-                Arc::new(FixtureSecrets),
-            )),
-            Arc::new(ArtifactServiceActivities::new(
-                artifact_service.clone(),
+                hubu.clone(),
+                Arc::new(GenericProviderActivities::new(
+                    repository.clone(),
+                    providers.clone(),
+                    Arc::new(FixtureSecrets),
+                )),
+                Arc::new(ArtifactServiceActivities::new(
+                    artifact_service.clone(),
+                    || "now".into(),
+                )),
                 || "now".into(),
-            )),
-            || "now".into(),
-        );
-        assert_eq!(
-            runner.run_execution(&execution.execution_id).unwrap(),
-            "succeeded"
-        );
-        assert_eq!(calls.0.load(Ordering::SeqCst), 1);
-        assert_eq!(hubu.claims.load(Ordering::SeqCst), 1);
-        assert_eq!(hubu.settlements.load(Ordering::SeqCst), 1);
-        let attempt = repository
-            .get_provider_attempt_for_execution(&execution.execution_id)
-            .unwrap();
-        assert_eq!(
-            attempt.provider_request_id.as_deref(),
-            Some("google-request-1")
-        );
-        assert_eq!(attempt.provider_operation_id, None);
-        let artifacts = artifact_service
-            .list_for_account(&execution.execution_id, "account")
-            .unwrap();
-        assert_eq!(artifacts.len(), 1);
-        assert_eq!(
-            artifact_service
-                .retrieve_for_account(&artifacts[0].artifact_id, "account")
-                .unwrap()
-                .bytes,
-            png
-        );
-        assert_eq!(
-            repository
-                .get_receipt_for_execution(&execution.execution_id)
-                .unwrap()
-                .settlement_units,
-            33_600
-        );
-        assert_eq!(
-            runner.run_execution(&mismatched.execution_id).unwrap(),
-            "failed"
-        );
-        assert_eq!(hubu.claims.load(Ordering::SeqCst), 1);
-        assert_eq!(calls.0.load(Ordering::SeqCst), 1);
-        for invalid in invalid {
+            )
+        };
+        for execution_id in [&execution.execution_id, &invalid.execution_id] {
+            assert_eq!(runner().run_execution(execution_id).unwrap(), "failed");
+            // A restarted worker replays the terminal state without sending.
+            assert_eq!(runner().run_execution(execution_id).unwrap(), "failed");
+            let stored = repository.get_execution(execution_id).unwrap();
             assert_eq!(
-                runner.run_execution(&invalid.execution_id).unwrap(),
-                "failed"
+                stored.failure_code.as_deref(),
+                Some(crate::provider::cost_containment::UNBOUNDED_COST_CODE)
             );
             assert!(repository
-                .get_provider_attempt_for_execution(&invalid.execution_id)
+                .get_provider_attempt_for_execution(execution_id)
                 .is_err());
         }
-        assert_eq!(hubu.claims.load(Ordering::SeqCst), 1);
-        assert_eq!(calls.0.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn a_draft_is_edited_by_artifact_id_and_both_settle_through_the_durable_workflow() {
-        use crate::{
-            artifact::{ArtifactLimits, LocalFsStorage},
-            execution::{CreateExecutionParams, HubuTokenReference},
-            provider::{
-                http_kernel::{ArtifactDownloadPolicy, InvocationDeadline},
-                pack::{Archetype, ArtifactFetchError, Pack},
-                pack_sync::{SyncFixedEngine, SyncTransport, TransportFailure, TransportResponse},
-                verified_packs::verified_packs,
-            },
-            secrets::{ProviderSecret, SecretError, SecretReference},
-        };
-        use base64::{engine::general_purpose::STANDARD, Engine};
-        use image::{DynamicImage, ImageFormat, RgbaImage};
-        use serde_json::json;
-        use std::{
-            collections::BTreeMap,
-            io::Cursor,
-            sync::{
-                atomic::{AtomicUsize, Ordering},
-                Mutex,
-            },
-            time::Duration,
-        };
-        use tempfile::tempdir;
-
-        fn png(rgba: [u8; 4]) -> Vec<u8> {
-            let mut png = Vec::new();
-            DynamicImage::ImageRgba8(RgbaImage::from_pixel(1, 1, image::Rgba(rgba)))
-                .write_to(&mut Cursor::new(&mut png), ImageFormat::Png)
-                .unwrap();
-            png
-        }
-        struct FixtureSecrets;
-        impl SecretProvider for FixtureSecrets {
-            fn resolve(&self, _: &SecretReference) -> Result<ProviderSecret, SecretError> {
-                Ok(crate::secrets::secret_for_test("fixture-secret"))
-            }
-        }
-        /// Returns the draft for a prompt alone, and the edit when the
-        /// request carries the draft's bytes as its input image.
-        struct FixtureTransport {
-            calls: AtomicUsize,
-            draft: Vec<u8>,
-            edited: Vec<u8>,
-        }
-        impl SyncTransport for FixtureTransport {
-            fn post_json(
-                &self,
-                _: &reqwest::Url,
-                _: (&str, &str),
-                _: &BTreeMap<String, String>,
-                body: &serde_json::Value,
-                _: Duration,
-            ) -> Result<TransportResponse, TransportFailure> {
-                let call = self.calls.fetch_add(1, Ordering::SeqCst);
-                let input = body["input"].as_array().unwrap();
-                let image = if input.len() == 1 {
-                    assert_eq!(input[0], json!({"type": "text", "text": "draw a cat"}));
-                    &self.draft
-                } else {
-                    assert_eq!(
-                        input,
-                        &[
-                            json!({"type": "text", "text": "make it blue"}),
-                            json!({"type": "image", "mime_type": "image/png",
-                                "data": STANDARD.encode(&self.draft)}),
-                        ]
-                    );
-                    &self.edited
-                };
-                Ok(TransportResponse {
-                    status: 200,
-                    headers: BTreeMap::new(),
-                    body: json!({"id":format!("interaction-{call}"),"status":"completed","steps":[{"type":"model_output","content":[{"type":"image","mime_type":"image/png","data":STANDARD.encode(image)}]}]}),
-                })
-            }
-            fn download(
-                &self,
-                _: &reqwest::Url,
-                _: &ArtifactDownloadPolicy,
-                _: InvocationDeadline,
-            ) -> Result<Vec<u8>, ArtifactFetchError> {
-                unreachable!("Gemini images are inline")
-            }
-        }
-        #[derive(Default)]
-        struct LedgerHubu {
-            claims: AtomicUsize,
-            settled: Mutex<Vec<i64>>,
-        }
-        impl HubuActivities for LedgerHubu {
-            fn preflight(&self, _: &Execution) -> Result<(), WorkflowActivityError> {
-                Ok(())
-            }
-            fn claim(&self, _: &Execution) -> Result<String, WorkflowActivityError> {
-                self.claims.fetch_add(1, Ordering::SeqCst);
-                Ok("claim".into())
-            }
-            fn validate_claim(&self, _: &Execution) -> Result<(), WorkflowActivityError> {
-                Ok(())
-            }
-            fn settle(
-                &self,
-                _: &Execution,
-                _: &str,
-                units: i64,
-            ) -> Result<String, WorkflowActivityError> {
-                let mut settled = self.settled.lock().unwrap();
-                settled.push(units);
-                Ok(format!("settlement-{}", settled.len()))
-            }
-            fn release(&self, _: &Execution) -> Result<(), WorkflowActivityError> {
-                Ok(())
-            }
-        }
-
-        let transport = Arc::new(FixtureTransport {
-            calls: AtomicUsize::new(0),
-            draft: png([1, 2, 3, 255]),
-            edited: png([0, 0, 255, 255]),
-        });
-        // The v1 packs: one revision per target.
-        let packs: Vec<Pack> = verified_packs()
-            .into_iter()
-            .filter(|pack| pack.provider() == "google" && !pack.has_size_presets())
-            .collect();
-        let secret = SecretReference::new("gongbu.google", "fixture").unwrap();
-        let targets: ProviderTargetConfig = serde_json::from_value(json!({
-            "schema_version": 2,
-            "provider_configs": packs
-                .iter()
-                .flat_map(|pack| pack.provider_configs(&secret))
-                .collect::<Vec<_>>(),
-        }))
-        .unwrap();
-        let pricing = PricingCatalog::from_json(
-            &serde_json::to_vec(&json!({
-                "schema_version": 2,
-                "catalog_version": "gemini-edit-test",
-                "rules": packs.iter().flat_map(Pack::pricing_rules).collect::<Vec<_>>(),
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        let repository = Repository::in_memory().unwrap();
-        let create = |workload: &str, account: &str, key: &str, input: serde_json::Value| {
-            let pack = packs
-                .iter()
-                .find(|pack| pack.workload_type() == workload)
-                .unwrap();
-            let model = pack.model("gemini-3.1-flash-image").unwrap();
-            let target = targets.resolve_active(&pack.target_key(model)).unwrap();
-            let request = pack.prepare(&model.model, &input).unwrap().request;
-            let snapshot = pricing
-                .snapshot_for_target(&target.target_key(), &request)
-                .unwrap();
-            repository
-                .create_execution(&CreateExecutionParams {
-                    account_id: account.into(),
-                    operation_key: key.into(),
-                    hubu_authorization_id: key.into(),
-                    hubu_claim_id: None,
-                    hubu_token_reference: HubuTokenReference::new(key).unwrap(),
-                    authorized_units: snapshot.estimated_units,
-                    authorization_currency: "USD".into(),
-                    normalized_input: input,
-                    input_hash: "hash".into(),
-                    input_schema_version: 1,
-                    target: target.target_key().canonical_name(),
-                    config_version: target.provider_config_version.clone(),
-                    workload_type: target.workload_type.clone(),
-                    provider: target.provider.clone(),
-                    adapter: target.adapter.clone(),
-                    model: target.model.clone(),
-                    provider_config_version: target.provider_config_version.clone(),
-                    provider_config_digest: target.digest().to_owned(),
-                    pricing_snapshot: serde_json::to_value(&snapshot).unwrap(),
-                    pricing_schema_version: i64::from(snapshot.schema_version),
-                    execution_scope: None,
-                    created_at: "now".into(),
-                })
-                .unwrap()
-        };
-        let root = tempdir().unwrap();
-        let artifact_service = ArtifactService::new(
-            repository.clone(),
-            LocalFsStorage::new(root.path()),
-            ArtifactLimits::default(),
-        );
-        let hubu = Arc::new(LedgerHubu::default());
-        // The operator's reference folder, holding the mascot.
-        let references = tempdir().unwrap();
-        let mascot = png([9, 9, 9, 255]);
-        std::fs::write(references.path().join("hubu mascot.png"), &mascot).unwrap();
-        let mut registry = ProviderRegistry::new();
-        for pack in &packs {
-            registry.register_pack(pack.clone());
-        }
-        let engine_transport = transport.clone();
-        registry.register_pack_engine(Archetype::SyncFixed, move |target, pack| {
-            Ok(Arc::new(SyncFixedEngine::new(
-                pack.clone(),
-                &target.model,
-                engine_transport.clone(),
-                ArtifactLimits::default().max_encoded_bytes,
-            )?))
-        });
-        let providers =
-            ValidatedProviderCatalog::bind(targets.clone(), pricing.clone(), &registry).unwrap();
-        let runner = PersistedExecutionRunner::new(
-            repository.clone(),
-            hubu.clone(),
-            Arc::new(
-                GenericProviderActivities::new(
-                    repository.clone(),
-                    providers,
-                    Arc::new(FixtureSecrets),
-                )
-                .with_input_artifacts(artifact_service.clone())
-                .with_reference_images(Some(
-                    crate::reference::ReferenceLibrary::open(
-                        references.path(),
-                        ArtifactLimits::default(),
-                    )
-                    .unwrap(),
-                )),
-            ),
-            Arc::new(ArtifactServiceActivities::new(
-                artifact_service.clone(),
-                || "now".into(),
-            )),
-            || "now".into(),
-        );
-
-        let draft = create(
-            "image_generation",
-            "account",
-            "draft",
-            json!({"prompt": "draw a cat", "image_size": "1k"}),
-        );
-        assert_eq!(
-            runner.run_execution(&draft.execution_id).unwrap(),
-            "succeeded"
-        );
-        let draft_artifact = artifact_service
-            .list_for_account(&draft.execution_id, "account")
+        assert_eq!(calls.0.load(Ordering::SeqCst), 0);
+        assert_eq!(hubu.claims.load(Ordering::SeqCst), 0);
+        assert!(artifact_service
+            .list_for_account(&execution.execution_id, "account")
             .unwrap()
-            .remove(0);
-
-        let edit_input = json!({
-            "prompt": "make it blue",
-            "image_size": "1k",
-            "input_images": [draft_artifact.artifact_id],
-        });
-        // Another account can't name this account's draft.
-        let foreign = create("image_edit", "intruder", "foreign-edit", edit_input.clone());
-        assert_eq!(
-            runner.run_execution(&foreign.execution_id).unwrap(),
-            "failed"
-        );
-        assert!(repository
-            .get_provider_attempt_for_execution(&foreign.execution_id)
-            .is_err());
-        assert_eq!(hubu.claims.load(Ordering::SeqCst), 1);
-
-        let edit = create("image_edit", "account", "edit", edit_input);
-        assert_eq!(
-            runner.run_execution(&edit.execution_id).unwrap(),
-            "succeeded"
-        );
-        assert_eq!(transport.calls.load(Ordering::SeqCst), 2);
-        let edited = artifact_service
-            .list_for_account(&edit.execution_id, "account")
-            .unwrap();
-        assert_eq!(
-            artifact_service
-                .retrieve_for_account(&edited[0].artifact_id, "account")
-                .unwrap()
-                .bytes,
-            transport.edited
-        );
-        // 6.7¢ for the draft; 6.7¢ plus 0.056¢ for the one input image.
-        assert_eq!(*hubu.settled.lock().unwrap(), [67_000, 67_560]);
-
-        // A reference image approved at one digest is never sent once its
-        // file changes: the edit releases before the provider is called.
-        let digest = format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(&mascot));
-        let changed = create(
-            "image_edit",
-            "account",
-            "changed-reference",
-            json!({
-                "prompt": "make it blue",
-                "image_size": "1k",
-                "input_images": [format!("reference:hubu mascot.png@sha256:{digest}")],
-            }),
-        );
-        std::fs::write(
-            references.path().join("hubu mascot.png"),
-            png([0, 0, 0, 255]),
-        )
-        .unwrap();
-        assert_eq!(
-            runner.run_execution(&changed.execution_id).unwrap(),
-            "failed"
-        );
-        assert_eq!(transport.calls.load(Ordering::SeqCst), 2);
-        assert_eq!(hubu.claims.load(Ordering::SeqCst), 2);
-        for (execution, units) in [(&draft, 67_000), (&edit, 67_560)] {
-            assert_eq!(
-                repository
-                    .get_receipt_for_execution(&execution.execution_id)
-                    .unwrap()
-                    .settlement_units,
-                units
-            );
-        }
+            .is_empty());
     }
 
     #[test]
