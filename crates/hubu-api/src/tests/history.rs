@@ -30,7 +30,6 @@ fn settle_precise(
         json!({"claim_id":claim.claim_id,"receipt":receipt}).to_string(),
         state,
         true,
-        None,
     )
     .unwrap()
 }
@@ -510,7 +509,6 @@ fn authorization_record_lookup_decodes_private_key_but_returns_only_public_ident
         json!({"claim_id":claim.claim_id}).to_string(),
         &state,
         false,
-        None,
     )
     .unwrap();
     let released = read(
@@ -637,7 +635,6 @@ fn authorization_record_uses_final_authorization_outcome_after_human_approval_or
             .to_string(),
         &state,
         true,
-        None,
     )
     .unwrap();
     assert_eq!(
@@ -845,7 +842,7 @@ fn two_providers_for_one_task_have_independent_receipts_and_postings() {
         let selector = scope_as_selector(scope);
         let auth=authorize_spend(json!({"operation_key":key,"account_id":agent.account_id,"amount": "1.00","execution_scope":selector,"reason":"compare image providers","task_id":"private-shared-task"}).to_string(),&state).unwrap();
         let claim = claim_executor_spend(json!({"spend_auth_token_id":auth.auth_token_id,"account_id":agent.account_id,"amount_cents":100,"execution_scope":scope}).to_string(),&state).unwrap();
-        finalize_executor_spend(json!({"claim_id":claim.claim_id,"receipt":precise_settlement_receipt_json((index+1) as i64,3)}).to_string(),&state,true,None).unwrap();
+        finalize_executor_spend(json!({"claim_id":claim.claim_id,"receipt":precise_settlement_receipt_json((index+1) as i64,3)}).to_string(),&state,true,).unwrap();
     }
     let output = read(
         &state,
@@ -1366,12 +1363,12 @@ fn quote_settlement_preserves_provenance_and_never_claims_provider_actual_cost()
     let mut receipt = precise_settlement_receipt_json(160, 4);
     receipt["cost_basis"] = json!("frozen_quote");
     let request = json!({"claim_id":claim.claim_id,"receipt":receipt}).to_string();
-    let settled = finalize_executor_spend(request.clone(), &state, true, None).unwrap();
+    let settled = finalize_executor_spend(request.clone(), &state, true).unwrap();
     assert_eq!(settled["receipt"]["cost_basis"], "frozen_quote");
     assert_eq!(settled["receipt"]["settlement_amount"]["amount"], 160);
     assert!(settled["receipt"]["provider_actual_cost"].is_null());
     assert_eq!(
-        finalize_executor_spend(request, &state, true, None).unwrap(),
+        finalize_executor_spend(request, &state, true,).unwrap(),
         settled
     );
     let shown = read(
@@ -1394,7 +1391,6 @@ fn quote_settlement_preserves_provenance_and_never_claims_provider_actual_cost()
         json!({"claim_id":claim.claim_id,"receipt":receipt}).to_string(),
         &state,
         true,
-        None
     )
     .is_err());
     std::fs::remove_file(path).ok();
@@ -1436,7 +1432,7 @@ fn spend_summary_totals_latest_corrections_by_merchant_agent_and_day() {
         let selector = scope_as_selector(scope);
         let auth=authorize_spend(json!({"operation_key":format!("summary-{index}"),"account_id":agent.account_id,"amount": "1.00","execution_scope":selector,"reason":"summary"}).to_string(),&state).unwrap();
         let claim = claim_executor_spend(json!({"spend_auth_token_id":auth.auth_token_id,"account_id":agent.account_id,"amount_cents":100,"execution_scope":scope}).to_string(),&state).unwrap();
-        finalize_executor_spend(json!({"claim_id":claim.claim_id,"receipt":precise_settlement_receipt_json((index+1) as i64,3)}).to_string(),&state,true,None).unwrap();
+        finalize_executor_spend(json!({"claim_id":claim.claim_id,"receipt":precise_settlement_receipt_json((index+1) as i64,3)}).to_string(),&state,true,).unwrap();
     }
     // Correct the first merchant's USD 0.001 twice; only the latest total counts.
     let first_merchant = &catalog[0].billing_merchant.id;

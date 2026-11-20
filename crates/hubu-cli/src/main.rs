@@ -3273,23 +3273,18 @@ fn request_json_status(
         .auth_token()?
         .map(|token| format!("Authorization: Bearer {token}\r\n"))
         .unwrap_or_default();
-    let reconciliation_header = if include_reconciliation_capability {
-        let token = target.reconciliation_token()?.ok_or_else(|| {
-            anyhow!(
-                "human reconciliation requires {RECONCILIATION_TOKEN_ENV} or {RECONCILIATION_TOKEN_FILE_ENV}"
-            )
-        })?;
-        format!("{RECONCILIATION_CAPABILITY_HEADER}: {token}\r\n")
-    } else {
-        String::new()
-    };
-    let approval_header = if include_approval_capability {
-        let token = target.approval_token()?.ok_or_else(|| {
-            anyhow!("human approval requires {APPROVAL_TOKEN_ENV} or {APPROVAL_TOKEN_FILE_ENV}")
-        })?;
-        format!("{APPROVAL_CAPABILITY_HEADER}: {token}\r\n")
-    } else {
-        String::new()
+    // v0.3.0: hubu-server ignores the retired approval and reconciliation
+    // capabilities and asks for the owner's presence instead. The CLI still
+    // sends a capability it can read, for older servers, and no longer fails
+    // when the file is gone. HUB-349 removes them from managed-profile use.
+    let reconciliation_header =
+        match include_reconciliation_capability.then(|| target.reconciliation_token()) {
+            Some(Ok(Some(token))) => format!("{RECONCILIATION_CAPABILITY_HEADER}: {token}\r\n"),
+            _ => String::new(),
+        };
+    let approval_header = match include_approval_capability.then(|| target.approval_token()) {
+        Some(Ok(Some(token))) => format!("{APPROVAL_CAPABILITY_HEADER}: {token}\r\n"),
+        _ => String::new(),
     };
     let mut stream = TcpStream::connect((host.as_str(), port))
         .with_context(|| format!("connect to Hubu server at {}", target.base_url))?;

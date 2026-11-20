@@ -1034,6 +1034,9 @@ impl TestWorkspace {
             .env("HUBU_AUTH_TOKEN", AUTH_TOKEN)
             .env("HUBU_RECONCILIATION_TOKEN", RECONCILIATION_TOKEN)
             .env("HUBU_LEASE_CONFIG", &lease_config)
+            // Owner actions need owner presence (v0.3.0); never raise the
+            // real Touch ID dialog from a test server.
+            .env("HUBU_OWNER_PRESENCE_PROVIDER", "fixture")
             .stdout(Stdio::from(log.try_clone().unwrap()))
             .stderr(Stdio::from(log))
             .spawn()

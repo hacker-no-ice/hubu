@@ -55,18 +55,9 @@ pub(super) fn stale_identity_warning(
     }
 }
 
-pub(super) fn rename_agent_http(
-    body: &str,
-    approval_capability: Option<&str>,
-    state: &ServerState,
-) -> HttpResponse {
-    if let Err(error) = authenticate_approval_capability(approval_capability, state) {
-        return rename_error(
-            403,
-            &format!("agent rename is human-owner only: {error}"),
-            "agent_rename_requires_human_owner",
-        );
-    }
+/// The route layer has already checked the owner credential and owner
+/// presence (v0.3.0) before this runs.
+pub(super) fn rename_agent_http(body: &str, state: &ServerState) -> HttpResponse {
     match rename_agent(body, state) {
         Ok(body) => HttpResponse { status: 200, body },
         Err(RenameFailure::Http(response)) => response,

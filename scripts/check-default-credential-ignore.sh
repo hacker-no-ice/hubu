@@ -61,7 +61,7 @@ run_default_server_check() {
   SERVER_PID=$!
 
   for _ in $(seq 1 100); do
-    if [[ -f "${auth_token_path}" && -f "${agent_token_path}" && -f "${approval_token_path}" && -f "${reconciliation_token_path}" ]]; then
+    if [[ -f "${auth_token_path}" && -f "${agent_token_path}" ]]; then
       break
     fi
     if ! kill -0 "${SERVER_PID}" 2>/dev/null; then
@@ -71,7 +71,16 @@ run_default_server_check() {
     sleep 0.05
   done
 
-  for credential in "${auth_token_path}" "${agent_token_path}" "${approval_token_path}" "${reconciliation_token_path}"; do
+  # v0.3.0 retired the approval and reconciliation capability files: owner
+  # actions need the owner's presence, so the server must not create them.
+  for retired in "${approval_token_path}" "${reconciliation_token_path}"; do
+    if [[ -e "${retired}" ]]; then
+      echo "hubu-server created the retired ${label} $(basename "${retired}")" >&2
+      exit 1
+    fi
+  done
+
+  for credential in "${auth_token_path}" "${agent_token_path}"; do
     if [[ ! -s "${credential}" ]]; then
       echo "hubu-server did not create a non-empty ${label} $(basename "${credential}")" >&2
       exit 1
@@ -83,7 +92,7 @@ run_default_server_check() {
   done
 
   if [[ -n "$(git -C "${CHECKOUT_DIR}" status --porcelain --untracked-files=all -- \
-    "${auth_token_path}" "${agent_token_path}" "${approval_token_path}" "${reconciliation_token_path}")" ]]; then
+    "${auth_token_path}" "${agent_token_path}")" ]]; then
     echo "a generated ${label} credential file is eligible for commit" >&2
     exit 1
   fi

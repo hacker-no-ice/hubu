@@ -640,7 +640,7 @@ fn governance_snapshot_keeps_financial_backlog_after_confirmed_reconciliation() 
     assert_eq!(first["summary"]["backlog"]["unresolved_reconciliations"], 1);
     assert_eq!(first["records"].as_array().unwrap().len(), 1);
     let token = encoded(first["summary"]["snapshot"]["token"].as_str().unwrap());
-    let resolved = finalize_executor_spend(json!({"claim_id":claim.claim_id,"provider_reference":"PRIVATE_PROVIDER_REFERENCE","evidence":"PRIVATE_RECONCILIATION_EVIDENCE"}).to_string(), &state, false, Some(TEST_RECONCILIATION_TOKEN)).unwrap();
+    let resolved = finalize_executor_spend(json!({"claim_id":claim.claim_id,"provider_reference":"PRIVATE_PROVIDER_REFERENCE","evidence":"PRIVATE_RECONCILIATION_EVIDENCE"}).to_string(), &state, false,).unwrap();
     assert_eq!(resolved["status"], "released");
     let frozen = get(
         &state,
@@ -807,13 +807,7 @@ fn reconciliation_detail_overlays_current_state_without_changing_history() {
             payload["receipt"] = precise_settlement_receipt_json(135121, 6);
         }
         // Neither the portal nor a capability holder can reconcile a live lease.
-        assert!(finalize_executor_spend(
-            payload.to_string(),
-            &state,
-            billed,
-            Some(TEST_RECONCILIATION_TOKEN)
-        )
-        .is_err());
+        assert!(finalize_executor_spend(payload.to_string(), &state, billed,).is_err());
         std::thread::sleep(std::time::Duration::from_millis(1_100));
         let observer =
             financial_observer::FinancialObserver::start(Arc::clone(&state.governance)).unwrap();
@@ -839,22 +833,27 @@ fn reconciliation_detail_overlays_current_state_without_changing_history() {
         assert_eq!(route(missing_bearer, &state).status, 401);
         let mut bad = payload.clone();
         bad["evidence"] = json!("");
-        assert!(finalize_executor_spend(
-            bad.to_string(),
-            &state,
-            billed,
-            Some(TEST_RECONCILIATION_TOKEN)
-        )
-        .is_err());
+        assert!(finalize_executor_spend(bad.to_string(), &state, billed,).is_err());
         assert_eq!(current(&state)["claim"]["reconciliation_required"], true);
-        assert!(finalize_executor_spend(payload.to_string(), &state, billed, None).is_err());
-        let resolved = finalize_executor_spend(
-            payload.to_string(),
-            &state,
-            billed,
-            Some(TEST_RECONCILIATION_TOKEN),
-        )
-        .unwrap();
+        let mut no_window = authenticated_json_request(
+            if billed {
+                "/spend/executor/settle"
+            } else {
+                "/spend/executor/release"
+            },
+            payload.clone(),
+        );
+        no_window.headers.insert(
+            owner_presence::NO_PROMPT_HEADER.to_string(),
+            "1".to_string(),
+        );
+        let refused = route(no_window, &state);
+        assert_eq!(refused.status, 403, "{}", refused.body);
+        assert_eq!(
+            refused.body["error_code"],
+            OWNER_PRESENCE_REQUIRED_ERROR_CODE
+        );
+        let resolved = finalize_executor_spend(payload.to_string(), &state, billed).unwrap();
         let detail = current(&state);
         assert_eq!(detail["claim"]["reconciliation_required"], false);
         assert_eq!(
@@ -876,21 +875,9 @@ fn reconciliation_detail_overlays_current_state_without_changing_history() {
         }
         // An identical retry cannot double-settle/release; a conflicting stale
         // submission cannot change the accepted resolution or balances.
-        let replay = finalize_executor_spend(
-            payload.to_string(),
-            &state,
-            billed,
-            Some(TEST_RECONCILIATION_TOKEN),
-        )
-        .unwrap();
+        let replay = finalize_executor_spend(payload.to_string(), &state, billed).unwrap();
         assert_eq!(replay, resolved);
-        assert!(finalize_executor_spend(
-            payload.to_string(),
-            &state,
-            !billed,
-            Some(TEST_RECONCILIATION_TOKEN)
-        )
-        .is_err());
+        assert!(finalize_executor_spend(payload.to_string(), &state, !billed,).is_err());
         assert_eq!(current(&state), detail);
         assert!(list_executor_claims_requiring_reconciliation(&state)
             .unwrap()

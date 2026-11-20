@@ -2,6 +2,9 @@ mod agent_identity;
 mod financial_observer;
 mod governance;
 mod history;
+mod owner_presence;
+mod owner_routes;
+use owner_routes::{owner_presence_records, route};
 use std::{
     collections::{BTreeMap, HashMap},
     env,
@@ -98,15 +101,16 @@ const AGENT_TOKEN_FILE_ENV: &str = "HUBU_AGENT_TOKEN_FILE";
 const DEFAULT_AGENT_TOKEN_FILE: &str = "hubu.agent-token";
 const AGENT_TOKEN_PREFIX: &str = "hubu_agent_";
 const OWNER_AUTHORITY_REQUIRED_ERROR_CODE: &str = "owner_authority_required";
-const APPROVAL_TOKEN_ENV: &str = "HUBU_APPROVAL_TOKEN";
-const APPROVAL_TOKEN_FILE_ENV: &str = "HUBU_APPROVAL_TOKEN_FILE";
-const DEFAULT_APPROVAL_TOKEN_FILE: &str = "hubu.approval-token";
+const OWNER_PRESENCE_REQUIRED_ERROR_CODE: &str = "owner_presence_required";
+const APPROVAL_NOT_PENDING_ERROR_CODE: &str = "approval_not_pending";
+const OWNER_PRESENCE_GUIDANCE: &str = "each owner action needs the owner credential and the owner's confirmation on the Mac (Touch ID): hubu-server raises one dialog naming that action and holds the request until the owner answers; there is no owner window; send X-Hubu-No-Prompt: 1 to get owner_presence_required instead of a dialog";
+/// Retired in v0.3.0. Clients may still send it; the server ignores it.
+#[cfg(test)]
 const APPROVAL_CAPABILITY_HEADER: &str = "x-hubu-approval-capability";
 const SPEND_AUTH_TOKEN_EXPIRED_ERROR_CODE: &str = "spend_auth_token_expired";
 const BUDGET_UPDATE_SOURCE: &str = "hubu-api:update-budget-limit";
-const RECONCILIATION_TOKEN_ENV: &str = "HUBU_RECONCILIATION_TOKEN";
-const RECONCILIATION_TOKEN_FILE_ENV: &str = "HUBU_RECONCILIATION_TOKEN_FILE";
-const DEFAULT_RECONCILIATION_TOKEN_FILE: &str = "hubu.reconciliation-token";
+/// Retired in v0.3.0. Clients may still send it; the server ignores it.
+#[cfg(test)]
 const RECONCILIATION_CAPABILITY_HEADER: &str = "x-hubu-reconciliation-capability";
 const LEASE_CONFIG_ENV: &str = "HUBU_LEASE_CONFIG";
 const HTTP_READ_TIMEOUT: StdDuration = StdDuration::from_secs(5);
@@ -156,16 +160,32 @@ pub fn run_server(bind_addr: &str) -> Result<()> {
             "url": format!("http://{bind_addr}"),
         }),
     );
+    let state = Arc::new(state);
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                if let Err(error) = handle_connection(stream, &state) {
+                // One thread per connection, so an owner presence dialog that
+                // holds its request never blocks other clients. Handlers still
+                // run one at a time under `ServerState::dispatch`.
+                let state = Arc::clone(&state);
+                let spawned = std::thread::Builder::new()
+                    .name("hubu-http".to_string())
+                    .spawn(move || {
+                        if let Err(error) = handle_connection(stream, &state) {
+                            log_event(
+                                "error",
+                                "request_error",
+                                json!({
+                                    "error": error.to_string(),
+                                }),
+                            );
+                        }
+                    });
+                if let Err(error) = spawned {
                     log_event(
                         "error",
-                        "request_error",
-                        json!({
-                            "error": error.to_string(),
-                        }),
+                        "connection_thread_error",
+                        json!({ "error": error.to_string() }),
                     );
                 }
             }
@@ -211,6 +231,11 @@ struct ServerState {
     payment_attempts: Mutex<SqlitePaymentAttemptRepository>,
     payments: Mutex<LocalPaymentManager>,
     lease_config: LeaseConfig,
+    /// Owner presence: provider, dialog state and prompt limits (v0.3.0).
+    presence: owner_presence::OwnerPresence,
+    /// Serializes request handling. Owner prompts run outside it so a dialog
+    /// waiting for the owner never blocks other requests.
+    dispatch: Mutex<()>,
 }
 
 impl ServerState {
@@ -246,11 +271,23 @@ impl ServerState {
             json!({
                 "source": auth.source(),
                 "agent_source": auth.agent_source(),
-                "approval_source": auth.approval_source(),
-                "reconciliation_source": auth.reconciliation_source(),
                 "owner_user_id": default_user.id.to_string(),
                 "owner_user_pub_id": default_user.pub_id,
             }),
+        );
+        let presence = owner_presence::OwnerPresence::new(default_presence_provider(&path)?);
+        // The fixture prompts nobody, so scripted runs skip the rate limit
+        // unless a proof kit asks for it. Tests set it per test.
+        if cfg!(test)
+            || (presence.provider_name() == "fixture"
+                && env::var(owner_presence::FIXTURE_RATE_LIMIT_ENV).as_deref() != Ok("on"))
+        {
+            presence.set_rate_limit(None);
+        }
+        log_event(
+            "info",
+            "owner_presence_configured",
+            json!({ "provider": presence.provider_name() }),
         );
         let mut governance =
             SqliteGovernanceRepository::open(&path).context("initialize governance store")?;
@@ -336,6 +373,8 @@ impl ServerState {
             payment_attempts: Mutex::new(payment_attempts),
             payments: Mutex::new(payments),
             lease_config,
+            presence,
+            dispatch: Mutex::new(()),
         };
         log_event(
             "info",
@@ -386,15 +425,22 @@ fn parse_lease_config(yaml: &str, path: &str) -> Result<LeaseConfig> {
 /// short-lived capabilities and a durable human approval authority so possession
 /// of this local transport token alone is not enough to create budgets, change
 /// policies, or settle money.
+/// Tests answer every prompt with the fixture provider unless a test installs
+/// another one; servers pick the provider from the environment.
+fn default_presence_provider(
+    #[cfg_attr(test, allow(unused_variables))] path: &Path,
+) -> Result<Arc<dyn owner_presence::PresenceProvider>> {
+    #[cfg(test)]
+    return Ok(Arc::new(owner_presence::FixtureProvider::parse("confirm")?));
+    #[cfg(not(test))]
+    owner_presence::provider_from_env(path)
+}
+
 struct LocalAuth {
     token_hash: String,
     token_source: String,
     agent_token_hash: String,
     agent_token_source: String,
-    approval_token_hash: String,
-    approval_token_source: String,
-    reconciliation_token_hash: String,
-    reconciliation_token_source: String,
     owner_user_id: Mutex<UserId>,
 }
 
@@ -402,51 +448,12 @@ impl LocalAuth {
     fn new(owner_user_id: UserId) -> Result<Self> {
         let token = load_local_auth_token()?;
         let agent_token = load_local_agent_token()?;
-        let approval_token = load_local_approval_token()?;
-        let reconciliation_token = load_local_reconciliation_token()?;
-        for (other, message) in [
-            (
-                &token.value,
-                "Hubu agent credential must be distinct from the owner credential",
-            ),
-            (
-                &approval_token.value,
-                "Hubu agent credential must be distinct from the approval capability",
-            ),
-            (
-                &reconciliation_token.value,
-                "Hubu agent credential must be distinct from the reconciliation capability",
-            ),
-        ] {
-            if constant_time_eq(
-                hash_token(&agent_token.value).as_bytes(),
-                hash_token(other).as_bytes(),
-            ) {
-                return Err(anyhow!(message));
-            }
-        }
         if constant_time_eq(
+            hash_token(&agent_token.value).as_bytes(),
             hash_token(&token.value).as_bytes(),
-            hash_token(&approval_token.value).as_bytes(),
         ) {
             return Err(anyhow!(
-                "Hubu approval capability must be distinct from the API bearer token"
-            ));
-        }
-        if constant_time_eq(
-            hash_token(&token.value).as_bytes(),
-            hash_token(&reconciliation_token.value).as_bytes(),
-        ) {
-            return Err(anyhow!(
-                "Hubu reconciliation capability must be distinct from the API bearer token"
-            ));
-        }
-        if constant_time_eq(
-            hash_token(&approval_token.value).as_bytes(),
-            hash_token(&reconciliation_token.value).as_bytes(),
-        ) {
-            return Err(anyhow!(
-                "Hubu approval and reconciliation capabilities must be distinct"
+                "Hubu agent credential must be distinct from the owner credential"
             ));
         }
         Ok(Self {
@@ -454,10 +461,6 @@ impl LocalAuth {
             token_source: token.source,
             agent_token_hash: hash_token(&agent_token.value),
             agent_token_source: agent_token.source,
-            approval_token_hash: hash_token(&approval_token.value),
-            approval_token_source: approval_token.source,
-            reconciliation_token_hash: hash_token(&reconciliation_token.value),
-            reconciliation_token_source: reconciliation_token.source,
             owner_user_id: Mutex::new(owner_user_id),
         })
     }
@@ -481,28 +484,6 @@ impl LocalAuth {
 
     fn agent_source(&self) -> &str {
         &self.agent_token_source
-    }
-
-    fn verifies_approval_capability(&self, token: &str) -> bool {
-        constant_time_eq(
-            hash_token(token).as_bytes(),
-            self.approval_token_hash.as_bytes(),
-        )
-    }
-
-    fn approval_source(&self) -> &str {
-        &self.approval_token_source
-    }
-
-    fn verifies_reconciliation_capability(&self, token: &str) -> bool {
-        constant_time_eq(
-            hash_token(token).as_bytes(),
-            self.reconciliation_token_hash.as_bytes(),
-        )
-    }
-
-    fn reconciliation_source(&self) -> &str {
-        &self.reconciliation_token_source
     }
 
     fn owner_user_id(&self) -> Result<UserId> {
@@ -648,128 +629,6 @@ fn load_local_agent_token() -> Result<LoadedLocalAuthToken> {
     }
 }
 
-fn load_local_reconciliation_token() -> Result<LoadedLocalAuthToken> {
-    #[cfg(test)]
-    if env::var(RECONCILIATION_TOKEN_ENV).is_err()
-        && env::var(RECONCILIATION_TOKEN_FILE_ENV).is_err()
-    {
-        return Ok(LoadedLocalAuthToken {
-            value: TEST_RECONCILIATION_TOKEN.to_string(),
-            source: "test".to_string(),
-        });
-    }
-
-    if let Ok(token) = env::var(RECONCILIATION_TOKEN_ENV) {
-        let token = token.trim().to_string();
-        if token.is_empty() {
-            return Err(anyhow!("{RECONCILIATION_TOKEN_ENV} cannot be empty"));
-        }
-        return Ok(LoadedLocalAuthToken {
-            value: token,
-            source: RECONCILIATION_TOKEN_ENV.to_string(),
-        });
-    }
-
-    let path = reconciliation_token_file_path();
-    let file_generated = credential_file_is_generated(
-        RECONCILIATION_TOKEN_FILE_ENV,
-        launch_config::RECONCILIATION_TOKEN_FILE_GENERATED_ENV,
-    );
-    match read_token_file(&path) {
-        Ok(contents) => {
-            let token = contents.trim().to_string();
-            if token.is_empty() {
-                return Err(anyhow!(
-                    "Hubu reconciliation token file `{}` is empty",
-                    path.display()
-                ));
-            }
-            if file_generated {
-                validate_generated_file_token(&token, "hubu_reconcile_", &path)?;
-            }
-            Ok(LoadedLocalAuthToken {
-                value: token,
-                source: path.display().to_string(),
-            })
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            if !file_generated {
-                return Err(anyhow!(
-                    "Hubu reconciliation token file `{}` is externally supplied and does not exist",
-                    path.display()
-                ));
-            }
-            let token = create_token_file(&path, "hubu_reconcile_", file_generated)?;
-            Ok(LoadedLocalAuthToken {
-                value: token,
-                source: path.display().to_string(),
-            })
-        }
-        Err(error) => Err(error)
-            .with_context(|| format!("read Hubu reconciliation token file `{}`", path.display())),
-    }
-}
-
-fn load_local_approval_token() -> Result<LoadedLocalAuthToken> {
-    #[cfg(test)]
-    if env::var(APPROVAL_TOKEN_ENV).is_err() && env::var(APPROVAL_TOKEN_FILE_ENV).is_err() {
-        return Ok(LoadedLocalAuthToken {
-            value: TEST_APPROVAL_TOKEN.to_string(),
-            source: "test".to_string(),
-        });
-    }
-
-    if let Ok(token) = env::var(APPROVAL_TOKEN_ENV) {
-        let token = token.trim().to_string();
-        if token.is_empty() {
-            return Err(anyhow!("{APPROVAL_TOKEN_ENV} cannot be empty"));
-        }
-        return Ok(LoadedLocalAuthToken {
-            value: token,
-            source: APPROVAL_TOKEN_ENV.to_string(),
-        });
-    }
-
-    let path = approval_token_file_path();
-    let file_generated = credential_file_is_generated(
-        APPROVAL_TOKEN_FILE_ENV,
-        launch_config::APPROVAL_TOKEN_FILE_GENERATED_ENV,
-    );
-    match read_token_file(&path) {
-        Ok(contents) => {
-            let token = contents.trim().to_string();
-            if token.is_empty() {
-                return Err(anyhow!(
-                    "Hubu approval token file `{}` is empty",
-                    path.display()
-                ));
-            }
-            if file_generated {
-                validate_generated_file_token(&token, "hubu_approve_", &path)?;
-            }
-            Ok(LoadedLocalAuthToken {
-                value: token,
-                source: path.display().to_string(),
-            })
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            if !file_generated {
-                return Err(anyhow!(
-                    "Hubu approval token file `{}` is externally supplied and does not exist",
-                    path.display()
-                ));
-            }
-            let token = create_token_file(&path, "hubu_approve_", file_generated)?;
-            Ok(LoadedLocalAuthToken {
-                value: token,
-                source: path.display().to_string(),
-            })
-        }
-        Err(error) => Err(error)
-            .with_context(|| format!("read Hubu approval token file `{}`", path.display())),
-    }
-}
-
 fn auth_token_file_path() -> PathBuf {
     env::var(AUTH_TOKEN_FILE_ENV)
         .map(PathBuf::from)
@@ -791,18 +650,6 @@ fn agent_token_file_path() -> PathBuf {
             .join(DEFAULT_AGENT_TOKEN_FILE),
         Err(_) => PathBuf::from(DEFAULT_AGENT_TOKEN_FILE),
     }
-}
-
-fn reconciliation_token_file_path() -> PathBuf {
-    env::var(RECONCILIATION_TOKEN_FILE_ENV)
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(DEFAULT_RECONCILIATION_TOKEN_FILE))
-}
-
-fn approval_token_file_path() -> PathBuf {
-    env::var(APPROVAL_TOKEN_FILE_ENV)
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(DEFAULT_APPROVAL_TOKEN_FILE))
 }
 
 fn credential_file_is_generated(path_env: &str, generated_env: &str) -> bool {
@@ -2049,51 +1896,21 @@ fn declared_content_length(head: &str) -> Result<usize> {
     Ok(content_length.unwrap_or(0))
 }
 
-fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
-    if !is_public_route(&request) {
-        let class = match authenticate_request(&request, state) {
-            Ok(class) => class,
-            Err(error) => {
-                log_event(
-                    "warn",
-                    "http_request_unauthorized",
-                    json!({
-                        "method": request.method,
-                        "path": request.path,
-                        "error": error.to_string(),
-                    }),
-                );
-                return HttpResponse {
-                    status: 401,
-                    body: json!({ "error": error.to_string() }),
-                };
-            }
-        };
-        let required = route_access(&request.method, &request.path);
-        if !required.admits(class) {
-            log_event(
-                "warn",
-                "http_request_forbidden",
-                json!({
-                    "method": request.method,
-                    "path": request.path,
-                    "credential_class": class.as_str(),
-                    "required": required.as_str(),
-                    "error_code": OWNER_AUTHORITY_REQUIRED_ERROR_CODE,
-                }),
-            );
-            return owner_authority_required_response(&request);
-        }
-    }
+/// Runs one request's handler under the dispatch lock.
+fn dispatch_route(request: HttpRequest, state: &ServerState) -> HttpResponse {
+    let _dispatch = lock_dispatch(state);
+    dispatch_route_locked(request, state)
+}
 
-    let reconciliation_capability = request
-        .headers
-        .get(RECONCILIATION_CAPABILITY_HEADER)
-        .map(String::as_str);
-    let approval_capability = request
-        .headers
-        .get(APPROVAL_CAPABILITY_HEADER)
-        .map(String::as_str);
+fn lock_dispatch(state: &ServerState) -> std::sync::MutexGuard<'_, ()> {
+    match state.dispatch.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+/// Runs one request's handler. The caller holds the dispatch lock.
+fn dispatch_route_locked(request: HttpRequest, state: &ServerState) -> HttpResponse {
     let request_now = Utc::now();
     let budget_versions_public_id = budget_versions_public_id(&request.path).map(str::to_string);
     let result = match (request.method.as_str(), request.path.as_str()) {
@@ -2118,7 +1935,7 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
         }
         ("POST", "/agents/register") => register_agent(request.body, state).map(to_json),
         ("POST", agent_identity::AGENT_RENAME_ROUTE) => {
-            return agent_identity::rename_agent_http(&request.body, approval_capability, state);
+            return agent_identity::rename_agent_http(&request.body, state);
         }
         ("GET", agent_identity::AGENT_IDENTITY_HISTORY_ROUTE) => {
             agent_identity::agent_identity_history(&request, state)
@@ -2166,10 +1983,10 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
         )
         .map(to_json),
         ("POST", "/spend/approval/resolve") => {
-            authenticate_approval_capability(approval_capability, state).and_then(|()| {
-                resolve_spend_approval_at(request.body, state, request_now).map(to_json)
-            })
+            resolve_spend_approval_at(request.body, state, request_now).map(to_json)
         }
+        ("GET", "/owner/presence") => Ok(state.presence.status()),
+        ("GET", "/governance/owner-presence") => owner_presence_records(&request, state),
         ("GET", "/spend/executor/guidance") | ("GET", "/.well-known/hubu-spend-executor.json") => {
             Ok(spend_executor_guidance(state))
         }
@@ -2188,12 +2005,8 @@ fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
         ("GET", "/spend/executor/reconciliation") => {
             list_executor_claims_requiring_reconciliation(state).map(to_json)
         }
-        ("POST", "/spend/executor/settle") => {
-            finalize_executor_spend(request.body, state, true, reconciliation_capability)
-        }
-        ("POST", "/spend/executor/release") => {
-            finalize_executor_spend(request.body, state, false, reconciliation_capability)
-        }
+        ("POST", "/spend/executor/settle") => finalize_executor_spend(request.body, state, true),
+        ("POST", "/spend/executor/release") => finalize_executor_spend(request.body, state, false),
         ("POST", "/spend") => spend_at(request.body, state, request_now).map(to_json),
         ("GET", "/ledger") => list_ledger(state).map(to_json),
         ("GET", "/watch") => history::watch(&request, state),
@@ -2488,13 +2301,17 @@ impl CredentialClass {
     }
 }
 
-/// The credential class a protected route requires.
+/// The credential class a protected route requires (v0.3.0 spec, section 4).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RouteAccess {
-    /// Owner-only. This is the default for any route without a declaration.
-    Owner,
     /// The agent allowlist: reachable by the agent credential and the owner.
     Agent,
+    /// Owner bearer only: owner reads and tightening writes. Needs no owner
+    /// window and never prompts.
+    OwnerBearer,
+    /// Owner bearer plus the owner's confirmation of this action. The default for any
+    /// route without a declaration.
+    OwnerAction,
     /// Executor routes keep the shared owner bearer in v0.3.0 and move to a
     /// signed, executor-scoped credential in v0.3.2.
     Executor,
@@ -2505,29 +2322,37 @@ impl RouteAccess {
         match (self, class) {
             (_, CredentialClass::Owner) => true,
             (Self::Agent, CredentialClass::Agent) => true,
-            (Self::Owner | Self::Executor, CredentialClass::Agent) => false,
+            (Self::OwnerBearer | Self::OwnerAction | Self::Executor, CredentialClass::Agent) => {
+                false
+            }
         }
     }
 
     fn as_str(self) -> &'static str {
         match self {
-            Self::Owner => "owner",
             Self::Agent => "agent",
+            Self::OwnerBearer => "owner_bearer",
+            Self::OwnerAction => "owner_action",
             Self::Executor => "executor",
         }
     }
 }
 
+const OWNER_PRESENCE_RECORDS_ROUTE: &str = "/governance/owner-presence";
+
 /// Route access declarations, one per protected route in [`route`]. A route
-/// missing from this table is owner-only (default deny for agents); the
+/// missing from this table is an owner action (the strictest class); the
 /// `every_route_declares_its_credential_class` test fails until a new route is
-/// declared here.
+/// declared here. Two routes are refined by their body in
+/// [`effective_route_access`]: an approval `deny` is tightening, and settle or
+/// release with an executor body stays on the executor class.
 const ROUTE_ACCESS: &[(&str, &str, RouteAccess)] = &[
     // Agent allowlist (v0.3.0).
     ("POST", "/spend/authorize", RouteAccess::Agent),
     ("POST", "/spend", RouteAccess::Agent),
     ("POST", "/spend/void", RouteAccess::Agent),
     ("GET", "/spend/approval", RouteAccess::Agent),
+    ("POST", "/spend/approval/prompt", RouteAccess::Agent),
     ("GET", "/budgets", RouteAccess::Agent),
     ("GET", "/ledger", RouteAccess::Agent),
     ("GET", "/ledger/transactions", RouteAccess::Agent),
@@ -2541,35 +2366,61 @@ const ROUTE_ACCESS: &[(&str, &str, RouteAccess)] = &[
     ("GET", "/policies/show", RouteAccess::Agent),
     // A new agent stays pending until the owner confirms (enforced in v0.3.1).
     ("POST", "/agents/register", RouteAccess::Agent),
-    // Owner-only.
-    ("GET", "/users", RouteAccess::Owner),
-    ("POST", "/init", RouteAccess::Owner),
-    ("POST", "/user/spending-target", RouteAccess::Owner),
-    ("GET", "/user/spending-target", RouteAccess::Owner),
-    ("POST", "/user/spending-target/revoke", RouteAccess::Owner),
-    (
-        "POST",
-        agent_identity::AGENT_RENAME_ROUTE,
-        RouteAccess::Owner,
-    ),
+    ("GET", "/owner/presence", RouteAccess::Agent),
+    // Owner reads.
+    ("GET", "/users", RouteAccess::OwnerBearer),
+    ("GET", "/user/spending-target", RouteAccess::OwnerBearer),
     (
         "GET",
         agent_identity::AGENT_IDENTITY_HISTORY_ROUTE,
-        RouteAccess::Owner,
+        RouteAccess::OwnerBearer,
     ),
-    ("GET", "/policies/export", RouteAccess::Owner),
-    ("GET", "/policies/history", RouteAccess::Owner),
-    ("GET", "/policies/diff", RouteAccess::Owner),
-    ("POST", "/policies", RouteAccess::Owner),
-    ("POST", "/budgets", RouteAccess::Owner),
-    ("POST", "/budgets/revoke", RouteAccess::Owner),
-    ("POST", "/budgets/{budget_id}/versions", RouteAccess::Owner),
-    ("GET", "/budgets/{budget_id}/versions", RouteAccess::Owner),
-    ("POST", "/spend/approval/resolve", RouteAccess::Owner),
-    ("GET", "/governance/summary", RouteAccess::Owner),
-    ("GET", "/governance/records", RouteAccess::Owner),
-    ("GET", "/governance/records/{record_id}", RouteAccess::Owner),
-    // Executor routes keep the shared owner bearer until v0.3.2.
+    ("GET", "/policies/export", RouteAccess::OwnerBearer),
+    ("GET", "/policies/history", RouteAccess::OwnerBearer),
+    ("GET", "/policies/diff", RouteAccess::OwnerBearer),
+    (
+        "GET",
+        "/budgets/{budget_id}/versions",
+        RouteAccess::OwnerBearer,
+    ),
+    ("GET", "/governance/summary", RouteAccess::OwnerBearer),
+    ("GET", "/governance/records", RouteAccess::OwnerBearer),
+    (
+        "GET",
+        "/governance/records/{record_id}",
+        RouteAccess::OwnerBearer,
+    ),
+    (
+        "GET",
+        OWNER_PRESENCE_RECORDS_ROUTE,
+        RouteAccess::OwnerBearer,
+    ),
+    // Tightening writes: they only remove authority.
+    ("POST", "/budgets/revoke", RouteAccess::OwnerBearer),
+    (
+        "POST",
+        "/user/spending-target/revoke",
+        RouteAccess::OwnerBearer,
+    ),
+    // Owner actions.
+    ("POST", "/init", RouteAccess::OwnerAction),
+    ("POST", "/user/spending-target", RouteAccess::OwnerAction),
+    (
+        "POST",
+        agent_identity::AGENT_RENAME_ROUTE,
+        RouteAccess::OwnerAction,
+    ),
+    ("POST", "/policies", RouteAccess::OwnerAction),
+    ("POST", "/budgets", RouteAccess::OwnerAction),
+    (
+        "POST",
+        "/budgets/{budget_id}/versions",
+        RouteAccess::OwnerAction,
+    ),
+    // `decision: deny` is lowered to OwnerBearer by its body.
+    ("POST", "/spend/approval/resolve", RouteAccess::OwnerAction),
+    // Executor routes keep the shared owner bearer until v0.3.2. Settle and
+    // release with a reconciliation body are raised to OwnerAction.
     ("POST", "/spend/executor/validate", RouteAccess::Executor),
     ("POST", "/spend/executor/resolve", RouteAccess::Executor),
     ("POST", "/spend/executor/claim", RouteAccess::Executor),
@@ -2583,7 +2434,8 @@ const ROUTE_ACCESS: &[(&str, &str, RouteAccess)] = &[
     ("POST", "/spend/executor/release", RouteAccess::Executor),
 ];
 
-/// The declared access for a protected route; undeclared routes are owner-only.
+/// The declared access for a protected route; undeclared routes are owner
+/// actions.
 fn route_access(method: &str, path: &str) -> RouteAccess {
     let pattern = if budget_versions_public_id(path).is_some() {
         "/budgets/{budget_id}/versions"
@@ -2597,7 +2449,32 @@ fn route_access(method: &str, path: &str) -> RouteAccess {
         .find(|(declared_method, declared_path, _)| {
             *declared_method == method && *declared_path == pattern
         })
-        .map_or(RouteAccess::Owner, |(_, _, access)| *access)
+        .map_or(RouteAccess::OwnerAction, |(_, _, access)| *access)
+}
+
+/// The declared access refined by the request body (spec section 4).
+fn effective_route_access(request: &HttpRequest) -> RouteAccess {
+    let declared = route_access(&request.method, &request.path);
+    match (request.method.as_str(), request.path.as_str()) {
+        ("POST", "/spend/approval/resolve") => {
+            match serde_json::from_str::<ResolveSpendApprovalHttpRequest>(&request.body) {
+                Ok(ResolveSpendApprovalHttpRequest {
+                    decision: HumanApprovalHttpDecision::Deny,
+                    ..
+                }) => RouteAccess::OwnerBearer,
+                _ => declared,
+            }
+        }
+        ("POST", "/spend/executor/settle" | "/spend/executor/release") => {
+            match ExecutorSpendFinalizationHttpRequest::parse(&request.body) {
+                Ok(ExecutorSpendFinalizationHttpRequest::Reconciliation(_)) => {
+                    RouteAccess::OwnerAction
+                }
+                _ => declared,
+            }
+        }
+        _ => declared,
+    }
 }
 
 fn owner_authority_required_response(request: &HttpRequest) -> HttpResponse {
@@ -2684,31 +2561,6 @@ fn authenticate_request(request: &HttpRequest, state: &ServerState) -> Result<Cr
         .auth
         .classify(token.trim())
         .ok_or_else(|| anyhow!("invalid authorization bearer token"))
-}
-
-fn authenticate_reconciliation_capability(
-    capability: Option<&str>,
-    state: &ServerState,
-) -> Result<()> {
-    let capability = capability
-        .map(str::trim)
-        .filter(|capability| !capability.is_empty())
-        .ok_or_else(|| anyhow!("missing human reconciliation capability"))?;
-    if !state.auth.verifies_reconciliation_capability(capability) {
-        return Err(anyhow!("invalid human reconciliation capability"));
-    }
-    Ok(())
-}
-
-fn authenticate_approval_capability(capability: Option<&str>, state: &ServerState) -> Result<()> {
-    let capability = capability
-        .map(str::trim)
-        .filter(|capability| !capability.is_empty())
-        .ok_or_else(|| anyhow!("missing human approval capability"))?;
-    if !state.auth.verifies_approval_capability(capability) {
-        return Err(anyhow!("invalid human approval capability"));
-    }
-    Ok(())
 }
 
 fn spend_executor_guidance(state: &ServerState) -> Value {
@@ -2837,10 +2689,10 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
             "statuses": ["pending", "approved", "denied"],
             "approval_request_id": "the immutable spend decision id returned by needs_approval",
             "review": "show the complete approval.review object before asking the human to approve or deny",
-            "resolve": "the owner-authenticated client submits approve or deny with the distinct human approval capability; approval reserves budget but never invokes a provider",
-            "capability_header": APPROVAL_CAPABILITY_HEADER,
-            "retry": "replay the exact authorization request or read approval status to recover the durable result",
-            "mcp": "hubu_resolve_spend_approval is protected by the narrow spend-approval client gate"
+            "resolve": "approve needs the owner credential and a fresh owner confirmation on the Mac (Touch ID) for each approval; deny needs the owner credential only; approval reserves budget but never invokes a provider",
+            "owner_presence": OWNER_PRESENCE_GUIDANCE,
+            "agent_prompt": "after the owner says yes in the conversation, an agent may call POST /spend/approval/prompt with approval_request_id; hubu-server raises the approval dialog and only the owner's confirmation approves",
+            "retry": "replay the exact authorization request or read approval status to recover the durable result"
         },
         "validate_request": {
             "required": ["spend_auth_token_id", "account_id", "contract_version", "amount.units", "amount.scale", "amount.currency"],
@@ -2910,10 +2762,8 @@ fn spend_executor_guidance(state: &ServerState) -> Value {
                 "vendor_did_not_bill": "POST /spend/executor/release"
             },
             "human_gate": {
-                "capability_header": RECONCILIATION_CAPABILITY_HEADER,
-                "requirement": "The server requires a reconciliation capability distinct from the normal API bearer token.",
-                "cli": "The CLI reads HUBU_RECONCILIATION_TOKEN or HUBU_RECONCILIATION_TOKEN_FILE and sends it only for reconciliation.",
-                "mcp": "MCP reconciliation tools require both a trusted client approval prompt and the distinct reconciliation capability."
+                "requirement": "Reconciliation is an owner action: it needs the owner credential and the owner's confirmation of that claim on the Mac.",
+                "owner_presence": OWNER_PRESENCE_GUIDANCE
             }
         },
         "lease": &state.lease_config,
@@ -3049,7 +2899,7 @@ fn registration_guidance() -> Value {
             "actor": "human_owner_only",
             "endpoint": "POST /agents/rename",
             "body": ["agent_id", "name", "reason"],
-            "capability_header": APPROVAL_CAPABILITY_HEADER,
+            "owner_presence": OWNER_PRESENCE_GUIDANCE,
             "history_endpoint": "GET /agents/history?agent_id=agt_...",
             "cli": ["hubu agent rename --agent-id agt_... --name NEW_NAME --reason TEXT", "hubu agent history --agent-id agt_..."],
             "agents_must_not": "agents and agent sessions must not rename themselves; rename is not exposed through hubu-unified-mcp",
@@ -5207,7 +5057,6 @@ fn finalize_executor_spend(
     body: String,
     state: &ServerState,
     vendor_billed: bool,
-    reconciliation_capability: Option<&str>,
 ) -> Result<Value> {
     match ExecutorSpendFinalizationHttpRequest::parse(&body)? {
         ExecutorSpendFinalizationHttpRequest::Executor(request) if vendor_billed => {
@@ -5217,7 +5066,6 @@ fn finalize_executor_spend(
             release_executor_spend_request(request, state).map(to_json)
         }
         ExecutorSpendFinalizationHttpRequest::Reconciliation(request) => {
-            authenticate_reconciliation_capability(reconciliation_capability, state)?;
             reconcile_executor_claim(request, state, vendor_billed).map(to_json)
         }
     }
@@ -7002,6 +6850,7 @@ mod tests {
     mod authorization_void;
     mod governance;
     mod history;
+    mod owner_presence_routes;
     use super::*;
     use chrono::Duration;
 
@@ -7682,22 +7531,25 @@ lease_profiles:
         let agent_id = registered["agent_id"].as_str().unwrap();
         let body = json!({ "agent_id": agent_id, "name": "renamed", "reason": "x" });
 
-        // Bearer-only callers (agent sessions, the unified MCP) cannot rename.
-        let bearer_only = route(
-            authenticated_json_request("/agents/rename", body.clone()),
+        // The agent credential (agent sessions, the unified MCP) cannot rename.
+        let agent_only = route(
+            credential_request_with_body("POST", "/agents/rename", TEST_AGENT_TOKEN, body.clone()),
             &state,
         );
-        assert_eq!(bearer_only.status, 403);
+        assert_eq!(agent_only.status, 403);
         assert_eq!(
-            bearer_only.body["error_code"],
-            "agent_rename_requires_human_owner"
+            agent_only.body["error_code"],
+            OWNER_AUTHORITY_REQUIRED_ERROR_CODE
         );
-        let mut wrong_capability = authenticated_json_request("/agents/rename", body.clone());
-        wrong_capability.headers.insert(
-            APPROVAL_CAPABILITY_HEADER.to_string(),
-            "not-the-capability".to_string(),
-        );
-        assert_eq!(route(wrong_capability, &state).status, 403);
+        // The owner bearer alone, even with the retired capability, needs the
+        // owner's confirmation.
+        deny_presence(&state);
+        let refused = route(rename_http_request(body.clone()), &state);
+        assert_eq!(refused.status, 403);
+        assert_eq!(refused.body["error_code"], "owner_presence_denied");
+        state.presence.set_provider(Arc::new(
+            owner_presence::FixtureProvider::parse("confirm").unwrap(),
+        ));
         let mut no_bearer = rename_http_request(body);
         no_bearer.headers.remove("authorization");
         assert_eq!(route(no_bearer, &state).status, 401);
@@ -7798,8 +7650,8 @@ lease_profiles:
         assert_eq!(guidance["rename"]["actor"], "human_owner_only");
         assert_eq!(guidance["rename"]["endpoint"], "POST /agents/rename");
         assert_eq!(
-            guidance["rename"]["capability_header"],
-            APPROVAL_CAPABILITY_HEADER
+            guidance["rename"]["owner_presence"],
+            OWNER_PRESENCE_GUIDANCE
         );
         assert!(
             guidance["identity_resolution"]["after_rename"]["previous_name"]
@@ -7992,6 +7844,17 @@ lease_profiles:
         std::fs::remove_file(path).ok();
     }
 
+    fn credential_request_with_body(
+        method: &str,
+        path: &str,
+        token: &str,
+        body: Value,
+    ) -> HttpRequest {
+        let mut request = credential_request(method, path, token);
+        request.body = body.to_string();
+        request
+    }
+
     fn credential_request(method: &str, path: &str, token: &str) -> HttpRequest {
         let (path, query) = split_path_and_query(path);
         let mut headers = HashMap::new();
@@ -8088,6 +7951,13 @@ lease_profiles:
         ),
         ("POST", "/spend/executor/settle", "/spend/executor/settle"),
         ("POST", "/spend/executor/release", "/spend/executor/release"),
+        ("POST", "/spend/approval/prompt", "/spend/approval/prompt"),
+        ("GET", "/owner/presence", "/owner/presence"),
+        (
+            "GET",
+            "/governance/owner-presence",
+            "/governance/owner-presence",
+        ),
     ];
 
     fn declared_access(method: &str, pattern: &str) -> Option<RouteAccess> {
@@ -8121,7 +7991,7 @@ lease_profiles:
                     "agent credential must reach {method} {sample}: {:?}",
                     agent.body
                 ),
-                RouteAccess::Owner | RouteAccess::Executor => {
+                RouteAccess::OwnerBearer | RouteAccess::OwnerAction | RouteAccess::Executor => {
                     assert!(
                         is_owner_authority_rejection(&agent),
                         "agent credential must be rejected on {method} {sample}: {} {:?}",
@@ -8164,7 +8034,7 @@ lease_profiles:
         let path = std::env::temp_dir().join(format!("hubu-api-deny-{}.sqlite", UserId::new()));
         let state = ServerState::new_with_db_path(&path).expect("server state should initialize");
         for (method, path) in [("GET", "/not-a-route"), ("POST", "/budgets/raise")] {
-            assert_eq!(route_access(method, path), RouteAccess::Owner);
+            assert_eq!(route_access(method, path), RouteAccess::OwnerAction);
             let response = route(credential_request(method, path, TEST_AGENT_TOKEN), &state);
             assert!(is_owner_authority_rejection(&response));
         }
@@ -10578,7 +10448,6 @@ lease_profiles:
             json!({"claim_id": claim.claim_id, "receipt": receipt}).to_string(),
             &state,
             true,
-            None,
         )
         .unwrap();
         let budget = state
@@ -11465,7 +11334,6 @@ lease_profiles:
             .to_string(),
             &state,
             true,
-            None,
         )
         .expect_err("executor and reconciliation request fields must not be mixed");
         assert!(mixed_mode_error
@@ -11486,7 +11354,6 @@ lease_profiles:
             .to_string(),
             &state,
             true,
-            None,
         )
         .expect_err("normal settlement should reject an expired claim");
         assert!(normal_error
@@ -11513,33 +11380,31 @@ lease_profiles:
             "evidence": "Provider usage export shows a completed billed request.",
             "receipt": settlement_receipt_json(400),
         });
-        let missing_capability = route(
-            authenticated_json_request("/spend/executor/settle", reconciliation_body.clone()),
-            &state,
-        );
-        assert_eq!(missing_capability.status, 400);
-        assert!(missing_capability.body["error"]
-            .as_str()
-            .is_some_and(|error| error.contains("missing human reconciliation capability")));
-
-        let mut executor_capability_request =
+        // Reconciliation is an owner action: the bearer and the retired
+        // capability are not enough without the owner's confirmation.
+        deny_presence(&state);
+        let mut refused_request =
             authenticated_json_request("/spend/executor/settle", reconciliation_body.clone());
-        executor_capability_request.headers.insert(
-            RECONCILIATION_CAPABILITY_HEADER.to_string(),
-            TEST_AUTH_TOKEN.to_string(),
-        );
-        let executor_capability = route(executor_capability_request, &state);
-        assert_eq!(executor_capability.status, 400);
-        assert!(executor_capability.body["error"]
-            .as_str()
-            .is_some_and(|error| error.contains("invalid human reconciliation capability")));
-
-        let mut human_request =
-            authenticated_json_request("/spend/executor/settle", reconciliation_body);
-        human_request.headers.insert(
+        refused_request.headers.insert(
             RECONCILIATION_CAPABILITY_HEADER.to_string(),
             TEST_RECONCILIATION_TOKEN.to_string(),
         );
+        let refused = route(refused_request, &state);
+        assert_eq!(refused.status, 403);
+        assert_eq!(refused.body["error_code"], "owner_presence_denied");
+        assert_eq!(
+            list_executor_claims_requiring_reconciliation(&state)
+                .unwrap()
+                .claims
+                .len(),
+            1
+        );
+        state.presence.set_provider(Arc::new(
+            owner_presence::FixtureProvider::parse("confirm").unwrap(),
+        ));
+
+        let human_request =
+            authenticated_json_request("/spend/executor/settle", reconciliation_body);
         let human_response = route(human_request, &state);
         assert_eq!(human_response.status, 200);
         let reconciled = human_response.body;
@@ -13617,31 +13482,94 @@ rules: []
         std::fs::remove_file(path).ok();
     }
 
+    fn deny_presence(state: &ServerState) {
+        state.presence.set_provider(Arc::new(
+            owner_presence::FixtureProvider::parse("deny").unwrap(),
+        ));
+    }
+
     #[test]
-    fn api_bearer_alone_cannot_resolve_human_approval() {
+    fn owner_bearer_alone_cannot_approve_without_confirmation() {
         let (path, state, _agent, pending) = setup_pending_approval("approval-owner-boundary");
         let approval_request_id = pending.body["approval"]["approval_request_id"]
             .as_str()
             .unwrap();
-
-        let pending_events = assert_human_approval_lifecycle(&state, approval_request_id, None);
-        let response = route(
+        let approve = || {
             authenticated_json_request(
                 "/spend/approval/resolve",
                 json!({
                     "approval_request_id": approval_request_id,
                     "decision": "approve",
                 }),
-            ),
-            &state,
+            )
+        };
+
+        let pending_events = assert_human_approval_lifecycle(&state, approval_request_id, None);
+        let mut no_prompt = approve();
+        no_prompt.headers.insert(
+            owner_presence::NO_PROMPT_HEADER.to_string(),
+            "1".to_string(),
+        );
+        let response = route(no_prompt, &state);
+        assert_eq!(response.status, 403);
+        assert_eq!(
+            response.body["error_code"],
+            OWNER_PRESENCE_REQUIRED_ERROR_CODE
         );
 
-        assert_eq!(response.status, 400);
-        assert_eq!(response.body["error"], "missing human approval capability");
+        // The retired approval capability carries no authority any more.
+        // The retired approval capability carries no authority any more. A
+        // timeout leaves the request pending.
+        state.presence.set_provider(Arc::new(
+            owner_presence::FixtureProvider::parse("timeout").unwrap(),
+        ));
+        let mut with_capability = approve();
+        with_capability.headers.insert(
+            APPROVAL_CAPABILITY_HEADER.to_string(),
+            TEST_APPROVAL_TOKEN.to_string(),
+        );
+        let response = route(with_capability, &state);
+        assert_eq!(response.status, 403);
+        assert_eq!(response.body["error_code"], "owner_presence_timeout");
+        assert_eq!(response.body["approval_status"], "pending");
         assert_eq!(
             human_approval_lifecycle_events(&state, approval_request_id),
             pending_events
         );
+
+        // Deny closes the request (owner decision, 2026-11-19).
+        deny_presence(&state);
+        let in_window = approve();
+        let response = route(in_window, &state);
+        assert_eq!(response.status, 403);
+        assert_eq!(response.body["error_code"], "owner_presence_denied");
+        assert_eq!(response.body["approval_status"], "denied");
+        assert_human_approval_lifecycle(&state, approval_request_id, Some("declined"));
+
+        // A closed request is never prompted again.
+        state.presence.set_provider(Arc::new(
+            owner_presence::FixtureProvider::parse("confirm").unwrap(),
+        ));
+        let again = route(approve(), &state);
+        assert!(again.status >= 400, "{}", again.body);
+        assert!(again.body["auth_token_id"].is_null());
+
+        let records = route(
+            authenticated_get_request("/governance/owner-presence"),
+            &state,
+        );
+        assert_eq!(records.status, 200);
+        let records = records.body["records"].as_array().unwrap().clone();
+        let outcomes = records
+            .iter()
+            .map(|record| record["outcome"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(outcomes, vec!["denied", "timed_out"]);
+        assert!(records
+            .iter()
+            .all(|record| record["action"] == "spend.approval.approve"
+                && record["reason"].as_str().unwrap()
+                    == "approve 6.00 USD on AcmeCafe for agent approval-owner-boundary-agent"));
         std::fs::remove_file(path).ok();
     }
 
