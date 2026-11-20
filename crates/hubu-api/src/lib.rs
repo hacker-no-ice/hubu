@@ -1900,7 +1900,7 @@ fn declared_content_length(head: &str) -> Result<usize> {
 /// Runs one request's handler under the dispatch lock.
 fn dispatch_route(request: HttpRequest, state: &ServerState) -> HttpResponse {
     let _dispatch = lock_dispatch(state);
-    dispatch_route_locked(request, state)
+    dispatch_route_locked(request, state, None)
 }
 
 fn lock_dispatch(state: &ServerState) -> std::sync::MutexGuard<'_, ()> {
@@ -1911,7 +1911,11 @@ fn lock_dispatch(state: &ServerState) -> std::sync::MutexGuard<'_, ()> {
 }
 
 /// Runs one request's handler. The caller holds the dispatch lock.
-fn dispatch_route_locked(request: HttpRequest, state: &ServerState) -> HttpResponse {
+fn dispatch_route_locked(
+    request: HttpRequest,
+    state: &ServerState,
+    delegated_policy_id: Option<&str>,
+) -> HttpResponse {
     let request_now = Utc::now();
     let budget_versions_public_id = budget_versions_public_id(&request.path).map(str::to_string);
     let result = match (request.method.as_str(), request.path.as_str()) {
@@ -1950,7 +1954,9 @@ fn dispatch_route_locked(request: HttpRequest, state: &ServerState) -> HttpRespo
         ("GET", "/policies/export") => inspect_policy(&request, state, true),
         ("GET", "/policies/history") => policy_history(&request, state),
         ("GET", "/policies/diff") => policy_diff(&request, state),
-        ("POST", "/policies") => add_policy(request.body, state).map(to_json),
+        ("POST", "/policies") => {
+            apply_policy_request(request.body, state, delegated_policy_id).map(to_json)
+        }
         ("POST", "/budgets") => create_budget_at(request.body, state, request_now).map(to_json),
         ("POST", "/budgets/revoke") => revoke_budget(request.body, state).map(to_json),
         ("POST", _) if budget_versions_public_id.is_some() => update_budget_limit_at(
@@ -3445,7 +3451,16 @@ fn resolve_policy_scope(
     }
 }
 
+#[cfg(test)]
 fn add_policy(body: String, state: &ServerState) -> Result<AddPolicyHttpResponse> {
+    apply_policy_request(body, state, None)
+}
+
+fn apply_policy_request(
+    body: String,
+    state: &ServerState,
+    delegated_policy_id: Option<&str>,
+) -> Result<AddPolicyHttpResponse> {
     let request: AddPolicyHttpRequest = serde_json::from_str(&body)?;
 
     let user = authenticated_user_context(state)?;
@@ -3508,7 +3523,7 @@ fn add_policy(body: String, state: &ServerState) -> Result<AddPolicyHttpResponse
             .governance
             .lock()
             .map_err(|_| anyhow!("governance store lock poisoned"))?;
-        let result = governance.apply_policy(
+        let result = governance.apply_policy_with_assignment_check(
             &user.user_id,
             &declarative_key,
             &display_name,
@@ -3516,6 +3531,7 @@ fn add_policy(body: String, state: &ServerState) -> Result<AddPolicyHttpResponse
             &policy,
             request.expected_revision,
             request.expected_hash.as_deref(),
+            delegated_policy_id,
             &actor,
             request.source.as_deref().unwrap_or("api"),
         )?;

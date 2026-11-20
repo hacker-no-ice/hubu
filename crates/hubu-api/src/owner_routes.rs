@@ -67,6 +67,12 @@ pub(super) fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
             let _dispatch = lock_dispatch(state);
             match governance_overrides::delegation(&request, state) {
                 Ok(Some((action, target))) => {
+                    let delegated_policy_id = match action {
+                        governance_overrides::GovernanceOverride::AddDenyRule => {
+                            Some(target.as_str())
+                        }
+                        governance_overrides::GovernanceOverride::LowerBudget => None,
+                    };
                     let record = OwnerPresenceRecord {
                         record_id: new_record_id(),
                         recorded_at: Utc::now(),
@@ -75,13 +81,13 @@ pub(super) fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
                         outcome: "delegated".to_string(),
                         method: None,
                         client: OwnerClient::Agent.as_str().to_string(),
-                        targets: vec![target],
+                        targets: vec![target.clone()],
                         override_action: Some(action.key().to_string()),
                     };
                     if let Err(error) = record_presence(state, &record) {
                         return internal_presence_error(&error);
                     }
-                    return dispatch_route_locked(request, state);
+                    return dispatch_route_locked(request, state, delegated_policy_id);
                 }
                 Ok(None) => {}
                 Err(error) => return internal_presence_error(&error),
