@@ -1032,6 +1032,12 @@ impl TestWorkspace {
             .arg(address.to_string())
             .env("HUBU_DB_PATH", directory.path().join("hubu.sqlite3"))
             .env("HUBU_AUTH_TOKEN", AUTH_TOKEN)
+            .env_remove("HUBU_AGENT_TOKEN")
+            .env(
+                "HUBU_AGENT_TOKEN_FILE",
+                directory.path().join("hubu.agent-token"),
+            )
+            .env("HUBU_AGENT_TOKEN_FILE_GENERATED", "1")
             .env("HUBU_RECONCILIATION_TOKEN", RECONCILIATION_TOKEN)
             .env("HUBU_LEASE_CONFIG", &lease_config)
             // Owner actions need owner presence (v0.3.0); never raise the
