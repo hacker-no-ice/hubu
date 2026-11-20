@@ -1356,7 +1356,9 @@ fn apply_policy(base_url: &CliContext, mut args: Vec<String>, legacy_add: bool) 
     let expected_hash = take_value(&mut args, "--expected-hash");
     let path = take_required(&mut args, "--path")?;
     ensure_no_args(args)?;
-    Policy::from_yaml_file(&path).with_context(|| format!("validate policy file `{path}`"))?;
+    let policy =
+        Policy::from_yaml_file(&path).with_context(|| format!("validate policy file `{path}`"))?;
+    print_policy_change_preview(base_url, &path, &policy, agent_id.as_deref())?;
 
     let mut body = json!({
         "policy_yaml": fs::read_to_string(&path)
@@ -1428,6 +1430,142 @@ fn apply_policy(base_url: &CliContext, mut args: Vec<String>, legacy_add: bool) 
         );
     }
     Ok(())
+}
+
+/// Prints what applying `policy` changes for its scope, before the request
+/// that raises the owner-presence dialog. Both sides are rendered by the same
+/// serializer the server stores, so formatting differences in the file do not
+/// show up as changes.
+fn print_policy_change_preview(
+    base_url: &CliContext,
+    path: &str,
+    policy: &Policy,
+    agent_id: Option<&str>,
+) -> Result<()> {
+    let style = terminal::stdout();
+    let scope = match agent_id {
+        Some(agent_id) => format!("agent {agent_id}"),
+        None => "the owner default (all agents without their own policy)".to_string(),
+    };
+    let draft = strip_policy_owner(&policy.to_yaml_string()?);
+    let listing = get_json(base_url, "/policies")?;
+    let current = listing
+        .get("policies")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("server response missing `policies`"))?
+        .iter()
+        .find(|entry| match agent_id {
+            Some(agent_id) => {
+                entry.get("scope").and_then(Value::as_str) == Some("agent_override")
+                    && entry.get("agent_id").and_then(Value::as_str) == Some(agent_id)
+            }
+            None => entry.get("scope").and_then(Value::as_str) == Some("user_default"),
+        })
+        .cloned();
+
+    let Some(current) = current else {
+        println!(
+            "{}",
+            style.heading(format!(
+                "No policy applies to {scope} yet. Applying adds this whole policy from {path}:"
+            ))
+        );
+        for line in draft.lines() {
+            println!(
+                "{}",
+                style.success(format!("+ {}", terminal_safe_line(line)))
+            );
+        }
+        println!();
+        return Ok(());
+    };
+
+    let policy_id = string_at(&current, "policy_id")?;
+    let exported = get_json(base_url, &format!("/policies/export?policy_id={policy_id}"))?;
+    let before = strip_policy_owner(string_at(&exported, "policy_yaml")?);
+    println!(
+        "{}",
+        style.heading(format!(
+            "Changes to the policy for {scope}: revision {} of {} -> {path}",
+            exported["revision"],
+            terminal_safe_line(string_at(&current, "display_name").unwrap_or(policy_id)),
+        ))
+    );
+    let lines = policy_line_diff(&before, &draft);
+    if lines.iter().all(|(kind, _)| *kind == ' ') {
+        println!(
+            "{}",
+            style.muted("No differences from the current revision.")
+        );
+    } else {
+        for (kind, line) in lines {
+            let text = format!("{kind} {}", terminal_safe_line(line));
+            match kind {
+                '+' => println!("{}", style.success(text)),
+                '-' => println!("{}", style.error(text)),
+                _ => println!("{}", style.muted(text)),
+            }
+        }
+    }
+    println!();
+    Ok(())
+}
+
+/// Drops the top-level `owner_user_id` line, which the server fills in and
+/// an authored file usually omits.
+fn strip_policy_owner(yaml: &str) -> String {
+    yaml.lines()
+        .filter(|line| !line.starts_with("owner_user_id:"))
+        .map(|line| format!("{line}\n"))
+        .collect()
+}
+
+/// Escapes control characters so a policy file cannot drive the terminal.
+fn terminal_safe_line(line: &str) -> String {
+    line.chars()
+        .map(|c| {
+            if c.is_control() {
+                c.escape_unicode().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
+}
+
+/// Line diff (longest common subsequence) for small documents such as policy
+/// YAML. Matches the portal's diff view: ' ' kept, '-' removed, '+' added.
+fn policy_line_diff<'a>(before: &'a str, after: &'a str) -> Vec<(char, &'a str)> {
+    let a = before.lines().collect::<Vec<_>>();
+    let b = after.lines().collect::<Vec<_>>();
+    let mut table = vec![vec![0usize; b.len() + 1]; a.len() + 1];
+    for i in (0..a.len()).rev() {
+        for j in (0..b.len()).rev() {
+            table[i][j] = if a[i] == b[j] {
+                table[i + 1][j + 1] + 1
+            } else {
+                table[i + 1][j].max(table[i][j + 1])
+            };
+        }
+    }
+    let (mut i, mut j) = (0, 0);
+    let mut out = Vec::new();
+    while i < a.len() && j < b.len() {
+        if a[i] == b[j] {
+            out.push((' ', a[i]));
+            i += 1;
+            j += 1;
+        } else if table[i + 1][j] >= table[i][j + 1] {
+            out.push(('-', a[i]));
+            i += 1;
+        } else {
+            out.push(('+', b[j]));
+            j += 1;
+        }
+    }
+    out.extend(a[i..].iter().map(|line| ('-', *line)));
+    out.extend(b[j..].iter().map(|line| ('+', *line)));
+    out
 }
 
 fn policy_query(mut args: Vec<String>) -> Result<String> {
@@ -3802,7 +3940,12 @@ Options:
   --name NAME            Mutable display name (defaults to key)
   --agent-id AGENT_ID    Assign as an agent override instead of the user default
   --expected-revision N  Apply only if the current server revision matches
-  --expected-hash HASH   Apply only if the current payload hash matches"
+  --expected-hash HASH   Apply only if the current payload hash matches
+
+Before sending, prints what the file changes compared with the policy currently
+applied to the target scope (the whole file when none is applied), then the
+server asks the owner to confirm with Touch ID. An invalid file fails before
+anything is sent."
     );
 }
 
@@ -4092,6 +4235,40 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn policy_line_diff_marks_kept_removed_and_added_lines() {
+        let before = "id: p\nversion: '1'\ndefault_effect: deny\nrules: []\n";
+        let after = "id: p\nversion: '2'\ndefault_effect: deny\nrules: []\n";
+        assert_eq!(
+            policy_line_diff(before, after),
+            vec![
+                (' ', "id: p"),
+                ('-', "version: '1'"),
+                ('+', "version: '2'"),
+                (' ', "default_effect: deny"),
+                (' ', "rules: []"),
+            ]
+        );
+        assert!(policy_line_diff(before, before)
+            .iter()
+            .all(|(kind, _)| *kind == ' '));
+        assert_eq!(policy_line_diff("", "id: p\n"), vec![('+', "id: p")]);
+    }
+
+    #[test]
+    fn policy_preview_strips_owner_and_escapes_control_characters() {
+        assert_eq!(
+            strip_policy_owner(
+                "id: p\nowner_user_id: 00000000-0000-4000-8000-000000000123\nrules: []\n"
+            ),
+            "id: p\nrules: []\n"
+        );
+        assert_eq!(
+            terminal_safe_line("reason: \u{1b}[31mred"),
+            "reason: \\u{1b}[31mred"
+        );
+    }
 
     #[test]
     fn history_queries_encode_keys_and_validate_scope() {

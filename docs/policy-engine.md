@@ -34,6 +34,33 @@ Legacy authored ids that do not satisfy the new safe key syntax are mapped to a
 deterministic `legacy-<hash>` key; their authored id remains unchanged inside
 the immutable policy payload.
 
+## Agent drafts, owner applies
+
+An agent may draft a policy change but cannot apply one. Applying is an owner
+action that raises the owner-presence dialog (Touch ID on macOS), and the
+agent-facing MCP has no apply tool.
+
+1. The agent writes the YAML file and checks it offline with
+   `hubu policy validate --path FILE`. Validation needs no credential, makes no
+   HTTP call and reports the line of the first error.
+2. The agent tells the owner where the file is and gives the exact command,
+   for example `hubu policy apply --path FILE` or
+   `hubu policy apply --path FILE --agent-id agt_...`. A budget change is
+   handed over as the exact `hubu budget update` command instead of a file.
+3. The owner reviews the change before confirming it:
+   - **Portal.** In the policy editor, **Load file…** fills the editor from the
+     file (or paste it). After **Validate** passes, the editor shows the
+     draft's diff against the revision in effect for that scope. **Save** sends
+     exactly the validated text and raises one dialog.
+   - **CLI.** `hubu policy apply --path FILE` validates the file, prints its
+     diff against the policy currently applied to the target scope (the whole
+     file when none is applied yet), then sends it, which raises the dialog. An
+     invalid file fails with its line before anything is sent.
+
+Both diffs compare the policies as the server stores them, rendered by the
+same serializer, so formatting-only differences in the file do not appear.
+Hubu stores no drafts, and no route accepts a draft from an agent.
+
 ## Core Flow
 
 ```txt
