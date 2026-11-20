@@ -154,10 +154,9 @@ class ApiError extends Error {
   }
 }
 
-async function api(method, path, body, options = {}) {
+async function api(method, path, body) {
   const headers = { "X-Hubu-UI": "1" };
   if (body !== undefined) headers["Content-Type"] = "application/json";
-  if (options.confirmed) headers["X-Hubu-UI-Confirmed"] = "1";
   const response = await fetch(path, {
     method,
     headers,
@@ -180,8 +179,61 @@ function hubu(path, query) {
   return api("GET", `/api/hubu${path}${suffix}`);
 }
 
-function hubuPost(path, body, options) {
-  return api("POST", `/api/hubu${path}`, body, options);
+function hubuPost(path, body) {
+  return api("POST", `/api/hubu${path}`, body);
+}
+
+function ownerRefusalMessage(body) {
+  switch (body?.error_code) {
+    case "owner_presence_denied":
+      return body.approval_status === "denied"
+        ? "Confirmation denied. This request is closed. The agent can submit a new spend request."
+        : "Confirmation denied. Review the action before trying again.";
+    case "owner_presence_timeout":
+      return body.approval_status === "pending"
+        ? "Confirmation timed out. The request is still pending. Approve again when you’re at your Mac."
+        : "Confirmation timed out. Try again when you’re at your Mac.";
+    case "owner_presence_unavailable":
+      return "Owner confirmation is unavailable. Check that hubu-server is running in your Mac’s signed-in desktop session, then try again.";
+    case "owner_prompt_in_progress":
+      return "Another owner confirmation is already open. Finish it on your Mac, then try again.";
+    case "owner_prompt_rate_limited": {
+      const seconds = body.retry_guidance?.retry_after_seconds;
+      return seconds > 0
+        ? `Too many recent confirmations were denied or timed out. Try again in ${seconds} seconds.`
+        : "Too many recent confirmations were denied or timed out. Wait before trying again.";
+    }
+    case "approval_not_pending":
+      return "This request has already been resolved. Review the current requests in Approvals.";
+    default:
+      return null;
+  }
+}
+
+let ownerActionPending = false;
+
+async function ownerPost(path, body) {
+  if (ownerActionPending) throw new Error(ownerRefusalMessage({ error_code: "owner_prompt_in_progress" }));
+  ownerActionPending = true;
+  const status = document.getElementById("owner-action-status");
+  const currentDialog = Array.from(document.querySelectorAll("dialog[open]")).at(-1);
+  const dialogStatus = currentDialog?.querySelector(".owner-action-status");
+  status.textContent = "Confirm on your Mac…";
+  status.hidden = false;
+  if (dialogStatus) dialogStatus.textContent = status.textContent;
+  // Fetch has no request deadline. The server owns the 60-second prompt timeout.
+  try {
+    return await hubuPost(path, body);
+  } catch (error) {
+    const message = ownerRefusalMessage(error.body);
+    if (message) error.message = message;
+    throw error;
+  } finally {
+    ownerActionPending = false;
+    status.hidden = true;
+    status.textContent = "";
+    if (dialogStatus) dialogStatus.textContent = "";
+  }
 }
 
 async function loadAgents() {
@@ -200,7 +252,7 @@ function openDialog(title, body, footer) {
   const close = () => { dialog.close(); dialog.remove(); };
   append(dialog, [
     h("header", {}, h("h3", {}, title), h("button", { class: "ghost small", type: "button", onclick: close }, "Close")),
-    h("div", { class: "dialog-body" }, body),
+    h("div", { class: "dialog-body" }, h("div", { class: "owner-action-status", role: "status" }), body),
     footer ? h("footer", {}, footer(close)) : null,
   ]);
   dialog.addEventListener("close", () => dialog.remove());
@@ -218,39 +270,6 @@ async function showJsonDialog(title, loader) {
   } catch (error) {
     clear(body).append(h("div", { class: "notice bad" }, error.message));
   }
-}
-
-/** Two-step confirmation for actions that use the human approval capability. */
-function confirmCapability({ title, summary, confirmLabel, danger, onConfirm }) {
-  const status = h("div", {});
-  let armed = false;
-  const button = h("button", { type: "button", class: danger ? "danger" : "" }, confirmLabel);
-  const { close } = openDialog(title, [
-    summary,
-    h("div", { class: "notice warn" },
-      "This action uses the human approval capability held by `hubu ui`. Review the details, then confirm."),
-    status,
-  ], (closeFn) => [
-    h("button", { type: "button", class: "ghost", onclick: closeFn }, "Cancel"),
-    button,
-  ]);
-  button.addEventListener("click", async () => {
-    if (!armed) {
-      armed = true;
-      button.textContent = `Click again to ${confirmLabel.toLowerCase()}`;
-      return;
-    }
-    button.disabled = true;
-    try {
-      await onConfirm();
-      close();
-    } catch (error) {
-      clear(status).append(h("div", { class: "notice bad" }, error.message));
-      button.disabled = false;
-      armed = false;
-      button.textContent = confirmLabel;
-    }
-  });
 }
 
 // ---------- views ----------
@@ -358,17 +377,15 @@ async function renderApprovals(view) {
   const rows = data.authorization_records || [];
   state.counts.approvals = rows.length;
   updateNavCounts();
-  if (!state.session.approval_capability) {
-    view.append(h("div", { class: "notice warn" },
-      "No human approval capability is configured for this Hubu connection, so approvals can be reviewed but not resolved here."));
-  }
   view.append(card(`Waiting for a decision (${rows.length})`, table([
     { label: "Requested", render: (r) => when(r.created_at) },
     { label: "Agent", render: (r) => agentName(r.agent_id) },
     { label: "Amount", num: true, render: (r) => money(r.authorized_max) },
     { label: "Billing merchant", render: (r) => r.billing_merchant || r.provider },
     { label: "Policy", render: (r) => badge(r.policy_decision) },
-    { label: "", render: (r) => h("button", { class: "small", type: "button", onclick: () => reviewApproval(r.authorization_id) }, "Review") },
+    { label: "", render: (r) => h("div", { class: "row-actions" },
+      h("button", { class: "ghost small", type: "button", onclick: () => reviewApproval(r.authorization_id) }, "Review"),
+      ...approvalButtons(r.authorization_id)) },
   ], rows, "No spend is waiting for approval."), null, true));
 }
 
@@ -395,28 +412,50 @@ async function reviewApproval(approvalRequestId) {
     ["Lease profile", r.lease_profile],
     ["Request ID", short(approval.approval_request_id, 40)],
   ]));
-  if (approval.status !== "pending" || !state.session.approval_capability) {
-    openDialog("Spend approval", [summary,
-      approval.status !== "pending" ? h("div", { class: "notice" }, "This request is no longer pending.") : null]);
+  if (approval.status !== "pending") {
+    openDialog("Spend approval", [summary, h("div", { class: "notice" }, "This request is no longer pending.")]);
     return;
   }
-  const decide = (decision) => confirmCapability({
-    title: decision === "approve" ? "Approve spend" : "Deny spend",
-    summary,
-    confirmLabel: decision === "approve" ? "Approve" : "Deny",
-    danger: decision === "deny",
-    onConfirm: async () => {
-      await hubuPost("/spend/approval/resolve", { approval_request_id: approvalRequestId, decision }, { confirmed: true });
-      toast(decision === "approve" ? "Spend approved; budget reserved." : "Spend denied.");
-      route();
-    },
-  });
   openDialog("Spend approval", [summary,
-    h("p", { class: "hint" }, "Approving reserves budget and returns an authorization to the agent. It never calls a provider. Denial is final for this request."),
-  ], (close) => [
-    h("button", { type: "button", class: "danger", onclick: () => { close(); decide("deny"); } }, "Deny…"),
-    h("button", { type: "button", onclick: () => { close(); decide("approve"); } }, "Approve…"),
-  ]);
+    h("p", { class: "hint" }, "Approving reserves budget for the agent. Denial closes this request."),
+  ], (close) => approvalButtons(approvalRequestId, close));
+}
+
+function approvalButtons(approvalRequestId, close) {
+  const approve = h("button", { type: "button", class: "small" }, "Approve");
+  const deny = h("button", { type: "button", class: "danger small" }, "Deny");
+  const decide = async (decision, button) => {
+    if (button.disabled) return;
+    button.disabled = true;
+    close?.();
+    try {
+      const resolve = decision === "approve" ? ownerPost : hubuPost;
+      const result = await resolve("/spend/approval/resolve", { approval_request_id: approvalRequestId, decision });
+      const expected = decision === "approve" ? "approved" : "denied";
+      if (result.approval?.status !== expected) {
+        throw new Error(result.reasons?.join(" ") || "The request could not be resolved. Review its current status in Approvals.");
+      }
+      toast(decision === "approve" ? "Spend approved. Budget reserved." : "Spend denied.");
+    } catch (error) {
+      // The resolve route can return a generic conflict when another
+      // client already acted. Read the current state before suggesting a retry.
+      let message = ownerRefusalMessage(error.body);
+      if (!message && error instanceof ApiError) {
+        const current = await hubu("/spend/approval", { approval_request_id: approvalRequestId }).catch(() => null);
+        if (current && current.status !== "pending") {
+          message = ownerRefusalMessage({ error_code: "approval_not_pending" });
+        }
+      }
+      toast(message || error.message, "bad");
+    } finally {
+      button.disabled = false;
+      if (location.hash.split("?")[0] === "#/approvals") await route();
+      else refreshApprovalCount();
+    }
+  };
+  approve.addEventListener("click", () => decide("approve", approve));
+  deny.addEventListener("click", () => decide("deny", deny));
+  return [deny, approve];
 }
 
 // Spend history
@@ -695,8 +734,7 @@ async function renderDecisions(view) {
         { label: "Status", render: () => "Pending reconciliation" },
         { label: "", render: (c) => h("button", { type: "button", class: "ghost small", onclick: () => {
           const box = h("div", {}, reconciliationDetails({ claim: c }));
-          if (state.session.reconciliation_capability) box.append(h("button", { type: "button", onclick: () => reconciliationForm(c, load) }, "Resolve reconciliation…"));
-          else box.append(h("p", { class: "notice warn" }, "Human reconciliation capability unavailable."));
+          box.append(h("button", { type: "button", onclick: () => reconciliationForm(c, load) }, "Resolve reconciliation…"));
           openDialog("Pending reconciliation", box);
         } }, "Review…") },
       ], pending.claims, "No outstanding reconciliation claims."));
@@ -789,10 +827,8 @@ async function showDecision(r, refresh) {
   try {
     const data = await hubu(`/governance/records/${encodeURIComponent(r.record_id)}/reconciliation`);
     clear(body).append(reconciliationDetails(data));
-    if (data.claim.reconciliation_required && state.session.reconciliation_capability) {
+    if (data.claim.reconciliation_required) {
       body.append(h("button", { type: "button", onclick: () => reconciliationForm(data.claim, refresh) }, "Resolve reconciliation…"));
-    } else if (data.claim.reconciliation_required) {
-      body.append(h("p", { class: "notice warn" }, "The separate human reconciliation capability is unavailable. Configure it for hubu ui to resolve this claim."));
     }
     body.append(details("Immutable historical event", Object.fromEntries(Object.entries(r).filter(([key]) => !["current", "currentError"].includes(key)))));
   } catch (error) { clear(body).append(h("div", { class: "notice bad" }, error.message)); }
@@ -867,7 +903,7 @@ function reconciliationForm(claim, refresh = async () => {}) {
         try {
           const current = await hubu("/spend/executor/claim", { claim_id: claim.claim_id });
           if (!current.reconciliation_required) throw new Error(`Claim is no longer eligible: ${reconciliationLabel(current)}. Close this form and review its current details.`);
-          await hubuPost(`/spend/executor/${payload.receipt ? "settle" : "release"}`, payload, { confirmed: true });
+          await ownerPost(`/spend/executor/${payload.receipt ? "settle" : "release"}`, payload);
           toast("Reconciliation recorded. Accounting updated.");
           // Close all case dialogs so no stale evidence or actions remain visible.
           document.querySelectorAll("dialog").forEach((d) => { d.close(); d.remove(); });
@@ -975,8 +1011,6 @@ function showAgentHistory(agent) {
   });
 }
 
-/** Owner-only relabel. Sends the human approval capability, so the request
- * carries the confirmation header; submitting this dialog is the confirmation. */
 function renameAgent(agent, done) {
   const status = h("div", {});
   const nameInput = h("input", { name: "name", required: true, maxlength: 128, value: agent.display_name });
@@ -987,7 +1021,7 @@ function renameAgent(agent, done) {
   const { close } = openDialog(`Rename ${agent.display_name}`, [
     kv([["Agent ID", h("span", { class: "mono" }, agent.agent_id)], ["Current name", agent.display_name]]),
     form,
-    h("p", { class: "hint" }, "Only the name changes. The agent ID, account, budgets and policies stay the same, and the old name stays reserved for this agent. Renaming uses the human approval capability."),
+    h("p", { class: "hint" }, "Only the name changes. The agent ID, account, budgets and policies stay the same, and the old name stays reserved for this agent."),
     status,
   ], (closeFn) => [h("button", { type: "button", class: "ghost", onclick: closeFn }, "Cancel"), save]);
   setTimeout(() => { nameInput.focus(); nameInput.select(); }, 0);
@@ -1000,7 +1034,7 @@ function renameAgent(agent, done) {
     }
     save.disabled = true;
     try {
-      await hubuPost("/agents/rename", { agent_id: agent.agent_id, name: values.name, reason: values.reason }, { confirmed: true });
+      await ownerPost("/agents/rename", { agent_id: agent.agent_id, name: values.name, reason: values.reason });
       toast(`Renamed to ${values.name}.`);
       close();
       done();
@@ -1042,7 +1076,7 @@ async function renderUsers(view) {
     event.preventDefault();
     const v = formValues(targetForm);
     try {
-      await hubuPost("/user/spending-target", { amount: v.amount, starting_at: isoFromLocal(v.starting_at), ending_before: isoFromLocal(v.ending_before) });
+      await ownerPost("/user/spending-target", { amount: v.amount, starting_at: isoFromLocal(v.starting_at), ending_before: isoFromLocal(v.ending_before) });
       toast("Spending target set (advisory).");
       targetForm.reset();
       drawTargets();
@@ -1058,7 +1092,7 @@ async function renderUsers(view) {
     event.preventDefault();
     const v = formValues(userForm);
     try {
-      const result = await hubuPost("/init", { username: v.username, display_name: v.display_name, email: v.email || null });
+      const result = await ownerPost("/init", { username: v.username, display_name: v.display_name, email: v.email || null });
       toast(`Registered ${result.user_id}.`);
       route();
     } catch (error) { toast(error.message, "bad"); }
@@ -1290,7 +1324,7 @@ async function openPolicy(container, policy, options = {}) {
         const request = { policy_yaml: policyYaml, source: "web_ui", expected_revision: current,
           display_name: policy.display_name, declarative_key: policy.declarative_key };
         if (policy.agent_id) request.agent_id = policy.agent_id;
-        const result = await hubuPost("/policies", request);
+        const result = await ownerPost("/policies", request);
         toast(result.changed === false ? "No changes: the content matches the current revision." : `Saved revision ${result.revision ?? current + 1}.`);
         route();
       },
@@ -1376,7 +1410,7 @@ function newPolicyEditor(container) {
       const v = formValues(fields);
       const request = { policy_yaml: policyYaml, source: "web_ui" };
       for (const key of ["agent_id", "display_name", "declarative_key"]) if (v[key]) request[key] = v[key];
-      const result = await hubuPost("/policies", request);
+      const result = await ownerPost("/policies", request);
       state.selectedPolicy = result.policy_id || state.selectedPolicy;
       toast("Policy created.");
       route();
@@ -1409,7 +1443,7 @@ async function renderBudgets(view) {
     event.preventDefault();
     const v = formValues(form);
     try {
-      const result = await hubuPost("/budgets", { agent_id: v.agent_id, amount: v.amount, currency: v.currency,
+      const result = await ownerPost("/budgets", { agent_id: v.agent_id, amount: v.amount, currency: v.currency,
         starting_at: isoFromLocal(v.starting_at), ending_before: isoFromLocal(v.ending_before) });
       toast(`Budget ${result.budget?.budget_id || ""} created.`);
       for (const w of result.spending_target_warnings || []) toast(`Advisory: ${w.message}`, "bad");
@@ -1481,7 +1515,7 @@ function updateBudget(budget, refresh) {
     event.preventDefault();
     const v = formValues(form);
     try {
-      await hubuPost(`/budgets/${encodeURIComponent(budget.budget_id)}/versions`,
+      await ownerPost(`/budgets/${encodeURIComponent(budget.budget_id)}/versions`,
         { amount_limit: v.amount, expected_revision: budget.current_revision, reason: v.reason || null });
       toast("Budget limit updated.");
       close();
@@ -1741,6 +1775,7 @@ function watchViewInteractions() {
 function autoRefreshDue() {
   return autoRefresh.enabled && autoRefresh.supported && !autoRefresh.touched && !autoRefresh.inFlight
     && document.visibilityState === "visible"
+    && !ownerActionPending
     && !document.querySelector("dialog[open]")
     && document.querySelector(".shell").style.display !== "none"
     && Date.now() - Math.max(autoRefresh.lastAt, autoRefresh.lastAttemptAt) >= AUTO_REFRESH_MS;
