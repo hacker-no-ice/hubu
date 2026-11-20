@@ -37,7 +37,12 @@ fn operation_key_db_is_explicit_absolute_and_dry_run_is_non_mutating() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("--approval-token-file is deprecated and ignored"));
+    assert!(stderr.contains("--reconciliation-token-file is deprecated and ignored"));
     let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(!stdout.contains("HUBU_APPROVAL_TOKEN"));
+    assert!(!stdout.contains("HUBU_RECONCILIATION_TOKEN"));
     assert!(stdout.contains(&format!(
         "HUBU_UNIFIED_OPERATION_KEY_DB = \"{}\"",
         private_db.display()
@@ -145,4 +150,16 @@ command = "other-mcp"
         "HUBU_AGENT_TOKEN_FILE={}",
         canonical_agent.display()
     )));
+}
+
+#[test]
+fn init_help_omits_retired_token_options() {
+    let output = Command::new(env!("CARGO_BIN_EXE_hubu"))
+        .args(["init", "codex", "--help"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).unwrap();
+    assert!(!help.contains("--approval-token-file"));
+    assert!(!help.contains("--reconciliation-token-file"));
 }

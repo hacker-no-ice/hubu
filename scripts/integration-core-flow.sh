@@ -5,7 +5,9 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Owner actions need owner presence (v0.3.0). These temp-database servers use
 # the scripted fixture provider, which confirms every prompt; hubu-server
 # refuses it for a database inside a managed profile.
-export HUBU_OWNER_PRESENCE_PROVIDER="${HUBU_OWNER_PRESENCE_PROVIDER:-fixture}"
+export HUBU_OWNER_PRESENCE_PROVIDER=fixture
+export HUBU_AUTH_TOKEN=core-flow-owner-fixture
+export HUBU_AGENT_TOKEN=core-flow-agent-fixture
 FLOW_ADDR="${HUBU_CORE_FLOW_ADDR:-127.0.0.1:8788}"
 FLOW_URL="http://${FLOW_ADDR}"
 SERVER_LOG="$(mktemp -t hubu-core-flow-server.XXXXXX.log)"
@@ -14,11 +16,16 @@ POLICY_FILE="$(mktemp -t hubu-core-flow-policy.XXXXXX.yaml)"
 SERVER_PID=""
 
 cleanup() {
+  stop_server
+  rm -f "${SERVER_LOG}" "${DB_PATH}" "${POLICY_FILE}"
+}
+
+stop_server() {
   if [[ -n "${SERVER_PID}" ]] && kill -0 "${SERVER_PID}" >/dev/null 2>&1; then
     kill "${SERVER_PID}" >/dev/null 2>&1 || true
     wait "${SERVER_PID}" >/dev/null 2>&1 || true
   fi
-  rm -f "${SERVER_LOG}" "${DB_PATH}" "${POLICY_FILE}"
+  SERVER_PID=""
 }
 trap cleanup EXIT
 
@@ -84,10 +91,14 @@ cd "${ROOT_DIR}"
 
 cargo build --locked --bin hubu-server --bin hubu
 
-HUBU_DB_PATH="${DB_PATH}" "${ROOT_DIR}/target/debug/hubu-server" "${FLOW_ADDR}" \
-  >"${SERVER_LOG}" 2>&1 &
-SERVER_PID="$!"
-wait_for_server
+start_server() {
+  HUBU_OWNER_PRESENCE_FIXTURE="$1" HUBU_DB_PATH="${DB_PATH}" \
+    "${ROOT_DIR}/target/debug/hubu-server" "${FLOW_ADDR}" >>"${SERVER_LOG}" 2>&1 &
+  SERVER_PID="$!"
+  wait_for_server
+}
+
+start_server confirm
 
 HUMAN_OUTPUT="$(hubu register human --username alice-example --display-name "Alice Example" --email alice@example.com)"
 assert_contains "human registration" "${HUMAN_OUTPUT}" "Human registered"
@@ -234,7 +245,19 @@ assert_contains "agent budget list" "${AGENT_BUDGET_LIST_OUTPUT}" "status: sched
 SCHEDULED_BUDGET_ID="$(awk '/budget_id:/ { print $2; exit }' <<< "${AGENT_BUDGET_OUTPUT}")"
 [[ "${SCHEDULED_BUDGET_ID}" == bgt_* ]] || fail "could not parse scheduled public budget id"
 UPDATE_REASON="Raise the cumulative total cap"
-UPDATED_BUDGET_OUTPUT="$(hubu budget update --budget-id "${ACTIVE_BUDGET_ID}" --amount 80 --reason "${UPDATE_REASON}" --yes)"
+UPDATE_ARGS=(budget update --budget-id "${ACTIVE_BUDGET_ID}" --amount 80 --reason "${UPDATE_REASON}")
+stop_server
+start_server 'timeout,deny,confirm'
+BEFORE_UPDATE="$(hubu budget history --budget-id "${ACTIVE_BUDGET_ID}")"
+for refusal in owner_presence_timeout owner_presence_denied; do
+  UPDATE_STATUS=0
+  REFUSED_UPDATE="$(hubu "${UPDATE_ARGS[@]}" --yes 2>&1)" || UPDATE_STATUS=$?
+  [[ "${UPDATE_STATUS}" == "3" ]] || fail "budget refusal did not exit with status 3"
+  assert_contains "budget refusal" "${REFUSED_UPDATE}" "Waiting for the owner to confirm on this Mac…"
+  assert_contains "budget refusal" "${REFUSED_UPDATE}" "${refusal}"
+  [[ "$(hubu budget history --budget-id "${ACTIVE_BUDGET_ID}")" == "${BEFORE_UPDATE}" ]] || fail "budget changed without confirmation"
+done
+UPDATED_BUDGET_OUTPUT="$(hubu "${UPDATE_ARGS[@]}")"
 assert_contains "budget update" "${UPDATED_BUDGET_OUTPUT}" "Budget update applied"
 assert_contains "budget update" "${UPDATED_BUDGET_OUTPUT}" "budget_id: ${ACTIVE_BUDGET_ID}"
 assert_contains "budget update" "${UPDATED_BUDGET_OUTPUT}" "pinned_revision: 1  current_revision: 1"
@@ -283,7 +306,7 @@ RETIRED_COMMAND_STATUS=$?
 set -e
 [[ "${RETIRED_COMMAND_STATUS}" -ne 0 ]] || fail "retired budget replace command unexpectedly succeeded"
 assert_contains "retired budget command" "${RETIRED_COMMAND_OUTPUT}" 'unknown budget command `replace`'
-FLOW_AUTH_TOKEN="$(<"${ROOT_DIR}/hubu.auth-token")"
+FLOW_AUTH_TOKEN="${HUBU_AUTH_TOKEN}"
 RETIRED_ROUTE_RESPONSE="$(curl --silent --show-error --write-out $'\n%{http_code}' --request POST --header "Authorization: Bearer ${FLOW_AUTH_TOKEN}" --header 'Content-Type: application/json' --data '{"budget_id":"'"${ACTIVE_BUDGET_ID}"'","amount_cents":8000}' "${FLOW_URL}/budgets/replace")"
 RETIRED_ROUTE_STATUS="${RETIRED_ROUTE_RESPONSE##*$'\n'}"
 [[ "${RETIRED_ROUTE_STATUS}" != "200" ]] || fail "retired /budgets/replace route unexpectedly succeeded"
@@ -340,5 +363,25 @@ assert "via fiat_mock" in old["description"]
 assert {entry["id"] for entry in old["entries"]} == {entry["id"] for entry in entries}
 assert all(entry["amount"]["units"] == "20000000" and entry["owner_user_id"] == owner for entry in old["entries"])
 PYTHON
+
+hubu budget create --agent-id "${AGENT_ID}" --amount 400 --ending-before 2999-01-01T00:00:00Z >/dev/null
+SECOND_APPROVAL_OUTPUT="$(hubu spend authorize --operation-key integration-second-approval --account-id "${ACCOUNT_ID}" --amount 130 --reason "Review a second purchase")"
+FIRST_APPROVAL_ID="$(extract_field "${NEEDS_APPROVAL_OUTPUT}" "approval_request_id")"
+SECOND_APPROVAL_ID="$(extract_field "${SECOND_APPROVAL_OUTPUT}" "approval_request_id")"
+[[ -n "${FIRST_APPROVAL_ID}" && -n "${SECOND_APPROVAL_ID}" ]] || fail "could not identify queued approvals"
+
+stop_server
+start_server 'deny,confirm'
+QUEUE_STATUS=0
+QUEUE_OUTPUT="$(hubu approvals 2>&1)" || QUEUE_STATUS=$?
+[[ "${QUEUE_STATUS}" == "3" ]] || fail "approval queue did not report the refusal"
+assert_contains "approval queue" "${QUEUE_OUTPUT}" "Reviewing 1 of 2 (\"${FIRST_APPROVAL_ID}\")"
+assert_contains "approval queue" "${QUEUE_OUTPUT}" "Reviewing 2 of 2 (\"${SECOND_APPROVAL_ID}\")"
+assert_contains "first queued approval" "$(hubu spend approval get --approval-request-id "${FIRST_APPROVAL_ID}")" "status: denied"
+assert_contains "second queued approval" "$(hubu spend approval get --approval-request-id "${SECOND_APPROVAL_ID}")" "status: approved"
+PRESENCE_RECORDS="$(curl --fail --silent --show-error --header "Authorization: Bearer ${FLOW_AUTH_TOKEN}" "${FLOW_URL}/governance/owner-presence?limit=2")"
+assert_contains "first dialog reason" "${PRESENCE_RECORDS}" "(1 of 2)"
+assert_contains "second dialog reason" "${PRESENCE_RECORDS}" "(2 of 2)"
+assert_contains "empty approval queue" "$(hubu approvals)" "No spend is waiting for approval."
 
 printf 'integration-core-flow passed\n'

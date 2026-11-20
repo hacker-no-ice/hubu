@@ -290,7 +290,7 @@ const components = {
     nodes: [
       { id: "human", label: "Human owner", sub: "setup + decisions", x: 42, y: 108, w: 212, h: 100, tone: "human" },
       { id: "agent", label: "AI agent", sub: "one MCP connection", x: 42, y: 380, w: 212, h: 100, tone: "agent" },
-      { id: "cli", label: "Hubu CLI", sub: "init + catalog + read-only WATCH", x: 340, y: 110, w: 230, h: 96, tone: "surface" },
+      { id: "cli", label: "Hubu CLI", sub: "owner confirmation + agent commands", x: 340, y: 110, w: 230, h: 96, tone: "surface" },
       { id: "mcp", label: "Unified MCP", sub: "agent tools + governed execution", x: 340, y: 382, w: 230, h: 96, tone: "surface", path: "crates/hubu-unified-mcp/src/lib.rs" },
       { id: "release", label: "Versioned install", sub: "exact tag + full SHA", x: 340, y: 708, w: 230, h: 96, tone: "surface" },
       { id: "api", label: "Hubu HTTP API", sub: "owner + agent bearers", x: 706, y: 132, w: 226, h: 104, tone: "core" },
@@ -714,6 +714,7 @@ const components = {
     copy:
       "The CLI is the human developer surface and local-stack launcher. For the Gemini Lite, Flash, Nano Banana 2.1 and Pro, and FLUX provider contracts it renders one explicitly versioned composite catalog, reports independent non-network readiness facts, and invokes Gongbu's production validator before activation. It stages updates for explicit activation, reconciles only launcher-owned services in dependency order, configures Codex MCP discovery, and preserves backend ownership boundaries.",
     responsibilities: [
+      ["Owner actions", "Each authority-granting CLI command holds its request open while Hubu asks the owner to confirm. Ordinary reads and spends use the agent credential. The approvals command reviews pending requests oldest first."],
       ["Local gallery", "`hubu gallery export` uses the selected profile to read the operation registry, Hubu settlement history, and Gongbu artifact bytes directly into local files. It does not start the MCP server or provider worker."],
       ["Save folders", "`hubu folders allow` maps short names to project folders. Agents save artifacts only into these names, including images with billing pending. Receipts distinguish quote settlement from provider-confirmed cost; `hubu artifact save` is the CLI form."],
       ["Stack lifecycle", "`init`, `doctor`, `render`, `activate`, `rollback`, `start`, `status`, `logs`, and `stop`, in dependency order."],
@@ -729,7 +730,7 @@ const components = {
     ],
     links: [sharedLinks.feedback, sharedLinks.cli, sharedLinks.watch, sharedLinks.adminUi, sharedLinks.adminUiDoc, sharedLinks.saveFolders, sharedLinks.stackProviderContract, sharedLinks.stackProviderDoctor, sharedLinks.stackLifecycle, sharedLinks.managedCredentialHandoff, sharedLinks.gongbuProviderContracts, sharedLinks.liveProviders, sharedLinks.fluxProviderContract, sharedLinks.localStack, sharedLinks.localStackAcceptance, sharedLinks.api, sharedLinks.registrationProtocol],
     nodes: [
-      { id: "commands", label: "Commands", sub: "init/admin/stack/watch/folders/feedback", x: 35, y: 95, w: 220, h: 92, tone: "human" },
+      { id: "commands", label: "Commands", sub: "admin/approvals/stack/watch", x: 35, y: 95, w: 220, h: 92, tone: "human" },
       { id: "contract", label: "Provider contract source", sub: "FLUX contract + credential alias", x: 315, y: 70, w: 240, h: 92, tone: "data", path: "contracts/provider-contracts-v1.json" },
       { id: "doctor", label: "Source doctor", sub: "four independent readiness facts", x: 315, y: 220, w: 240, h: 92, tone: "core", path: "crates/hubu-cli/src/stack/doctor.rs" },
       { id: "render", label: "Immutable render", sub: "target + price + policies", x: 315, y: 370, w: 240, h: 92, tone: "core", path: "crates/hubu-cli/src/stack.rs" },
