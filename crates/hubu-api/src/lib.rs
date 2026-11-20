@@ -1,6 +1,7 @@
 mod agent_identity;
 mod financial_observer;
 mod governance;
+mod governance_overrides;
 mod history;
 mod owner_presence;
 mod owner_routes;
@@ -1987,6 +1988,8 @@ fn dispatch_route_locked(request: HttpRequest, state: &ServerState) -> HttpRespo
         }
         ("GET", "/owner/presence") => Ok(state.presence.status()),
         ("GET", "/governance/owner-presence") => owner_presence_records(&request, state),
+        ("GET", "/governance/overrides") => governance_overrides::list(state),
+        ("POST", "/governance/overrides") => governance_overrides::set(&request.body, state),
         ("GET", "/spend/executor/guidance") | ("GET", "/.well-known/hubu-spend-executor.json") => {
             Ok(spend_executor_guidance(state))
         }
@@ -2384,6 +2387,7 @@ const ROUTE_ACCESS: &[(&str, &str, RouteAccess)] = &[
         RouteAccess::OwnerBearer,
     ),
     ("GET", "/governance/summary", RouteAccess::OwnerBearer),
+    ("GET", "/governance/overrides", RouteAccess::OwnerBearer),
     ("GET", "/governance/records", RouteAccess::OwnerBearer),
     (
         "GET",
@@ -2404,6 +2408,7 @@ const ROUTE_ACCESS: &[(&str, &str, RouteAccess)] = &[
     ),
     // Owner actions.
     ("POST", "/init", RouteAccess::OwnerAction),
+    ("POST", "/governance/overrides", RouteAccess::OwnerAction),
     ("POST", "/user/spending-target", RouteAccess::OwnerAction),
     (
         "POST",
@@ -3427,20 +3432,26 @@ fn decimal_amount(decimal: Option<&str>, field: &str, subject: &str) -> Result<A
     Ok(requested)
 }
 
+fn resolve_policy_scope(
+    agent_pub_id: Option<&str>,
+    user: &UserContext,
+    state: &ServerState,
+) -> Result<PolicyAssignmentScope> {
+    match agent_pub_id {
+        Some(id) => {
+            resolve_agent_id_for_user(id, user, state).map(PolicyAssignmentScope::AgentOverride)
+        }
+        None => Ok(PolicyAssignmentScope::UserDefault),
+    }
+}
+
 fn add_policy(body: String, state: &ServerState) -> Result<AddPolicyHttpResponse> {
     let request: AddPolicyHttpRequest = serde_json::from_str(&body)?;
 
     let user = authenticated_user_context(state)?;
     let actor = authenticated_user(state)?.pub_id;
-    let (scope, agent_pub_id) = if let Some(agent_pub_id) = request.agent_id.clone() {
-        let agent_id = resolve_agent_id_for_user(&agent_pub_id, &user, state)?;
-        (
-            PolicyAssignmentScope::AgentOverride(agent_id),
-            Some(agent_pub_id),
-        )
-    } else {
-        (PolicyAssignmentScope::UserDefault, None)
-    };
+    let agent_pub_id = request.agent_id;
+    let scope = resolve_policy_scope(agent_pub_id.as_deref(), &user, state)?;
     let policy = if let Some(policy_yaml) = request.policy_yaml {
         let mut policy = Policy::from_yaml_str(&policy_yaml)
             .map_err(|error| anyhow!("{}", policy_load_error_message(error)))?;
@@ -3649,11 +3660,11 @@ fn policy_selector(request: &HttpRequest, state: &ServerState) -> Result<(UserCo
         return Ok((user, selector.clone()));
     }
 
-    let scope = if let Some(agent_pub_id) = request.query.get("agent_id") {
-        PolicyAssignmentScope::AgentOverride(resolve_agent_id_for_user(agent_pub_id, &user, state)?)
-    } else {
-        PolicyAssignmentScope::UserDefault
-    };
+    let scope = resolve_policy_scope(
+        request.query.get("agent_id").map(String::as_str),
+        &user,
+        state,
+    )?;
     let assignment = state
         .governance
         .lock()
@@ -7953,6 +7964,8 @@ lease_profiles:
         ("POST", "/spend/executor/release", "/spend/executor/release"),
         ("POST", "/spend/approval/prompt", "/spend/approval/prompt"),
         ("GET", "/owner/presence", "/owner/presence"),
+        ("GET", "/governance/overrides", "/governance/overrides"),
+        ("POST", "/governance/overrides", "/governance/overrides"),
         (
             "GET",
             "/governance/owner-presence",
