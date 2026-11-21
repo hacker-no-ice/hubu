@@ -68,25 +68,33 @@
       const add = available.length ? h("button", { type: "button",
         onclick: () => showAddPermission(available),
       }, "Add permission…") : null;
-      const additional = granted.length
-        ? h("ul", { class: "granted-permissions" }, granted.map((setting) => {
-          const remove = h("button", { type: "button", class: "ghost",
+      const allowed = table([
+        { label: "Action", render: (label) => label },
+        { label: "Status", render: () => badge("allowed") },
+      ], strict);
+      allowed.setAttribute("aria-label", "Allowed in Strict");
+
+      const additional = table([
+        { label: "Action", render: (setting) => h("div", {},
+          h("strong", {}, setting.label), h("p", { class: "hint" }, setting.permission)) },
+        { label: "Status", render: () => badge("granted") },
+        { label: "Manage", render: (setting) => {
+          const remove = h("button", { type: "button", class: "ghost small",
             "aria-label": `Remove permission: ${setting.label}`,
             onclick: () => changePermission(setting, false, remove, feedback),
           }, "Remove");
-          return h("li", {}, h("div", {}, h("strong", {}, setting.label),
-            h("p", { class: "hint" }, setting.permission)), remove);
-        }))
-        : h("div", { class: "empty" }, "No additional permissions granted.");
+          return remove;
+        } },
+      ], granted, "No additional permissions granted.");
+      if (granted.length) additional.setAttribute("aria-label", "Additional permissions");
 
       clear(view).append(
         h("div", { class: "settings-intro" }, h("h2", {}, "Agent action permissions"),
           h("p", { class: "hint" }, "Permissions apply to all agents in this Hubu profile."),
           h("p", { class: "hint" }, "Adding or removing an extra permission requires confirmation on your Mac.")),
-        card("Allowed in Strict", h("ul", { class: "strict-permissions" },
-          strict.map((label) => h("li", {}, label)))),
+        card("Allowed in Strict", h("div", { class: "permission-table" }, allowed), null, true),
         feedback,
-        card("Additional permissions", additional, add, true),
+        card("Additional permissions", h("div", { class: "permission-table" }, additional), add, true),
       );
     } catch (error) {
       if (error.status === 401) { showSignIn(); return; }

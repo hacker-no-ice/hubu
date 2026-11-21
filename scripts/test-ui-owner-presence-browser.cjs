@@ -137,7 +137,10 @@ async function main() {
     assert.equal(new URL(page.url()).pathname, '/settings');
     await page.getByRole('heading', { name: 'Agent action permissions' }).waitFor();
     assert.equal(await page.getByRole('navigation', { name: 'Sections' }).count(), 0);
-    await page.getByText('Register agents', { exact: true }).waitFor();
+    const strictTable = page.getByRole('table', { name: 'Allowed in Strict' });
+    await strictTable.getByRole('columnheader', { name: 'Action', exact: true }).waitFor();
+    await strictTable.getByRole('row', { name: /Register agents/ }).getByText('allowed', { exact: true }).waitFor();
+    assert.equal(await strictTable.getByRole('button').count(), 0);
     const strict = page.getByText('No additional permissions granted.', { exact: true });
     await strict.waitFor();
     const add = page.getByRole('button', { name: 'Add permission…', exact: true });
@@ -156,7 +159,10 @@ async function main() {
     await add.click();
     await warning.getByLabel('Permission', { exact: true }).selectOption('lower_budget');
     await confirm.click();
-    const remove = page.getByRole('button', { name: 'Remove permission: Lower an existing budget' });
+    const grantedRow = page.getByRole('table', { name: 'Additional permissions' })
+      .getByRole('row', { name: /Lower an existing budget/ });
+    await grantedRow.getByText('granted', { exact: true }).waitFor();
+    const remove = grantedRow.getByRole('button', { name: 'Remove permission: Lower an existing budget' });
     await remove.waitFor();
     await add.click();
     assert.deepEqual(await warning.getByRole('option').allTextContents(), ['Choose a permission', 'Append a deny rule']);
