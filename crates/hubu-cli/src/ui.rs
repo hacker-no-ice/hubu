@@ -41,7 +41,9 @@ const GONGBU_TIMEOUT: Duration = Duration::from_secs(5);
 const UI_HEADER: &str = "x-hubu-ui";
 
 const INDEX_HTML: &str = include_str!("ui/assets/index.html");
+const SETTINGS_HTML: &str = include_str!("ui/assets/settings.html");
 const APP_JS: &str = include_str!("ui/assets/app.js");
+const SETTINGS_JS: &str = include_str!("ui/assets/settings.js");
 const APP_CSS: &str = include_str!("ui/assets/app.css");
 /// The same wordmark hubustack.dev serves, so the admin UI stays on-brand.
 const WORDMARK_SVG: &str = include_str!("../../../site/public/brand/hubu-wordmark.svg");
@@ -555,7 +557,9 @@ fn handle<B: Backend>(request: &Request, state: &UiState<B>) -> Response {
 
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/" | "/index.html") => asset("text/html; charset=utf-8", INDEX_HTML),
+        ("GET", "/settings") => asset("text/html; charset=utf-8", SETTINGS_HTML),
         ("GET", "/app.js") => asset("text/javascript; charset=utf-8", APP_JS),
+        ("GET", "/settings.js") => asset("text/javascript; charset=utf-8", SETTINGS_JS),
         ("GET", "/app.css") => asset("text/css; charset=utf-8", APP_CSS),
         ("GET", "/hubu-wordmark.svg") => asset("image/svg+xml", WORDMARK_SVG),
         ("GET", "/login") => login(request, state),
@@ -1018,6 +1022,9 @@ mod tests {
         let response = handle(&request("GET", "/"), &state);
         assert_eq!(response.status, 200);
         assert!(String::from_utf8_lossy(&response.body).contains("app.js"));
+        let settings = handle(&request("GET", "/settings"), &state);
+        assert_eq!(settings.status, 200);
+        assert!(String::from_utf8_lossy(&settings.body).contains("settings.js"));
 
         let mut rebound = request("GET", "/");
         rebound

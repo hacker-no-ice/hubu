@@ -82,6 +82,11 @@ fn agent_post(state: &ServerState, path: &str, body: Value) -> HttpResponse {
 fn override_settings_are_strict_and_can_only_change_after_warned_owner_confirmation() {
     let (path, state) = temp_state("override-settings");
     let initial = override_settings(&state);
+    let strict = initial["strict_permissions"].as_array().unwrap();
+    assert!(strict.contains(&json!("Register agents")));
+    assert!(strict.contains(&json!(
+        "Check spend approvals and prompt the owner to decide"
+    )));
     let settings = initial["overrides"].as_array().unwrap();
     assert_eq!(settings.len(), 2);
     assert!(settings.iter().all(|setting| setting["enabled"] == false));
@@ -142,6 +147,14 @@ fn override_settings_are_strict_and_can_only_change_after_warned_owner_confirmat
     drop(state);
     let state = ServerState::new_with_db_path(&path).unwrap();
     assert_eq!(override_settings(&state)["overrides"][0]["enabled"], true);
+    fixture(&state, "deny");
+    let remove = route(
+        authenticated_json_request(OVERRIDES, override_body("lower_budget", false)),
+        &state,
+    );
+    assert_eq!(remove.body["error_code"], "owner_presence_denied");
+    assert_eq!(override_settings(&state)["overrides"][0]["enabled"], true);
+    fixture(&state, "confirm");
     set_override(&state, "lower_budget", false);
     assert_eq!(initial, override_settings(&state));
     std::fs::remove_file(path).ok();

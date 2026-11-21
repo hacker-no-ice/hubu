@@ -131,30 +131,47 @@ async function main() {
     const errors = [];
     page.on('pageerror', (error) => errors.push(error.message));
     await page.goto(login);
+    await page.getByRole('link', { name: 'Budgets', exact: true }).click();
+    await page.getByRole('heading', { name: 'Budgets', exact: true }).waitFor();
     await page.getByRole('link', { name: 'Settings', exact: true }).click();
-    const lowerBudget = page.getByRole('row', { name: /Lower an existing budget/ });
-    const addDenyRule = page.getByRole('row', { name: /Append a deny rule/ });
-    await lowerBudget.getByText('off', { exact: true }).waitFor();
-    await addDenyRule.getByText('off', { exact: true }).waitFor();
-    assert.equal(await page.getByRole('table').getByRole('row').count(), 3);
-    const enableBudget = lowerBudget.getByRole('button', { name: /Enable override/ });
-    await enableBudget.click();
-    const overrideWarning = page.getByRole('dialog');
-    await overrideWarning.getByText('Agents can lower existing budgets without your confirmation.').waitFor();
-    await overrideWarning.getByText(/A prompt-injected agent could cut spending limits/).waitFor();
-    await overrideWarning.getByRole('button', { name: 'Close', exact: true }).click();
+    assert.equal(new URL(page.url()).pathname, '/settings');
+    await page.getByRole('heading', { name: 'Agent action permissions' }).waitFor();
+    assert.equal(await page.getByRole('navigation', { name: 'Sections' }).count(), 0);
+    await page.getByText('Register agents', { exact: true }).waitFor();
+    const strict = page.getByText('No additional permissions granted.', { exact: true });
+    await strict.waitFor();
+    const add = page.getByRole('button', { name: 'Add permission…', exact: true });
+    const warning = page.getByRole('dialog');
+    const confirm = warning.getByRole('button', { name: 'I understand, add permission' });
+    await add.click();
+    assert.deepEqual(await warning.getByRole('option').allTextContents(), [
+      'Choose a permission', 'Lower an existing budget', 'Append a deny rule',
+    ]);
+    assert.ok(await confirm.isDisabled());
+    await warning.getByLabel('Permission', { exact: true }).selectOption('lower_budget');
+    await warning.getByText('Agents can lower existing budgets without your confirmation.').waitFor();
+    await warning.getByText(/A prompt-injected agent could cut spending limits/).waitFor();
+    await warning.getByRole('button', { name: 'Close', exact: true }).click();
     assert.ok((await serverRequest('/governance/overrides')).overrides.every((setting) => !setting.enabled));
-    await enableBudget.click();
-    await overrideWarning.getByRole('button', { name: 'I understand, enable override' }).click();
-    await lowerBudget.getByText('enabled', { exact: true }).waitFor();
-    await addDenyRule.getByText('off', { exact: true }).waitFor();
-    await lowerBudget.getByRole('button', { name: /Disable override/ }).click();
-    await lowerBudget.getByText('off', { exact: true }).waitFor();
+    await add.click();
+    await warning.getByLabel('Permission', { exact: true }).selectOption('lower_budget');
+    await confirm.click();
+    const remove = page.getByRole('button', { name: 'Remove permission: Lower an existing budget' });
+    await remove.waitFor();
+    await add.click();
+    assert.deepEqual(await warning.getByRole('option').allTextContents(), ['Choose a permission', 'Append a deny rule']);
+    await warning.getByRole('button', { name: 'Close', exact: true }).click();
+    await remove.click();
+    await strict.waitFor();
     const overrideRecords = (await serverRequest('/governance/owner-presence')).records
       .filter((record) => record.action === 'governance.override.set');
     assert.equal(overrideRecords.length, 2);
-    assert.ok(overrideRecords.every((record) => record.outcome === 'confirmed' && record.client === 'portal'));
+    assert.ok(overrideRecords.every((record) => record.outcome === 'confirmed' && record.client === 'portal' && record.method === 'fixture'));
+    assert.match(overrideRecords[0].reason, /^remove permission for agents to lower existing budgets$/);
+    assert.match(overrideRecords[1].reason, /^allow agents to lower existing budgets without you/);
 
+    await page.getByRole('link', { name: 'Back to console' }).click();
+    await page.getByRole('heading', { name: 'Budgets', exact: true }).waitFor();
     await page.getByRole('link', { name: /^Approvals/ }).click();
     const approve = page.getByRole('button', { name: 'Approve', exact: true });
     const assertApproval = async (id, status) => {

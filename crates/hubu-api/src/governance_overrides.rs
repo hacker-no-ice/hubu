@@ -79,9 +79,45 @@ impl SetOverride {
                 self.action.risk().trim_end_matches('.')
             )
         } else {
-            format!("require owner confirmation for agents to {permission}")
+            format!("remove permission for agents to {permission}")
         }
     }
+}
+
+fn strict_permissions() -> Vec<String> {
+    let mut permissions = Vec::new();
+    for &(method, path, access) in ROUTE_ACCESS {
+        if access != RouteAccess::Agent {
+            continue;
+        }
+        let label = match (method, path) {
+            ("POST", "/spend/authorize" | "/spend") => "Request authorization and submit spend",
+            ("POST", "/spend/void") => "Void unclaimed spend authorizations",
+            ("GET", "/spend/approval") | ("POST", "/spend/approval/prompt") => {
+                "Check spend approvals and prompt the owner to decide"
+            }
+            ("GET", "/budgets" | "/watch") => "View budgets and watch for changes",
+            ("GET", "/ledger" | "/ledger/transactions" | "/ledger/summary") => {
+                "View the ledger and spend summaries"
+            }
+            ("GET", "/spend/authorizations" | "/spend/authorizations/show") => {
+                "View spend authorization records"
+            }
+            ("GET", "/agents" | "/user" | "/owner/presence") => {
+                "View agents, the current user, and owner confirmation availability"
+            }
+            ("GET", "/policies" | "/policies/show") => "View policies",
+            ("POST", "/agents/register") => "Register agents",
+            _ => {
+                permissions.push(format!("{method} {path}"));
+                continue;
+            }
+        };
+        if !permissions.iter().any(|permission| permission == label) {
+            permissions.push(label.to_string());
+        }
+    }
+    permissions
 }
 
 pub(super) fn list(state: &ServerState) -> Result<Value> {
@@ -102,7 +138,7 @@ pub(super) fn list(state: &ServerState) -> Result<Value> {
             })
         })
         .collect();
-    Ok(json!({ "overrides": overrides }))
+    Ok(json!({ "strict_permissions": strict_permissions(), "overrides": overrides }))
 }
 
 pub(super) fn set(body: &str, state: &ServerState) -> Result<Value> {

@@ -355,7 +355,7 @@ const components = {
     responsibilities: [
       ["Bounded HTTP", "Strictly frames each request and caps header size, body size, and read time."],
       ["Authentication", "Health and guidance are public. Other routes need an owner or agent bearer. ROUTE_ACCESS declares each route’s credential class. Strict gives agents the baseline allowlist. Owner actions such as approving spend and reconciliation require the server’s confirmation dialog."],
-      ["Agent action overrides", "Portal Settings can delegate budget lowering or appending a deny rule after a warning and owner confirmation. The API checks the current setting and revision, then records which override authorized the write."],
+      ["Agent action permissions", "The console gear opens a dedicated Settings page showing the Strict allowlist and additional permissions for all agents. Adding budget lowering or appending a deny rule shows a warning. Each add or remove needs owner confirmation. The API checks the setting and revision, then records which setting authorized the write."],
       ["Executors are not humans", "Holding the bearer token never grants approval or reconciliation authority."],
       ["Thin transport", "Parses public IDs and checks ownership, then delegates to `SpendApprovalService`, `ExecutorClaimService`, and `BudgetManager`."],
       ["Policy snapshot", "Passes the selected immutable policy payload and public revision/hash together to core, preserving agent override before owner default."],
