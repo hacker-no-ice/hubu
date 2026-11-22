@@ -1,8 +1,8 @@
 //! Route-level owner presence enforcement (v0.3.0 spec, sections 4, 5 and 9).
 //!
 //! Every protected request is classified by credential and by its effective
-//! [`RouteAccess`]. Every owner action runs only after `hubu-server` itself
-//! raised the presence dialog for that action and the owner confirmed. There
+//! [`RouteAccess`]. Owner actions require a confirmation raised by
+//! `hubu-server` or an explicitly delegated tightening action. There
 //! is no owner window: one confirmation authorizes exactly the action its
 //! dialog named (owner decision, 2026-11-19).
 //! Prompts run outside the dispatch lock so a dialog waiting for the owner
@@ -60,6 +60,39 @@ pub(super) fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
     };
     let access = effective_route_access(&request);
     if !access.admits(class) {
+        if access == RouteAccess::OwnerAction {
+            // Read the setting, classify the action and execute under the same
+            // lock as owner writes. A concurrent disable or revision cannot
+            // slip in between the authorization and the mutation.
+            let _dispatch = lock_dispatch(state);
+            match governance_overrides::delegation(&request, state) {
+                Ok(Some((action, target))) => {
+                    let delegated_policy_id = match action {
+                        governance_overrides::GovernanceOverride::AddDenyRule => {
+                            Some(target.as_str())
+                        }
+                        governance_overrides::GovernanceOverride::LowerBudget => None,
+                    };
+                    let record = OwnerPresenceRecord {
+                        record_id: new_record_id(),
+                        recorded_at: Utc::now(),
+                        action: action.action().to_string(),
+                        reason: String::new(),
+                        outcome: "delegated".to_string(),
+                        method: None,
+                        client: OwnerClient::Agent.as_str().to_string(),
+                        targets: vec![target.clone()],
+                        override_action: Some(action.key().to_string()),
+                    };
+                    if let Err(error) = record_presence(state, &record) {
+                        return internal_presence_error(&error);
+                    }
+                    return dispatch_route_locked(request, state, delegated_policy_id);
+                }
+                Ok(None) => {}
+                Err(error) => return internal_presence_error(&error),
+            }
+        }
         log_event(
             "warn",
             "http_request_forbidden",
@@ -174,6 +207,7 @@ fn tightening(request: HttpRequest, state: &ServerState, client: OwnerClient) ->
         method: None,
         client: client.as_str().to_string(),
         targets,
+        override_action: None,
     };
     if let Err(error) = record_presence(state, &record) {
         return internal_presence_error(&error);
@@ -345,6 +379,7 @@ fn prompt_and_record(
         method,
         client: client.as_str().to_string(),
         targets: spec.targets.clone(),
+        override_action: None,
     };
     if let Err(error) = record_presence(state, &record) {
         log_event(
@@ -557,6 +592,14 @@ fn owner_action_spec(
         }
     }
     match (request.method.as_str(), request.path.as_str()) {
+        ("POST", "/governance/overrides") => {
+            let change = governance_overrides::SetOverride::parse(&request.body)?;
+            action(
+                "governance.override.set",
+                change.reason(),
+                vec![change.key().to_string()],
+            )
+        }
         ("POST", "/init") => {
             let map = body_object(&request.body)?;
             let username = body_str(&map, "username")
@@ -729,6 +772,7 @@ pub(super) fn owner_presence_records(request: &HttpRequest, state: &ServerState)
             "method": record.method,
             "client": record.client,
             "target": record.targets,
+            "override_action": record.override_action,
         })).collect::<Vec<_>>(),
     }))
 }

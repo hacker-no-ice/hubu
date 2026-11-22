@@ -8,7 +8,7 @@
   <link rel="stylesheet" href="/app.css">
 </head>
 <body>
-  <div class="shell">
+  <div class="shell" id="portal-shell">
     <aside class="sidebar">
       <div class="brand">
         <a class="brand-link" href="#/overview" aria-label="Hubu admin home">
@@ -31,6 +31,7 @@
             </label>
           </span>
           <button type="button" class="ghost" id="refresh" title="Reload this view">Refresh</button>
+          <a id="open-settings" class="icon-button settings-link" href="/settings" title="Settings" aria-label="Settings"><span aria-hidden="true">⚙︎</span></a>
         </div>
       </header>
       <div id="owner-action-status" class="notice info" role="status" hidden></div>

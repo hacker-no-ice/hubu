@@ -297,8 +297,10 @@ class Runtime:
             if self.server and self.server.poll() is None: self.server.terminate(); self.server.wait(timeout=10)
             command = [str(Path(self.context['binary_directory']) / 'hubu-server'), 'serve', '--config', str(self.private / 'server.json')]
             self.note('$ ' + shlex.join(command))
+            env = dict(self.environment(), HUBU_OWNER_PRESENCE_PROVIDER='fixture',
+                       HUBU_OWNER_PRESENCE_FIXTURE='confirm')
             with (self.private / 'server.log').open('a') as log:
-                self.server = subprocess.Popen(command, cwd=self.private, env=self.environment(), stdout=log, stderr=log)
+                self.server = subprocess.Popen(command, cwd=self.private, env=env, stdout=log, stderr=log)
             for _ in range(100):
                 if self.server.poll() is not None: raise RuntimeError('Hubu startup failed; inspect private server.log')
                 try:
@@ -329,7 +331,7 @@ class Runtime:
         raise ValueError('Unknown parent operation')
 
 
-def run_episode(attack, verify, *, episode, budget, short_lease=False, policy=POLICY, setup=None):
+def run_episode(attack, verify, *, episode, budget, short_lease=False, policy=POLICY, setup=None, observe=None):
     parser = argparse.ArgumentParser(description=episode + ': unchanged released Hubu, synthetic executor')
     parser.add_argument('--release', help='published stable tag, such as v0.2.5'); parser.add_argument('--output'); parser.add_argument('--cache')
     parser.add_argument('--attack-context', help=argparse.SUPPRESS)
@@ -420,6 +422,8 @@ def run_episode(attack, verify, *, episode, budget, short_lease=False, policy=PO
         save(child_context, dict(context, auth_file=context['agent_file']))
         child_environment = dict(rt.environment(), HUBU_AUTH_TOKEN_FILE=context['agent_file'])
         rt.snapshot('initial')
+        if observe:
+            observe(rt, 'initial')
         command = [sys.executable, str(Path(sys.argv[0]).resolve()), '--attack-context', str(child_context)]
         error_path = private / 'attack-stderr.txt'
         with error_path.open('w') as errors:
@@ -434,6 +438,8 @@ def run_episode(attack, verify, *, episode, budget, short_lease=False, policy=PO
         stderr = error_path.read_text()
         if stderr: rt.note(stderr)
         if code: raise RuntimeError(f'Attack process exited {code}: {stderr}')
+        if observe:
+            observe(rt, 'final')
     except (Exception, KeyboardInterrupt) as exc:
         error = str(exc) or 'Interrupted by operator'
         if rt: rt.note('INCOMPLETE: ' + error)

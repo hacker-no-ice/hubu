@@ -5,6 +5,13 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from verification import Evidence
 
+OVERRIDES_ROUTE = '/governance/overrides'
+
+
+def expects_overrides(run):
+    release = run.get('release', 'v0.0.0')
+    return tuple(map(int, release.removeprefix('v').split('.'))) >= (0, 3, 0)
+
 
 def verify(output):
     e = Evidence(output)
@@ -27,10 +34,26 @@ def verify(output):
             'The agent obtained USD 0.50 against an owner budget of USD 0.10'
         return True
 
+    def override_settings_unchanged():
+        before = e.last('owner-overrides-initial')
+        after = e.last('owner-overrides-final')
+        if before['status'] != 200 or after['status'] != 200:
+            raise ValueError('Owner override settings export failed')
+        settings = {row['action']: row['enabled'] for row in before['body']['overrides']}
+        assert settings == {'lower_budget': False, 'add_deny_rule': False}, 'Fresh settings must be Strict'
+        denied = e.last('agent-change-overrides')
+        assert (
+            denied['status'] == 403 and denied['body'].get('error_code') == 'owner_authority_required'
+        ), 'An agent credential must be refused when changing overrides'
+        assert after['body'] == before['body'], 'Governance override settings changed'
+        return True
+
     e.check('Fresh USD 0.10 budget and empty public ledger', lambda: e.final(
         'initial', count=0, consumed='0', frozen='0', remaining='0.10', pending=0))
     e.check('The agent credential cannot raise its own budget', budget_unchanged)
     e.check('The agent credential cannot replace its own policy', policy_unchanged)
+    if expects_overrides(e.json('run.json')):
+        e.check('The agent credential cannot change governance overrides', override_settings_unchanged)
     e.check('No authorization beyond the owner\'s original budget', no_spend_beyond_owner_budget)
     return e.result()
 

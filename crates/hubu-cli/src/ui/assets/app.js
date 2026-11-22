@@ -1686,6 +1686,7 @@ async function route({ silent = false } = {}) {
   const viewDef = VIEWS.find((v) => v.id === id) || VIEWS[1];
   if (!silent) {
     drawNav(viewDef.id);
+    document.getElementById("open-settings").href = `/settings?from=${encodeURIComponent(location.hash)}`;
     document.getElementById("title").textContent = viewDef.label;
     document.title = `${viewDef.label} · Hubu Admin`;
     // Only read-mostly views reload themselves; views with editors use Refresh.
@@ -1804,7 +1805,7 @@ function startAutoRefresh() {
 }
 
 function showSignIn() {
-  document.querySelector(".shell").style.display = "none";
+  document.getElementById("portal-shell").style.display = "none";
   document.body.append(h("div", { class: "card signin" },
     h("header", {}, h("h2", {}, "Sign in to Hubu Admin")),
     h("div", { class: "body" },
@@ -1821,6 +1822,7 @@ async function refreshApprovalCount() {
 }
 
 async function boot() {
+  if (!document.getElementById("nav")) return;
   try {
     state.session = await api("GET", "/api/session");
   } catch (error) {
