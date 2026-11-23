@@ -33,7 +33,7 @@ bearer without a Touch ID dialog.
 | Decisions | Governance records filtered by agent, category and time, with the summary for the same filter. |
 | Agents | Register an agent from a name and a version label, list agents, rename an agent from the pencil next to its name, view its name history. |
 | Users & targets | List human users, register a human user, set or revoke advisory spending targets. |
-| Policies | Read any revision of a policy (rules in plain language and the YAML source), compare a past revision with the current one, then switch to Edit to change the YAML or load an agent's draft with **Load file…**. After **Validate** passes, the editor shows the draft's diff against the revision in effect for that scope; **Save** sends exactly the validated text and asks you to confirm on your Mac. See [Agent drafts, owner applies](policy-engine.md#agent-drafts-owner-applies). |
+| Policies | Read any revision of a policy (rules in plain language and the YAML source), compare a past revision with the current one, then switch to Edit to change the YAML or paste an agent's draft. After **Validate** passes, the editor shows the draft's diff against the revision in effect for that scope; **Save** sends exactly the validated text and asks you to confirm on your Mac. See [Agent drafts, owner applies](policy-engine.md#agent-drafts-owner-applies). |
 | Budgets | Create budgets, change a limit, revoke, view version history. |
 | Providers & secrets | Read-only view grouped by platform: each platform's models, config versions, secret reference name and which targets Gongbu currently offers. |
 

@@ -98,13 +98,14 @@ amount boundary, and one cent above it.
 
 ## Hand the draft to the owner
 
-End by telling the owner where the file is and how to apply it. Give both
-routes, with the exact path and scope filled in:
+End by telling the owner where the file is and how to apply it. Include the
+full YAML in your reply so the owner can copy it, and give both routes, with
+the exact path and scope filled in:
 
-- **Portal:** open the Policies page, choose the policy for that scope (or
-  **New policy**), click **Load file…** and pick the file, then **Validate**.
-  The editor shows what the draft changes before **Save**, which asks the
-  owner to confirm on their Mac.
+- **Portal:** open the Policies page, choose the policy for that scope and
+  switch to **Edit** (or click **New policy** and pick the scope), paste the
+  YAML, then click **Validate**. The editor shows what the draft changes
+  before **Save**, which asks the owner to confirm on their Mac.
 - **CLI:** the exact command, for example
 
   ```bash

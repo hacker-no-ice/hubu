@@ -1336,8 +1336,6 @@ async function openPolicy(container, policy, options = {}) {
   await draw();
 }
 
-const MAX_POLICY_FILE_BYTES = 256 * 1024;
-
 /**
  * YAML editor with server-equivalent validation before saving. After a
  * successful validation it shows the draft's diff against what is in effect
@@ -1351,39 +1349,20 @@ function policyEditor(container, { yaml, intro, submitLabel, onDraft, onCancel, 
   const save = h("button", { type: "button", disabled: true }, submitLabel);
   const stale = h("span", { class: "hint" }, "Validate to enable saving.");
   let validatedText = null;
-  // Bumped by every edit, file load, scope change and new validation. A
+  // Bumped by every edit, scope change and new validation. A
   // validation applies its result only if nothing has changed since it began,
   // so a slow export cannot enable Save with another scope's diff.
   let generation = 0;
   let validating = false;
-  const invalidate = (message, force = false) => {
+  const invalidate = (message) => {
     generation += 1;
-    if (validatedText === null && !validating && !force) return;
+    if (validatedText === null && !validating) return;
     validating = false;
     validatedText = null;
     save.disabled = true;
     stale.textContent = message;
     clear(result);
   };
-  const fileInput = h("input", { type: "file", accept: ".yaml,.yml,application/yaml,text/yaml", hidden: true,
-    "aria-label": "Policy YAML file" });
-  fileInput.addEventListener("change", async () => {
-    const file = fileInput.files?.[0];
-    fileInput.value = "";
-    if (!file) return;
-    if (file.size > MAX_POLICY_FILE_BYTES) {
-      clear(result).append(h("div", { class: "notice bad" }, `${file.name} is larger than 256 KB; a policy file is much smaller.`));
-      return;
-    }
-    try {
-      textarea.value = await file.text();
-    } catch (error) {
-      clear(result).append(h("div", { class: "notice bad" }, `Could not read ${file.name}: ${error.message}`));
-      return;
-    }
-    onDraft?.(textarea.value);
-    invalidate(`Loaded ${file.name}. Validate to see what it changes.`, true);
-  });
   if (extraFields) extraFields.addEventListener("change", () => invalidate("Changed since the last validation. Validate again to save."));
   const validate = async () => {
     generation += 1;
@@ -1446,8 +1425,6 @@ function policyEditor(container, { yaml, intro, submitLabel, onDraft, onCancel, 
     extraFields || null,
     textarea,
     h("div", { class: "form-actions" },
-      h("button", { type: "button", class: "ghost", onclick: () => fileInput.click() }, "Load file…"),
-      fileInput,
       h("button", { type: "button", class: "ghost", onclick: validate }, "Validate"),
       save,
       onCancel ? h("button", { type: "button", class: "ghost", onclick: onCancel }, "Discard changes") : null,

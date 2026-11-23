@@ -48,10 +48,10 @@ agent-facing MCP has no apply tool.
    `hubu policy apply --path FILE --agent-id agt_...`. A budget change is
    handed over as the exact `hubu budget update` command instead of a file.
 3. The owner reviews the change before confirming it:
-   - **Portal.** In the policy editor, **Load file…** fills the editor from the
-     file (or paste it). After **Validate** passes, the editor shows the
-     draft's diff against the revision in effect for that scope. **Save** sends
-     exactly the validated text and raises one dialog.
+   - **Portal.** Paste the draft into the policy editor (**Edit** on the
+     scope's policy, or **New policy**). After **Validate** passes, the editor
+     shows the draft's diff against the revision in effect for that scope.
+     **Save** sends exactly the validated text and raises one dialog.
    - **CLI.** `hubu policy apply --path FILE` validates the file, prints its
      diff against the policy currently applied to the target scope (the whole
      file when none is applied yet), then sends it, which raises the dialog. An
