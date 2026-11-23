@@ -41,7 +41,9 @@ const GONGBU_TIMEOUT: Duration = Duration::from_secs(5);
 const UI_HEADER: &str = "x-hubu-ui";
 
 const INDEX_HTML: &str = include_str!("ui/assets/index.html");
+const SETTINGS_HTML: &str = include_str!("ui/assets/settings.html");
 const APP_JS: &str = include_str!("ui/assets/app.js");
+const SETTINGS_JS: &str = include_str!("ui/assets/settings.js");
 const APP_CSS: &str = include_str!("ui/assets/app.css");
 /// The same wordmark hubustack.dev serves, so the admin UI stays on-brand.
 const WORDMARK_SVG: &str = include_str!("../../../site/public/brand/hubu-wordmark.svg");
@@ -555,7 +557,9 @@ fn handle<B: Backend>(request: &Request, state: &UiState<B>) -> Response {
 
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/" | "/index.html") => asset("text/html; charset=utf-8", INDEX_HTML),
+        ("GET", "/settings") => asset("text/html; charset=utf-8", SETTINGS_HTML),
         ("GET", "/app.js") => asset("text/javascript; charset=utf-8", APP_JS),
+        ("GET", "/settings.js") => asset("text/javascript; charset=utf-8", SETTINGS_JS),
         ("GET", "/app.css") => asset("text/css; charset=utf-8", APP_CSS),
         ("GET", "/hubu-wordmark.svg") => asset("image/svg+xml", WORDMARK_SVG),
         ("GET", "/login") => login(request, state),
@@ -804,12 +808,14 @@ fn allowed_route(method: &str, path: &str) -> Option<RouteAccess> {
         "/ledger/transactions",
         "/ledger/summary",
         "/governance/summary",
+        "/governance/overrides",
         "/governance/records",
         "/spend/executor/claim",
         "/spend/executor/reconciliation",
     ];
     const POST_ROUTES: &[&str] = &[
         "/init",
+        "/governance/overrides",
         "/policies",
         "/budgets",
         "/budgets/revoke",
@@ -1016,6 +1022,9 @@ mod tests {
         let response = handle(&request("GET", "/"), &state);
         assert_eq!(response.status, 200);
         assert!(String::from_utf8_lossy(&response.body).contains("app.js"));
+        let settings = handle(&request("GET", "/settings"), &state);
+        assert_eq!(settings.status, 200);
+        assert!(String::from_utf8_lossy(&settings.body).contains("settings.js"));
 
         let mut rebound = request("GET", "/");
         rebound
@@ -1126,12 +1135,14 @@ mod tests {
             ("GET", "/api/hubu/agents?all=true"),
             ("GET", "/api/hubu/budgets/bgt_abc123/versions"),
             ("GET", "/api/hubu/governance/records/gov_1"),
+            ("GET", "/api/hubu/governance/overrides"),
             ("GET", "/api/hubu/ledger/summary?agent_id=agt_1&days=30"),
             (
                 "GET",
                 "/api/hubu/governance/records?categories=spend,approval&limit=50",
             ),
             ("POST", "/api/hubu/budgets"),
+            ("POST", "/api/hubu/governance/overrides"),
             ("POST", "/api/hubu/budgets/bgt_abc123/versions"),
             ("POST", "/api/hubu/policies"),
         ] {
@@ -1152,7 +1163,7 @@ mod tests {
             assert_eq!(response.status, 404, "{method} {target}");
         }
         let calls = state.backend.calls.lock().unwrap();
-        assert_eq!(calls.len(), 8);
+        assert_eq!(calls.len(), 10);
         assert_eq!(calls[0].1, "/agents?all=true");
         assert!(calls.iter().all(|call| !call.3));
     }

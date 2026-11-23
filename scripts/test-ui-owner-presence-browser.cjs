@@ -38,8 +38,8 @@ async function main() {
     HUBU_AGENT_TOKEN: 'isolated-portal-agent-fixture',
     HUBU_OWNER_PRESENCE_PROVIDER: 'fixture',
     HUBU_OWNER_PRESENCE_FIXTURE_RATE_LIMIT: 'on',
-    // Init, policy, budget, first approval, two budget changes, then refusals.
-    HUBU_OWNER_PRESENCE_FIXTURE: 'confirm,confirm,confirm,confirm,confirm,confirm,timeout,deny,unavailable,timeout',
+    // Init, policy, budget, two override changes, approval, two budget changes, then refusals.
+    HUBU_OWNER_PRESENCE_FIXTURE: 'confirm,confirm,confirm,confirm,confirm,confirm,confirm,confirm,timeout,deny,unavailable,timeout',
   });
   let server, portal, proxy, browser;
   try {
@@ -131,6 +131,53 @@ async function main() {
     const errors = [];
     page.on('pageerror', (error) => errors.push(error.message));
     await page.goto(login);
+    await page.getByRole('link', { name: 'Budgets', exact: true }).click();
+    await page.getByRole('heading', { name: 'Budgets', exact: true }).waitFor();
+    await page.getByRole('link', { name: 'Settings', exact: true }).click();
+    assert.equal(new URL(page.url()).pathname, '/settings');
+    await page.getByRole('heading', { name: 'Agent action permissions' }).waitFor();
+    assert.equal(await page.getByRole('navigation', { name: 'Sections' }).count(), 0);
+    const strictTable = page.getByRole('table', { name: 'Allowed in Strict' });
+    await strictTable.getByRole('columnheader', { name: 'Action', exact: true }).waitFor();
+    await strictTable.getByRole('row', { name: /Register agents/ }).getByText('allowed', { exact: true }).waitFor();
+    assert.equal(await strictTable.getByRole('button').count(), 0);
+    const strict = page.getByText('No additional permissions granted.', { exact: true });
+    await strict.waitFor();
+    const add = page.getByRole('button', { name: 'Add permission…', exact: true });
+    const warning = page.getByRole('dialog');
+    const confirm = warning.getByRole('button', { name: 'I understand, add permission' });
+    await add.click();
+    assert.deepEqual(await warning.getByRole('option').allTextContents(), [
+      'Choose a permission', 'Lower an existing budget', 'Append a deny rule',
+    ]);
+    assert.ok(await confirm.isDisabled());
+    await warning.getByLabel('Permission', { exact: true }).selectOption('lower_budget');
+    await warning.getByText('Agents can lower existing budgets without your confirmation.').waitFor();
+    await warning.getByText(/A prompt-injected agent could cut spending limits/).waitFor();
+    await warning.getByRole('button', { name: 'Close', exact: true }).click();
+    assert.ok((await serverRequest('/governance/overrides')).overrides.every((setting) => !setting.enabled));
+    await add.click();
+    await warning.getByLabel('Permission', { exact: true }).selectOption('lower_budget');
+    await confirm.click();
+    const grantedRow = page.getByRole('table', { name: 'Additional permissions' })
+      .getByRole('row', { name: /Lower an existing budget/ });
+    await grantedRow.getByText('granted', { exact: true }).waitFor();
+    const remove = grantedRow.getByRole('button', { name: 'Remove permission: Lower an existing budget' });
+    await remove.waitFor();
+    await add.click();
+    assert.deepEqual(await warning.getByRole('option').allTextContents(), ['Choose a permission', 'Append a deny rule']);
+    await warning.getByRole('button', { name: 'Close', exact: true }).click();
+    await remove.click();
+    await strict.waitFor();
+    const overrideRecords = (await serverRequest('/governance/owner-presence')).records
+      .filter((record) => record.action === 'governance.override.set');
+    assert.equal(overrideRecords.length, 2);
+    assert.ok(overrideRecords.every((record) => record.outcome === 'confirmed' && record.client === 'portal' && record.method === 'fixture'));
+    assert.match(overrideRecords[0].reason, /^remove permission for agents to lower existing budgets$/);
+    assert.match(overrideRecords[1].reason, /^allow agents to lower existing budgets without you/);
+
+    await page.getByRole('link', { name: 'Back to console' }).click();
+    await page.getByRole('heading', { name: 'Budgets', exact: true }).waitFor();
     await page.getByRole('link', { name: /^Approvals/ }).click();
     const approve = page.getByRole('button', { name: 'Approve', exact: true });
     const assertApproval = async (id, status) => {
@@ -139,7 +186,8 @@ async function main() {
     };
     const presence = async () => (await serverRequest('/governance/owner-presence')).records.filter((r) => r.client === 'portal');
 
-    assert.equal((await presence()).length, 0);
+    const approvalConfirmations = async () => (await presence()).filter((r) => r.action === 'spend.approval.approve');
+    assert.equal((await approvalConfirmations()).length, 0);
     const waiting = page.getByText('Confirm on your Mac…', { exact: true });
     const startedAt = Date.now();
     await approve.click();
@@ -148,7 +196,7 @@ async function main() {
     assert.ok(Date.now() - startedAt > 30_000);
     await waiting.waitFor({ state: 'hidden' });
     await assertApproval(approvedId, 'approved');
-    const confirmations = await presence();
+    const confirmations = await approvalConfirmations();
     assert.equal(confirmations.length, 1);
     assert.equal(confirmations[0].outcome, 'confirmed');
     assert.equal(confirmations[0].method, 'fixture');
@@ -215,7 +263,7 @@ async function main() {
       assert.doesNotMatch(headers, /capability|X-Hubu-UI-Confirmed/i);
     }
     assert.deepEqual(errors, []);
-    console.log('PASS portal owner presence, refusals, pending state, and >30-second wait');
+    console.log('PASS portal owner presence, override warnings, refusals, pending state, and >30-second wait');
   } finally {
     await browser?.close();
     await stop(portal);

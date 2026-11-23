@@ -85,6 +85,22 @@ signed-in desktop session. After five denied or timed-out prompts in ten
 minutes, wait for the retry time shown by the portal. If another client has
 already resolved the spend request, the portal refreshes the pending list.
 
+## Agent action permissions
+
+Open the **Settings** gear in the console toolbar. **Allowed in Strict** lists
+the permissions every agent starts with. **Additional permissions** starts
+empty and applies to all agents in the profile. To grant one, choose **Add
+permission…**, select an action, review the warning, and confirm on your Mac.
+Each **Remove** action also requires its own Mac confirmation.
+
+- **Lower an existing budget** lets agents decrease the current limit.
+- **Append a deny rule** lets agents block additional spend under an existing
+  assigned policy. Every agent using that policy can be affected.
+
+Only the owner can change these settings, create or raise a budget, approve
+spend, reconcile, or apply a policy change that could loosen controls.
+Delegated actions name the override in `GET /governance/owner-presence`.
+
 ## Connection
 
 `hubu ui` connects to Hubu the same way other CLI commands do: the selected
