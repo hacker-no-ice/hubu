@@ -1351,8 +1351,15 @@ function policyEditor(container, { yaml, intro, submitLabel, onDraft, onCancel, 
   const save = h("button", { type: "button", disabled: true }, submitLabel);
   const stale = h("span", { class: "hint" }, "Validate to enable saving.");
   let validatedText = null;
+  // Bumped by every edit, file load, scope change and new validation. A
+  // validation applies its result only if nothing has changed since it began,
+  // so a slow export cannot enable Save with another scope's diff.
+  let generation = 0;
+  let validating = false;
   const invalidate = (message, force = false) => {
-    if (validatedText === null && !force) return;
+    generation += 1;
+    if (validatedText === null && !validating && !force) return;
+    validating = false;
     validatedText = null;
     save.disabled = true;
     stale.textContent = message;
@@ -1379,11 +1386,19 @@ function policyEditor(container, { yaml, intro, submitLabel, onDraft, onCancel, 
   });
   if (extraFields) extraFields.addEventListener("change", () => invalidate("Changed since the last validation. Validate again to save."));
   const validate = async () => {
+    generation += 1;
+    const run = generation;
+    const current = () => run === generation;
+    validating = true;
+    validatedText = null;
+    save.disabled = true;
+    stale.textContent = "Validating…";
     try {
       const text = textarea.value;
       const outcome = await api("POST", "/api/policies/validate", { policy_yaml: text });
-      if (textarea.value !== text) return;
+      if (!current()) return;
       if (!outcome.valid) {
+        validating = false;
         validatedText = null;
         save.disabled = true;
         stale.textContent = "Fix the error, then validate again.";
@@ -1391,7 +1406,8 @@ function policyEditor(container, { yaml, intro, submitLabel, onDraft, onCancel, 
         return;
       }
       const baseline = compareWith ? await compareWith() : undefined;
-      if (textarea.value !== text) return;
+      if (!current() || textarea.value !== text) return;
+      validating = false;
       const draft = stripOwner(outcome.policy_yaml);
       validatedText = text;
       save.disabled = false;
@@ -1405,12 +1421,15 @@ function policyEditor(container, { yaml, intro, submitLabel, onDraft, onCancel, 
           diffView(baseline ? baseline.yaml : "", draft)),
         h("div", { class: "flush-table" }, rulesTable(outcome.rules))]);
     } catch (error) {
+      if (!current()) return;
+      validating = false;
+      stale.textContent = "Validation failed. Try again.";
       clear(result).append(h("div", { class: "notice bad" }, error.message));
     }
   };
   textarea.addEventListener("input", () => {
     onDraft?.(textarea.value);
-    if (validatedText !== null && textarea.value !== validatedText) {
+    if (textarea.value !== validatedText) {
       invalidate("Changed since the last validation. Validate again to save.");
     }
   });
