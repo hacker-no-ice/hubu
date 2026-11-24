@@ -1527,6 +1527,144 @@ impl Repository {
         redacted_error: Option<&str>,
         at: &str,
     ) -> Result<ReconciliationRecord> {
+        let (evidence, last_confirmed_step) =
+            self.reconciliation_evidence(execution, last_confirmed_step, redacted_error, at)?;
+        let c = self.0.lock().unwrap();
+        // A workflow finishing a stale recovery phase must not overwrite a
+        // snapshot that already contains the owner's terminal Hubu decision.
+        c.execute(
+            "INSERT INTO reconciliation_records(execution_id,evidence_json,evidence_schema_version,last_confirmed_step,entered_at,updated_at)
+             VALUES(?1,?2,3,?3,?4,?4)
+             ON CONFLICT(execution_id) DO UPDATE SET evidence_json=excluded.evidence_json,
+                evidence_schema_version=excluded.evidence_schema_version,
+                last_confirmed_step=excluded.last_confirmed_step,updated_at=excluded.updated_at
+             WHERE json_type(reconciliation_records.evidence_json, '$.hubu_owner_resolution') IS NULL",
+            params![execution.execution_id, j(&evidence), last_confirmed_step, at],
+        )?;
+        drop(c);
+        self.get_reconciliation(&execution.execution_id)
+    }
+
+    /// Record a verified owner decision on the existing Hubu claim. This
+    /// closes synchronization without creating a new Gongbu receipt, erasing
+    /// observations, or describing the provider execution as successful.
+    pub(crate) fn record_hubu_owner_resolution(
+        &self,
+        execution: &Execution,
+        finalized_at: &str,
+        reconciliation_outcome: &str,
+        settlement_id: Option<&str>,
+        at: &str,
+    ) -> Result<()> {
+        let settlement_outcome = match reconciliation_outcome {
+            "vendor_billed" if settlement_id.is_some_and(|id| !id.trim().is_empty()) => {
+                LifecycleOutcome::Succeeded
+            }
+            "vendor_did_not_bill" if settlement_id.is_none() => LifecycleOutcome::Released,
+            _ => return Err(Error::Invalid("Hubu owner reconciliation outcome")),
+        };
+        let claim_id = execution
+            .hubu_claim_id
+            .as_deref()
+            .filter(|id| !id.trim().is_empty())
+            .ok_or(Error::Invalid("Hubu owner reconciliation claim"))?;
+        if finalized_at.trim().is_empty()
+            || at.trim().is_empty()
+            || settlement_id.is_some_and(|id| id.trim().is_empty())
+        {
+            return Err(Error::Invalid("Hubu owner reconciliation evidence"));
+        }
+        let owner_resolution = serde_json::json!({
+            "claim_id": claim_id,
+            "finalized_at": finalized_at,
+            "reconciliation_outcome": reconciliation_outcome,
+            "settlement_id": settlement_id,
+        });
+        self.reject_registered_json([&owner_resolution])?;
+        self.reject_registered_secrets([at, execution.execution_id.as_str()])?;
+        self.reject_registered_numbers([execution.version.saturating_add(1)])?;
+
+        // The workflow writes its first reconciliation evidence after changing
+        // the execution status. Recover that snapshot if it stopped in between.
+        let missing_evidence = match self.get_reconciliation(&execution.execution_id) {
+            Ok(_) => None,
+            Err(Error::NotFound) => Some(self.reconciliation_evidence(
+                execution,
+                "reconciliation_replay",
+                execution.failure_code.as_deref(),
+                at,
+            )?),
+            Err(error) => return Err(error),
+        };
+
+        let mut connection = self.0.lock().unwrap();
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = query_id(&tx, &execution.execution_id)?;
+        if current.hubu_claim_id.as_deref() != Some(claim_id) {
+            return Err(Error::Stale);
+        }
+        let stored_json: Option<String> = tx
+            .query_row(
+                "SELECT evidence_json FROM reconciliation_records WHERE execution_id=?1",
+                [&execution.execution_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let mut evidence: Value = if let Some(stored) = &stored_json {
+            serde_json::from_str(stored).map_err(|_| Error::Invalid("reconciliation evidence"))?
+        } else {
+            missing_evidence.as_ref().ok_or(Error::Stale)?.0.clone()
+        };
+        let object = evidence
+            .as_object_mut()
+            .ok_or(Error::Invalid("reconciliation evidence"))?;
+        if let Some(previous) = object.get("hubu_owner_resolution") {
+            return if current.status == "failed"
+                && current.settlement_outcome == Some(settlement_outcome)
+                && previous == &owner_resolution
+            {
+                Ok(())
+            } else {
+                Err(Error::Stale)
+            };
+        }
+        if current.status != "reconciliation_required" || current.version != execution.version {
+            return Err(Error::Stale);
+        }
+        object.insert("hubu_owner_resolution".into(), owner_resolution);
+        if stored_json.is_some() {
+            tx.execute(
+                "UPDATE reconciliation_records SET evidence_json=?1,updated_at=?2 WHERE execution_id=?3",
+                params![j(&evidence), at, execution.execution_id],
+            )?;
+        } else {
+            let (_, step) = missing_evidence.ok_or(Error::Stale)?;
+            tx.execute(
+                "INSERT INTO reconciliation_records(execution_id,evidence_json,evidence_schema_version,last_confirmed_step,entered_at,updated_at)
+                 VALUES(?1,?2,3,?3,?4,?4)",
+                params![execution.execution_id, j(&evidence), step, at],
+            )?;
+        }
+        let changed = tx.execute(
+            "UPDATE executions SET status='failed',settlement_outcome=?1,
+                completed_at=COALESCE(completed_at,?2),updated_at=?2,version=version+1
+             WHERE execution_id=?3 AND version=?4 AND status='reconciliation_required' AND hubu_claim_id=?5",
+            params![settlement_outcome.as_str(), at, execution.execution_id, execution.version, claim_id],
+        )?;
+        if changed != 1 {
+            return Err(Error::Stale);
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn reconciliation_evidence<'a>(
+        &self,
+        execution: &Execution,
+        last_confirmed_step: &'a str,
+        redacted_error: Option<&str>,
+        at: &str,
+    ) -> Result<(Value, &'a str)> {
         let attempt = self
             .get_provider_attempt_for_execution(&execution.execution_id)
             .ok();
@@ -1588,10 +1726,7 @@ impl Repository {
                 .remove("recovery_guidance");
         }
         self.reject_registered_json([&evidence])?;
-        let c = self.0.lock().unwrap();
-        c.execute("INSERT INTO reconciliation_records(execution_id,evidence_json,evidence_schema_version,last_confirmed_step,entered_at,updated_at) VALUES(?1,?2,3,?3,?4,?4) ON CONFLICT(execution_id) DO UPDATE SET evidence_json=excluded.evidence_json,evidence_schema_version=excluded.evidence_schema_version,last_confirmed_step=excluded.last_confirmed_step,updated_at=excluded.updated_at", params![execution.execution_id,j(&evidence),last_confirmed_step,at])?;
-        drop(c);
-        self.get_reconciliation(&execution.execution_id)
+        Ok((evidence, last_confirmed_step))
     }
     pub fn get_reconciliation(&self, execution_id: &str) -> Result<ReconciliationRecord> {
         self.0.lock().unwrap().query_row("SELECT execution_id,evidence_json,last_confirmed_step,entered_at,updated_at,automatic_attempts,last_automatic_attempt_at,automatic_attempts_exhausted,last_operator_action_id,last_operator_action FROM reconciliation_records WHERE execution_id=?1",[execution_id],|r| { let evidence:String=r.get(1)?; Ok(ReconciliationRecord { execution_id:r.get(0)?, evidence:serde_json::from_str(&evidence).map_err(|e| rusqlite::Error::FromSqlConversionFailure(evidence.len(),rusqlite::types::Type::Text,Box::new(e)))?, last_confirmed_step:r.get(2)?,entered_at:r.get(3)?,updated_at:r.get(4)?,automatic_attempts:r.get(5)?,last_automatic_attempt_at:r.get(6)?,automatic_attempts_exhausted:r.get::<_,i64>(7)? != 0,last_operator_action_id:r.get(8)?,last_operator_action:r.get(9)? }) }).optional()?.ok_or(Error::NotFound)
@@ -2921,6 +3056,205 @@ mod tests {
                 "api.us.bfl.ai"
             );
         }
+    }
+
+    fn awaiting_owner_resolution(repository: &Repository, key: &str) -> Execution {
+        let execution = repository.create_execution(&new("account", key)).unwrap();
+        let mut update = ExecutionUpdate {
+            status: "preflighting".into(),
+            outcome: None,
+            started_at: Some("2026-08-05T20:00:01Z".into()),
+            completed_at: None,
+            failure_code: None,
+            failure_message_redacted: None,
+            provider_outcome: None,
+            artifact_outcome: None,
+            settlement_outcome: None,
+        };
+        let preflighting = repository
+            .update_execution(
+                &execution.execution_id,
+                execution.version,
+                &update,
+                "2026-08-05T20:00:01Z",
+            )
+            .unwrap();
+        update.status = "reconciliation_required".into();
+        update.outcome = Some("artifact_persistence_failed".into());
+        update.failure_code = update.outcome.clone();
+        update.failure_message_redacted = Some("artifact storage failed".into());
+        update.provider_outcome = Some(LifecycleOutcome::Succeeded);
+        update.artifact_outcome = Some(LifecycleOutcome::Failed);
+        update.settlement_outcome = Some(LifecycleOutcome::Ambiguous);
+        repository
+            .update_execution(
+                &execution.execution_id,
+                preflighting.version,
+                &update,
+                "2026-08-05T20:00:02Z",
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn hubu_owner_resolution_preserves_evidence_and_is_idempotent() {
+        let repo = Repository::in_memory().unwrap();
+        let execution = awaiting_owner_resolution(&repo, "owner-billed");
+        let attempt_id = attempt(&repo, &execution);
+        complete_success(&repo, &attempt_id);
+        let provider_attempt = repo.get_provider_attempt(&attempt_id).unwrap();
+        let evidence = repo
+            .record_reconciliation(
+                &execution,
+                "settling",
+                Some("artifact_persistence_failed"),
+                "2026-08-05T20:03:00Z",
+            )
+            .unwrap();
+        let hubu_finalized_at = "2026-08-05T20:04:00Z";
+        let synced_at = "2026-08-05T20:05:00Z";
+        for missing in [None, Some(" ")] {
+            assert!(matches!(
+                repo.record_hubu_owner_resolution(
+                    &execution,
+                    hubu_finalized_at,
+                    "vendor_billed",
+                    missing,
+                    synced_at,
+                ),
+                Err(Error::Invalid(_))
+            ));
+        }
+        repo.record_hubu_owner_resolution(
+            &execution,
+            hubu_finalized_at,
+            "vendor_billed",
+            Some("settlement-1"),
+            synced_at,
+        )
+        .unwrap();
+        let closed = repo.get_execution(&execution.execution_id).unwrap();
+        assert_eq!(closed.status, "failed");
+        assert_eq!(closed.version, execution.version + 1);
+        assert_eq!(closed.completed_at.as_deref(), Some(synced_at));
+        assert_eq!(closed.outcome, execution.outcome);
+        assert_eq!(closed.failure_code, execution.failure_code);
+        assert_eq!(
+            closed.failure_message_redacted,
+            execution.failure_message_redacted
+        );
+        assert_eq!(closed.provider_outcome, execution.provider_outcome);
+        assert_eq!(closed.artifact_outcome, execution.artifact_outcome);
+        assert_eq!(closed.settlement_outcome, Some(LifecycleOutcome::Succeeded));
+        assert!(repo.list_nonterminal_execution_ids().unwrap().is_empty());
+        assert_eq!(
+            repo.get_provider_attempt(&attempt_id).unwrap(),
+            provider_attempt
+        );
+        assert_eq!(repo.count("receipts"), 0);
+        let mut expected = evidence;
+        expected.updated_at = synced_at.into();
+        expected.evidence["hubu_owner_resolution"] = json!({
+            "claim_id": "claim",
+            "finalized_at": hubu_finalized_at,
+            "reconciliation_outcome": "vendor_billed",
+            "settlement_id": "settlement-1",
+        });
+        assert_eq!(
+            repo.get_reconciliation(&execution.execution_id).unwrap(),
+            expected
+        );
+
+        repo.record_hubu_owner_resolution(
+            &execution,
+            hubu_finalized_at,
+            "vendor_billed",
+            Some("settlement-1"),
+            "2026-08-05T20:06:00Z",
+        )
+        .unwrap();
+        assert_eq!(repo.get_execution(&execution.execution_id).unwrap(), closed);
+        assert_eq!(
+            repo.record_reconciliation(&execution, "stale_workflow", None, "later")
+                .unwrap(),
+            expected
+        );
+        assert!(matches!(
+            repo.record_hubu_owner_resolution(
+                &execution,
+                hubu_finalized_at,
+                "vendor_did_not_bill",
+                None,
+                "later"
+            ),
+            Err(Error::Stale)
+        ));
+    }
+
+    #[test]
+    fn hubu_owner_resolution_fences_stale_claim_and_recovers_missing_evidence() {
+        let repo = Repository::in_memory().unwrap();
+        let execution = awaiting_owner_resolution(&repo, "owner-did-not-bill");
+        let now = "2026-08-05T20:01:00Z";
+        let mut stale = execution.clone();
+        stale.version -= 1;
+        for snapshot in [
+            &stale,
+            &Execution {
+                hubu_claim_id: Some("other-claim".into()),
+                ..execution.clone()
+            },
+        ] {
+            assert!(matches!(
+                repo.record_hubu_owner_resolution(snapshot, now, "vendor_did_not_bill", None, now),
+                Err(Error::Stale)
+            ));
+        }
+        assert_eq!(
+            repo.get_execution(&execution.execution_id).unwrap(),
+            execution
+        );
+        assert_eq!(repo.count("reconciliation_records"), 0);
+
+        repo.record_hubu_owner_resolution(&execution, now, "vendor_did_not_bill", None, now)
+            .unwrap();
+        let closed = repo.get_execution(&execution.execution_id).unwrap();
+        assert_eq!(closed.status, "failed");
+        assert_eq!(closed.settlement_outcome, Some(LifecycleOutcome::Released));
+        let record = repo.get_reconciliation(&execution.execution_id).unwrap();
+        assert_eq!(record.last_confirmed_step, "reconciliation_replay");
+        assert_eq!(record.evidence["authorization"]["claim_id"], "claim");
+        assert!(record.evidence["hubu_owner_resolution"]["settlement_id"].is_null());
+    }
+
+    #[test]
+    fn hubu_owner_resolution_rolls_back_evidence_when_transition_fails() {
+        let repo = Repository::in_memory().unwrap();
+        let execution = awaiting_owner_resolution(&repo, "failed-owner-transition");
+        let now = "2026-08-05T20:01:00Z";
+        let before = repo
+            .record_reconciliation(&execution, "settling", None, now)
+            .unwrap();
+        repo.0
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TEMP TRIGGER reject_owner_resolution BEFORE UPDATE OF status ON executions
+                 WHEN NEW.status='failed' BEGIN SELECT RAISE(ABORT, 'test transition failure'); END;",
+            )
+            .unwrap();
+        assert!(matches!(
+            repo.record_hubu_owner_resolution(&execution, now, "vendor_did_not_bill", None, now),
+            Err(Error::Db(_))
+        ));
+        assert_eq!(
+            repo.get_execution(&execution.execution_id).unwrap(),
+            execution
+        );
+        assert_eq!(
+            repo.get_reconciliation(&execution.execution_id).unwrap(),
+            before
+        );
     }
 
     #[test]

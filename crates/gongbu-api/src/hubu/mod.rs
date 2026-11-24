@@ -3,7 +3,7 @@ use crate::{
     execution_scope::ExecutionScope,
     workflow::{ActivityError, HubuActivities},
 };
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 mod transport;
 
@@ -96,6 +96,10 @@ impl HubuClient {
         &self,
         claim_id: &str,
     ) -> Result<ExecutorSpendClaimResponse, HttpClientError> {
+        self.get_claim(claim_id)
+    }
+
+    fn get_claim<T: DeserializeOwned>(&self, claim_id: &str) -> Result<T, HttpClientError> {
         let url = format!(
             "{}/spend/executor/claim?claim_id={}",
             self.base_url,
@@ -302,6 +306,77 @@ impl HubuActivities for ProductionHubuActivities {
             })
             .map(|_| ())
             .map_err(map_activity_error)
+    }
+
+    fn sync_owner_resolution(
+        &self,
+        execution: &Execution,
+        now: &str,
+    ) -> crate::execution::Result<bool> {
+        if execution.status != "reconciliation_required" {
+            return Ok(false);
+        }
+        let Some(claim_id) = execution.hubu_claim_id.as_deref() else {
+            return Ok(false);
+        };
+        // A transport failure or an older Hubu response leaves the local
+        // reconciliation obligation intact.
+        let Ok(response) = self.client.get_claim::<OwnerClaimResponse>(claim_id) else {
+            return Ok(false);
+        };
+        let Some((finalized_at, outcome)) = response.verified_outcome(
+            claim_id,
+            execution.hubu_token_reference.as_str(),
+            &execution.account_id,
+        ) else {
+            return Ok(false);
+        };
+        self.repository.record_hubu_owner_resolution(
+            execution,
+            finalized_at,
+            outcome,
+            response.claim.settlement_id.as_deref(),
+            now,
+        )?;
+        Ok(true)
+    }
+}
+
+#[derive(Deserialize)]
+struct OwnerClaimResponse {
+    #[serde(flatten)]
+    claim: ExecutorSpendClaimResponse,
+    reconciliation_outcome: Option<String>,
+    reconciled_at: Option<String>,
+    reconciled_by_user_id: Option<String>,
+}
+
+impl OwnerClaimResponse {
+    fn verified_outcome(&self, claim_id: &str, token: &str, account: &str) -> Option<(&str, &str)> {
+        let claim = &self.claim;
+        if claim.claim_id != claim_id
+            || claim.spend.spend_auth_token_id != token
+            || claim.spend.account_id != account
+            || claim.reconciliation_required
+            || self.reconciled_by_user_id.as_deref()?.trim().is_empty()
+        {
+            return None;
+        }
+        let finalized_at = claim.finalized_at.as_deref()?;
+        chrono::DateTime::parse_from_rfc3339(finalized_at).ok()?;
+        chrono::DateTime::parse_from_rfc3339(self.reconciled_at.as_deref()?).ok()?;
+        let outcome = self.reconciliation_outcome.as_deref()?;
+        match (
+            claim.status.as_str(),
+            outcome,
+            claim.settlement_id.as_deref(),
+        ) {
+            ("settled", "vendor_billed", Some(id)) if !id.trim().is_empty() => {
+                Some((finalized_at, outcome))
+            }
+            ("released", "vendor_did_not_bill", None) => Some((finalized_at, outcome)),
+            _ => None,
+        }
     }
 }
 
@@ -574,6 +649,63 @@ mod tests {
 
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn owner_claim_resolution_requires_matching_finalized_authoritative_evidence() {
+        let at = "2026-11-24T00:00:00Z";
+        let amount = json!(ExactAmount::from_units(5_000_000, "USD"));
+        let mut payload = json!({
+            "claim_id": "claim-1", "lease_profile": "default", "status": "settled",
+            "claimed_at": at, "claim_expires_at": at, "finalized_at": at,
+            "settlement_id": "settlement-1", "reconciliation_required": false,
+            "reconciliation_outcome": "vendor_billed", "reconciled_at": at,
+            "reconciled_by_user_id": "owner-1",
+            "spend": {
+                "reason": "fixture", "spend_auth_token_id": "token-1", "decision_id": "decision-1",
+                "account_id": "account-1", "agent_id": "agent-1", "amount": amount,
+                "amount_cents": 500, "currency": "USD", "lease_profile": "default", "status": "settled",
+                "expires_at": at, "budget_hold": {
+                    "hold_id": "hold-1", "budget_id": "budget-1", "status": "settled", "amount": amount,
+                    "consumed_amount": amount, "frozen_amount": amount, "remaining_amount": amount
+                }
+            }
+        });
+        let resolution = |payload| {
+            let parsed: OwnerClaimResponse = serde_json::from_value(payload).unwrap();
+            parsed
+                .verified_outcome("claim-1", "token-1", "account-1")
+                .map(|(when, outcome)| (when.to_owned(), outcome.to_owned()))
+        };
+        assert_eq!(
+            resolution(payload.clone()),
+            Some((at.into(), "vendor_billed".into()))
+        );
+        for (field, bad_value) in [
+            ("claim_id", json!("claim-2")),
+            ("status", json!("claimed")),
+            ("reconciled_by_user_id", json!(null)),
+            ("reconciled_at", json!("invalid timestamp")),
+            ("reconciliation_required", json!(true)),
+            ("reconciliation_outcome", json!(null)),
+            ("settlement_id", json!(null)),
+        ] {
+            let mut mismatched = payload.clone();
+            mismatched[field] = bad_value;
+            assert_eq!(resolution(mismatched), None, "accepted invalid {field}");
+        }
+        for field in ["account_id", "spend_auth_token_id"] {
+            let mut mismatched = payload.clone();
+            mismatched["spend"][field] = json!("mismatched");
+            assert_eq!(resolution(mismatched), None);
+        }
+        payload["status"] = json!("released");
+        payload["reconciliation_outcome"] = json!("vendor_did_not_bill");
+        payload["settlement_id"] = json!(null);
+        assert_eq!(
+            resolution(payload),
+            Some((at.into(), "vendor_did_not_bill".into()))
+        );
+    }
 
     fn execution_params() -> crate::execution::CreateExecutionParams {
         let scope = crate::execution_scope::for_target("google", "gemini_developer_image").unwrap();
