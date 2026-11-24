@@ -1215,7 +1215,7 @@ async function renderPolicies(view) {
     card("Policies", listBody, [h("button", { type: "button", class: "small", onclick: () => {
       selected = null;
       drawList();
-      newPolicyEditor(workspace);
+      newPolicyEditor(workspace, policies);
     } }, "New policy")], true),
     workspace,
   ]);
@@ -1318,6 +1318,8 @@ async function openPolicy(container, policy, options = {}) {
       yaml: view.draft ?? stripOwner(exported.policy_yaml),
       intro: `Saving creates revision ${current + 1}. Earlier revisions stay in the history, and the change is rejected if someone else saves first.`,
       submitLabel: `Save as revision ${current + 1}`,
+      compareWith: async () => ({ title: `Changes from revision ${current} (current) to this draft`,
+        yaml: stripOwner(exported.policy_yaml) }),
       onDraft: (text) => { view.draft = text; },
       onCancel: () => { view.mode = "read"; view.draft = undefined; draw(); },
       submit: async (policyYaml) => {
@@ -1334,41 +1336,80 @@ async function openPolicy(container, policy, options = {}) {
   await draw();
 }
 
-/** YAML editor with server-equivalent validation before saving. */
-function policyEditor(container, { yaml, intro, submitLabel, onDraft, onCancel, submit, extraFields }) {
+/**
+ * YAML editor with server-equivalent validation before saving. After a
+ * successful validation it shows the draft's diff against what is in effect
+ * now (`compareWith`), so the owner sees the change before the Touch ID
+ * dialog that saving raises. Both sides are rendered by the same serializer.
+ */
+function policyEditor(container, { yaml, intro, submitLabel, onDraft, onCancel, submit, extraFields, compareWith }) {
   const textarea = h("textarea", { class: "code-editor", spellcheck: "false", "aria-label": "Policy YAML" });
   textarea.value = yaml;
   const result = h("div", {});
   const save = h("button", { type: "button", disabled: true }, submitLabel);
   const stale = h("span", { class: "hint" }, "Validate to enable saving.");
   let validatedText = null;
+  // Bumped by every edit, scope change and new validation. A
+  // validation applies its result only if nothing has changed since it began,
+  // so a slow export cannot enable Save with another scope's diff.
+  let generation = 0;
+  let validating = false;
+  const invalidate = (message) => {
+    generation += 1;
+    if (validatedText === null && !validating) return;
+    validating = false;
+    validatedText = null;
+    save.disabled = true;
+    stale.textContent = message;
+    clear(result);
+  };
+  if (extraFields) extraFields.addEventListener("change", () => invalidate("Changed since the last validation. Validate again to save."));
   const validate = async () => {
+    generation += 1;
+    const run = generation;
+    const current = () => run === generation;
+    validating = true;
+    validatedText = null;
+    save.disabled = true;
+    stale.textContent = "Validating…";
     try {
-      const outcome = await api("POST", "/api/policies/validate", { policy_yaml: textarea.value });
+      const text = textarea.value;
+      const outcome = await api("POST", "/api/policies/validate", { policy_yaml: text });
+      if (!current()) return;
       if (!outcome.valid) {
+        validating = false;
         validatedText = null;
         save.disabled = true;
         stale.textContent = "Fix the error, then validate again.";
         clear(result).append(h("div", { class: "notice bad" }, h("strong", {}, "Not valid. "), outcome.error));
         return;
       }
-      validatedText = textarea.value;
+      const baseline = compareWith ? await compareWith() : undefined;
+      if (!current() || textarea.value !== text) return;
+      validating = false;
+      const draft = stripOwner(outcome.policy_yaml);
+      validatedText = text;
       save.disabled = false;
-      stale.textContent = "Valid. Saving sends exactly this text.";
-      clear(result).append(
+      stale.textContent = "Valid. Review the changes below; saving sends exactly this text and asks you to confirm on your Mac.";
+      append(clear(result), [
         h("div", { class: "notice ok" }, h("strong", {}, "Valid. "),
           `${outcome.id} @ ${outcome.version}: ${outcome.rules.length} rule(s), default decision `, badge(outcome.default_effect), "."),
         (outcome.warnings || []).length ? h("div", { class: "notice warn" }, outcome.warnings.join(" ")) : null,
-        h("div", { class: "flush-table" }, rulesTable(outcome.rules)));
+        baseline === undefined ? null : h("div", { class: "draft-diff" },
+          baseline ? h("h3", {}, baseline.title) : h("h3", {}, "No policy applies to this scope yet. Saving adds all of it."),
+          diffView(baseline ? baseline.yaml : "", draft)),
+        h("div", { class: "flush-table" }, rulesTable(outcome.rules))]);
     } catch (error) {
+      if (!current()) return;
+      validating = false;
+      stale.textContent = "Validation failed. Try again.";
       clear(result).append(h("div", { class: "notice bad" }, error.message));
     }
   };
   textarea.addEventListener("input", () => {
     onDraft?.(textarea.value);
-    if (validatedText !== null && textarea.value !== validatedText) {
-      save.disabled = true;
-      stale.textContent = "Changed since the last validation. Validate again to save.";
+    if (textarea.value !== validatedText) {
+      invalidate("Changed since the last validation. Validate again to save.");
     }
   });
   save.addEventListener("click", async () => {
@@ -1392,7 +1433,7 @@ function policyEditor(container, { yaml, intro, submitLabel, onDraft, onCancel, 
   ]);
 }
 
-function newPolicyEditor(container) {
+function newPolicyEditor(container, policies = []) {
   const fields = h("form", { class: "grid" },
     h("label", {}, "Applies to", h("select", { name: "agent_id" }, h("option", { value: "" }, "All agents (owner default)"),
       state.agents.map((a) => h("option", { value: a.agent_id }, a.display_name)))),
@@ -1405,6 +1446,14 @@ function newPolicyEditor(container) {
     intro: "Write the policy in YAML, validate it, then save. Saving a policy for a scope that already has one replaces that assignment.",
     submitLabel: "Create policy",
     extraFields: fields,
+    compareWith: async () => {
+      const agentId = formValues(fields).agent_id || null;
+      const existing = policies.find((p) => (agentId ? p.scope === "agent_override" && p.agent_id === agentId : p.scope === "user_default"));
+      if (!existing) return null;
+      const exported = await hubu("/policies/export", { policy_id: existing.policy_id });
+      return { title: `Changes from ${existing.display_name} revision ${exported.revision} (in effect for this scope) to this draft`,
+        yaml: stripOwner(exported.policy_yaml) };
+    },
     onCancel: () => route(),
     submit: async (policyYaml) => {
       const v = formValues(fields);
