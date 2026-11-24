@@ -117,11 +117,17 @@ Hubu stores the policy resource separately from its assignment:
 - Agent override: applies only to the exact registered agent and takes
   precedence over the user default.
 
-Validate and apply through the CLI:
+The agent validates; the owner applies. Validation is offline:
 
 ```bash
 hubu policy validate --path policies/POLICY.yaml
+```
 
+Hand the owner one of these commands, filled in. Each prints the diff against
+the policy currently applied to that scope, then asks the owner to confirm with
+Touch ID. The owner can instead load the file in the portal's policy editor.
+
+```bash
 # User default
 hubu policy apply --path policies/POLICY.yaml \
   --name "REVIEWABLE DISPLAY NAME"
@@ -132,7 +138,8 @@ hubu policy apply --path policies/POLICY.yaml \
   --agent-id agt_EXACT_AGENT_ID
 ```
 
-When updating an existing resource, inspect it and pin the write:
+When updating an existing resource, inspect it and give the owner a pinned
+command:
 
 ```bash
 hubu policy show --policy-id pol_EXACT_POLICY_ID
@@ -143,7 +150,8 @@ hubu policy apply --path policies/POLICY.yaml \
 ```
 
 Agents can read the current policy and assignments with `hubu_show_policy`.
-Use the Hubu admin portal or CLI for policy changes and owner inspection.
+Agents never apply a policy: there is no agent apply tool, and applying needs
+the owner's confirmation on the portal or the CLI.
 
 Applying without `agent_id` targets the user default. Applying with `agent_id`
 targets that exact agent override. Applying identical canonical content is
@@ -164,4 +172,7 @@ silently omitted.
 - Do missing typed fields fail closed where the policy requires them?
 - Does `needs_approval` or another deliberate fallback cover unmatched work?
 - Were current revision and hash pinned for a replacement?
-- After apply, does `show` report the intended assignment and returned revision?
+- Does the handoff name the file path and the exact owner command for the
+  intended scope?
+- After the owner applies, does `show` report the intended assignment and
+  returned revision?
