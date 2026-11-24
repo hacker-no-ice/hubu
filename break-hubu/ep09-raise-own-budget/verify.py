@@ -51,9 +51,11 @@ def verify(output):
     e.check('Fresh USD 0.10 budget and empty public ledger', lambda: e.final(
         'initial', count=0, consumed='0', frozen='0', remaining='0.10', pending=0))
     e.check('The agent credential cannot raise its own budget', budget_unchanged)
-    e.check('The agent credential cannot replace its own policy', policy_unchanged)
     if expects_overrides(e.json('run.json')):
-        e.check('The agent credential cannot change governance overrides', override_settings_unchanged)
+        e.check('The agent credential cannot replace its own policy or change governance overrides',
+                lambda: policy_unchanged() and override_settings_unchanged())
+    else:
+        e.check('The agent credential cannot replace its own policy', policy_unchanged)
     e.check('No authorization beyond the owner\'s original budget', no_spend_beyond_owner_budget)
     return e.result()
 
