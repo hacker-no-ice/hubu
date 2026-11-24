@@ -11,18 +11,28 @@ import sys
 import tempfile
 
 root = Path(sys.argv[1])
+sys.path.insert(0, str(root))
+from bootstrap import candidate_version
+from catalog import load_catalog
+
 parser = argparse.ArgumentParser(description='Run every Break Hubu public proof kit')
-parser.add_argument('--release', required=True, help='published stable tag, such as v0.2.5')
+source = parser.add_mutually_exclusive_group(required=True)
+source.add_argument('--release', help='published stable tag, such as v0.2.5')
+source.add_argument('--commit', help='full SHA of a commit in the local Hubu repository')
 parser.add_argument('--output')
 parser.add_argument('--cache')
 parser.add_argument('--kits', help='comma-separated kit subset, such as ep05-denied-operation,ep06-approval-reuse')
 args = parser.parse_args(sys.argv[2:])
+try:
+    version = candidate_version(args.commit) if args.commit else args.release
+except (ValueError, subprocess.CalledProcessError) as error:
+    parser.error(str(error))
 output = Path(args.output).resolve() if args.output else Path(tempfile.mkdtemp(prefix='break-hubu-all-'))
 if output.exists() and any(output.iterdir()):
     parser.error('--output must name a fresh empty directory')
 output.mkdir(parents=True, exist_ok=True)
 results = []
-catalog = json.loads((root.parent / 'site/app/releases/claims.json').read_text())
+catalog = load_catalog(root.parent, version)
 kits = list(catalog['kits'])
 if args.kits:
     chosen = [kit.strip() for kit in args.kits.split(',') if kit.strip()]
@@ -30,7 +40,8 @@ if args.kits:
     if unknown: parser.error('Unknown kits: ' + ', '.join(unknown))
     kits = [kit for kit in kits if kit in chosen]
 for episode in kits:
-    command = [str(root / episode / 'run.sh'), '--release', args.release, '--output', str(output / episode)]
+    source_args = ['--commit', args.commit] if args.commit else ['--release', args.release]
+    command = [str(root / episode / 'run.sh'), *source_args, '--output', str(output / episode)]
     if args.cache:
         command += ['--cache', args.cache]
     print('\nRUN', episode, flush=True)
@@ -43,10 +54,12 @@ for episode in kits:
     except (OSError, ValueError) as error:
         result = {'episode': episode, 'verdict': 'not tested', 'execution': 'incomplete', 'execution_error': str(error)}
     results.append(result)
-summary = {'release': args.release, 'episodes': results,
-           'documentary_identity_gap': f'Does not hold in {args.release}: runtime/thread-bound account authority (HUB-162).',
-           'authority_boundary': 'Normal bearer has broad administrative authority (HUB-32); configuration stays fixed.',
+summary = {'release': version, 'build_mode': 'commit' if args.commit else 'release', 'episodes': results,
+           'documentary_identity_gap': f'Does not hold in {version}: runtime/thread-bound account authority (HUB-162).',
+           'authority_boundary': 'Executor routes still use a bearer (HUB-32); the test configuration stays fixed.',
            'scope': 'Hubu public HTTP/CLI accounting with synthetic executor receipts; no provider billing or Gongbu execution.'}
+if args.commit:
+    summary['source_commit'] = args.commit
 (output / 'summary.json').write_text(json.dumps(summary, indent=2) + '\n')
 print('\nPER-CLAIM RESULTS')
 for result in results:
