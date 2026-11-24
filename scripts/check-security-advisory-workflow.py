@@ -105,12 +105,12 @@ for action_source, label in ((workflow, "monitor"), (install_action, "cargo-deny
         if not re.fullmatch(r"[0-9a-f]{40}", match.group(2)):
             fail(f"{label} must pin {match.group(1)} to a full commit SHA")
 
-# This action's Dockerfile ships cargo-deny 0.20.2. Review the publisher's
+# This action's Dockerfile ships cargo-deny 0.22.0. Review the publisher's
 # Dockerfile and update this pair together when changing either tool version.
-deny_action = "EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25"
+deny_action = "EmbarkStudios/cargo-deny-action@17aeb3c839e42274e2b8adf721c8c65edfdc74dd"
 if deny_action not in workflow or deny_action not in ci_workflow:
     fail("CI and scheduled policy checks must use the same reviewed cargo-deny action")
-if not re.search(r"cargo install cargo-deny --version ['\"]=?0\.20\.2['\"] --locked", install_action):
+if not re.search(r"cargo install cargo-deny --version ['\"]=?0\.22\.0['\"] --locked", install_action):
     fail("the structured scanner must match the cargo-deny action's tool version")
 
 for required in (
