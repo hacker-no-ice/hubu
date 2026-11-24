@@ -1,6 +1,6 @@
 ---
 name: hubu-policy-authoring
-description: Author, review, validate, and attach extensible Hubu spending policies from an operator's constraints. Use for per-request caps, approval or deny rules, typed provider/executor/capability/billing-merchant allowlists, and user-default or agent-specific policy assignment; use Hubu budgets instead for cumulative period limits.
+description: Draft, review, and validate extensible Hubu spending policies from an operator's constraints, then hand the file to the owner to apply. Use for per-request caps, approval or deny rules, typed provider/executor/capability/billing-merchant allowlists, and user-default or agent-specific policy assignment; use Hubu budgets instead for cumulative period limits.
 ---
 
 # Hubu Policy Authoring
@@ -10,8 +10,13 @@ its rules and whose independently governed constraints can change without
 rewriting unrelated rules.
 
 Read [references/policy-language.md](references/policy-language.md) before
-drafting YAML or choosing apply arguments. It contains the supported schema,
-safe composition pattern, attachment commands, and review checklist.
+drafting YAML or choosing the apply command for the owner. It contains the
+supported schema, safe composition pattern, attachment commands, and review
+checklist.
+
+You draft and validate; the owner applies. Applying a policy or changing a
+budget is an owner action confirmed with Touch ID, and no agent tool applies
+one. Never try to apply a policy or change a budget yourself.
 
 ## Establish the intended governance
 
@@ -71,7 +76,7 @@ Create or edit the YAML in the operator's chosen location. Otherwise use a
 descriptive file under `policies/`. Use a stable authored `id`; change
 `version` when the authored rule payload changes.
 
-Run local validation before proposing attachment:
+Run local validation before handing the file over:
 
 ```bash
 hubu policy validate --path policies/POLICY.yaml
@@ -91,20 +96,39 @@ mentally or with existing policy evaluation facilities: a fully compliant
 request, each individual constraint violation, a missing typed field, the exact
 amount boundary, and one cent above it.
 
-## Attach only after explicit review
+## Hand the draft to the owner
 
-Policy attachment changes live spending authority. Obtain the operator's
-explicit approval of the reviewed YAML and assignment scope immediately before
-calling an apply operation. Validation and inspection are read-only and do not
-need that approval.
+End by telling the owner where the file is and how to apply it. Include the
+full YAML in your reply so the owner can copy it, and give both routes, with
+the exact path and scope filled in:
 
-Prefer compare-and-set when replacing an existing policy: inspect its current
-revision and hash, then supply them during apply. Use the authored id as the
-declarative key unless the operator needs a different stable owner-scoped key.
-Omitting `--agent-id` assigns the user default; passing it creates or replaces
-that agent's override.
+- **Portal:** open the Policies page, choose the policy for that scope and
+  switch to **Edit** (or click **New policy** and pick the scope), paste the
+  YAML, then click **Validate**. The editor shows what the draft changes
+  before **Save**, which asks the owner to confirm on their Mac.
+- **CLI:** the exact command, for example
 
-After apply, report the returned policy id, declarative key, revision, payload
-hash, and assignment scope. Show the policy again and verify that the intended
-assignment is present. Never treat a successful YAML parse as proof that the
-correct live scope was attached.
+  ```bash
+  hubu policy apply --path policies/POLICY.yaml --agent-id agt_EXACT_AGENT_ID
+  ```
+
+  Omit `--agent-id` for the user default; pass it for that agent's override.
+  The command prints the diff against the policy currently applied to that
+  scope before the Touch ID dialog appears.
+
+When replacing an existing policy, you may add
+`--expected-revision CURRENT_REVISION --expected-hash CURRENT_SHA256` from
+`hubu_show_policy` so a concurrent change stops the apply. Use the authored id
+as the declarative key unless the operator needs a different stable key.
+
+For a cumulative limit, hand over the exact budget command instead of a
+policy file, for example:
+
+```bash
+hubu budget update --budget-id bud_EXACT_BUDGET_ID --amount 20.00 --reason "December design work"
+```
+
+After the owner says it is applied, you may read the policy back with
+`hubu_show_policy` and confirm the intended assignment and revision. Never
+treat a successful YAML parse as proof that the correct live scope was
+attached.
