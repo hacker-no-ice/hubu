@@ -292,9 +292,49 @@ gongbu_caller = {}
     .unwrap();
 
     let profile_arg = profile.to_str().unwrap();
-    let started = run(&["stack", "start", "--profile", profile_arg]);
+    let codex_home = root.path().join("test-codex");
+    fs::create_dir(&codex_home).unwrap();
+    let codex_config = codex_home.join("config.toml");
+    fs::write(
+        &codex_config,
+        format!(
+            r#"model = "keep-me"
+
+# >>> hubu managed codex mcp
+[mcp_servers.hubu]
+command = "old-mcp"
+[mcp_servers.hubu.env]
+HUBU_UNIFIED_HUBU_BEARER_TOKEN_FILE = {}
+HUBU_APPROVAL_TOKEN_FILE = {}
+HUBU_MCP_TRUST_CLIENT_APPROVAL = "1"
+# <<< hubu managed codex mcp
+"#,
+            quote(root.path().join("hubu-auth").display().to_string()),
+            quote(root.path().join("hubu-approval").display().to_string()),
+        ),
+    )
+    .unwrap();
+    let started = Command::new(hubu())
+        .env("CODEX_HOME", &codex_home)
+        .args(["stack", "start", "--profile", profile_arg])
+        .output()
+        .unwrap();
     assert_success(&started);
-    assert!(String::from_utf8_lossy(&started.stdout).contains("running_ready"));
+    let stdout = String::from_utf8_lossy(&started.stdout);
+    assert!(stdout.contains("running_ready"));
+    assert!(stdout.contains("Updated the Hubu-managed Codex config"));
+    let migrated = fs::read_to_string(codex_config).unwrap();
+    assert!(migrated.contains("hubu-agent"));
+    assert!(migrated.contains(r#"model = "keep-me""#));
+    for retired in [
+        "hubu-auth",
+        "hubu-approval",
+        "HUBU_MCP_TRUST_CLIENT_APPROVAL",
+    ] {
+        assert!(!migrated.contains(retired));
+    }
+    assert!(root.path().join("hubu-approval").is_file());
+    assert!(root.path().join("hubu-reconciliation").is_file());
 
     let state_path = profile.join("runtime/launcher-state.json");
     let first_state: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();

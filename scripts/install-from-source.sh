@@ -287,6 +287,8 @@ for binary in "${production_binaries[@]}"; do
   "${install_command}" -m 0755 "${built_binary}" "${stage_bin}/${binary}" || \
     fail "cannot stage ${binary}"
 done
+"${script_root}/scripts/sign-hubu-macos-binaries.sh" sign "${stage_bin}" || \
+  fail "cannot apply hardened ad hoc signatures to the staged Hubu binaries"
 for binary in "${development_binaries[@]}"; do
   [[ ! -e "${stage_bin}/${binary}" ]] || fail "development binary ${binary} entered the install stage"
 done
@@ -352,6 +354,8 @@ for binary in "${production_binaries[@]}"; do
   index=$((index + 1))
 done
 
+"${script_root}/scripts/sign-hubu-macos-binaries.sh" verify "${destination_bin}" || \
+  fail "installed Hubu binaries failed hardened signature verification"
 transaction_active=0
 if ! rm -rf "${transaction_dir}"; then
   echo "Warning: installed binaries are valid, but cleanup failed for ${transaction_dir}" >&2

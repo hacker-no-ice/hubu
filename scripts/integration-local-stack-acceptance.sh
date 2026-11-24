@@ -264,8 +264,6 @@ active_generation="$(jq -r '.generation' "${active_manifest}")"
 client_handoff="${profile}/generated/${active_generation}/client-handoff.json"
 hubu_auth="$(jq -r '.hubu_token_file' "${client_handoff}")"
 hubu_agent="$(jq -r '.agent_token_file' "${client_handoff}")"
-hubu_approval="$(jq -r '.approval_token_file' "${client_handoff}")"
-hubu_reconciliation="$(jq -r '.reconciliation_token_file' "${client_handoff}")"
 gongbu_caller="$(jq -r '.gongbu_token_file' "${client_handoff}")"
 gongbu_hubu="${managed_credential_root}/gongbu/hubu-executor"
 codex_config="${workspace}/codex-config.toml"
@@ -280,14 +278,14 @@ fi
 for directory in "${managed_credential_root}" "${managed_credential_root}/hubu" "${managed_credential_root}/gongbu"; do
   [[ "$(file_mode "${directory}")" == "700" ]] || fail "managed credential directory permissions are not private"
 done
-for credential in "${hubu_auth}" "${hubu_approval}" "${hubu_reconciliation}" "${gongbu_caller}" "${gongbu_hubu}"; do
+for credential in "${hubu_auth}" "${hubu_agent}" "${gongbu_caller}" "${gongbu_hubu}"; do
   [[ "${credential}" == "${managed_credential_root}/"* ]] || fail "managed credential escaped the private profile state"
   [[ -s "${credential}" ]] || fail "managed credential was not provisioned"
   [[ "$(file_mode "${credential}")" == "600" ]] || fail "managed credential permissions are not private"
 done
 cmp "${hubu_auth}" "${gongbu_hubu}" >/dev/null || fail "Gongbu's internal Hubu handoff does not match the verified Hubu capability"
-credential_digests_before="$(shasum -a 256 "${hubu_auth}" "${hubu_approval}" "${hubu_reconciliation}" "${gongbu_caller}")"
-[[ "$(cut -d' ' -f1 <<<"${credential_digests_before}" | sort -u | wc -l | tr -d ' ')" == "4" ]] || fail "managed credential classes reused material"
+credential_digests_before="$(shasum -a 256 "${hubu_auth}" "${hubu_agent}" "${gongbu_caller}")"
+[[ "$(cut -d' ' -f1 <<<"${credential_digests_before}" | sort -u | wc -l | tr -d ' ')" == "3" ]] || fail "managed credential classes reused material"
 serve_record="$(cat "${hubu_serve_trace}")"
 [[ "$(wc -l <<<"${serve_record}" | tr -d ' ')" == "1" ]] || fail "first startup launched more than one Hubu server"
 serve_pid="${serve_record%%|*}"
@@ -297,11 +295,12 @@ launcher_pid="$(jq -r '.processes["hubu-server"].pid' "${profile}/runtime/launch
 [[ "${serve_config}" == "${profile}/generated/${active_generation}/hubu-launch.json" ]] || fail "first Hubu process did not use the active managed config"
 jq -e '
   .auth_token_file_generated == true and
-  .approval_token_file_generated == true and
-  .reconciliation_token_file_generated == true
+  .agent_token_file_generated == true and
+  (has("approval_token_file") | not) and
+  (has("reconciliation_token_file") | not)
 ' "${serve_config}" >/dev/null || fail "derived Hubu credential ownership was not preserved in the active config"
 running_doctor="$("${hubu_bin}" stack doctor --json --profile "${profile}")"
-jq -e '[.checks[] | select(.code == "credential_file_available")] | length == 4 and all(has("field") | not)' <<<"${running_doctor}" >/dev/null || fail "running doctor exposed derived credential paths as source fields"
+jq -e '[.checks[] | select(.code == "credential_file_available")] | length == 3 and all(has("field") | not)' <<<"${running_doctor}" >/dev/null || fail "running doctor exposed derived credential paths as source fields"
 if jq -e '.checks[] | select(.code == "managed_credential_pending")' <<<"${running_doctor}" >/dev/null; then
   fail "running doctor still classified a managed credential as pending"
 fi
@@ -831,7 +830,7 @@ if grep -q '^activate$' "${lifecycle_log}"; then
   fail "stack activated explicitly after its automatic first-generation activation"
 fi
 
-for credential in "${hubu_auth}" "${hubu_approval}" "${hubu_reconciliation}" "${gongbu_caller}" "${provider_secret}"; do
+for credential in "${hubu_auth}" "${hubu_agent}" "${gongbu_caller}" "${provider_secret}"; do
   secret="$(tr -d '\r\n' <"${credential}")"
   if grep -R -F "${secret}" "${profile}/generated" "${workspace}/hubu.log" "${workspace}/gongbu.log" >/dev/null; then
     fail "generated artifacts or service logs exposed credential material"
@@ -844,7 +843,7 @@ stack_lifecycle start >/dev/null
 stack_started=1
 [[ "$(grep -c '^start$' "${lifecycle_log}")" == "2" && "$(grep -c '^stop$' "${lifecycle_log}")" == "1" ]] || fail "managed stack restart count changed"
 [[ "$(wc -l <"${hubu_serve_trace}" | tr -d ' ')" == "2" ]] || fail "restart did not preserve one managed Hubu process per start"
-[[ "$(shasum -a 256 "${hubu_auth}" "${hubu_approval}" "${hubu_reconciliation}" "${gongbu_caller}")" == "${credential_digests_before}" ]] || fail "managed credentials changed during restart"
+[[ "$(shasum -a 256 "${hubu_auth}" "${hubu_agent}" "${gongbu_caller}")" == "${credential_digests_before}" ]] || fail "managed credentials changed during restart"
 
 for label in agent-a agent-b; do
   if [[ "${label}" == "agent-a" ]]; then
@@ -871,7 +870,7 @@ budgets_after_restart="$(curl --fail --silent \
   "${hubu_endpoint}/budgets")"
 [[ "${budgets_after_restart}" == "${budgets}" ]] || fail "budget settlement changed during restart/replay"
 
-stable_credential_digests="$(shasum -a 256 "${hubu_approval}" "${hubu_reconciliation}" "${gongbu_caller}")"
+stable_credential_digests="$(shasum -a 256 "${hubu_agent}" "${gongbu_caller}")"
 hubu_auth_digest_before="$(shasum -a 256 "${hubu_auth}" | awk '{ print $1 }')"
 stack_lifecycle stop >/dev/null
 stack_started=0
@@ -882,7 +881,7 @@ stack_started=1
 hubu_auth_digest_after="$(shasum -a 256 "${hubu_auth}" | awk '{ print $1 }')"
 [[ "${hubu_auth_digest_after}" != "${hubu_auth_digest_before}" ]] || fail "Hubu did not regenerate the removed managed capability"
 cmp "${hubu_auth}" "${gongbu_hubu}" >/dev/null || fail "Gongbu did not refresh its verified Hubu credential handoff"
-[[ "$(shasum -a 256 "${hubu_approval}" "${hubu_reconciliation}" "${gongbu_caller}")" == "${stable_credential_digests}" ]] || fail "Hubu credential recovery changed unrelated managed capabilities"
+[[ "$(shasum -a 256 "${hubu_agent}" "${gongbu_caller}")" == "${stable_credential_digests}" ]] || fail "Hubu credential recovery changed unrelated managed capabilities"
 
 stack_lifecycle stop >/dev/null
 stack_started=0

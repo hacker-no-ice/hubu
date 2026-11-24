@@ -69,6 +69,10 @@ else
 fi
 
 target="$(jq -r '.target' "${package_dir}/PROVENANCE.json")"
+if [[ "${target}" == *-apple-darwin ]]; then
+  root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  "${root_dir}/scripts/sign-hubu-macos-binaries.sh" verify "${package_dir}"
+fi
 jq -e \
   --arg product_version "${product_version}" \
   --arg source_commit "${source_commit}" \
