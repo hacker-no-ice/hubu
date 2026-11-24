@@ -22,5 +22,45 @@
       "C3.2": "known-gap",
       "C5.1": "known-gap"
     }
+  },
+  "v0.3.0": {
+    "notes": {
+      "C3": "Agent identity and session binding are tracked for v0.3.1.",
+      "C4": "Executor credentials and provider key custody are tracked for v0.3.2.",
+      "C5": "Direct state edits are tracked separately for v0.3.3 tamper evidence. The owner can explicitly delegate tightening actions."
+    },
+    "catalog": {
+      "excludeClaims": ["C6"],
+      "excludeChallenges": ["C5.5"],
+      "claims": {
+        "C5": {
+          "title": "The agent stays within its allowlist; expanding authority requires the owner",
+          "invariant": "Under Strict governance, an agent cannot raise its budget, loosen policy, or approve its own request. The server checks owner confirmation for authority-granting owner actions."
+        }
+      },
+      "challenges": {
+        "C1.5": { "status": "not-applicable", "reason": "This release handles HTTP requests serially." },
+        "C5.3": { "title": "Change recorded spend through Hubu’s public HTTP or CLI interfaces" },
+        "C5.4": { "title": "Substitute a different amount or operation after approval review" }
+      },
+      "kits": {
+        "ep09-raise-own-budget": {
+          "boundary": "Strict governance and the agent credential. Delegated tightening and direct state changes are separate from authority-granting changes."
+        },
+        "ep10-self-approval": {
+          "statement": "An agent cannot approve its own escalation. Access to the owner bearer alone does not satisfy owner confirmation.",
+          "setup": "A fresh $1.00 budget, the tiered policy and synthetic agent and owner credentials.",
+          "steps": ["Create a pending approval using the agent credential.", "Check the approval boundary with the agent credential and with an owner bearer without confirmation.", "Check that the approval stays pending until the owner denies it and that no spend was recorded."],
+          "verify": "The agent and unconfirmed owner requests are refused, and no token, hold or spend appears.",
+          "boundary": "The automated kit uses an isolated fixture. The real macOS confirmation is qualified separately."
+        },
+        "ep11-rewrite-ledger": {
+          "boundary": "The claim applies to Hubu’s public HTTP and CLI interfaces. Direct database edits are tracked separately."
+        },
+        "ep12-misstated-approval": {
+          "boundary": "The HTTP review can return the agent’s description alongside the authoritative fields. The macOS confirmation dialog uses a server-built reason; its real UI is qualified separately."
+        }
+      }
+    }
   }
 }

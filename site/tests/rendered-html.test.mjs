@@ -127,7 +127,7 @@ test("v0.2.5 release notes summarize the release and its upgrade", async () => {
   assert.doesNotMatch(html, /Break Hubu|linear\.app|HUB-\d+/);
 });
 
-// Release notes show six claims; the analysis shows every challenge. Each claim's
+// Release notes show claims; the analysis shows every challenge. Each claim's
 // tier follows the challenge rule, and both pages agree.
 function claimTiers(html) {
   return Object.fromEntries([...html.matchAll(/id="claim-(c\d)"[\s\S]*?data-tier="([a-z-]+)"/g)].map((m) => [m[1], m[2]]));
@@ -136,11 +136,16 @@ function claimTiers(html) {
 test("release system cards match their measured or unmeasured report", async () => {
   const releasesDir = new URL("../app/releases/", import.meta.url);
   const catalog = JSON.parse(await readFile(new URL("claims.json", releasesDir), "utf8"));
+  const assessments = JSON.parse(await readFile(new URL("assessments.json", releasesDir), "utf8"));
   const sitemap = await readFile(new URL("../dist/client/sitemap.xml", import.meta.url), "utf8");
   const releases = (await readdir(releasesDir, { withFileTypes: true }))
     .filter((entry) => entry.isDirectory() && /^v\d+\.\d+\.\d+$/.test(entry.name)).map((entry) => entry.name);
   let checked = 0;
   for (const release of releases) {
+    const overrides = assessments[release]?.catalog;
+    const claimIds = catalog.claims.map(({ id }) => id).filter((id) => !overrides?.excludeClaims?.includes(id));
+    const challenges = catalog.challenges.filter(({ id, claim }) => claimIds.includes(claim) && !overrides?.excludeChallenges?.includes(id))
+      .map((challenge) => ({ ...challenge, ...overrides?.challenges?.[challenge.id] }));
     const page = await readFile(new URL(`${release}/page.tsx`, releasesDir), "utf8");
     if (!page.includes("MeasuredClaims")) continue;
     checked += 1;
@@ -151,7 +156,7 @@ test("release system cards match their measured or unmeasured report", async () 
     const card = html.match(/<ul class="release-claim-summary">[\s\S]*?<\/ul>/)?.[0];
     assert.ok(card, release);
     const cardTiers = claimTiers(card);
-    assert.deepEqual(Object.keys(cardTiers), ["c1", "c2", "c3", "c4", "c5", "c6"], release);
+    assert.deepEqual(Object.keys(cardTiers), claimIds.map((id) => id.toLowerCase()), release);
     assert.doesNotMatch(card, /data-status=/, `${release} card lists challenges`);
     const reportPage = await render(`/releases/${release}/report`);
     if (measured) {
@@ -159,31 +164,45 @@ test("release system cards match their measured or unmeasured report", async () 
       assert.equal(reportPage.status, 200, release);
       const report = JSON.parse(reportSource.slice(reportSource.indexOf("= {") + 2, reportSource.lastIndexOf(";")));
       const sections = analysis.split(/(?=<section class="claim-detail" id="claim-c\d")/).slice(1).map((section) => section.split("</section>")[0]);
-      assert.equal(sections.length, 6, release);
+      assert.equal(sections.length, claimIds.length, release);
       const shown = {};
       for (const [index, section] of sections.entries()) {
-        const id = `C${index + 1}`;
+        const id = claimIds[index];
+        const anchor = `claim-${id.toLowerCase()}`;
+        assert.match(section, new RegExp(`id="${anchor}"`), release);
         const tier = section.match(/data-tier="([a-z-]+)"/)[1];
         const statuses = [...section.matchAll(/data-status="([a-z-]+)"/g)].map((match) => match[1]);
-        const own = catalog.challenges.filter((challenge) => challenge.claim === id);
+        const own = challenges.filter((challenge) => challenge.claim === id);
         assert.equal(statuses.length, own.length, `${release} ${id} challenge count`);
-        own.forEach((challenge, i) => { shown[challenge.id] = statuses[i]; });
-        const inScope = statuses.filter((status) => status !== "out-of-scope");
+        const titles = [...section.matchAll(/<th scope="row">(.*?)<\/th>/g)].map((match) => match[1]);
+        assert.equal(titles.length, own.length, `${release} ${id} title count`);
+        own.forEach((challenge, i) => {
+          shown[challenge.id] = statuses[i];
+          assert.doesNotMatch(titles[i], /<a\b/, `${release} ${challenge.id} title is plain text`);
+          if (challenge.kit && report.episodes[challenge.kit]) {
+            const number = overrides?.kits?.[challenge.kit]?.number ?? catalog.kits[challenge.kit].number;
+            assert.ok(titles[i].endsWith(` (EP ${number})`), `${release} ${challenge.id} episode label`);
+            assert.ok(analysis.includes(`id="${challenge.kit}"`), `${release} ${challenge.id} episode section`);
+          } else {
+            assert.doesNotMatch(titles[i], /\(EP \d+\)/, `${release} ${challenge.id} unmeasured`);
+          }
+        });
+        const inScope = statuses.filter((status) => status !== "out-of-scope" && status !== "not-applicable");
         const held = inScope.filter((status) => status.startsWith("holds")).length;
         const failed = inScope.some((status) => status === "does-not-hold" || status === "known-gap");
         const expected = failed ? "does-not-hold" : inScope.length && held === inScope.length ? "verified" : held ? "partially-verified" : "unverified";
         assert.equal(tier, expected, `${release} ${id} tier`);
-        assert.equal(cardTiers[`c${index + 1}`], tier, `${release} ${id} card and analysis agree`);
+        assert.equal(cardTiers[id.toLowerCase()], tier, `${release} ${id} card and analysis agree`);
         assert.match(card, new RegExp(`${held} of ${inScope.length} challenges hold`));
-        assert.match(card, new RegExp(`href="/releases/${escaped}/report#claim-c${index + 1}"`));
+        assert.match(card, new RegExp(`href="/releases/${escaped}/report#${anchor}"`));
       }
-      for (const challenge of catalog.challenges) {
-        if (challenge.status === "out-of-scope") assert.equal(shown[challenge.id], "out-of-scope");
-        if (challenge.kit && report.episodes[challenge.kit]) assert.equal(shown[challenge.id], report.episodes[challenge.kit].verdict, `${release} ${challenge.id}`);
+      for (const challenge of challenges) {
+        if (challenge.status === "out-of-scope" || challenge.status === "not-applicable") assert.equal(shown[challenge.id], challenge.status);
+        else if (challenge.kit && report.episodes[challenge.kit]) assert.equal(shown[challenge.id], report.episodes[challenge.kit].verdict, `${release} ${challenge.id}`);
       }
       assert.match(html, /Recorded \d{4}-\d{2}-\d{2}/);
       assert.match(analysis, new RegExp(`<h1>${escaped} system analysis</h1>`));
-      assert.match(analysis, /<h2 id="results-title">Six claims, judged by their challenges\.<\/h2>/, `${release} headline`);
+      assert.match(analysis, /<h2 id="results-title">Claims and results<\/h2>/, `${release} headline`);
       assert.doesNotMatch(analysis, /tests\. One known gap/, `${release} stale headline`);
       assert.ok(sitemap.includes(`https://hubustack.dev/releases/${release}/report</loc>`), release);
     } else {
@@ -210,8 +229,8 @@ test("the detailed system analysis keeps reproducibility and authority limits al
   assert.match(html, /Gongbu, Temporal, MCP transport, provider adapters, and actual provider billing/);
   for (const id of ["ep01-runaway", "ep02-last-cent", "ep03-crash-recovery", "ep04-many-clients", "identity"]) {
     assert.match(html, new RegExp(`id="${id}"`));
-    assert.match(html, new RegExp(`href="#${id}"`));
   }
+  assert.match(html, /href="#identity"/);
   assert.match(html, /known gap that will be addressed in future releases/);
   assert.doesNotMatch(html, /linear\.app|HUB-\d+/);
   assert.match(html, /not server-enforced role isolation/);
