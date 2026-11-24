@@ -69,6 +69,7 @@ test("release notes lead from the landing page to one concise stable release and
   }
   assert.match(index, /href="\/releases\/v0.2.5"/);
   assert.match(index, /href="\/releases\/v0.2.4"/);
+  assert.match(index, /href="\/releases\/v0\.3\.0"/);
   assert.ok(index.indexOf('href="/releases/v0.2.5"') < index.indexOf('href="/releases/v0.2.4"'));
   assert.doesNotMatch(index, /href="\/releases\/v0\.2\.[0-3]/);
   assert.match(overview, /What changed/);
@@ -125,6 +126,16 @@ test("v0.2.5 release notes summarize the release and its upgrade", async () => {
   assert.match(html, /normal bearer can change budgets and policies/);
   assert.match(html, /href="https:\/\/hubustack.dev\/releases\/v0.2.5"/);
   assert.doesNotMatch(html, /Break Hubu|linear\.app|HUB-\d+/);
+});
+
+test("v0.3.0 release notes explain owner confirmation and link the upgrade guide", async () => {
+  const response = await render("/releases/v0.3.0");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /<h1>Hubu v0\.3\.0<\/h1>/);
+  assert.match(html, /The macOS dialog names the action and covers that action only/);
+  assert.match(html, /href="\/docs\/operations\/upgrading-to-v0\.3\.0"/);
+  assert.match(html, /href="\/docs\/threat-model"/);
 });
 
 // Release notes show claims; the analysis shows every challenge. Each claim's
