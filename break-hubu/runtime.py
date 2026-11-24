@@ -107,6 +107,7 @@ class Runtime:
         self.url = context['url']
         self.owner = owner
         self.server = None
+        self.presence_answer = 'confirm'
 
     def note(self, text):
         with (self.output / 'transcript.txt').open('a') as stream:
@@ -298,7 +299,7 @@ class Runtime:
             command = [str(Path(self.context['binary_directory']) / 'hubu-server'), 'serve', '--config', str(self.private / 'server.json')]
             self.note('$ ' + shlex.join(command))
             env = dict(self.environment(), HUBU_OWNER_PRESENCE_PROVIDER='fixture',
-                       HUBU_OWNER_PRESENCE_FIXTURE='confirm')
+                       HUBU_OWNER_PRESENCE_FIXTURE=self.presence_answer)
             with (self.private / 'server.log').open('a') as log:
                 self.server = subprocess.Popen(command, cwd=self.private, env=env, stdout=log, stderr=log)
             for _ in range(100):
@@ -316,8 +317,13 @@ class Runtime:
             if self.context['owner_presence']:
                 if kwargs['decision'] == 'deny' and self.context['episode'] == 'ep10-self-approval':
                     # Model a readable owner credential and retired capability with explicitly provisioned test inputs.
-                    self.request('POST', '/spend/approval/resolve', dict(body, decision='approve'),
+                    approval = dict(body, decision='approve')
+                    self.request('POST', '/spend/approval/resolve', approval,
                                  label='owner-without-confirmation', headers={**legacy_capability, 'x-hubu-no-prompt': '1'})
+                    self.request('POST', '/spend/approval/resolve', approval,
+                                 label='owner-presence-unavailable', headers=legacy_capability)
+                    self.request('GET', '/spend/approval?approval_request_id=' + kwargs['approval_request_id'],
+                                 label='pending-after-owner-presence-refusal')
                 self.note('OWNER STEP: scripted presence for approval; denial uses the owner credential')
                 return self.request('POST', '/spend/approval/resolve', body, label=kwargs['label'])
             self.note('OWNER STEP: human approval decision with the legacy approval capability')
@@ -437,6 +443,11 @@ def run_episode(attack, verify, *, episode, budget, short_lease=False, policy=PO
         rt.snapshot('initial')
         if observe:
             observe(rt, 'initial')
+        if context['owner_presence'] and episode == 'ep10-self-approval':
+            # Fixture setup needs confirmation. During this regression check
+            # every prompt remains unconfirmed, and explicit deny still works.
+            rt.presence_answer = 'unavailable'
+            rt.restart()
         command = [sys.executable, str(Path(sys.argv[0]).resolve()), '--attack-context', str(child_context)]
         error_path = private / 'attack-stderr.txt'
         with error_path.open('w') as errors:
