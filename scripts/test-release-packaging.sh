@@ -56,6 +56,13 @@ verify_package() {
   for expected_file in "${expected_files[@]}"; do
     test -s "${package_dir}/${expected_file}"
   done
+  if [[ "${target}" == *-apple-darwin ]]; then
+    PATH="${root_dir}/scripts/test-fixtures:${PATH}" \
+      "${root_dir}/scripts/sign-hubu-macos-binaries.sh" verify "${package_dir}"
+  elif grep -Fq '# hardened ad hoc signature fixture' "${package_dir}/hubu" "${package_dir}/hubu-server"; then
+    echo "release packaging signed binaries for a non-macOS target" >&2
+    exit 1
+  fi
   test ! -e "${package_dir}/operations"
   test ! -e "${package_dir}/hubu-bench"
   test ! -e "${package_dir}/gongbu-sandbox"
@@ -104,7 +111,7 @@ verify_package() {
 
 for target in "${packaging_test_targets[@]}"; do
   mkdir -p "${test_dir}/dist-${target}"
-  "${root_dir}/scripts/package-release-archive.sh" \
+  PATH="${root_dir}/scripts/test-fixtures:${PATH}" "${root_dir}/scripts/package-release-archive.sh" \
     "0.0.0-test" \
     "0000000000000000000000000000000000000000" \
     "${target}" \
@@ -114,6 +121,11 @@ for target in "${packaging_test_targets[@]}"; do
     "https://github.com/hacker-no-ice/hubu/actions/runs/1/attempts/1"
   verify_package "${target}"
 done
+
+if grep -Fq '# hardened ad hoc signature fixture' "${test_dir}/bin/hubu" "${test_dir}/bin/hubu-server"; then
+  echo "release packaging modified its input binaries" >&2
+  exit 1
+fi
 
 missing_dir="${test_dir}/missing-bin"
 mkdir -p "${missing_dir}"

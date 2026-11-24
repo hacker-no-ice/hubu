@@ -35,7 +35,7 @@ fn budget_units(cost: &ExactMoney) -> Result<Amount, StorageError> {
 }
 
 pub(super) fn post_settlement(
-    conn: &rusqlite::Transaction<'_>,
+    conn: &Connection,
     claim: &SpendExecutorClaimRecord,
     hold: &BudgetHold,
     receipt: &PersistedSpendExecutorSettlementReceipt,
@@ -164,9 +164,7 @@ pub(super) fn post_settlement(
 
 impl SqliteGovernanceRepository {
     pub(super) fn initialize_provider_accounting(&mut self) -> Result<(), StorageError> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.conn.savepoint()?;
         ledger::initialize(&tx).map_err(ledger_error)?;
         tx.execute_batch("CREATE TABLE IF NOT EXISTS ledger_legacy_gaps (source_key TEXT PRIMARY KEY, reason TEXT NOT NULL);")?;
         let ids = {
@@ -432,7 +430,7 @@ impl SqliteGovernanceRepository {
     }
 }
 
-fn backfill_wallet_context(tx: &rusqlite::Transaction<'_>) -> Result<(), StorageError> {
+fn backfill_wallet_context(tx: &Connection) -> Result<(), StorageError> {
     if !table_has_column(tx, "payment_attempts", "ledger_transaction_id")? {
         return Ok(());
     }

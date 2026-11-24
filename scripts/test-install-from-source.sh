@@ -188,7 +188,7 @@ run_installer() {
   local case_dir="$1"
   shift
   env \
-    PATH="${case_dir}/stubs:${PATH}" \
+    PATH="${case_dir}/stubs:${root_dir}/scripts/test-fixtures:${PATH}" \
     HUBU_SOURCE_INSTALL_OS_OVERRIDE=Darwin \
     HUBU_SOURCE_INSTALL_CHECKOUT_ROOT="${case_dir}/checkout" \
     HUBU_SOURCE_INSTALL_TMPDIR="${case_dir}" \
@@ -205,6 +205,7 @@ run_installer() {
     STUB_TOOLCHAIN_FAIL="${STUB_TOOLCHAIN_FAIL:-0}" \
     STUB_BAD_METADATA="${STUB_BAD_METADATA:-0}" \
     STUB_BAD_BUILD_ID="${STUB_BAD_BUILD_ID:-0}" \
+    STUB_CODESIGN_RUNTIME="${STUB_CODESIGN_RUNTIME:-1}" \
     STUB_CREATE_DEV_BINARIES="${STUB_CREATE_DEV_BINARIES:-0}" \
     STUB_FAIL_INSTALLED_PATH="${STUB_FAIL_INSTALLED_PATH:-}" \
     STUB_FAIL_REMOVE_PATH="${STUB_FAIL_REMOVE_PATH:-}" \
@@ -237,6 +238,15 @@ for binary in hubu hubu-server hubu-unified-mcp gongbu-server; do
   test -x "${success_case}/prefix/bin/${binary}" || fail_test "${binary} was not installed"
   "${success_case}/prefix/bin/${binary}" --version | \
     grep -F "\"source_commit\": \"${expected_commit}\"" >/dev/null
+done
+for binary in hubu hubu-server; do
+  grep -Fxq '# hardened ad hoc signature fixture' "${success_case}/prefix/bin/${binary}" || \
+    fail_test "${binary} was installed without a hardened ad hoc signature"
+done
+for binary in hubu-unified-mcp gongbu-server; do
+  if grep -Fxq '# hardened ad hoc signature fixture' "${success_case}/prefix/bin/${binary}"; then
+    fail_test "${binary} was signed outside the owner-presence binary set"
+  fi
 done
 test ! -e "${success_case}/prefix/bin/hubu-bench"
 test ! -e "${success_case}/prefix/bin/gongbu-sandbox"
@@ -339,6 +349,15 @@ assert_failure \
   run_installer "${build_id_case}" --expected-commit "${expected_commit}" --prefix "${build_id_case}/prefix"
 unset STUB_BAD_BUILD_ID
 [[ ! -e "${build_id_case}/prefix/bin" ]] || fail_test "bad Gongbu build ID touched the prefix"
+
+signature_case="$(make_case signature)"
+STUB_CODESIGN_RUNTIME=0
+assert_failure \
+  "cannot apply hardened ad hoc signatures to the staged Hubu binaries" \
+  "${signature_case}/output" \
+  run_installer "${signature_case}" --expected-commit "${expected_commit}" --prefix "${signature_case}/prefix"
+unset STUB_CODESIGN_RUNTIME
+[[ ! -e "${signature_case}/prefix/bin" ]] || fail_test "bad staged signature touched the prefix"
 
 remove_failure_case="$(make_case remove-failure)"
 mkdir -p "${remove_failure_case}/prefix/bin"
