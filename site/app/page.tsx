@@ -13,7 +13,7 @@ const worksToday = [
   ["macOS", "source install from a release tag"],
   ["Codex", "setup helper; other MCP clients by manual config"],
   ["Gemini and the FLUX suite", "live providers: FLUX.2 [pro], [max], [flex], [klein] and FLUX 3 Image, with edit"],
-  ["Sandbox", "with no provider credentials"],
+  ["Live and sandbox modes", "live with approved real providers; sandbox with a non-billable fixture and no provider credentials"],
 ] as const;
 
 export const metadata: Metadata = homeMetadata;
