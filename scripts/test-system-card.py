@@ -153,12 +153,16 @@ class SiteContract(unittest.TestCase):
         previous = renderer.load_catalog(ROOT, "v0.2.5")
         candidate = renderer.load_catalog(ROOT, "v0.3.0")
         self.assertIn("C6", [claim["id"] for claim in previous["claims"]])
-        self.assertNotIn("C6", [claim["id"] for claim in candidate["claims"]])
+        self.assertIn("C6", [claim["id"] for claim in candidate["claims"]])
+        self.assertEqual([(item["id"], item["status"]) for item in candidate["challenges"] if item["claim"] == "C6"],
+                         [("C6.1", "blocked"), ("C6.2", "blocked"), ("C6.3", "blocked")])
         self.assertIn("C5.5", [item["id"] for item in previous["challenges"]])
         self.assertNotIn("C5.5", [item["id"] for item in candidate["challenges"]])
         report = {"episodes": {}}
         self.assertEqual(renderer.claim_tier("C1", previous, report)["total"], 6)
         self.assertEqual(renderer.claim_tier("C1", candidate, report)["total"], 5)
+        self.assertEqual(renderer.claim_tier("C6", candidate, report),
+                         {"tier": "unverified", "held": 0, "total": 3, "failed": 0})
 
     def test_rendered_tiers_include_documented_gaps_like_the_site(self):
         renderer = load_renderer()

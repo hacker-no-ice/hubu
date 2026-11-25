@@ -28,10 +28,10 @@
     "notes": {
       "C3": "Agent identity and session binding are tracked for v0.3.1.",
       "C4": "Executor credentials and provider key custody are tracked for v0.3.2.",
-      "C5": "Direct state edits are tracked separately for v0.3.3 tamper evidence. The owner can explicitly delegate tightening actions."
+      "C5": "Direct state edits are tracked separately for v0.3.3 tamper evidence. The owner can explicitly delegate tightening actions.",
+      "C6": "All three challenges are blocked until self-serve provider pack activation is available."
     },
     "catalog": {
-      "excludeClaims": ["C6"],
       "excludeChallenges": ["C5.5"],
       "claims": {
         "C5": {

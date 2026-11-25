@@ -30,6 +30,12 @@
       "held": 4,
       "total": 4,
       "failed": 0
+    },
+    "C6": {
+      "tier": "unverified",
+      "held": 0,
+      "total": 3,
+      "failed": 0
     }
   },
   "verdicts": {
