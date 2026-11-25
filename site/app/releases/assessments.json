@@ -45,6 +45,10 @@
         "C5.4": { "title": "Substitute a different amount or operation after approval review" }
       },
       "kits": {
+        "ep06-approval-reuse": {
+          "setup": "A fresh $1.00 budget, the tiered policy, and separate synthetic agent and owner credentials. The server uses a scripted owner-confirmation fixture.",
+          "boundary": "The owner approves over HTTP with the owner bearer and a scripted owner-confirmation fixture. The live macOS prompt and review screens are outside this experiment."
+        },
         "ep09-raise-own-budget": {
           "boundary": "Strict governance and the agent credential. Delegated tightening and direct state changes are separate from authority-granting changes."
         },

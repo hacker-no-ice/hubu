@@ -103,7 +103,7 @@ export const report: ReleaseReport = {
     "ep06-approval-reuse": {
       "verdict": "holds",
       "execution": "complete",
-      "caveat": "The owner approves through the approval capability over HTTP; the human-facing notification and review screens are outside this test.",
+      "caveat": "The owner approves over HTTP with the owner bearer and a scripted owner-confirmation fixture. The live macOS prompt and review screens are outside this experiment.",
       "summary": "12 of 12 checks held.",
       "metrics": [
         {
