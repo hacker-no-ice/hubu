@@ -194,9 +194,12 @@
 .hop i { width: 14px; height: 1px; background: linear-gradient(90deg, var(--indigo), var(--cyan)); }
 .badge { display: inline-block; font: 500 10.5px var(--font-geist-mono), monospace; padding: 2px 7px; border-radius: 99px; white-space: nowrap; }
 .badge.warn { background: #2e2412; color: var(--warning); } .badge.ok { background: #12291f; color: #6fd3a0; } .badge.bad { background: #331917; color: #ff8f86; }
-.chat { border: 1px solid #ffffff12; border-radius: 12px; background: #08090c; padding: 16px 18px; display: grid; gap: 10px; min-height: 236px; align-content: start; min-width: 0; }
+.chat { align-self: stretch; border: 1px solid #ffffff12; border-radius: 12px; background: #08090c; padding: 16px 18px; display: grid; gap: 10px; align-content: start; min-width: 0; }
 .chat .bar { display: flex; justify-content: space-between; gap: 12px; font: 11px var(--font-geist-mono), monospace; color: var(--dim); letter-spacing: .08em; text-transform: uppercase; padding-bottom: 10px; border-bottom: 1px solid #ffffff10; }
-.chat .row { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 12px; align-items: start; font-size: 14px; animation: logIn .45s ease-out both; }
+.chat .row { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 12px; align-items: start; font-size: 14px; visibility: hidden; opacity: 0; }
+/* Spread the session over the full height of the paths column beside it. */
+@media (min-width: 901px) { .chat { align-content: space-between; } }
+.chat .row.in { visibility: visible; opacity: 1; animation: logIn .45s ease-out both; }
 @keyframes logIn { from { opacity: .2; transform: translateX(-8px); } }
 .chat .who { font: 11px var(--font-geist-mono), monospace; color: var(--dim); text-transform: uppercase; letter-spacing: .08em; padding-top: 3px; }
 .chat .tool { font: 12.5px var(--font-geist-mono), monospace; color: #c3c4ff; overflow-wrap: anywhere; }

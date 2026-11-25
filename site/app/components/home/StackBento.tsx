@@ -66,7 +66,8 @@ const MSG = {
   approved: { who: "hubu", kind: "ok", text: "approved by the owner in the admin portal · reserved $0.40" },
   final: { who: "gongbu", kind: "image", text: "artifact ready · settled $0.32 · released $0.08" },
 } satisfies Record<string, Row>;
-const settledChat: Row[] = [MSG.ask1, MSG.done, MSG.ask2, MSG.hold, MSG.approved, MSG.final];
+// The whole session is always laid out, so the panel keeps one height; playback reveals rows in order.
+const TRANSCRIPT: Row[] = [MSG.ask1, MSG.call1, MSG.allow, MSG.done, MSG.ask2, MSG.call2, MSG.hold, MSG.approved, MSG.final];
 
 const clockText = (seconds: number) => [Math.floor(seconds / 3600), Math.floor(seconds / 60) % 60, seconds % 60].map((part) => String(part).padStart(2, "0")).join(":");
 const pad = (text: string, width: number) => (text + " ".repeat(width)).slice(0, width);
@@ -112,24 +113,24 @@ export function StackBento({ policy }: { policy: PolicyExcerpt }) {
   const [ready, setReady] = useState([true, true, true, true]);
   const [registered, setRegistered] = useState(true);
   const [hud, setHud] = useState<Hud>(settledHud);
-  const [chat, setChat] = useState<Row[]>(settledChat);
+  const [shown, setShown] = useState(TRANSCRIPT.length);
   const [hit, setHit] = useState<string | null>(null);
   const [reveal, setReveal] = useState<"idle" | "pending" | "in">("idle");
   const timers = useRef<number[]>([]);
   const replay = useRef<() => void>(() => {});
 
   const stop = useCallback(() => { timers.current.forEach(window.clearTimeout); timers.current = []; }, []);
-  const settle = useCallback(() => { stop(); setReady([true, true, true, true]); setRegistered(true); setHud(settledHud()); setChat(settledChat); setHit(null); }, [stop]);
+  const settle = useCallback(() => { stop(); setReady([true, true, true, true]); setRegistered(true); setHud(settledHud()); setShown(TRANSCRIPT.length); setHit(null); }, [stop]);
 
   const play = useCallback(() => {
     stop();
     const at = (ms: number, fn: () => void) => timers.current.push(window.setTimeout(fn, ms));
-    const add = (row: Row) => setChat((rows) => [...rows, row].slice(-6));
+    const add = (row: Row) => setShown(TRANSCRIPT.indexOf(row) + 1);
     const event = (next: Partial<Hud> & { push?: Event; replace?: Event; tick?: number }) => setHud((current) => {
       const events = next.push ? [next.push, ...current.events] : next.replace ? [next.replace, ...current.events.slice(1)] : current.events;
       return { ...current, ...next, clock: current.clock + (next.tick ?? 0), events, fresh: Boolean(next.push || next.replace) };
     });
-    setReady([false, false, false, false]); setRegistered(false); setHud(startHud()); setChat([]); setHit(null);
+    setReady([false, false, false, false]); setRegistered(false); setHud(startHud()); setShown(0); setHit(null);
     at(500, () => setReady([false, true, false, false]));
     at(850, () => setReady([false, true, true, false]));
     at(1200, () => setReady([false, true, true, true]));
@@ -264,8 +265,8 @@ export function StackBento({ policy }: { policy: PolicyExcerpt }) {
             </div>
             <div className="chat" aria-label="Example agent session">
               <div className="bar"><span>Agent harness · image-agent</span><span>MCP · hubu-unified-mcp</span></div>
-              {chat.map((row, index) => (
-                <div className="row" key={`${index}-${row.text}`}>
+              {TRANSCRIPT.map((row, index) => (
+                <div className={`row${index < shown ? " in" : ""}`} key={row.text} aria-hidden={index < shown ? undefined : true}>
                   <span className="who">{row.who}</span>
                   {row.kind === "image" ? (
                     <div className="img">
