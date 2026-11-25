@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { PortalTour } from "./PortalTour";
 
 type PolicyExcerpt = { path: string; header: readonly string[]; rules: readonly { id: string; lines: readonly string[] }[]; ruleCount: number };
@@ -9,6 +9,26 @@ const MASCOT = "/brand/hubu-mascot-evolved.jpg";
 
 export function say(text: string, ms = 1500) {
   window.dispatchEvent(new CustomEvent("marty:say", { detail: { text, ms } }));
+}
+
+// Phones get a shorter page: setup steps and commands fold away, and only one
+// harness path shows at a time. Desktop renders exactly as before.
+const NARROW = "(max-width: 620px)";
+function useNarrow() {
+  return useSyncExternalStore(
+    (onChange) => {
+      const query = window.matchMedia(NARROW);
+      query.addEventListener("change", onChange);
+      return () => query.removeEventListener("change", onChange);
+    },
+    () => window.matchMedia(NARROW).matches,
+    () => false,
+  );
+}
+
+// Open on desktop (and before hydration); closed on phones until tapped.
+function Fold({ narrow, label, children }: { narrow: boolean; label: string; children: React.ReactNode }) {
+  return <details className="fold" open={!narrow}><summary>{label}</summary>{children}</details>;
 }
 
 function Command({ children }: { children: string }) {
@@ -92,7 +112,7 @@ function HudView({ hud }: { hud: Hud }) {
       <span className="hd"> RECENT DECISIONS</span>
       {hud.events.slice(0, 10).map((event, index) => {
         const line = ` 2026-11-24 ${event.t}  ${event.glyph} ${pad(event.agent, 12)}${pad(event.provider, 7)}${pad(event.status, 18)}${event.rule}`;
-        return <span key={index}>{"\n"}{index === 0 && hud.fresh ? <span className="new">{line}</span> : line}</span>;
+        return <span key={index} className={index >= 5 ? "extra" : undefined}>{"\n"}{index === 0 && hud.fresh ? <span className="new">{line}</span> : line}</span>;
       })}
     </pre>
   );
@@ -116,6 +136,11 @@ export function StackBento({ policy }: { policy: PolicyExcerpt }) {
   const [shown, setShown] = useState(TRANSCRIPT.length);
   const [hit, setHit] = useState<string | null>(null);
   const [reveal, setReveal] = useState<"idle" | "pending" | "in">("idle");
+  const [pathTab, setPathTab] = useState<"remote" | "local">("remote");
+  const [policyOpen, setPolicyOpen] = useState(false);
+  const narrow = useNarrow();
+  // On phones the session shows a four-row window that follows the playback.
+  const windowStart = narrow ? Math.min(Math.max(shown - 4, 0), TRANSCRIPT.length - 4) : 0;
   const timers = useRef<number[]>([]);
   const replay = useRef<() => void>(() => {});
 
@@ -188,7 +213,11 @@ export function StackBento({ policy }: { policy: PolicyExcerpt }) {
         </div>
         <div className="bx">
           <article className="tile t-prereq reveal" style={{ "--i": 1 } as React.CSSProperties} onPointerMove={spotlight} aria-labelledby="prereq-title">
-            <div className="tt"><small id="prereq-title">Before you start</small><span className="pre-tag">prerequisites · once per machine</span></div>
+            <details className="pre-fold" open={!narrow}>
+            <summary>
+              <div className="tt"><small id="prereq-title">Before you start</small><span className="pre-tag">prerequisites · once per machine</span></div>
+              <span className="pre-sum">Create a live profile, connect provider keys, start the stack</span>
+            </summary>
             <div className="prereq-grid">
               <div className="t-stack">
                 <h3>Create a live profile</h3>
@@ -225,12 +254,13 @@ export function StackBento({ policy }: { policy: PolicyExcerpt }) {
               </div>
             </div>
             <p className="pre-foot">No provider keys yet? The <a href="/docs/local-stack">local stack guide</a> starts in sandbox, which needs no keys and cannot spend. Full live setup: <a href="/configuration/local-stack/v1/examples#live-gemini-developer-api-and-flux2">live configuration example</a>.</p>
+            </details>
           </article>
           <article className="tile t-policy reveal" style={{ "--i": 2 } as React.CSSProperties} onPointerMove={spotlight}>
             <div className="tt"><small>Start from a policy file</small><span className="step">Step 1</span></div>
             <h3>Rules in plain YAML</h3>
-            <Command>{`hubu policy apply --path ${policy.path} --name "Creative tiers"`}</Command>
-            <pre className="term yaml">
+            <Fold narrow={narrow} label="Command"><Command>{`hubu policy apply --path ${policy.path} --name "Creative tiers"`}</Command></Fold>
+            <pre className={`term yaml${policyOpen ? " open" : ""}`} id="policy-yaml">
               {policy.header.map((line) => <span key={line}><YamlLine line={line} />{"\n"}</span>)}
               {policy.rules.map((rule, index) => (
                 <span key={rule.id}>
@@ -242,16 +272,17 @@ export function StackBento({ policy }: { policy: PolicyExcerpt }) {
               ))}
               <span className="c">{`  # excerpt: the full file has ${policy.ruleCount} rules`}</span>
             </pre>
+            <button type="button" className="more" aria-controls="policy-yaml" aria-expanded={policyOpen} onClick={() => setPolicyOpen((open) => !open)}>{policyOpen ? "Show less" : "Show the whole excerpt"}</button>
           </article>
           <article className="tile t-budget reveal" style={{ "--i": 3 } as React.CSSProperties} onPointerMove={spotlight}>
             <div className="tt"><small>Give the agent a budget</small><span className="step">Step 2</span></div>
-            <Command>hubu budget create --agent-id agt_IMAGE_AGENT_ID --amount 2</Command>
+            <Fold narrow={narrow} label="Command"><Command>hubu budget create --agent-id agt_IMAGE_AGENT_ID --amount 2</Command></Fold>
             <div className="amt">$2.00<span>USD · cumulative</span></div>
             <p className="bid">image-agent · bgt_…</p>
           </article>
           <article className="tile t-hud reveal" style={{ "--i": 4 } as React.CSSProperties} onPointerMove={spotlight}>
             <div className="tt"><small>Watch spend live</small><span className="live">live</span></div>
-            <Command>hubu watch --events 10</Command>
+            <Fold narrow={narrow} label="Command"><Command>hubu watch --events 10</Command></Fold>
             <HudView hud={hud} />
           </article>
           <article className="tile t-harness reveal" style={{ "--i": 6 } as React.CSSProperties} onPointerMove={spotlight}>
@@ -259,15 +290,19 @@ export function StackBento({ policy }: { policy: PolicyExcerpt }) {
               <div className="tt"><small>Plug into your harness</small></div>
               <h3>Hubu as MCP tools for your agent</h3>
               <p>Hubu ships a stdio MCP server, <code>hubu-unified-mcp</code>. The agent sees <code>hubu_*</code> and <code>gongbu_*</code> tools and never a provider key.</p>
-              <div className="paths">
-                <div className="path">
+              <div className="path-tabs" role="tablist" aria-label="Connection path">
+                <button type="button" role="tab" aria-selected={pathTab === "remote"} onClick={() => setPathTab("remote")}>Remote (ChatGPT)</button>
+                <button type="button" role="tab" aria-selected={pathTab === "local"} onClick={() => setPathTab("local")}>Local MCP</button>
+              </div>
+              <div className="paths" data-tab={pathTab}>
+                <div className="path remote">
                   <div className="ph"><b>Remote, from ChatGPT</b><span className="badge warn">experimental</span></div>
                   <p>Secure MCP Tunnel: an outbound connection from your Mac, no inbound port. Works from ChatGPT on the web or your phone while the client runs.</p>
                   <div className="hop"><span>ChatGPT</span><i /><span>OpenAI tunnel</span><i /><span>tunnel-client</span><i /><span>hubu-unified-mcp</span></div>
                   <Command>caffeinate -i tunnel-client run --profile hubu-stdio</Command>
                   <a className="path-link" href="/docs/operations/chatgpt-mcp-tunnel">Tunnel runbook →</a>
                 </div>
-                <div className="path">
+                <div className="path local">
                   <div className="ph"><b>Local MCP client</b><span className="badge ok">Codex verified</span></div>
                   <p>Your harness starts <code>hubu-unified-mcp</code> from its MCP config. Codex has a setup helper. Other clients take manual config and aren&apos;t verified yet.</p>
                   <Command>{'hubu init codex --stack-profile "$HOME/hubu-live"'}</Command>
@@ -278,7 +313,7 @@ export function StackBento({ policy }: { policy: PolicyExcerpt }) {
             <div className="chat" aria-label="Example agent session">
               <div className="bar"><span>Agent harness · image-agent</span><span>MCP · hubu-unified-mcp</span></div>
               {TRANSCRIPT.map((row, index) => (
-                <div className={`row${index < shown ? " in" : ""}`} key={row.text} aria-hidden={index < shown ? undefined : true}>
+                <div className={`row${index < shown ? " in" : ""}${index < windowStart || index >= windowStart + 4 + (narrow ? 0 : TRANSCRIPT.length) ? " out" : ""}`} key={row.text} aria-hidden={index < shown ? undefined : true}>
                   <span className="who">{row.who}</span>
                   {row.kind === "image" ? (
                     <div className="img">
