@@ -82,7 +82,7 @@ const MSG = {
   done: { who: "gongbu", kind: "image", text: "artifact ready · settled $0.03 · released $0.02" },
   ask2: { who: "you", kind: "you", text: "Now render the final at 4k." },
   call2: { who: "tool", kind: "tool", text: "hubu_submit_governed_execution · flux-2-pro · image_size 4k" },
-  hold: { who: "hubu", kind: "hold", text: "‖ needs approval · escalate_final_renders · sent to the owner" },
+  hold: { who: "hubu", kind: "hold", text: "‖ escalate_final_renders · owner approval needed" },
   approved: { who: "hubu", kind: "ok", text: "approved by the owner in the admin portal · reserved $0.40" },
   final: { who: "gongbu", kind: "image", text: "artifact ready · settled $0.32 · released $0.08" },
 } satisfies Record<string, Row>;
