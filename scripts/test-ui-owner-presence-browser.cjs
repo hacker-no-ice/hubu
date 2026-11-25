@@ -74,14 +74,22 @@ async function main() {
     writeFileSync(policy, 'id: fixture-policy\nversion: v1\ndefault_effect: needs_approval\nrules: []\n');
     cli('policy', 'add', '--path', policy);
     cli('budget', 'create', '--agent-id', agentId, '--amount', '20.00');
-    const pending = async (name) => {
+    const pending = async (name, executionScope) => {
       const result = await serverRequest('/spend/authorize', {
-        operation_key: name, account_id: accountId, amount: '1.00', reason: name,
+        operation_key: name, account_id: accountId, amount: '1.00', reason: name, execution_scope: executionScope,
       });
       assert.equal(result.decision, 'needs_approval');
       return result.approval.approval_request_id;
     };
-    const approvedId = await pending('fixture-approved');
+    const approvedId = await pending('fixture-approved', {
+      schema_version: 2,
+      provider: 'provider:black-forest-labs:flux',
+      executor: 'executor:gongbu:image',
+      capability: 'capability:image:generate',
+      billing_merchant: 'merchant:black-forest-labs',
+      model: 'flux-2-klein-4b',
+      image_size: '2k',
+    });
     // Dummy capability values verify that the live portal sends only the owner bearer.
     env.HUBU_APPROVAL_TOKEN = 'retired-approval-fixture';
     env.HUBU_RECONCILIATION_TOKEN = 'retired-reconciliation-fixture';
@@ -126,13 +134,17 @@ async function main() {
       portal.once('exit', (code) => fail(new Error(`Portal exited with status ${code}`)));
     });
 
+    const approvalUrl = (id) => `${new URL(login).origin}/#approvals?request=${encodeURIComponent(id)}`;
     browser = await chromium.launch(process.env.HUBU_UI_CHROME ? { executablePath: process.env.HUBU_UI_CHROME } : {});
     const page = await browser.newPage();
     const errors = [];
     page.on('pageerror', (error) => errors.push(error.message));
+    await page.goto(approvalUrl(approvedId));
+    await page.getByRole('heading', { name: 'Sign in to Hubu Admin', exact: true }).waitFor();
+    assert.equal(await page.getByText('fixture-approved', { exact: true }).count(), 0);
     await page.goto(login);
     await page.getByRole('link', { name: 'Budgets', exact: true }).click();
-    await page.getByRole('heading', { name: 'Budgets', exact: true }).waitFor();
+    await page.getByRole('heading', { name: 'Budgets', exact: true, level: 1 }).waitFor();
     await page.getByRole('link', { name: 'Settings', exact: true }).click();
     assert.equal(new URL(page.url()).pathname, '/settings');
     await page.getByRole('heading', { name: 'Agent action permissions' }).waitFor();
@@ -177,7 +189,7 @@ async function main() {
     assert.match(overrideRecords[1].reason, /^allow agents to lower existing budgets without you/);
 
     await page.getByRole('link', { name: 'Back to console' }).click();
-    await page.getByRole('heading', { name: 'Budgets', exact: true }).waitFor();
+    await page.getByRole('heading', { name: 'Budgets', exact: true, level: 1 }).waitFor();
     await page.getByRole('link', { name: /^Approvals/ }).click();
     const approve = page.getByRole('button', { name: 'Approve', exact: true });
     const assertApproval = async (id, status) => {
@@ -187,7 +199,29 @@ async function main() {
     const presence = async () => (await serverRequest('/governance/owner-presence')).records.filter((r) => r.client === 'portal');
 
     const approvalConfirmations = async () => (await presence()).filter((r) => r.action === 'spend.approval.approve');
+    const reviewLink = page.getByRole('link', { name: 'Review', exact: true });
+    const reviewHeading = page.getByRole('heading', { name: 'Spend approval', exact: true });
+    const backToApprovals = page.getByText('Back to approvals', { exact: true });
+    const expectReview = async () => {
+      await reviewHeading.waitFor();
+      await page.getByText(approvedId, { exact: true }).waitFor();
+      await page.getByText('fixture-approved', { exact: true }).waitFor();
+    };
+    await reviewLink.click();
+    await expectReview();
+    await backToApprovals.click();
+    await reviewLink.waitFor();
+
+    await page.goto(approvalUrl(approvedId));
+    await page.reload();
+    await expectReview();
+    await page.getByText('Hubu requests your approval for fixture-agent to spend up to 1.00 USD with Black Forest Labs FLUX.', { exact: true }).waitFor();
+    await page.getByText('flux-2-klein-4b', { exact: true }).waitFor();
+    await page.getByText('2k', { exact: true }).waitFor();
+    await assertApproval(approvedId, 'pending');
+    assert.equal(portalHeaders.length, 0);
     assert.equal((await approvalConfirmations()).length, 0);
+
     const waiting = page.getByText('Confirm on your Mac…', { exact: true });
     const startedAt = Date.now();
     await approve.click();
@@ -200,6 +234,15 @@ async function main() {
     assert.equal(confirmations.length, 1);
     assert.equal(confirmations[0].outcome, 'confirmed');
     assert.equal(confirmations[0].method, 'fixture');
+
+    await page.goto(approvalUrl(approvedId));
+    await expectReview();
+    await page.getByText('This request is no longer pending.', { exact: true }).waitFor();
+    assert.equal(await approve.count(), 0);
+    assert.equal(await page.getByRole('button', { name: 'Deny', exact: true }).count(), 0);
+    assert.equal(portalHeaders.length, 1);
+    await backToApprovals.click();
+    await page.getByText('No spend is waiting for approval.', { exact: true }).waitFor();
 
     await page.getByRole('link', { name: 'Budgets', exact: true }).click();
     for (const amount of ['21.00', '22.00']) {
@@ -263,7 +306,7 @@ async function main() {
       assert.doesNotMatch(headers, /capability|X-Hubu-UI-Confirmed/i);
     }
     assert.deepEqual(errors, []);
-    console.log('PASS portal owner presence, override warnings, refusals, pending state, and >30-second wait');
+    console.log('PASS portal approval review links, owner presence, override warnings, refusals, pending state, and >30-second wait');
   } finally {
     await browser?.close();
     await stop(portal);

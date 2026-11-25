@@ -372,7 +372,12 @@ function stat(label, value, sub, { tone, href } = {}) {
 // Approvals
 
 async function renderApprovals(view) {
+  const requestId = state.routeParams.get("request");
   await loadAgents();
+  if (requestId !== null) {
+    await renderApprovalReview(view, requestId);
+    return;
+  }
   const data = await hubu("/spend/authorizations", { status: "needs_approval", limit: "100" });
   const rows = data.authorization_records || [];
   state.counts.approvals = rows.length;
@@ -384,50 +389,56 @@ async function renderApprovals(view) {
     { label: "Billing merchant", render: (r) => r.billing_merchant || r.provider },
     { label: "Policy", render: (r) => badge(r.policy_decision) },
     { label: "", render: (r) => h("div", { class: "row-actions" },
-      h("button", { class: "ghost small", type: "button", onclick: () => reviewApproval(r.authorization_id) }, "Review"),
+      h("a", { href: `#/approvals?request=${encodeURIComponent(r.authorization_id)}` }, "Review"),
       ...approvalButtons(r.authorization_id)) },
   ], rows, "No spend is waiting for approval."), null, true));
 }
 
-async function reviewApproval(approvalRequestId) {
+async function renderApprovalReview(view, approvalRequestId) {
+  view.append(h("a", { href: "#/approvals" }, "Back to approvals"));
   let approval;
   try {
     approval = await hubu("/spend/approval", { approval_request_id: approvalRequestId });
   } catch (error) {
-    toast(error.message, "bad");
+    if (error.status === 401) throw error;
+    view.append(h("div", { class: "notice bad", role: "alert" }, error.message));
     return;
   }
   const r = approval.review || {};
   const scope = r.execution_scope || {};
-  const summary = h("div", {}, kv([
+  const pending = approval.status === "pending";
+  const summary = kv([
     ["Status", badge(approval.status)],
     ["Agent", agentName(r.agent_id)],
     ["Amount", money(r.amount)],
     ["Merchant", r.merchant],
-    ["Reason", r.reason],
+    ["Agent-provided context", r.reason],
     ["Policy", r.policy_summary],
     (r.policy_reasons || []).length ? ["Policy reasons", (r.policy_reasons || []).join("; ")] : null,
     ["Provider", scope.provider ? scope.provider.display_name : null],
     ["Capability", scope.capability ? scope.capability.display_name : null],
+    scope.model ? ["Model", scope.model] : null,
+    scope.image_size ? ["Image size", scope.image_size] : null,
     ["Lease profile", r.lease_profile],
     ["Request ID", short(approval.approval_request_id, 40)],
-  ]));
-  if (approval.status !== "pending") {
-    openDialog("Spend approval", [summary, h("div", { class: "notice" }, "This request is no longer pending.")]);
-    return;
-  }
-  openDialog("Spend approval", [summary,
-    h("p", { class: "hint" }, "Approving reserves budget for the agent. Denial closes this request."),
-  ], (close) => approvalButtons(approvalRequestId, close));
+  ]);
+  view.append(card("Spend approval", h("div", { class: "stack" },
+    pending ? h("p", {}, "Hubu requests your approval for ", agentName(r.agent_id),
+      " to spend up to ", money(r.amount),
+      scope.provider?.display_name ? ` with ${scope.provider.display_name}.` : " on this request.") : null,
+    summary,
+    pending ? h("p", { class: "hint" }, "Approving reserves budget for the agent. Denial closes this request.")
+      : h("div", { class: "notice" }, "This request is no longer pending."),
+  ), pending ? approvalButtons(approvalRequestId) : null));
 }
 
-function approvalButtons(approvalRequestId, close) {
+function approvalButtons(approvalRequestId) {
   const approve = h("button", { type: "button", class: "small" }, "Approve");
   const deny = h("button", { type: "button", class: "danger small" }, "Deny");
-  const decide = async (decision, button) => {
-    if (button.disabled) return;
-    button.disabled = true;
-    close?.();
+  const decide = async (decision) => {
+    if (approve.disabled) return;
+    approve.disabled = true;
+    deny.disabled = true;
     try {
       const resolve = decision === "approve" ? ownerPost : hubuPost;
       const result = await resolve("/spend/approval/resolve", { approval_request_id: approvalRequestId, decision });
@@ -448,13 +459,12 @@ function approvalButtons(approvalRequestId, close) {
       }
       toast(message || error.message, "bad");
     } finally {
-      button.disabled = false;
-      if (location.hash.split("?")[0] === "#/approvals") await route();
+      if (/^#\/?approvals(?:\?|$)/.test(location.hash)) await route();
       else refreshApprovalCount();
     }
   };
-  approve.addEventListener("click", () => decide("approve", approve));
-  deny.addEventListener("click", () => decide("deny", deny));
+  approve.addEventListener("click", () => decide("approve"));
+  deny.addEventListener("click", () => decide("deny"));
   return [deny, approve];
 }
 

@@ -228,14 +228,24 @@ Hubu admin portal.
 Spend submission, authorization, and composite governed execution follow
 Hubu policy. When policy requires human approval, the composite returns
 `approval_required` before payment or provider work. Show the immutable
-approval review. After the owner says to approve in the conversation, call
-`hubu_prompt_spend_approval` with the existing approval request ID. Hubu
-shows the confirmation dialog on the owner's Mac and waits for the result.
+approval review and share the response's `review_url` as **Review request**. The link
+opens the exact request in the signed-in [admin portal](admin-ui.md). The
+owner can choose **Approve** on that page to open Touch ID. After the owner
+says to approve in the conversation, call `hubu_prompt_spend_approval` with
+the existing approval request ID. Hubu shows the confirmation dialog on the
+owner's Mac and waits for the result.
 Deny in the dialog closes the request. Timeout or an unavailable provider
 leaves the request pending. The owner can also decide through the admin portal
 or CLI. After approval, `hubu_resume_operation` continues the same operation
 by public handle. See [owner presence](owner-presence.md) for server-side
 authorization and prompt outcomes.
+
+The router builds pending approval links for `http://127.0.0.1:8790`, the
+default portal address. If you run `hubu ui --listen` on another port, set
+`HUBU_UNIFIED_APPROVAL_PORTAL_ADDR` in the MCP server's environment to its
+loopback address and port, such as `127.0.0.1:8791`. For an OS-assigned port,
+use the address printed by `hubu ui` after it starts. The link carries the
+public approval request ID. Portal sign-in uses the existing session flow.
 
 ## MCP behavior and responses
 
