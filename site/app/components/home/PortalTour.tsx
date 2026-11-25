@@ -218,6 +218,7 @@ export function PortalTour() {
   const [index, setIndex] = useState(0);
   const [running, setRunning] = useState(false);
   const tileRef = useRef<HTMLElement>(null);
+  const navRef = useRef<HTMLElement>(null);
   const step = TOUR[index];
 
   const schedule = useCallback((from: number) => {
@@ -242,6 +243,18 @@ export function PortalTour() {
     observer.observe(tile);
     return () => observer.disconnect();
   }, [schedule]);
+
+  // When the section bar scrolls sideways (phones), keep the shown section's
+  // tab in view. Only the bar scrolls, never the page.
+  useEffect(() => {
+    const nav = navRef.current;
+    const active = nav?.querySelector<HTMLElement>("button.on");
+    if (!nav || !active || nav.scrollWidth <= nav.clientWidth) return;
+    const navBox = nav.getBoundingClientRect(), tabBox = active.getBoundingClientRect();
+    const left = nav.scrollLeft + (tabBox.left - navBox.left) - (nav.clientWidth - tabBox.width) / 2;
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    nav.scrollTo({ left: Math.max(0, left), behavior: reduce ? "auto" : "smooth" });
+  }, [step.view]);
 
   useEffect(() => {
     if (step.view === "providers") window.dispatchEvent(new CustomEvent("marty:say", { detail: { text: "so many FLUX models", ms: 1600 } }));
@@ -268,10 +281,10 @@ export function PortalTour() {
       <div className="portal" aria-label="Example admin portal tour">
         <div className="pbar"><span className="dotz"><i /><i /><i /></span><span>127.0.0.1:8790/#/{step.view}</span><span /></div>
         <div className="pbody">
-          <nav className="pnav" aria-label="Portal sections (example)">
+          <nav className="pnav" aria-label="Portal sections (example)" ref={navRef}>
             <b>Hubu <span>/ admin</span></b>
             {NAV.map((item) => (
-              <button type="button" key={item.label} disabled={!item.view} className={item.view === step.view ? "on" : undefined} onClick={() => item.view && jump(item.view)}>
+              <button type="button" key={item.label} disabled={!item.view} className={item.view === step.view ? "on" : undefined} aria-current={item.view === step.view ? "page" : undefined} onClick={() => item.view && jump(item.view)}>
                 {item.label}{item.view === "approvals" && <em className={pending ? "hot" : undefined}>{pending}</em>}
               </button>
             ))}

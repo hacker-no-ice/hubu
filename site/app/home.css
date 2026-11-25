@@ -317,6 +317,7 @@
   .pnav { flex-direction: row; overflow-x: auto; border-right: 0; border-bottom: 1px solid #ffffff10; padding: 8px; }
   .pnav b { display: none; }
   .pnav button { flex: none; }
+  .pnav button.on { background: #9697ff2e; box-shadow: inset 0 -2px var(--cyan); }
   .pgroups { grid-template-columns: 1fr; }
   .prereq-grid { grid-template-columns: 1fr; }
   .pcards.four { grid-template-columns: repeat(2, minmax(0, 1fr)); }
