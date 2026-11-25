@@ -11,6 +11,7 @@ const SPOTS: [string, string][] = [
   [".t-budget", "two whole dollars!"],
   [".t-stack", "all green, nice"],
   [".t-register", "hello, image-agent"],
+  [".t-keys", "keys stay in the Keychain"],
   [".t-hud", "watching the budget 👀"],
   [".t-harness", "agents never see the keys"],
   [".t-portal", "need a seal? I am one"],

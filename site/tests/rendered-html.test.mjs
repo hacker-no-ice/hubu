@@ -25,7 +25,7 @@ test("server-renders the Hubu documentation home", async () => {
   assert.match(html, /Gongbu executes only Hubu-authorized provider work/);
   assert.match(html, /Agents get a budget, never your keys\./);
   assert.doesNotMatch(html, /The ecosystem they form is the product/);
-  assert.match(html, /Start the stack/);
+  assert.match(html, /Create a live profile/);
   assert.match(html, /hubu stack start/);
   assert.match(html, /hubu register agent --name image-agent --version local-dev/);
   assert.match(html, /hubu policy apply --path policies\/creative-tiers\.yaml/);
@@ -417,7 +417,8 @@ test("home page leads with the policy file and keeps stack setup as prerequisite
   // Prerequisites come first in reading order, unnumbered, in the order the stack requires.
   const prereq = html.slice(html.indexOf('class="tile t-prereq'), html.indexOf('class="tile t-policy'));
   assert.ok(prereq.length > 0, "prerequisites strip renders before the policy tile");
-  assert.ok(prereq.indexOf("Start the stack") < prereq.indexOf("Register the owner and agent"));
+  const prereqOrder = ["Create a live profile", "Connect provider keys", "Start, then register"];
+  for (let index = 1; index < prereqOrder.length; index += 1) assert.ok(prereq.indexOf(prereqOrder[index - 1]) < prereq.indexOf(prereqOrder[index]), prereqOrder[index]);
   assert.doesNotMatch(prereq, /class="step"/);
   // The numbered story starts from the policy file.
   const order = ["Start from a policy file", "Give the agent a budget"];
@@ -434,10 +435,11 @@ test("home page leads with the policy file and keeps stack setup as prerequisite
 test("home page offers copyable commands, a mobile menu, and anchored warning", async () => {
   const html = await (await render()).text();
   assert.doesNotMatch(html, /--profile …|--stack-profile …/);
-  assert.match(html, /hubu stack init --mode sandbox --profile &quot;\$HOME\/hubu-sandbox&quot;/);
-  assert.equal(html.match(/<button class="copy-code"/g)?.length, 11);
-  assert.match(html, /This policy is for live FLUX and Gemini models[\s\S]*?hubu policy new-template/, "the creative-tiers example says it does not fit the sandbox");
-  assert.match(html, /hubu stack init --mode sandbox[\s\S]*?hubu stack select --profile &quot;\$HOME\/hubu-sandbox&quot;[\s\S]*?hubu stack start/, "the bento selects the new profile before starting it");
+  assert.match(html, /hubu stack init --mode live --profile &quot;\$HOME\/hubu-live&quot;/);
+  assert.equal(html.match(/<button class="copy-code"/g)?.length, 12);
+  assert.doesNotMatch(html, /--mode sandbox --profile/, "the bento shows one mode: live, matching the FLUX policy and HUD");
+  assert.match(html, /No provider keys yet\?[\s\S]*?href="\/docs\/local-stack"/, "newcomers are pointed to the sandbox guide");
+  assert.match(html, /hubu stack init --mode live[\s\S]*?hubu stack select --profile &quot;\$HOME\/hubu-live&quot;[\s\S]*?contract_bindings[\s\S]*?hubu stack doctor[\s\S]*?hubu stack start[\s\S]*?hubu register human/, "live setup runs init, select, keys, doctor, start, then registration");
   assert.match(html, /<details class="mmenu site-menu"><summary>Menu<\/summary>/);
   assert.match(html, /id="header-search"[^>]*role="combobox"/);
   for (const panel of ["docs", "demos", "architecture", "blog", "releases"]) assert.match(html, new RegExp(`aria-controls="np-${panel}"`));

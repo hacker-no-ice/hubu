@@ -191,14 +191,26 @@ export function StackBento({ policy }: { policy: PolicyExcerpt }) {
             <div className="tt"><small id="prereq-title">Before you start</small><span className="pre-tag">prerequisites · once per machine</span></div>
             <div className="prereq-grid">
               <div className="t-stack">
-                <h3>Start the stack</h3>
-                <Command>{'hubu stack init --mode sandbox --profile "$HOME/hubu-sandbox"'}</Command>
-                <Command>{'hubu stack select --profile "$HOME/hubu-sandbox"'}</Command>
-                <Command>hubu stack start</Command>
-                <StatusView ready={ready} />
+                <h3>Create a live profile</h3>
+                <Command>{'hubu stack init --mode live --profile "$HOME/hubu-live"'}</Command>
+                <Command>{'hubu stack select --profile "$HOME/hubu-live"'}</Command>
+                <p>One profile for Hubu, Gongbu and Temporal. Charges can happen only after the stack is started and an agent makes a governed request.</p>
+              </div>
+              <div className="t-keys">
+                <h3>Connect provider keys</h3>
+                <p>Keep your BFL and Google AI Studio keys in macOS Keychain. <code>credentials.toml</code> names them; <code>providers.toml</code> binds each model to a key under a spend ceiling.</p>
+                <pre className="term toml">
+                  <span className="c"># providers.toml</span>{"\n"}
+                  <span className="k">[[contract_bindings]]</span>{"\n"}
+                  {"contract   = "}<span className="s">&quot;hubu.flux-2-pro.text-to-image/v1&quot;</span>{"\n"}
+                  {"credential = "}<span className="s">&quot;bfl_flux&quot;</span>
+                </pre>
+                <Command>hubu stack doctor</Command>
               </div>
               <div className="t-register">
-                <h3>Register the owner and agent</h3>
+                <h3>Start, then register</h3>
+                <Command>hubu stack start</Command>
+                <StatusView ready={ready} />
                 <Command>{'hubu register human --username alice-example --display-name "Alice Example"'}</Command>
                 <Command>hubu register agent --name image-agent --version local-dev</Command>
                 <pre className="term">
@@ -208,6 +220,7 @@ export function StackBento({ policy }: { policy: PolicyExcerpt }) {
                 <p>The <code>agt_</code> ID is what policies and budgets attach to.</p>
               </div>
             </div>
+            <p className="pre-foot">No provider keys yet? The <a href="/docs/local-stack">local stack guide</a> starts in sandbox, which needs no keys and cannot spend. Full live setup: <a href="/configuration/local-stack/v1/examples#live-gemini-developer-api-and-flux2">live configuration example</a>.</p>
           </article>
           <article className="tile t-policy reveal" style={{ "--i": 2 } as React.CSSProperties} onPointerMove={spotlight}>
             <div className="tt"><small>Start from a policy file</small><span className="step">Step 1</span></div>
@@ -225,7 +238,6 @@ export function StackBento({ policy }: { policy: PolicyExcerpt }) {
               ))}
               <span className="c">{`  # excerpt: the full file has ${policy.ruleCount} rules`}</span>
             </pre>
-            <p>This policy is for live FLUX and Gemini models, and it denies the sandbox&apos;s fixture model. In sandbox, apply the starter policy from <code>hubu policy new-template</code> instead (<a href="/docs/local-stack#make-your-first-governed-request">first governed request</a>).</p>
           </article>
           <article className="tile t-budget reveal" style={{ "--i": 3 } as React.CSSProperties} onPointerMove={spotlight}>
             <div className="tt"><small>Give the agent a budget</small><span className="step">Step 2</span></div>
