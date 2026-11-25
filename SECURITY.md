@@ -1,8 +1,6 @@
 # Security Policy
 
-Hubu is experimental, local-first software. This policy describes how to
-report security problems; it is not a claim that Hubu is ready for production
-or real-money use.
+Hubu is experimental, local-first software. Use it at your own discretion.
 
 ## Threat model
 
