@@ -37,6 +37,8 @@ export function Marty() {
 
     const speak = (text: string, ms = 1400) => {
       const target = bubble ?? perchSay;
+      // Only one bubble may show: hide the other one, whose hide timer this call cancels.
+      (target === perchSay ? bubble : perchSay)?.classList.remove("show");
       target.textContent = text;
       target.classList.add("show");
       window.clearTimeout(sayTimer);
@@ -112,6 +114,7 @@ export function Marty() {
       document.body.appendChild(el);
       x = px = rect.left; y = py = rect.top; render();
       perch!.classList.add("away");
+      perchSay.classList.remove("show");
       if (asleep) el.classList.add("sleepy");
       el.addEventListener("pointerdown", grab);
       el.addEventListener("dblclick", sendHome);
