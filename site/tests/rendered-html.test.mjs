@@ -417,7 +417,7 @@ test("home page leads with the policy file and keeps stack setup as prerequisite
   // Prerequisites come first in reading order, unnumbered, in the order the stack requires.
   const prereq = html.slice(html.indexOf('class="tile t-prereq'), html.indexOf('class="tile t-policy'));
   assert.ok(prereq.length > 0, "prerequisites strip renders before the policy tile");
-  const prereqOrder = ["Create a live profile", "Connect provider keys", "Start, then register"];
+  const prereqOrder = ["Create a live profile", "Connect provider keys", "Start, then register the agent"];
   for (let index = 1; index < prereqOrder.length; index += 1) assert.ok(prereq.indexOf(prereqOrder[index - 1]) < prereq.indexOf(prereqOrder[index]), prereqOrder[index]);
   assert.doesNotMatch(prereq, /class="step"/);
   // The numbered story starts from the policy file.
@@ -436,10 +436,11 @@ test("home page offers copyable commands, a mobile menu, and anchored warning", 
   const html = await (await render()).text();
   assert.doesNotMatch(html, /--profile …|--stack-profile …/);
   assert.match(html, /hubu stack init --mode live --profile &quot;\$HOME\/hubu-live&quot;/);
-  assert.equal(html.match(/<button class="copy-code"/g)?.length, 12);
+  assert.equal(html.match(/<button class="copy-code"/g)?.length, 11);
   assert.doesNotMatch(html, /--mode sandbox --profile/, "the bento shows one mode: live, matching the FLUX policy and HUD");
   assert.match(html, /No provider keys yet\?[\s\S]*?href="\/docs\/local-stack"/, "newcomers are pointed to the sandbox guide");
-  assert.match(html, /hubu stack init --mode live[\s\S]*?hubu stack select --profile &quot;\$HOME\/hubu-live&quot;[\s\S]*?contract_bindings[\s\S]*?hubu stack doctor[\s\S]*?hubu stack start[\s\S]*?hubu register human/, "live setup runs init, select, keys, doctor, start, then registration");
+  assert.match(html, /hubu stack init --mode live[\s\S]*?hubu stack select --profile &quot;\$HOME\/hubu-live&quot;[\s\S]*?contract_bindings[\s\S]*?hubu stack doctor[\s\S]*?hubu stack start[\s\S]*?hubu register agent/, "live setup runs init, select, keys, doctor, start, then registration");
+  assert.doesNotMatch(html, /hubu register human/, "the stack creates a default owner, so the bento registers only the agent");
   assert.match(html, /<details class="mmenu site-menu"><summary>Menu<\/summary>/);
   assert.match(html, /id="header-search"[^>]*role="combobox"/);
   for (const panel of ["docs", "demos", "architecture", "blog", "releases"]) assert.match(html, new RegExp(`aria-controls="np-${panel}"`));

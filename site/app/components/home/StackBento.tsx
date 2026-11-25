@@ -198,7 +198,7 @@ export function StackBento({ policy }: { policy: PolicyExcerpt }) {
               </div>
               <div className="t-keys">
                 <h3>Connect provider keys</h3>
-                <p>Keep your BFL and Google AI Studio keys in macOS Keychain. <code>credentials.toml</code> names them; <code>providers.toml</code> binds each model to a key under a spend ceiling.</p>
+                <p>Keep your BFL and Google AI Studio keys in macOS Keychain. <code>credentials.toml</code> names them; <code>providers.toml</code> binds each model to a key and caps what any single request may cost.</p>
                 <pre className="term toml">
                   <span className="c"># providers.toml</span>{"\n"}
                   <span className="k">[[contract_bindings]]</span>{"\n"}
@@ -208,16 +208,15 @@ export function StackBento({ policy }: { policy: PolicyExcerpt }) {
                 <Command>hubu stack doctor</Command>
               </div>
               <div className="t-register">
-                <h3>Start, then register</h3>
+                <h3>Start, then register the agent</h3>
                 <Command>hubu stack start</Command>
                 <StatusView ready={ready} />
-                <Command>{'hubu register human --username alice-example --display-name "Alice Example"'}</Command>
                 <Command>hubu register agent --name image-agent --version local-dev</Command>
                 <pre className="term">
                   {"agent      image-agent\nagent_id   "}{registered ? <span className="ok">agt_…7KQ</span> : <span className="wait">…</span>}
                   {"\naccount_id "}{registered ? <span className="ok">aga_…</span> : <span className="wait">…</span>}
                 </pre>
-                <p>The <code>agt_</code> ID is what policies and budgets attach to.</p>
+                <p>The stack creates a default owner on start. The <code>agt_</code> ID is what policies and budgets attach to.</p>
               </div>
             </div>
             <p className="pre-foot">No provider keys yet? The <a href="/docs/local-stack">local stack guide</a> starts in sandbox, which needs no keys and cannot spend. Full live setup: <a href="/configuration/local-stack/v1/examples#live-gemini-developer-api-and-flux2">live configuration example</a>.</p>
