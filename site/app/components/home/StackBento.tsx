@@ -189,6 +189,7 @@ export function StackBento({ policy }: { policy: PolicyExcerpt }) {
           <article className="tile t-stack reveal" style={{ "--i": 1 } as React.CSSProperties} onPointerMove={spotlight}>
             <div className="tt"><small>Start the stack</small><span className="step">Step 1 of 4</span></div>
             <Command>{'hubu stack init --mode sandbox --profile "$HOME/hubu-sandbox"'}</Command>
+            <Command>{'hubu stack select --profile "$HOME/hubu-sandbox"'}</Command>
             <Command>hubu stack start</Command>
             <StatusView ready={ready} />
           </article>

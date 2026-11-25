@@ -429,7 +429,8 @@ test("home page offers copyable commands, a mobile menu, and anchored warning", 
   const html = await (await render()).text();
   assert.doesNotMatch(html, /--profile …|--stack-profile …/);
   assert.match(html, /hubu stack init --mode sandbox --profile &quot;\$HOME\/hubu-sandbox&quot;/);
-  assert.equal(html.match(/<button class="copy-code"/g)?.length, 10);
+  assert.equal(html.match(/<button class="copy-code"/g)?.length, 11);
+  assert.match(html, /hubu stack init --mode sandbox[\s\S]*?hubu stack select --profile &quot;\$HOME\/hubu-sandbox&quot;[\s\S]*?hubu stack start/, "the bento selects the new profile before starting it");
   assert.match(html, /<details class="mmenu site-menu"><summary>Menu<\/summary>/);
   assert.match(html, /id="header-search"[^>]*role="combobox"/);
   for (const panel of ["docs", "demos", "architecture", "blog", "releases"]) assert.match(html, new RegExp(`aria-controls="np-${panel}"`));
