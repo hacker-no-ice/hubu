@@ -139,6 +139,28 @@ test("v0.3.0 release notes explain owner confirmation and link the upgrade guide
   assert.match(html, /href="\/docs\/threat-model"/);
 });
 
+test("v0.3.0 shows all three blocked provider pack challenges as unverified", async () => {
+  const [release, report] = await Promise.all([render("/releases/v0.3.0"), render("/releases/v0.3.0/report")]);
+  assert.equal(release.status, 200);
+  assert.equal(report.status, 200);
+  const summary = (await release.text()).match(/<li id="claim-c6">[\s\S]*?<\/li>/)?.[0];
+  const detail = (await report.text()).match(/<section class="claim-detail" id="claim-c6"[\s\S]*?<\/section>/)?.[0];
+  assert.ok(summary);
+  assert.ok(detail);
+  for (const claim of [summary, detail]) {
+    assert.match(claim, /0 of 3 challenges hold/);
+    assert.match(claim, /data-tier="unverified"><span aria-hidden="true"><\/span>Unverified/);
+  }
+  assert.match(detail, /All three challenges are blocked until self-serve provider pack activation is available/);
+  const rows = detail.match(/<tr>[\s\S]*?<\/tr>/g);
+  assert.equal(rows?.length, 3);
+  rows.forEach((row, index) => {
+    assert.ok(row.includes(`>C6.${index + 1}</span>`));
+    assert.match(row, /data-status="not-tested"><span aria-hidden="true"><\/span>Not tested/);
+    assert.match(row, /Blocked: Activating your own packs is not available yet/);
+  });
+});
+
 // Release notes show claims; the analysis shows every challenge. Each claim's
 // tier follows the challenge rule, and both pages agree.
 function claimTiers(html) {
