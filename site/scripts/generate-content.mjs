@@ -264,6 +264,30 @@ await writeFile(
     .join("\n")}\n</urlset>\n`,
 );
 
+// The home page's policy tile shows committed rules verbatim, so the excerpt
+// can never drift from the policy file it names.
+const homePolicyPath = "policies/creative-tiers.yaml";
+const homePolicyRules = ["escalate_final_renders", "allow_draft_renders"];
+const policyLines = (await readFile(path.join(repoRoot, homePolicyPath), "utf8")).replace(/\r\n/g, "\n").split("\n");
+const rulesLine = policyLines.findIndex((line) => line.trim() === "rules:");
+if (rulesLine < 0) throw new Error(`${homePolicyPath} has no rules list`);
+const policyExcerpt = {
+  path: homePolicyPath,
+  header: policyLines.slice(0, rulesLine + 1).filter((line) => line.trim() && !line.trimStart().startsWith("#")),
+  rules: homePolicyRules.map((id) => {
+    const start = policyLines.findIndex((line) => line.trim() === `- id: ${id}`);
+    if (start < 0) throw new Error(`${homePolicyPath} has no rule ${id}`);
+    let end = start + 1;
+    while (end < policyLines.length && policyLines[end].trim() && !/^\s*(- id:|#)/.test(policyLines[end])) end += 1;
+    return { id, lines: policyLines.slice(start, end) };
+  }),
+  ruleCount: policyLines.filter((line) => /^\s*- id:/.test(line)).length,
+};
+await writeFile(
+  path.join(siteRoot, "app/generated-home.ts"),
+  `// Generated from ../${homePolicyPath}. Do not edit.\nexport const policyExcerpt = ${JSON.stringify(policyExcerpt)} as const;\n`,
+);
+
 const architectureTarget = path.join(siteRoot, "public/architecture");
 await rm(architectureTarget, { recursive: true, force: true });
 await mkdir(architectureTarget, { recursive: true });

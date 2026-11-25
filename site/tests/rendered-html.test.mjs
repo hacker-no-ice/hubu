@@ -21,16 +21,15 @@ test("server-renders the Hubu documentation home", async () => {
   );
   const html = await response.text();
   assert.match(html, /Governed spend/);
-  assert.match(html, /Experimental and local-first/);
   assert.match(html, /Hubu governs AI-agent spend/);
   assert.match(html, /Gongbu executes only Hubu-authorized provider work/);
   assert.match(html, /Agents get a budget, never your keys\./);
   assert.doesNotMatch(html, /The ecosystem they form is the product/);
-  assert.match(html, /Initialize a profile/);
-  assert.match(html, /hubu stack select --profile/);
+  assert.match(html, /Start the stack/);
   assert.match(html, /hubu stack start/);
-  assert.match(html, /Connect your favorite agent harness/);
-  assert.match(html, /authorize → execute → settle, release, or reconcile/);
+  assert.match(html, /hubu register agent --name image-agent --version local-dev/);
+  assert.match(html, /hubu policy apply --path policies\/creative-tiers\.yaml/);
+  assert.match(html, /Plug into your harness/);
   assert.doesNotMatch(html, /Hubu gives humans|v4\.2|One command from profile to running|MANAGED LIFECYCLE/);
   assert.doesNotMatch(html, /authorize → execute → submit/);
   assert.equal(html.match(/src="\/brand\/hubu-wordmark\.svg"/g)?.length, 2);
@@ -56,7 +55,7 @@ test("release notes lead from the landing page to one concise stable release and
   const index = await indexResponse.text();
   const overview = await overviewResponse.text();
   const header = home.match(/<header\b[^>]*>[\s\S]*?<\/header>/)?.[0];
-  const hero = home.match(/<section class="hero">[\s\S]*?<\/section>/)?.[0];
+  const hero = home.match(/<section class="hero[^"]*">[\s\S]*?<\/section>/)?.[0];
   assert.ok(header);
   assert.ok(hero);
   assert.match(header, /class="header-version" href="\/releases\/v0\.2\.5" aria-label="Read Hubu v0.2.5 release notes and system card"/);
@@ -267,51 +266,41 @@ test("public analyses have reproduction instructions and legacy evidence URLs re
   }
 });
 
-test("embeds the introduction below the hero without autoplay", async () => {
+test("home page links demos instead of embedding the introduction video", async () => {
   const html = await (await render()).text();
-  assert.match(html, /Meet Hubu in 3 min/);
-  const iframe = html.match(/<iframe\b[^>]*><\/iframe>/)?.[0];
-  assert.ok(iframe);
-  assert.match(iframe, /src="https:\/\/www.youtube-nocookie.com\/embed\/SlJbC_hcl9U"/);
-  assert.match(iframe, /title="Introducing Hubu: bounded spending power for AI agents"/);
-  assert.match(iframe, /loading="lazy"/);
-  assert.match(iframe, /referrerPolicy="strict-origin-when-cross-origin"/i);
-  assert.doesNotMatch(iframe, /autoplay/);
-  assert.match(html, /href="https:\/\/youtu.be\/SlJbC_hcl9U"/);
-  assert.doesNotMatch(html, /ufEgYjmxKWM/);
-  assert.ok(html.indexOf('class="hero"') < html.indexOf('id="intro-video-title"'));
-  assert.ok(html.indexOf('id="intro-video-title"') < html.indexOf('class="warning-band"'));
+  assert.doesNotMatch(html, /<iframe\b/);
+  assert.doesNotMatch(html, /Meet Hubu in 3 min/);
+  assert.match(html, /href="\/demos"/);
+  assert.match(html, /href="\/demos\/sandbox"/);
 });
 
-test("home page walks through an illustrative governed image request", async () => {
+test("home page shows the committed policy and an illustrative governed request", async () => {
   const html = await (await render()).text();
-  assert.match(html, /<ol class="example-flow">/);
-  assert.match(html, /Agent asks for an image/);
-  assert.match(html, /Hubu checks policy and reserves \$0\.05/);
-  assert.match(html, /Gongbu calls the provider/);
-  assert.match(html, /reports a \$0\.03 receipt/);
-  assert.match(html, /Hubu settles \$0\.03 and releases \$0\.02/);
-  assert.match(html, /Illustrative amounts\./);
-  assert.ok(html.indexOf('class="hero"') < html.indexOf('id="worked-example-title"'));
-  assert.ok(html.indexOf('id="worked-example-title"') < html.indexOf('id="intro-video-title"'));
-  const mascot = html.match(/<figure class="example-mascot">[\s\S]*?<\/figure>/)?.[0];
-  assert.ok(mascot);
-  assert.match(mascot, /src="\/brand\/hubu-mascot-evolved.jpg"/);
-  assert.match(mascot, /loading="lazy"/);
-  assert.match(mascot, /<figcaption>Marty, Hubu&#x27;s mascot/);
-  assert.match(mascot, /alt="Marty, Hubu&#x27;s cream-and-jade seal mascot on a cinnabar base, with violet and cyan glowing edges"/);
-  assert.match(mascot, /href="\/mascot"/);
-  assert.doesNotMatch(mascot, /x\.com|href="\/demos\/local-stack"/);
+  const policy = await readFile(new URL("../../policies/creative-tiers.yaml", import.meta.url), "utf8");
+  for (const rule of ["escalate_final_renders", "allow_draft_renders"]) {
+    assert.match(policy, new RegExp(`- id: ${rule}`));
+    assert.match(html, new RegExp(rule));
+  }
+  assert.match(html, /<span class="k">money<\/span>:(?:<!-- -->)? ?<span class="s">&quot;0\.10&quot;<\/span>/);
+  assert.match(html, /excerpt: the full file has \d+ rules/);
+  assert.match(html, /Illustrative amounts, IDs, and times\./);
+  assert.match(html, /approved by the owner in the admin portal · reserved \$0\.40/);
+  assert.match(html, /HUBU WATCH · 2 agents/);
+  assert.doesNotMatch(html, /Experimental and local-first/);
+  const perch = html.match(/<figure class="perch">[\s\S]*?<\/figure>/)?.[0];
+  assert.ok(perch);
+  assert.match(perch, /src="\/brand\/hubu-mascot-evolved.jpg"/);
+  assert.match(perch, /alt="Marty, Hubu&#x27;s cream-and-jade seal mascot on a cinnabar base"/);
+  assert.match(perch, /href="\/mascot"/);
 });
 
 test("links demos from home and publishes the sandbox video before its concise script", async () => {
   const home = await (await render()).text();
-  assert.match(home, /href="\/demos">Demos<\/a>/);
-  const actions = home.match(/<div class="hero-actions">[\s\S]*?<\/div>/)?.[0];
+  assert.match(home, /href="\/demos"/);
+  const actions = home.match(/<div class="hero-actions[^"]*"[^>]*>[\s\S]*?<\/div>/)?.[0];
   assert.ok(actions);
   assert.match(actions, /href="\/architecture\/">Explore the architecture<\/a>\s*<a class="button secondary" href="\/demos">Watch a demo<\/a>/);
   assert.match(home, /href="\/demos\/sandbox"/);
-  assert.match(home, /See Hubu in use: watch the sandbox demo and follow the walkthrough/);
   const index = await render("/demos");
   assert.equal(index.status, 200);
   const indexHtml = await index.text();
@@ -362,10 +351,10 @@ test("home page presents two supported modes with Gongbu and links what works to
   assert.match(html, /href="\/docs\/external-executor">Advanced: custom executors/);
   assert.match(html, /<section class="works-today" aria-labelledby="works-today-title">/);
   assert.match(html, /<strong>macOS<\/strong> source install from a release tag/);
-  assert.match(html, /<strong>Gemini and FLUX\.2 Pro<\/strong> live providers/);
+  assert.match(html, /<strong>Gemini and the FLUX suite<\/strong> live providers: FLUX\.2 \[pro\], \[max\], \[flex\], \[klein\] and FLUX 3 Image, with edit/);
   assert.match(html, /<strong>Sandbox<\/strong> with no provider credentials/);
   assert.match(html, /href="\/docs\/overview#what-works-today"/);
-  assert.ok(html.indexOf('class="warning-band"') < html.indexOf('class="works-today"'));
+  assert.doesNotMatch(html, /class="warning-band"/);
 });
 
 test("publishes the live-provider demo with a video-first companion and clear cost boundary", async () => {
@@ -422,33 +411,32 @@ test("roadmap shows three linked priorities without promising release dates", as
   assert.ok(html.indexOf(diagram) < html.indexOf('id="1-easy-and-safe-for-individuals"'));
 });
 
-test("home page starts the stack steps with an install step and routes topic cards to first steps", async () => {
+test("home page orders the setup steps the way the stack requires", async () => {
   const html = await (await render()).text();
-  assert.match(html, /<span>00<\/span><div><h3>Install from a release tag<\/h3><a class="step-link" href="\/docs\/local-stack#install">/);
-  assert.match(html, /Build the four binaries from an exact release tag on macOS\./);
-  assert.ok(html.indexOf("Install from a release tag") < html.indexOf("Initialize a profile"));
-  const topics = html.match(/<div class="topic-grid">[\s\S]*?<\/div>/)?.[0];
-  assert.ok(topics);
-  assert.deepEqual(
-    [...topics.matchAll(/<a href="([^"]+)"><small>[^<]+<\/small><h3>([^<]+)<\/h3>/g)].map(([, href, title]) => [href, title]),
-    [
-      ["/docs/local-stack", "Quick start"],
-      ["/docs/policy-engine", "Write a policy"],
-      ["/docs/unified-mcp#setup", "Connect your agent"],
-      ["/docs/external-executor", "Use your own executor"],
-    ],
-  );
-  assert.match(topics, /From install to your first governed request\./);
-  assert.doesNotMatch(topics, /Register an agent|Trace a spend|Understand Gongbu|Use unified MCP/);
+  assert.match(html, /href="\/docs\/local-stack#install"/);
+  const order = ["Start the stack", "Register the owner and agent", "Apply a policy", "Give the agent a budget"];
+  order.forEach((title, index) => assert.ok(html.includes(`${title}</small><span class="step">Step ${index + 1} of 4</span>`), title));
+  for (let index = 1; index < order.length; index += 1) assert.ok(html.indexOf(order[index - 1]) < html.indexOf(order[index]));
+  for (const capability of ["Watch spend live", "Plug into your harness", "Run it from the admin portal"]) {
+    const start = html.indexOf(`${capability}</small>`);
+    assert.ok(start > 0, capability);
+    assert.doesNotMatch(html.slice(start, start + 80), /class="step"/);
+  }
+  assert.doesNotMatch(html, /class="topic-grid"/);
 });
 
 test("home page offers copyable commands, a mobile menu, and anchored warning", async () => {
   const html = await (await render()).text();
   assert.doesNotMatch(html, /--profile …|--stack-profile …/);
   assert.match(html, /hubu stack init --mode sandbox --profile &quot;\$HOME\/hubu-sandbox&quot;/);
-  assert.equal(html.match(/<button class="copy-code"/g)?.length, 5);
-  assert.match(html, /<details class="site-menu"><summary>Menu<\/summary>/);
-  assert.match(html, /href="\/docs\/overview#project-status"/);
+  assert.equal(html.match(/<button class="copy-code"/g)?.length, 10);
+  assert.match(html, /<details class="mmenu site-menu"><summary>Menu<\/summary>/);
+  assert.match(html, /id="header-search"[^>]*role="combobox"/);
+  for (const panel of ["docs", "demos", "architecture", "blog", "releases"]) assert.match(html, new RegExp(`aria-controls="np-${panel}"`));
+  const releases = html.match(/<div class="npanel" id="np-releases"[\s\S]*?<a class="nfeat"/)?.[0];
+  assert.ok(releases);
+  assert.equal(releases.match(/class="nl nrow"/g)?.length, 5);
+  assert.doesNotMatch(releases, /Upgrading to/);
   assert.match(html, /<link rel="icon" href="\/favicon.svg" type="image\/svg\+xml"/);
   const favicon = await readFile(new URL("../public/favicon.svg", import.meta.url), "utf8");
   assert.match(favicon, /linearGradient id="hubu-icon-gradient"/);
