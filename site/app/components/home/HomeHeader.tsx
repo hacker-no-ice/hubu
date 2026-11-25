@@ -116,7 +116,7 @@ export function HomeHeader({ panels, searchIndex, popular }: Props) {
                     </div>
                   </details>
                 ))}
-                <a className="nl" href="https://github.com/hacker-no-ice/hubu"><b>GitHub</b></a>
+                <a className="mlink" href="https://github.com/hacker-no-ice/hubu">GitHub ↗</a>
               </nav>
             </details>
           </div>
