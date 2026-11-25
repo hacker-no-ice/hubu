@@ -484,11 +484,12 @@ enum ExecutorFinalizationAuthority {
 
 impl SqliteGovernanceRepository {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StorageError> {
-        Self::from_connection(Connection::open(path)?)
+        let path = path.as_ref();
+        Self::open_connection(Connection::open(path)?, Some(path))
     }
 
     pub fn in_memory() -> Result<Self, StorageError> {
-        Self::from_connection(Connection::open_in_memory()?)
+        Self::open_connection(Connection::open_in_memory()?, None)
     }
 
     pub fn load_policy_by_id(
@@ -1090,58 +1091,154 @@ impl SqliteGovernanceRepository {
         })
     }
 
+    #[cfg(test)]
     fn from_connection(conn: Connection) -> Result<Self, StorageError> {
+        Self::open_connection(conn, None)
+    }
+
+    fn open_connection(conn: Connection, path: Option<&Path>) -> Result<Self, StorageError> {
         conn.busy_timeout(StdDuration::from_secs(5))?;
         let mut repository = Self { conn };
-        repository.init()?;
+        repository.init(path)?;
         Ok(repository)
     }
 
-    /// Fresh databases use the final µ schema. Existing µ profiles get one
-    /// atomic table rebuild; no pre-µ backfill chain runs on normal opens.
-    fn init(&mut self) -> Result<(), StorageError> {
+    /// Keep the one-way v0.3.0 schema upgrade atomic, including its ledger
+    /// initialization. Take the backup while the source is reserved for this
+    /// migration and before running any schema or data changes.
+    fn init(&mut self, path: Option<&Path>) -> Result<(), StorageError> {
         self.conn.pragma_update(None, "foreign_keys", false)?;
-        let result = self.in_init_transaction(|repo| {
-            let has_profile: bool = repo.conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name IN ('budgets','budget_versions','budget_balances','budget_holds','spending_targets','spend_executor_settlement_receipts'))", [], |row| row.get(0))?;
-            if has_profile {
-                for (table, columns) in [
-                    ("budget_versions", &["amount_limit", "amount_scale"][..]),
-                    ("budget_balances", &["consumed_amount", "frozen_amount", "remaining_amount", "amount_scale"][..]),
-                    ("budget_holds", &["amount", "amount_scale", "spend_asset", "spend_exact_amount", "spend_exact_scale"][..]),
-                    ("spending_targets", &["target_amount", "amount_scale"][..]),
-                    ("spend_executor_settlement_receipts", &["authorized_max", "budget_charge", "released_amount", "overrun_amount", "amount_scale", "actual_vendor_cost_amount", "actual_vendor_cost_scale", "actual_vendor_cost_currency"][..]),
-                ] {
-                    for column in columns {
-                        if !table_has_column(&repo.conn, table, column)? {
-                            return Err(StorageError::InvalidData(format!("profile lacks released micro-unit field {table}.{column}: upgrade through v0.2.4 or v0.2.5 before opening this version")));
-                        }
-                    }
-                }
-            }
-            repo.init_schema_and_policy_migrations()?;
-            repo.init_spend_migrations()?;
-            repo.migrate_canonical_amounts()
-        });
-        let restore = self.conn.pragma_update(None, "foreign_keys", true);
-        result?;
-        restore?;
-        self.initialize_provider_accounting()?;
-        self.in_init_transaction(Self::init_lifecycle_schema)?;
-        self.in_init_transaction(Self::init_owner_presence_schema)?;
-        Ok(())
-    }
-
-    fn in_init_transaction(
-        &mut self,
-        phase: fn(&mut Self) -> Result<(), StorageError>,
-    ) -> Result<(), StorageError> {
-        self.conn.execute_batch("BEGIN IMMEDIATE")?;
-        let result = phase(self).and_then(|()| Ok(self.conn.execute_batch("COMMIT")?));
+        let result: Result<(), StorageError> = (|| {
+            self.conn.execute_batch("BEGIN IMMEDIATE")?;
+            self.init_schema(path)?;
+            Ok(self.conn.execute_batch("COMMIT")?)
+        })();
         if result.is_err() && !self.conn.is_autocommit() {
             let _ = self.conn.execute_batch("ROLLBACK");
         }
-        result
+        let restore = self.conn.pragma_update(None, "foreign_keys", true);
+        result?;
+        restore?;
+        Ok(())
+    }
+
+    fn init_schema(&mut self, path: Option<&Path>) -> Result<(), StorageError> {
+        let has_profile: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name IN ('budgets','budget_versions','budget_balances','budget_holds','spending_targets','spend_executor_settlement_receipts'))",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_profile {
+            for (table, columns) in [
+                ("budget_versions", &["amount_limit", "amount_scale"][..]),
+                (
+                    "budget_balances",
+                    &[
+                        "consumed_amount",
+                        "frozen_amount",
+                        "remaining_amount",
+                        "amount_scale",
+                    ][..],
+                ),
+                (
+                    "budget_holds",
+                    &[
+                        "amount",
+                        "amount_scale",
+                        "spend_asset",
+                        "spend_exact_amount",
+                        "spend_exact_scale",
+                    ][..],
+                ),
+                ("spending_targets", &["target_amount", "amount_scale"][..]),
+                (
+                    "spend_executor_settlement_receipts",
+                    &[
+                        "authorized_max",
+                        "budget_charge",
+                        "released_amount",
+                        "overrun_amount",
+                        "amount_scale",
+                        "actual_vendor_cost_amount",
+                        "actual_vendor_cost_scale",
+                        "actual_vendor_cost_currency",
+                    ][..],
+                ),
+            ] {
+                for column in columns {
+                    if !table_has_column(&self.conn, table, column)? {
+                        return Err(StorageError::InvalidData(format!("profile lacks released micro-unit field {table}.{column}: upgrade through v0.2.4 or v0.2.5 before opening this version")));
+                    }
+                }
+            }
+        }
+        let upgrading =
+            has_profile && table_has_column(&self.conn, "budget_versions", "amount_limit_cents")?;
+        if upgrading {
+            if let Some(path) = path {
+                Self::backup_released_profile(path)?;
+            }
+        }
+        self.init_schema_and_policy_migrations()?;
+        self.init_spend_migrations()?;
+        self.migrate_canonical_amounts()?;
+        self.initialize_provider_accounting()?;
+        self.init_lifecycle_schema()?;
+        self.init_owner_presence_schema()?;
+        if upgrading
+            && self
+                .conn
+                .prepare("PRAGMA foreign_key_check")?
+                .query([])?
+                .next()?
+                .is_some()
+        {
+            return Err(StorageError::InvalidData(
+                "profile migration found a foreign-key violation".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn backup_released_profile(path: &Path) -> Result<(), StorageError> {
+        let failure = |error: &dyn std::fmt::Display| {
+            StorageError::InvalidData(format!("pre-v0.3.0 database backup failed: {error}"))
+        };
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        let backup = tempfile::Builder::new()
+            .prefix(&format!("{name}.pre-v0.3.0-"))
+            .suffix(".sqlite3")
+            .tempfile_in(parent)
+            .map_err(|error| failure(&error))?;
+        // VACUUM INTO reads the most recently committed snapshot, including
+        // WAL content. A second read-only connection can read that snapshot
+        // while the migration connection holds the write reservation.
+        let reader = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|error| failure(&error))?;
+        let destination = backup.path().to_str().ok_or_else(|| {
+            StorageError::InvalidData("pre-v0.3.0 database backup path is not UTF-8".into())
+        })?;
+        reader
+            .execute("VACUUM INTO ?1", [destination])
+            .map_err(|error| failure(&error))?;
+        backup
+            .as_file()
+            .sync_all()
+            .map_err(|error| failure(&error))?;
+        let (_, backup_path) = backup.keep().map_err(|error| failure(&error))?;
+        #[cfg(unix)]
+        std::fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| failure(&error))?;
+        eprintln!(
+            "Saved the pre-v0.3.0 database backup at {}",
+            backup_path.display()
+        );
+        Ok(())
     }
 
     fn init_schema_and_policy_migrations(&mut self) -> Result<(), StorageError> {

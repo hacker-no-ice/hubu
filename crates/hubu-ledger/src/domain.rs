@@ -538,9 +538,12 @@ pub struct PairPosting<'a> {
 }
 
 pub fn post_pair(
-    tx: &rusqlite::Transaction<'_>,
+    tx: &Connection,
     posting: PairPosting<'_>,
 ) -> Result<TransactionRecord, LedgerError> {
+    if tx.is_autocommit() {
+        return Err(invalid("posting a pair requires an active transaction"));
+    }
     let PairPosting {
         owner,
         debit_kind,

@@ -25,18 +25,34 @@ Future release template
 
 ## Unreleased
 
+## v0.3.0-rc.1 — 2026-11-24
+
+Candidate notes for qualification.
+
+### Highlights
+
+- Hubu separates agent and owner credentials. The unified MCP exposes the
+  agent allowlist for spend requests, status, and reads. A request that needs
+  the owner can trigger a confirmation on the owner's Mac.
+- The server asks for macOS owner confirmation before an action such as raising
+  a budget, loosening policy, approving spend, or reconciling a claim. Each
+  confirmation applies to the action in the dialog. The owner can use Touch ID
+  or the device password under the default presence policy.
+- Owners can review policy diffs before applying them. Agents can supply drafts
+  for the owner to review. Strict permissions are the default. Owners can
+  explicitly delegate lowering budgets or adding deny rules.
+- Governance history records owner confirmation outcomes and delegated actions.
+  See [Owner presence](docs/owner-presence.md) and the
+  [threat model](docs/threat-model.md).
+
 ### Breaking or operational changes
 
-- Hubu issues a separate agent credential (`HUBU_AGENT_TOKEN_FILE`, managed
-  profile `state/credentials/hubu/agent`) beside the owner credential.
-  `hubu stack start` provisions it and `hubu init codex` hands only the agent
-  credential to the unified MCP. The agent credential reaches an explicit
-  allowlist of spend, status, and read routes; every other protected route
-  answers HTTP 403 `owner_authority_required`. External Hubu profiles must add
-  `files.hubu_agent` to `credentials.toml`; re-run `hubu stack start` and
-  `hubu init codex --stack-profile` to pick up the new credential. Until the
-  unified MCP surface is reduced, its admin tools return
-  `owner_authority_required`.
+- Back up the v0.2.5 profile and upgrade Hubu and Gongbu together. Update the
+  managed Codex setup to use the agent credential, and use the portal or `hubu`
+  CLI for owner actions. External profiles must set `files.hubu_agent` in
+  `credentials.toml`.
+- Owner confirmation replaces the old approval and reconciliation capability
+  files. `hubu stack doctor` reports obsolete files and stale client setup.
 
 ## v0.2.5 — 2026-11-06
 

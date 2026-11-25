@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+marker='# hardened ad hoc signature fixture'
+case "${1:-}" in
+  --force)
+    [[ "$#" -eq 7 && "$2" == --sign && "$3" == - && "$4" == --options &&
+       "$5" == runtime && "$6" == --timestamp=none ]]
+    case "${7##*/}" in
+      hubu|hubu-server) ;;
+      *) exit 2 ;;
+    esac
+    printf '%s\n' "${marker}" >>"$7"
+    ;;
+  --verify)
+    [[ "$#" -eq 3 && "$2" == --strict ]]
+    grep -Fxq "${marker}" "$3"
+    ;;
+  --display)
+    [[ "$#" -eq 3 && "$2" == --verbose=2 ]]
+    grep -Fxq "${marker}" "$3"
+    if [[ "${STUB_CODESIGN_RUNTIME:-1}" == 1 ]]; then
+      echo 'CodeDirectory v=20500 flags=0x10002(adhoc,runtime)' >&2
+    else
+      echo 'CodeDirectory v=20500 flags=0x2(adhoc)' >&2
+    fi
+    echo 'Signature=adhoc' >&2
+    ;;
+  *) exit 2 ;;
+esac

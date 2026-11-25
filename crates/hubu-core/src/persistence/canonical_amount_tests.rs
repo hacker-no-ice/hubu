@@ -49,6 +49,23 @@ fn snapshot(conn: &Connection) -> Vec<Vec<Vec<Value>>> {
     .collect()
 }
 
+fn backups(path: &Path) -> Vec<std::path::PathBuf> {
+    let prefix = format!(
+        "{}.pre-v0.3.0-",
+        path.file_name().unwrap().to_string_lossy()
+    );
+    std::fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(&prefix)
+        })
+        .collect()
+}
+
 fn guards(conn: &Connection) -> Vec<Vec<Value>> {
     rows(
         conn,
@@ -107,7 +124,7 @@ fn fresh_schema_is_canonical_and_reopens_without_rebuilding() {
         assert!(table_has_column(&repo.conn, table, column).unwrap());
         assert!(!table_has_column(&repo.conn, table, &format!("{column}_cents")).unwrap());
     }
-    repo.init().unwrap();
+    repo.init(None).unwrap();
     assert_eq!(rows(&repo.conn, "sqlite_master", "name, sql"), schema);
 }
 
@@ -122,8 +139,22 @@ fn micro_profile_preserves_exact_values_guards_and_live_claims() {
         .map(|(table, col)| rows(&old, table, col))
         .collect();
     let objects = guards(&old);
+    let before = snapshot(&old);
     drop(old);
     let mut repo = SqliteGovernanceRepository::open(&path).unwrap();
+    let backups = backups(&path);
+    assert_eq!(backups.len(), 1);
+    let backup = Connection::open(&backups[0]).unwrap();
+    assert_eq!(snapshot(&backup), before);
+    assert_eq!(guards(&backup), objects);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&backups[0]).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
     for ((table, col), expected) in AMOUNTS.iter().zip(expected) {
         assert_eq!(rows(&repo.conn, table, col), expected, "{table}.{col}");
         assert!(!table_has_column(&repo.conn, table, &format!("{col}_cents")).unwrap());
@@ -180,21 +211,47 @@ fn invalid_micro_profile_rolls_back_and_restores_foreign_keys() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("invalid.sqlite3");
     micro_profile(&path);
-    let conn = Connection::open(path).unwrap();
+    let conn = Connection::open(&path).unwrap();
     conn.execute("UPDATE budget_balances SET consumed_amount=NULL", [])
         .unwrap();
     let before = snapshot(&conn);
     let objects = guards(&conn);
     let mut repo = SqliteGovernanceRepository { conn };
-    assert!(repo.init().is_err());
+    assert!(repo.init(Some(&path)).is_err());
     assert_eq!(snapshot(&repo.conn), before);
     assert_eq!(guards(&repo.conn), objects);
+    let backups = backups(&path);
+    assert_eq!(backups.len(), 1);
+    let backup = Connection::open(&backups[0]).unwrap();
+    assert_eq!(snapshot(&backup), before);
+    assert_eq!(guards(&backup), objects);
     assert_eq!(
         repo.conn
             .pragma_query_value(None, "foreign_keys", |r| r.get::<_, i64>(0))
             .unwrap(),
         1
     );
+}
+
+#[test]
+fn a_late_schema_failure_preserves_the_released_database_and_backup() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("late-failure.sqlite3");
+    micro_profile(&path);
+    let conn = Connection::open(&path).unwrap();
+    // A conflicting schema object fails the owner-presence phase, after the
+    // canonical amount and ledger steps would otherwise have committed.
+    conn.execute_batch(
+        "DROP TABLE owner_presence_records;
+         CREATE VIEW owner_presence_records AS SELECT 1 AS unexpected;",
+    )
+    .unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let mut repo = SqliteGovernanceRepository { conn };
+    assert!(repo.init(Some(&path)).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert!(table_has_column(&repo.conn, "budget_versions", "amount_limit_cents").unwrap());
+    assert_eq!(backups(&path).len(), 1);
 }
 
 #[test]
@@ -216,6 +273,7 @@ fn concurrent_micro_profile_opens_serialize_the_rebuild() {
     for thread in threads {
         thread.join().unwrap();
     }
+    assert_eq!(backups(&path).len(), 1);
 }
 
 #[test]
@@ -226,7 +284,7 @@ fn pre_micro_profile_is_rejected_without_any_schema_or_data_change() {
     let before = rows(&conn, "budgets", "*");
     let mut repo = SqliteGovernanceRepository { conn };
     assert!(repo
-        .init()
+        .init(None)
         .unwrap_err()
         .to_string()
         .contains("upgrade through v0.2.4 or v0.2.5"));
@@ -299,7 +357,7 @@ fn incomplete_micro_profile_is_rejected_before_schema_changes() {
     let schema = rows(&conn, "sqlite_master", "name,sql");
     let mut repo = SqliteGovernanceRepository { conn };
     assert!(repo
-        .init()
+        .init(None)
         .unwrap_err()
         .to_string()
         .contains("budget_holds.spend_exact_amount"));

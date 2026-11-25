@@ -46,7 +46,7 @@ gh workflow run release.yml \
   --repo hacker-no-ice/hubu \
   --ref main \
   -f channel=candidate \
-  -f version=v0.2.5-rc.1 \
+  -f version=v0.3.0-rc.1 \
   -f source_commit=FULL_40_CHARACTER_COMMIT_SHA
 ```
 
@@ -64,7 +64,7 @@ gh workflow run release.yml \
   --repo hacker-no-ice/hubu \
   --ref main \
   -f channel=stable \
-  -f version=v0.2.5 \
+  -f version=v0.3.0 \
   -f source_commit=FULL_40_CHARACTER_COMMIT_SHA
 ```
 
@@ -74,7 +74,11 @@ Apple silicon, archive verification, and native published-asset smoke tests.
 Ordinary release validation never supplies provider credentials or enables
 provider spend.
 
-Before a stable release, write its release notes page; after it publishes, the
+Before a stable release, write its release notes page. After it publishes,
+point the site version badge at that release and update the rendered-site
+expectation for the badge.
+
+The
 [System card workflow](../../.github/workflows/system-card.yml) runs the public
 proof kits against the exact tag on macOS and opens a PR with the measured
 system card. Review and merge that PR by following the [release-card

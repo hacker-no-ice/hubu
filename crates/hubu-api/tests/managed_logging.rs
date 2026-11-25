@@ -17,13 +17,13 @@ fn managed_server_keeps_successful_probes_quiet_and_writes_events_once() {
     let logs = root.path().join("logs");
     fs::create_dir_all(&state).unwrap();
     fs::create_dir_all(&logs).unwrap();
-    for name in ["auth", "approval", "reconciliation"] {
+    for name in ["auth", "agent"] {
         fs::write(root.path().join(name), format!("{name}-token")).unwrap();
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        for name in ["auth", "approval", "reconciliation"] {
+        for name in ["auth", "agent"] {
             fs::set_permissions(root.path().join(name), fs::Permissions::from_mode(0o600)).unwrap();
         }
     }
@@ -41,8 +41,7 @@ fn managed_server_keeps_successful_probes_quiet_and_writes_events_once() {
             "database_path": state.join("hubu.sqlite3"),
             "log_file": log_path,
             "auth_token_file": root.path().join("auth"),
-            "approval_token_file": root.path().join("approval"),
-            "reconciliation_token_file": root.path().join("reconciliation")
+            "agent_token_file": root.path().join("agent")
         }))
         .unwrap(),
     )

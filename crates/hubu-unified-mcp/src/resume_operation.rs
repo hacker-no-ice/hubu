@@ -81,7 +81,9 @@ pub(crate) fn call_tool(server: &Server, id: Value, call: ToolCall) -> Value {
         }
         operation_registry::ResumePreparation::Status(status)
         | operation_registry::ResumePreparation::IntentUnavailable(status) => {
-            return success_response(id, operation_status_result(&status));
+            let mut result = operation_status_result(&status);
+            server.add_pending_operation_review_link(&status, &mut result);
+            return success_response(id, result);
         }
         operation_registry::ResumePreparation::Dispatch(plan) => plan,
     };

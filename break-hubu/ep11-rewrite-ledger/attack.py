@@ -40,10 +40,14 @@ def attack(rt):
         receipt = rt.receipt('spend-3-agent', '0.000001')
         body = {'claim_id': claim['body']['claim_id'], 'provider_reference': 'agent-written',
                 'evidence': 'agent rewriting its own bill', 'receipt': receipt}
-        rt.note('ATTACK: reconcile the expired claim at one micro-dollar without, then with a forged, owner capability.')
-        rt.request('POST', '/spend/executor/settle', body, label='agent-reconcile-no-capability')
+        rt.note('PROBE: verify that an expired claim requires owner reconciliation.')
+        # Setup shares the owner bearer with the synthetic executor. Refuse the
+        # scripted confirmation for these negative controls; the owner step
+        # below is the only one that exercises the confirming provider.
+        unconfirmed = {'x-hubu-no-prompt': '1'} if rt.context['owner_presence'] else {}
+        rt.request('POST', '/spend/executor/settle', body, label='agent-reconcile-no-capability', headers=unconfirmed)
         rt.request('POST', '/spend/executor/settle', body, label='agent-reconcile-forged-capability',
-                   headers={'x-hubu-reconciliation-capability': secrets.token_urlsafe(48)})
+                   headers={**unconfirmed, 'x-hubu-reconciliation-capability': secrets.token_urlsafe(48)})
         rt.owner_reconcile(claim, rt.receipt('spend-3', '0.03'), label='owner-reconcile-spend-3')
     rt.snapshot('final')
 

@@ -1,16 +1,10 @@
 import { EngineeringHeader } from "../../components/EngineeringHeader";
 import { documentMetadata } from "../../lib/metadata";
-import catalog from "../claims.json";
+import { catalogFor } from "../assessments";
 import { ClaimDetails } from "./MeasuredClaims";
 import type { EpisodeId, EpisodeResult, ReleaseReport, Verdict } from "../report-types";
 
-type Kit = { id: EpisodeId; number: string; title: string; question: string; claim: string; setup: string; steps: string[]; verify: string; challenge?: { id: string; title: string; claim: string } };
-const kitText = catalog.kits as Record<string, { number: string; title: string; question: string; statement: string; setup: string; steps: string[]; verify: string }>;
-const kits: Kit[] = Object.entries(kitText).map(([id, kit]) => ({
-  id, number: kit.number, title: kit.title, question: kit.question, claim: kit.statement, setup: kit.setup, steps: kit.steps, verify: kit.verify,
-  challenge: catalog.challenges.find((challenge) => challenge.kit === id),
-}));
-const claimTitle = (id: string) => catalog.claims.find((claim) => claim.id === id)?.title ?? id;
+type Kit = ReturnType<typeof catalogFor>["kits"][string];
 
 // One analysis page for every measured release. Each release directory holds
 // generated report data and a thin report/page.tsx wrapper around this.
@@ -30,24 +24,25 @@ function VerdictLabel({ verdict }: { verdict: Verdict }) {
   return <span className={`proof-verdict proof-verdict-${verdict}`}><span aria-hidden="true" />{verdicts[verdict]}</span>;
 }
 
-function Episode({ episode, result, report }: { episode: Kit; result: EpisodeResult; report: ReleaseReport }) {
+function Episode({ id, kit, challengeLabel, result, report }: { id: EpisodeId; kit: Kit; challengeLabel?: string; result: EpisodeResult; report: ReleaseReport }) {
   // A supplemented kit links to the kits revision that measured it.
-  const sourceRef = report.supplements?.find((supplement) => supplement.episodes.includes(episode.id))?.kitsCommit ?? report.kitsCommit ?? "main";
-  return <section className="proof-episode" id={episode.id} aria-labelledby={`${episode.id}-title`}>
-    <header className="proof-episode-header"><span className="proof-episode-number">{episode.number}</span><div><p className="proof-kicker">{episode.question}</p><h2 id={`${episode.id}-title`}>{episode.title}</h2></div><VerdictLabel verdict={result.verdict} /></header>
-    {episode.challenge && <p className="proof-kicker proof-claim-tag">Challenge {episode.challenge.id} · {claimTitle(episode.challenge.claim)}</p>}
-    <p className="proof-claim">{episode.claim}</p>
+  const sourceRef = report.supplements?.find((supplement) => supplement.episodes.includes(id))?.kitsCommit ?? report.kitsCommit ?? "main";
+  return <section className="proof-episode" id={id} aria-labelledby={`${id}-title`}>
+    <header className="proof-episode-header"><span className="proof-episode-number">{kit.number}</span><div><p className="proof-kicker">{kit.question}</p><h2 id={`${id}-title`}>{kit.title}</h2></div><VerdictLabel verdict={result.verdict} /></header>
+    {challengeLabel && <p className="proof-kicker proof-claim-tag">{challengeLabel}</p>}
+    <p className="proof-claim">{kit.statement}</p>
     <div className="proof-observation"><p className="proof-kicker">{result.execution === "complete" ? "Observed outcome" : result.execution === "incomplete" ? "Incomplete experiment" : "Awaiting a run"}</p><p>{result.summary}</p></div>
     {result.metrics.length > 0 && <dl className="proof-metrics">{result.metrics.map((metric) => <div key={metric.label}><dt>{metric.label}</dt><dd>{metric.value}</dd></div>)}</dl>}
     <p className="proof-caveat"><strong>Boundary.</strong> {result.caveat}</p>
-    <details className="proof-method"><summary><span>Setup, script & verification</span><span className="proof-expand" aria-hidden="true">+</span></summary><div className="proof-method-body"><h3>Setup</h3><p>{episode.setup}</p><h3>Script</h3><ol>{episode.steps.map((step) => <li key={step}>{step}</li>)}</ol><pre><code>{`./break-hubu/${episode.id}/run.sh --release ${report.release}`}</code></pre><a href={`${repository}/tree/${sourceRef}/break-hubu/${episode.id}`}>Read the complete kit ↗</a><h3>Verification</h3><p>{episode.verify}</p><p>The verifier reads HTTP and CLI output from your run using exact integer amounts. It does not read SQLite or import Hubu’s implementation.</p></div></details>
+    <details className="proof-method"><summary><span>Setup, script & verification</span><span className="proof-expand" aria-hidden="true">+</span></summary><div className="proof-method-body"><h3>Setup</h3><p>{kit.setup}</p><h3>Script</h3><ol>{kit.steps.map((step) => <li key={step}>{step}</li>)}</ol><pre><code>{`./break-hubu/${id}/run.sh --release ${report.release}`}</code></pre><a href={`${repository}/tree/${sourceRef}/break-hubu/${id}`}>Read the complete kit ↗</a><h3>Verification</h3><p>{kit.verify}</p><p>The verifier reads HTTP and CLI output from your run using exact integer amounts. It does not read SQLite or import Hubu’s implementation.</p></div></details>
   </section>;
 }
 
 export function ReleaseAnalysis({ report }: { report: ReleaseReport }) {
-  const measured = kits.filter((kit) => report.episodes[kit.id]);
-  // Releases measured before the identity and authority kits keep their documentary row.
-  const documentary = !report.episodes["ep07-impersonate-agent"];
+  const { claims, challenges, kits } = catalogFor(report.release);
+  const measured = Object.entries(kits).filter(([id]) => report.episodes[id]);
+  // The first analysis documents identity and bearer authority without a kit.
+  const documentary = report.release === "v0.2.4" && !report.episodes["ep07-impersonate-agent"];
   const supplements = report.supplements ?? [];
   const identityNumber = String(measured.length + 1).padStart(2, "0");
   return <div className="engineering-shell">
@@ -64,12 +59,17 @@ export function ReleaseAnalysis({ report }: { report: ReleaseReport }) {
         </header>
         <dl className="proof-provenance"><div><dt>Released source</dt><dd><a href={`${repository}/tree/${report.sourceCommit}`}>{report.release} · {report.sourceCommit.slice(0, 8)} ↗</a></dd></div><div><dt>Kits revision</dt><dd>{report.kitsCommit ? <a href={`${repository}/tree/${report.kitsCommit}/break-hubu`}>{report.kitsCommit.slice(0, 8)} ↗</a> : "Not recorded"}{(report.supplements ?? []).map((supplement) => <span key={supplement.kitsCommit}><br /><a href={`${repository}/tree/${supplement.kitsCommit}/break-hubu`}>{supplement.kitsCommit.slice(0, 8)} ↗</a> · {supplement.episodes.length} added {supplement.recordedAt}</span>)}</dd></div><div><dt>Recorded</dt><dd>{report.recordedAt ?? "No run attached"}</dd></div></dl>
         <section className="proof-overview" id="results" aria-labelledby="results-title">
-          <div className="proof-section-label"><span className="proof-kicker">The 30-second read</span><h2 id="results-title">Six claims, judged by their challenges.</h2><p>Each claim is Verified when all its in-scope challenges hold, Partially verified when some do, Unverified when none have been shown, and Does not hold when any fails. Each measured challenge has its own method and reported result below.</p></div>
+          <div className="proof-section-label"><span className="proof-kicker">The 30-second read</span><h2 id="results-title">Claims and results</h2><p>Each claim is Verified when all its in-scope challenges hold, Partially verified when some do, Unverified when none have been shown, and Does not hold when any fails. Each measured challenge has its own method and reported result below.</p></div>
           <ClaimDetails release={report.release} report={report} />
           {documentary && <p className="proof-index-note"><a className="proof-text-link" href="#identity">Agent identity and bearer authority (C3, C5) ↘</a> remain documented limitations in this release.</p>}
         </section>
         <aside className="proof-scope"><div><span className="proof-kicker">What runs</span><p>Real released Hubu CLI + HTTP server.<br />Fresh SQLite. Synthetic external executor.</p></div><div><span className="proof-kicker">Outside this card</span><p>Gongbu, Temporal, MCP transport, provider adapters, and actual provider billing.</p></div></aside>
-        {measured.map((episode) => <Episode key={episode.id} episode={episode} result={report.episodes[episode.id]} report={report} />)}
+        {measured.map(([id, kit]) => {
+          const challenge = challenges.find((item) => item.kit === id);
+          const title = claims.find((claim) => claim.id === challenge?.claim)?.title;
+          const challengeLabel = challenge ? `Challenge ${challenge.id} · ${title ?? challenge.claim}` : undefined;
+          return <Episode key={id} id={id} kit={kit} challengeLabel={challengeLabel} result={report.episodes[id]} report={report} />;
+        })}
         {documentary && <section className="proof-identity" id="identity" aria-labelledby="identity-title"><div className="proof-episode-header"><span className="proof-episode-number">{identityNumber}</span><div><p className="proof-kicker">Documented limitation · C3 and C5 · no experiment in this card</p><h2 id="identity-title">The identity gap stays visible.</h2></div><VerdictLabel verdict="does-not-hold" /></div><p>{report.release} does not bind authority to use a registered agent account to an authenticated runtime or thread. These budget experiments do not establish that boundary. This is a known gap that will be addressed in future releases.</p><p><strong>The bearer boundary matters too.</strong> The normal bearer can access protected administration routes, including budget and policy changes. Each kit fixes those settings; it does not prove a bearer holder cannot raise a budget. Driver and mock-executor separation is not server-enforced role isolation. More narrowly scoped executor authority is planned for future releases. Read the <a href={`${repository}/blob/${report.sourceCommit}/crates/hubu-api/src/lib.rs`}>released routing source ↗</a>.</p></section>}
         <section className="proof-reproduce" id="reproduce" aria-labelledby="reproduce-title">
           <div className="proof-section-label"><h2 id="reproduce-title">Reproduce these experiments</h2><p>The kits use synthetic fixtures and run over loopback. They require no LLM subscription or provider credentials.</p></div>
