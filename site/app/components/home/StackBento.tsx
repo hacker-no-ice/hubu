@@ -178,10 +178,6 @@ export function StackBento({ policy }: { policy: PolicyExcerpt }) {
   return (
     <section className={`stackx reveal-${reveal}`} id="stack" aria-labelledby="stack-title" ref={sectionRef}>
       <div className="stackx-grid" aria-hidden="true" />
-      <i className="beam" style={{ top: 192 }} aria-hidden="true" />
-      <i className="beam" style={{ top: 640, animationDelay: "-3s", animationDuration: "9s" }} aria-hidden="true" />
-      <i className="beam v" style={{ left: "40%" }} aria-hidden="true" />
-      <i className="beam v" style={{ left: "78%", animationDelay: "-3.5s", animationDuration: "8s" }} aria-hidden="true" />
       <div className="home-wrap">
         <div className="sx-head reveal">
           <div>
