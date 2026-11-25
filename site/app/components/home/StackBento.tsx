@@ -219,6 +219,7 @@ export function StackBento({ policy }: { policy: PolicyExcerpt }) {
               ))}
               <span className="c">{`  # excerpt: the full file has ${policy.ruleCount} rules`}</span>
             </pre>
+            <p>This policy is for live FLUX and Gemini models, and it denies the sandbox&apos;s fixture model. In sandbox, apply the starter policy from <code>hubu policy new-template</code> instead (<a href="/docs/local-stack#make-your-first-governed-request">first governed request</a>).</p>
           </article>
           <article className="tile t-budget reveal" style={{ "--i": 4 } as React.CSSProperties} onPointerMove={spotlight}>
             <div className="tt"><small>Give the agent a budget</small><span className="step">Step 4 of 4</span></div>

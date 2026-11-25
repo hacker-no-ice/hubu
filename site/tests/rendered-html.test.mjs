@@ -430,6 +430,7 @@ test("home page offers copyable commands, a mobile menu, and anchored warning", 
   assert.doesNotMatch(html, /--profile …|--stack-profile …/);
   assert.match(html, /hubu stack init --mode sandbox --profile &quot;\$HOME\/hubu-sandbox&quot;/);
   assert.equal(html.match(/<button class="copy-code"/g)?.length, 11);
+  assert.match(html, /This policy is for live FLUX and Gemini models[\s\S]*?hubu policy new-template/, "the creative-tiers example says it does not fit the sandbox");
   assert.match(html, /hubu stack init --mode sandbox[\s\S]*?hubu stack select --profile &quot;\$HOME\/hubu-sandbox&quot;[\s\S]*?hubu stack start/, "the bento selects the new profile before starting it");
   assert.match(html, /<details class="mmenu site-menu"><summary>Menu<\/summary>/);
   assert.match(html, /id="header-search"[^>]*role="combobox"/);
