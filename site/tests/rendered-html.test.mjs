@@ -411,12 +411,18 @@ test("roadmap shows three linked priorities without promising release dates", as
   assert.ok(html.indexOf(diagram) < html.indexOf('id="1-easy-and-safe-for-individuals"'));
 });
 
-test("home page orders the setup steps the way the stack requires", async () => {
+test("home page leads with the policy file and keeps stack setup as prerequisites", async () => {
   const html = await (await render()).text();
   assert.match(html, /href="\/docs\/local-stack#install"/);
-  const order = ["Start the stack", "Register the owner and agent", "Apply a policy", "Give the agent a budget"];
-  order.forEach((title, index) => assert.ok(html.includes(`${title}</small><span class="step">Step ${index + 1} of 4</span>`), title));
-  for (let index = 1; index < order.length; index += 1) assert.ok(html.indexOf(order[index - 1]) < html.indexOf(order[index]));
+  // Prerequisites come first in reading order, unnumbered, in the order the stack requires.
+  const prereq = html.slice(html.indexOf('class="tile t-prereq'), html.indexOf('class="tile t-policy'));
+  assert.ok(prereq.length > 0, "prerequisites strip renders before the policy tile");
+  assert.ok(prereq.indexOf("Start the stack") < prereq.indexOf("Register the owner and agent"));
+  assert.doesNotMatch(prereq, /class="step"/);
+  // The numbered story starts from the policy file.
+  const order = ["Start from a policy file", "Give the agent a budget"];
+  order.forEach((title, index) => assert.ok(html.includes(`${title}</small><span class="step">Step ${index + 1}</span>`), title));
+  assert.ok(html.indexOf(order[0]) < html.indexOf(order[1]));
   for (const capability of ["Watch spend live", "Plug into your harness", "Run it from the admin portal"]) {
     const start = html.indexOf(`${capability}</small>`);
     assert.ok(start > 0, capability);

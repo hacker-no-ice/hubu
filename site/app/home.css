@@ -163,11 +163,18 @@
 .reveal-pending .reveal { opacity: .25; transform: translateY(26px); }
 .reveal-in .reveal { opacity: 1; transform: none; transition: opacity .8s cubic-bezier(.2,.7,.2,1), transform .8s cubic-bezier(.2,.7,.2,1); transition-delay: calc(var(--i, 0) * 110ms); }
 
-.t-stack { grid-column: span 4; }
-.t-register { grid-column: span 4; }
-.t-policy { grid-column: span 4; grid-row: span 2; }
-.t-budget { grid-column: span 3; }
-.t-hud { grid-column: span 5; background: #08090c; }
+.t-prereq { grid-column: 1 / -1; padding-block: 16px 18px; background: radial-gradient(280px circle at var(--tx, -30%) var(--ty, -30%), #9697ff12, transparent 60%), #0a0b0ee6; border-style: dashed; }
+.t-prereq .pre-tag { font: 500 11px var(--font-geist-mono), monospace; color: var(--dim); letter-spacing: .04em; white-space: nowrap; }
+.prereq-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 28px; }
+.prereq-grid > div { display: grid; align-content: start; gap: 8px; min-width: 0; }
+.prereq-grid h3 { font-size: 15px; color: #c6c7ca; }
+.prereq-grid .term { font-size: 11.5px; line-height: 1.5; }
+.t-policy { grid-column: 1 / span 6; grid-row: span 2; }
+/* Rows: prerequisites, budget, then the HUD row soaks up the tall policy panel's extra height. */
+.bx { grid-template-rows: auto auto 1fr; }
+.t-budget { grid-column: span 6; }
+.t-hud { grid-column: span 6; background: #08090c; grid-template-rows: auto auto 1fr; }
+.t-hud .term.hud { align-self: stretch; padding: 12px 14px; border: 1px solid #ffffff10; border-radius: 10px; background: #050608; }
 .t-harness, .t-portal { grid-column: span 12; grid-template-columns: minmax(0, 380px) minmax(0, 1fr); gap: 28px; align-items: start; }
 .t-budget .amt { font: 500 clamp(34px, 3vw, 46px)/1 var(--font-geist-mono), monospace; letter-spacing: -.04em; font-variant-numeric: tabular-nums; }
 .t-budget .amt span { font-size: 13px; color: var(--dim); letter-spacing: 0; margin-left: 8px; }
@@ -284,8 +291,7 @@
 .home-footer span { color: #d7d8da; font-weight: 620; } .home-footer p { flex: 1; margin: 0; } .home-footer a:hover { color: white; }
 
 @media (max-width: 1180px) {
-  .bx { grid-template-columns: repeat(6, minmax(0, 1fr)); }
-  .t-stack, .t-register { grid-column: span 3; }
+  .bx { grid-template-columns: repeat(6, minmax(0, 1fr)); grid-template-rows: none; }
   .t-policy { grid-column: span 6; grid-row: auto; }
   .t-budget, .t-hud, .t-harness, .t-portal { grid-column: span 6; }
   .hs-field { width: 190px; } .hs-field:focus-within { width: 280px; }
@@ -310,7 +316,9 @@
 }
 @media (max-width: 620px) {
   .bx { grid-template-columns: 1fr; }
-  .t-stack, .t-register, .t-policy, .t-budget, .t-hud, .t-harness, .t-portal { grid-column: auto; }
+  .t-prereq, .t-policy, .t-budget, .t-hud, .t-harness, .t-portal { grid-column: auto; }
+  .prereq-grid { grid-template-columns: 1fr; }
+  .t-prereq .pre-tag { display: none; }
   .boundary-plane ul { grid-template-columns: 1fr; }
   .hero-actions { flex-direction: column; align-items: stretch; }
   .chat .row { grid-template-columns: 1fr; gap: 2px; }
