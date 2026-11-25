@@ -41,9 +41,10 @@ prompts, so the owner can always stop spending at once.
   the dialog. Executors always send it.
 
 The dialog reads `"hubu-server" is trying to <reason>.` Hubu builds the reason
-from stored, validated data, for example
-`set design-agent's budget to 20.00 USD (now 10.00 USD)`. Agent names are
-reduced to `[A-Za-z0-9._-]`, at most 32 characters.
+from stored, validated data. A spend approval can read
+`get your approval for design-agent to spend up to 0.014 USD on black-forest-labsflux/flux-3-image-klein`.
+A budget change can read `set design-agent's budget to 20.00 USD (now 10.00 USD)`.
+Agent names are reduced to `[A-Za-z0-9._-]`, at most 32 characters.
 
 Approving many pending requests with one dialog is planned
 ([HUB-399](https://linear.app/hubu/issue/HUB-399)).

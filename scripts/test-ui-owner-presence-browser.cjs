@@ -234,6 +234,10 @@ async function main() {
     assert.equal(confirmations.length, 1);
     assert.equal(confirmations[0].outcome, 'confirmed');
     assert.equal(confirmations[0].method, 'fixture');
+    assert.equal(
+      confirmations[0].reason,
+      'get your approval for fixture-agent to spend up to 1.00 USD on black-forest-labsflux/flux-2-klein-4b',
+    );
 
     await page.goto(approvalUrl(approvedId));
     await expectReview();

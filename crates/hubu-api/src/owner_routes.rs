@@ -739,7 +739,7 @@ fn approval_spec(
     let name = agent_name(state, agent_id).unwrap_or_else(|_| sanitize_id(agent_id));
     Ok(Some(OwnerActionSpec {
         action: "spend.approval.approve",
-        reason: format!("approve {amount} on {target} for agent {name}"),
+        reason: format!("get your approval for {name} to spend up to {amount} on {target}"),
         targets: vec![sanitize_id(approval_request_id), sanitize_id(agent_id)],
         kind: ActionKind::Approval,
     }))
