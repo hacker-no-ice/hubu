@@ -352,7 +352,7 @@ test("home page presents two supported modes with Gongbu and links what works to
   assert.match(html, /<section class="works-today" aria-labelledby="works-today-title">/);
   assert.match(html, /<strong>macOS<\/strong> source install from a release tag/);
   assert.match(html, /<strong>Gemini and the FLUX suite<\/strong> live providers: FLUX\.2 \[pro\], \[max\], \[flex\], \[klein\] and FLUX 3 Image, with edit/);
-  assert.match(html, /<strong>Sandbox<\/strong> with no provider credentials/);
+  assert.match(html, /<strong>Live and sandbox modes<\/strong> live with approved real providers; sandbox with a non-billable fixture and no provider credentials/);
   assert.match(html, /href="\/docs\/overview#what-works-today"/);
   assert.doesNotMatch(html, /class="warning-band"/);
 });
