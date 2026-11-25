@@ -260,7 +260,7 @@ export function StackBento({ policy }: { policy: PolicyExcerpt }) {
             <div className="tt"><small>Start from a policy file</small><span className="step">Step 1</span></div>
             <h3>Rules in plain YAML</h3>
             <Fold narrow={narrow} label="Command"><Command>{`hubu policy apply --path ${policy.path} --name "Creative tiers"`}</Command></Fold>
-            <pre className={`term yaml${policyOpen ? " open" : ""}`} id="policy-yaml">
+            <pre className={`term yaml${narrow && !policyOpen ? " clip" : ""}`} id="policy-yaml">
               {policy.header.map((line) => <span key={line}><YamlLine line={line} />{"\n"}</span>)}
               {policy.rules.map((rule, index) => (
                 <span key={rule.id}>
@@ -272,7 +272,7 @@ export function StackBento({ policy }: { policy: PolicyExcerpt }) {
               ))}
               <span className="c">{`  # excerpt: the full file has ${policy.ruleCount} rules`}</span>
             </pre>
-            <button type="button" className="more" aria-controls="policy-yaml" aria-expanded={policyOpen} onClick={() => setPolicyOpen((open) => !open)}>{policyOpen ? "Show less" : "Show the whole excerpt"}</button>
+            {narrow && <button type="button" className="more" aria-controls="policy-yaml" aria-expanded={policyOpen} onClick={() => setPolicyOpen((open) => !open)}>{policyOpen ? "Show less" : "Show the whole excerpt"}</button>}
           </article>
           <article className="tile t-budget reveal" style={{ "--i": 3 } as React.CSSProperties} onPointerMove={spotlight}>
             <div className="tt"><small>Give the agent a budget</small><span className="step">Step 2</span></div>
@@ -290,11 +290,14 @@ export function StackBento({ policy }: { policy: PolicyExcerpt }) {
               <div className="tt"><small>Plug into your harness</small></div>
               <h3>Hubu as MCP tools for your agent</h3>
               <p>Hubu ships a stdio MCP server, <code>hubu-unified-mcp</code>. The agent sees <code>hubu_*</code> and <code>gongbu_*</code> tools and never a provider key.</p>
-              <div className="path-tabs" role="tablist" aria-label="Connection path">
-                <button type="button" role="tab" aria-selected={pathTab === "remote"} onClick={() => setPathTab("remote")}>Remote (ChatGPT)</button>
-                <button type="button" role="tab" aria-selected={pathTab === "local"} onClick={() => setPathTab("local")}>Local MCP</button>
-              </div>
-              <div className="paths" data-tab={pathTab}>
+              {/* The toggle exists only once hydrated on a phone, so without JavaScript both paths stay visible. */}
+              {narrow && (
+                <div className="path-tabs" role="tablist" aria-label="Connection path">
+                  <button type="button" role="tab" aria-selected={pathTab === "remote"} onClick={() => setPathTab("remote")}>Remote (ChatGPT)</button>
+                  <button type="button" role="tab" aria-selected={pathTab === "local"} onClick={() => setPathTab("local")}>Local MCP</button>
+                </div>
+              )}
+              <div className="paths" data-tab={narrow ? pathTab : undefined}>
                 <div className="path remote">
                   <div className="ph"><b>Remote, from ChatGPT</b><span className="badge warn">experimental</span></div>
                   <p>Secure MCP Tunnel: an outbound connection from your Mac, no inbound port. Works from ChatGPT on the web or your phone while the client runs.</p>

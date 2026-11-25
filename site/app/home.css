@@ -351,7 +351,7 @@
   .fold > summary { display: flex; justify-content: space-between; list-style: none; cursor: pointer; padding: 8px 11px; border: 1px dashed #30323a; border-radius: 8px; font: 12px var(--font-geist-mono), monospace; color: var(--muted); }
   .fold[open] > summary { margin-bottom: 8px; }
   /* Policy: the first rule, with a button for the rest. */
-  .term.yaml:not(.open) { max-height: 290px; overflow: auto hidden; -webkit-mask-image: linear-gradient(180deg, #000 72%, transparent); mask-image: linear-gradient(180deg, #000 72%, transparent); }
+  .term.yaml.clip { max-height: 290px; overflow: auto hidden; -webkit-mask-image: linear-gradient(180deg, #000 72%, transparent); mask-image: linear-gradient(180deg, #000 72%, transparent); }
   .t-policy .more { display: block; justify-self: start; padding: 7px 12px; border: 1px solid #30323a; border-radius: 8px; background: none; color: #b4b5ff; font: 12px var(--font-geist-mono), monospace; cursor: pointer; }
   /* hubu watch: the CLI's default five decisions. */
   .term.hud .extra { display: none; }
