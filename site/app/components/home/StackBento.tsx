@@ -265,7 +265,7 @@ export function StackBento({ policy }: { policy: PolicyExcerpt }) {
                 <div className="path">
                   <div className="ph"><b>Local MCP client</b><span className="badge ok">Codex verified</span></div>
                   <p>Your harness starts <code>hubu-unified-mcp</code> from its MCP config. Codex has a setup helper. Other clients take manual config and aren&apos;t verified yet.</p>
-                  <Command>{'hubu init codex --stack-profile "$HOME/hubu-sandbox"'}</Command>
+                  <Command>{'hubu init codex --stack-profile "$HOME/hubu-live"'}</Command>
                   <a className="path-link" href="/docs/unified-mcp#setup">MCP setup →</a>
                 </div>
               </div>

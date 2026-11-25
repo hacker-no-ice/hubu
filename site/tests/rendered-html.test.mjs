@@ -441,6 +441,8 @@ test("home page offers copyable commands, a mobile menu, and anchored warning", 
   assert.match(html, /No provider keys yet\?[\s\S]*?href="\/docs\/local-stack"/, "newcomers are pointed to the sandbox guide");
   assert.match(html, /hubu stack init --mode live[\s\S]*?hubu stack select --profile &quot;\$HOME\/hubu-live&quot;[\s\S]*?contract_bindings[\s\S]*?hubu stack doctor[\s\S]*?hubu stack start[\s\S]*?hubu register agent/, "live setup runs init, select, keys, doctor, start, then registration");
   assert.doesNotMatch(html, /hubu register human/, "the stack creates a default owner, so the bento registers only the agent");
+  assert.match(html, /hubu init codex --stack-profile &quot;\$HOME\/hubu-live&quot;/, "the harness connects to the live profile the prerequisites create");
+  assert.doesNotMatch(html, /hubu-sandbox/, "no step points at a sandbox profile the page never creates");
   assert.match(html, /<details class="mmenu site-menu"><summary>Menu<\/summary>/);
   assert.match(html, /id="header-search"[^>]*role="combobox"/);
   for (const panel of ["docs", "demos", "architecture", "blog", "releases"]) assert.match(html, new RegExp(`aria-controls="np-${panel}"`));
