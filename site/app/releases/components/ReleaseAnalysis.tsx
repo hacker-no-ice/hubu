@@ -38,7 +38,7 @@ function Episode({ id, kit, challengeLabel, result, report }: { id: EpisodeId; k
   </section>;
 }
 
-export function ReleaseAnalysis({ report, liveVerificationHref }: { report: ReleaseReport; liveVerificationHref?: string }) {
+export function ReleaseAnalysis({ report }: { report: ReleaseReport }) {
   const { claims, challenges, kits } = catalogFor(report.release);
   const measured = Object.entries(kits).filter(([id]) => report.episodes[id]);
   // The first analysis documents identity and bearer authority without a kit.
@@ -61,7 +61,7 @@ export function ReleaseAnalysis({ report, liveVerificationHref }: { report: Rele
         <section className="proof-overview" id="results" aria-labelledby="results-title">
           <div className="proof-section-label"><span className="proof-kicker">The 30-second read</span><h2 id="results-title">Claims and results</h2><p>Each claim is Verified when all its in-scope challenges hold, Partially verified when some do, Unverified when none have been shown, and Does not hold when any fails. Each measured challenge has its own method and reported result below.</p></div>
           <ClaimDetails release={report.release} report={report} />
-          {liveVerificationHref && <p className="proof-index-note"><a className="proof-text-link" href={liveVerificationHref}>Read the live macOS approval checks ↗</a></p>}
+          {report.release === "v0.3.0" && <p className="proof-index-note"><a className="proof-text-link" href="/releases/v0.3.0#live-verification-title">Read the live macOS approval checks ↗</a></p>}
           {documentary && <p className="proof-index-note"><a className="proof-text-link" href="#identity">Agent identity and bearer authority (C3, C5) ↘</a> remain documented limitations in this release.</p>}
         </section>
         <aside className="proof-scope"><div><span className="proof-kicker">What runs</span><p>Real released Hubu CLI + HTTP server.<br />Fresh SQLite. Synthetic external executor.</p></div><div><span className="proof-kicker">Outside this card</span><p>Gongbu, Temporal, MCP transport, provider adapters, and actual provider billing.</p></div></aside>
