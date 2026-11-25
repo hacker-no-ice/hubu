@@ -53,15 +53,29 @@ on different issues make the same choices.
 
 ## Merge policy
 
-The merge decision is made at triage, when the Linear issue is labeled. The
-implementing agent follows the label and does not re-decide it.
+Use the Linear issue's explicit `Merge` label when one exists. An explicit
+instruction from the user in the current task overrides that decision.
 
-- The Linear issue's `Merge` label sets the mode:
-  - `Merge → auto`: the PR auto-merges after review and checks.
-  - `Merge → manual`, no `Merge` label, or no Linear issue: `manual`.
-- Put the Linear issue ID (for example `HUB-284`) in the PR title, and add the
-  matching GitHub label `merge:auto` or `merge:manual` to the PR.
-- An explicit instruction from the user in the current task overrides the label.
+- `Merge → auto`: use `merge:auto`.
+- `Merge → manual`: use `merge:manual`.
+- Without an explicit merge decision, use `merge:auto` for eligible maintenance
+  PRs and `merge:manual` for everything else.
+- Include the Linear issue ID in the PR title when there is one. Add the
+  matching GitHub merge label to the PR.
+
+A maintenance PR is eligible for the auto-merge default when it is narrowly
+scoped to a routine dependency update, a mechanical compatibility fix for
+that update, or upkeep of existing docs or development tooling. Keep the PR
+manual if it needs a product or security decision, changes supported toolchain
+versions or intentionally changes runtime behavior, or touches a path on the
+auto-merge blocklist. Follow any stricter eligibility criteria in the
+[Dependabot triage runbook](docs/operations/dependabot-triage.md) when running
+that workflow.
+
+Before enabling auto-merge for any maintenance PR, verify that Codex review
+completed on the current head, no review findings remain outstanding, and all
+applicable checks passed against current `main`. A newer head or stale checks
+require fresh verification.
 
 Handoff:
 - `auto`: once the requested review is done and required checks pass, enable

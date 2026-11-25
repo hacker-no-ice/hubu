@@ -1,9 +1,9 @@
-"""Build an unchanged, published stable Hubu release in a separate private cache.
+"""Build an unchanged Hubu source commit in a separate private cache.
 
 The release identity comes from GitHub's published release metadata, never from
 the caller: the release must be a stable (non-draft, non-prerelease) release
 whose notes name its full source commit, and the cloned tag must resolve to
-exactly that commit. Each release gets its own source and build cache.
+exactly that commit. Commit rehearsals use a separate cache and source identity.
 """
 import json
 import fcntl
@@ -21,16 +21,43 @@ RELEASES_API = 'https://api.github.com/repos/hacker-no-ice/hubu/releases/tags/'
 SUPPORTED_CONTRACTS = frozenset({'hubu-spend-executor-v4.5'})
 STABLE_TAG = re.compile(r'v\d+\.\d+\.\d+')
 SOURCE_COMMIT = re.compile(r'Source commit: `([0-9a-f]{40})`')
+FULL_COMMIT = re.compile(r'[0-9a-f]{40}')
+ROOT = Path(__file__).resolve().parent.parent
 
 
-def build(release, cache=None):
-    if not STABLE_TAG.fullmatch(release or ''):
+def candidate_version(commit):
+    if not FULL_COMMIT.fullmatch(commit or ''):
+        raise ValueError('--commit requires a full 40-character lowercase Git commit SHA')
+    try:
+        resolved = subprocess.check_output(
+            ['git', '-C', str(ROOT), 'rev-parse', '--verify', f'{commit}^{{commit}}'],
+            text=True, stderr=subprocess.DEVNULL).strip()
+    except subprocess.CalledProcessError as error:
+        raise ValueError(f'Commit {commit} is unavailable in the local Hubu repository; fetch it first') from error
+    if resolved != commit:
+        raise ValueError('--commit must identify the source commit itself')
+    manifest = subprocess.check_output(
+        ['git', '-C', str(ROOT), 'show', f'{commit}:crates/hubu-cli/Cargo.toml'], text=True)
+    _, _, package = manifest.partition('[package]\n')
+    package = re.split(r'^\[', package, maxsplit=1, flags=re.MULTILINE)[0]
+    version = re.search(r'^version\s*=\s*"(\d+\.\d+\.\d+)"\s*$', package, re.MULTILINE)
+    if not version:
+        raise ValueError(f'Expected a Hubu package version at {commit}')
+    return 'v' + version.group(1)
+
+
+def build(release, cache=None, *, commit=None):
+    if (release is None) == (commit is None):
+        raise ValueError('Choose exactly one of --release and --commit')
+    if release is not None and not STABLE_TAG.fullmatch(release):
         raise ValueError(f'--release must name a stable tag such as v0.2.5; got {release!r}')
     cache = Path(cache or Path(tempfile.gettempdir()) / f'break-hubu-build-{os.getuid()}').resolve()
     cache.mkdir(mode=0o700, parents=True, exist_ok=True)
     # Separate invocations may share the source/build cache, never their servers or data.
     with (cache / 'build.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        if commit is not None:
+            return _build(candidate_version(commit), cache / f'commit-{commit}', commit=commit)
         return _build(release, cache / release)
 
 
@@ -53,7 +80,7 @@ def pinned_commit(published, release):
     return commits.pop()
 
 
-def _build(release, cache):
+def _build(release, cache, *, commit=None):
     cache.mkdir(mode=0o700, parents=True, exist_ok=True)
     source, target = cache / 'source', cache / 'target'
     log = cache / 'build.log'
@@ -65,21 +92,34 @@ def _build(release, cache):
             stream.write('$ ' + ' '.join(map(str, args)) + '\n'); stream.flush()
             subprocess.run(list(map(str, args)), cwd=cwd, env=env, stdout=stream,
                            stderr=subprocess.STDOUT, check=True)
-    published_path = cache / 'published-release.json'
-    if not published_path.exists():
-        published = published_release(release)
-        pinned_commit(published, release)
-        pending = published_path.with_suffix('.pending')
-        pending.write_text(json.dumps(published, indent=2) + '\n')
-        pending.replace(published_path)
-    published = json.loads(published_path.read_text())
-    commit = pinned_commit(published, release)
-    if not source.exists():
-        run(['git', 'clone', '--branch', release, '--single-branch', REPOSITORY, source])
     def git(*args):
         return subprocess.check_output(['git', '-C', str(source), *args], env=env, text=True).strip()
-    if git('rev-parse', 'HEAD') != commit or git('rev-parse', f'{release}^{{commit}}') != commit:
-        raise RuntimeError(f'Cache is not the exact {release} release checkout at {commit}: {source}')
+    if commit is None:
+        published_path = cache / 'published-release.json'
+        if not published_path.exists():
+            published = published_release(release)
+            pinned_commit(published, release)
+            pending = published_path.with_suffix('.pending')
+            pending.write_text(json.dumps(published, indent=2) + '\n')
+            pending.replace(published_path)
+        published = json.loads(published_path.read_text())
+        commit = pinned_commit(published, release)
+        if not source.exists():
+            run(['git', 'clone', '--branch', release, '--single-branch', REPOSITORY, source])
+        if git('rev-parse', f'{release}^{{commit}}') != commit:
+            raise RuntimeError(f'Cached {release} tag does not identify {commit}: {source}')
+        provenance = dict(build_mode='release', published_release_url=published['html_url'],
+                          published_at=published['published_at'])
+    else:
+        if not source.exists():
+            with tempfile.TemporaryDirectory(dir=cache) as pending_directory:
+                pending_source = Path(pending_directory) / 'source'
+                run(['git', 'clone', '--no-checkout', '--shared', ROOT, pending_source])
+                run(['git', 'checkout', '--detach', commit], pending_source)
+                pending_source.replace(source)
+        provenance = dict(build_mode='commit')
+    if git('rev-parse', 'HEAD') != commit:
+        raise RuntimeError(f'Cache is not the exact source checkout at {commit}: {source}')
     if git('status', '--porcelain', '--untracked-files=all'):
         raise RuntimeError(f'Release source cache is dirty: {source}')
     toolchain = re.search(r'channel\s*=\s*"([\d.]+)"', (source / 'rust-toolchain.toml').read_text()).group(1)
@@ -107,4 +147,4 @@ def _build(release, cache):
             'toolchain': toolchain, 'build_command': command, 'build_log': str(log),
             'rustc_version': subprocess.check_output(['rustup', 'run', toolchain, 'rustc', '--version'], env=env, text=True).strip(),
             'git_version': subprocess.check_output(['git', '--version'], env=env, text=True).strip(),
-            'published_release_url': published['html_url'], 'published_at': published['published_at']}
+            **provenance}

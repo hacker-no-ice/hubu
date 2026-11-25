@@ -64,6 +64,7 @@ fn server_with_backends(hubu_endpoint: &str, gongbu_endpoint: Option<&str>) -> S
         ))),
         meta_shape_diagnostics: false,
         save_folders_path: None,
+        approval_portal_addr: DEFAULT_APPROVAL_PORTAL_ADDR,
         use_capability_snapshot_for_test: true,
     }
 }
@@ -579,11 +580,49 @@ fn spend_approval_read_is_automatic_and_redacts_private_operation_identity() {
         approval_request_id
     );
     assert_eq!(response["result"]["structuredContent"]["status"], "pending");
+    assert_eq!(
+        response["result"]["structuredContent"]["review_url"],
+        format!("http://127.0.0.1:8790/#approvals?request={approval_request_id}"),
+    );
     let serialized = response.to_string();
     assert!(!serialized.contains("operation_key"));
     assert!(!serialized.contains("private-root"));
     assert!(!serialized.contains("private-nested"));
     assert!(serialized.contains("<private operation redacted>"));
+}
+
+#[test]
+fn standalone_spend_pending_result_and_exact_replay_include_review_url() {
+    let (endpoint, request, handle) = one_shot_http_server(
+        200,
+        r#"{"decision":"needs_approval","approval":{"approval_request_id":"approval:fixture","status":"pending"}}"#,
+    );
+    let mut server = server_with_backends(&endpoint, None);
+    server.approval_portal_addr = "[::1]:4567".parse().unwrap();
+
+    let spend = || {
+        tool_call(
+            &server,
+            "hubu_authorize_spend",
+            json!({"account_id":"account-1","amount":"0.25","reason":"review"}),
+            Some(json!({"callId":"standalone-review-link"})),
+        )
+    };
+    for response in [spend(), spend()] {
+        let result = &response["result"];
+        assert_eq!(
+            result["structuredContent"]["review_url"],
+            "http://[::1]:4567/#approvals?request=approval%3Afixture",
+        );
+        let text_result: Value =
+            serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(text_result, result["structuredContent"]);
+    }
+    assert!(request
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap()
+        .starts_with("POST /spend/authorize "));
+    handle.join().unwrap();
 }
 
 #[test]

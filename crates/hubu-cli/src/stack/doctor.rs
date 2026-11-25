@@ -141,7 +141,8 @@ pub(super) fn command(mut args: Vec<String>, hubu_home: &Path) -> Result<()> {
     let json_output = take_flag(&mut args, "--json");
     let profile = take_profile(&mut args, hubu_home)?;
     ensure_no_args(args)?;
-    let report = inspect_profile(&profile);
+    let mut report = inspect_profile(&profile);
+    report_platform_checks(&profile, &mut report.checks);
     if json_output {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
@@ -504,6 +505,7 @@ fn inspect_profile_with(
             return report;
         }
     };
+    report_retired_capabilities(profile, &credentials, &mut report.checks);
     let configured_files = credentials.files.as_ref();
     let hubu_managed =
         stack.hubu.as_ref().and_then(|value| value.ownership) == Some(Ownership::Managed);
@@ -532,32 +534,6 @@ fn inspect_profile_with(
                     .is_none(),
             configured_files
                 .and_then(|files| files.hubu_agent.as_ref())
-                .is_some(),
-        ),
-        (
-            "hubu_approval",
-            "hubu",
-            "credentials.toml:files.hubu_approval",
-            credential_paths.hubu_approval.clone(),
-            hubu_managed
-                && configured_files
-                    .and_then(|files| files.hubu_approval.as_ref())
-                    .is_none(),
-            configured_files
-                .and_then(|files| files.hubu_approval.as_ref())
-                .is_some(),
-        ),
-        (
-            "hubu_reconciliation",
-            "hubu",
-            "credentials.toml:files.hubu_reconciliation",
-            credential_paths.hubu_reconciliation.clone(),
-            hubu_managed
-                && configured_files
-                    .and_then(|files| files.hubu_reconciliation.as_ref())
-                    .is_none(),
-            configured_files
-                .and_then(|files| files.hubu_reconciliation.as_ref())
                 .is_some(),
         ),
     ];
@@ -742,6 +718,25 @@ fn inspect_profile_with(
     }
     let handoff: CodexHandoff = read_json(&generation.join("client-handoff.json"))
         .expect("validated client handoff remains readable");
+    match crate::codex_mcp::profile_config_is_stale(&crate::default_codex_config_path(), &handoff) {
+        Ok(true) => report.checks.push(check(
+            CheckLayer::RuntimeReadiness,
+            CheckStatus::Warning,
+            "codex_config_stale",
+            "hubu-unified-mcp",
+            None,
+            "the Hubu-managed Codex config uses retired credentials or settings; restart the stack or rerun `hubu init codex --stack-profile`",
+        )),
+        Ok(false) => {}
+        Err(_) => report.checks.push(check(
+            CheckLayer::RuntimeReadiness,
+            CheckStatus::Warning,
+            "codex_config_unreadable",
+            "hubu-unified-mcp",
+            None,
+            "the default Codex configuration could not be checked",
+        )),
+    }
     report_operation_registry_path(&handoff.operation_state_path, &mut report.checks);
     report.checks.push(check(
         CheckLayer::Renderability,
@@ -1088,14 +1083,29 @@ fn validate_with_binary_bounded(
 fn command_stdout_bounded(
     command: &mut Command,
 ) -> std::result::Result<(ExitStatus, Vec<u8>), SubprocessProbeError> {
-    command.stdout(Stdio::piped()).stderr(Stdio::null());
+    command_output_bounded(command, false)
+}
+
+fn command_output_bounded(
+    command: &mut Command,
+    capture_stderr: bool,
+) -> std::result::Result<(ExitStatus, Vec<u8>), SubprocessProbeError> {
+    if capture_stderr {
+        command.stdout(Stdio::null()).stderr(Stdio::piped());
+    } else {
+        command.stdout(Stdio::piped()).stderr(Stdio::null());
+    }
     prepare_bounded_command(command);
     let mut child = command.spawn().map_err(|_| SubprocessProbeError::Failed)?;
-    let mut stdout = child.stdout.take().ok_or(SubprocessProbeError::Failed)?;
+    let mut output: Box<dyn Read + Send> = if capture_stderr {
+        Box::new(child.stderr.take().ok_or(SubprocessProbeError::Failed)?)
+    } else {
+        Box::new(child.stdout.take().ok_or(SubprocessProbeError::Failed)?)
+    };
     let (sender, receiver) = mpsc::sync_channel(1);
     std::thread::spawn(move || {
         let mut bytes = Vec::new();
-        let result = stdout.read_to_end(&mut bytes).map(|_| bytes);
+        let result = output.read_to_end(&mut bytes).map(|_| bytes);
         let _ = sender.send(result);
     });
     let deadline = Instant::now() + PROBE_TIMEOUT;
@@ -1172,8 +1182,6 @@ fn validate_handoff(
         && Some(&handoff.mcp_server) == binaries.get("hubu-unified-mcp")
         && Some(&handoff.hubu_token_file) == credentials.get("hubu_auth")
         && handoff.agent_token_file.as_ref() == credentials.get("hubu_agent")
-        && Some(&handoff.approval_token_file) == credentials.get("hubu_approval")
-        && Some(&handoff.reconciliation_token_file) == credentials.get("hubu_reconciliation")
         && handoff.gongbu_token_file.as_ref() == credentials.get("gongbu_caller")
         && handoff.operation_state_path.is_absolute()
         && generation.ancestors().nth(3).is_some_and(|profile| {
@@ -1189,6 +1197,107 @@ fn validate_handoff(
             .as_ref()
             .and_then(|value| value.endpoint.as_ref())
             == handoff.gongbu_endpoint.as_ref()
+}
+
+fn report_platform_checks(profile: &Path, checks: &mut Vec<DoctorCheck>) {
+    if env::var("HUBU_OWNER_PRESENCE_PROVIDER").as_deref() == Ok("fixture") {
+        checks.push(check(
+            CheckLayer::RuntimeReadiness,
+            CheckStatus::Warning,
+            "fixture_owner_presence",
+            "hubu-server",
+            None,
+            "the owner-presence fixture is for isolated test databases; unset HUBU_OWNER_PRESENCE_PROVIDER for managed profiles",
+        ));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let Ok(contents) = fs::read_to_string(profile.join("stack.toml")) else {
+            return;
+        };
+        let Ok(stack) = toml::from_str::<StackSource>(&contents) else {
+            return;
+        };
+        let Some(binaries) = stack.binaries else {
+            return;
+        };
+        let managed = stack.hubu.and_then(|hubu| hubu.ownership) == Some(Ownership::Managed);
+        for (component, path) in [
+            ("hubu", binaries.hubu.as_deref()),
+            (
+                "hubu-server",
+                binaries.hubu_server.as_deref().filter(|_| managed),
+            ),
+        ] {
+            let Some(path) = path.filter(|path| path.is_file()) else {
+                continue;
+            };
+            let mut display = Command::new("/usr/bin/codesign");
+            display.args(["--display", "--verbose=4"]).arg(path);
+            let signed_with_runtime = command_output_bounded(&mut display, true)
+                .is_ok_and(|(status, output)| status.success() && hardened_runtime(&output));
+            let mut verify = Command::new("/usr/bin/codesign");
+            verify.args(["--verify", "--strict"]).arg(path);
+            verify.stdout(Stdio::null()).stderr(Stdio::null());
+            if !signed_with_runtime || command_succeeds_bounded(&mut verify) != Some(true) {
+                checks.push(check(
+                    CheckLayer::Renderability,
+                    CheckStatus::Warning,
+                    "hardened_signature_missing",
+                    component,
+                    None,
+                    "this binary lacks a valid macOS hardened-runtime signature; reinstall the Hubu release or sign the local build",
+                ));
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = profile;
+}
+
+#[cfg(target_os = "macos")]
+fn hardened_runtime(output: &[u8]) -> bool {
+    // The Mach-O CodeDirectory CS_RUNTIME flag (0x10000).
+    String::from_utf8_lossy(output).lines().any(|line| {
+        line.strip_prefix("CodeDirectory ")
+            .and_then(|directory| directory.split_once(" flags=0x"))
+            .and_then(|(_, flags)| flags.split_once('('))
+            .and_then(|(flags, _)| u32::from_str_radix(flags, 16).ok())
+            .is_some_and(|flags| flags & 0x10000 != 0)
+    })
+}
+
+fn report_retired_capabilities(
+    profile: &Path,
+    credentials: &CredentialsSource,
+    checks: &mut Vec<DoctorCheck>,
+) {
+    let files = credentials.files.as_ref();
+    for (field, name, configured) in [
+        (
+            "credentials.toml:files.hubu_approval",
+            "approval",
+            files.and_then(|files| files.hubu_approval.as_ref()),
+        ),
+        (
+            "credentials.toml:files.hubu_reconciliation",
+            "reconciliation",
+            files.and_then(|files| files.hubu_reconciliation.as_ref()),
+        ),
+    ] {
+        if configured.is_some()
+            || fs::symlink_metadata(managed_hubu_credential_root(profile).join(name)).is_ok()
+        {
+            checks.push(check(
+                CheckLayer::Renderability,
+                CheckStatus::Warning,
+                "retired_credential",
+                "hubu",
+                Some(field.to_owned()),
+                "this v0.2.5 capability is obsolete and ignored; preserve it for rollback until the upgrade is verified",
+            ));
+        }
+    }
 }
 
 fn report_operation_registry_path(path: &Path, checks: &mut Vec<DoctorCheck>) {
@@ -2546,7 +2655,7 @@ account = "gongbu-caller"
                 .iter()
                 .filter(|check| check.code == "managed_credential_pending")
                 .count(),
-            5
+            3
         );
         assert!(!managed_root.exists());
         assert!(report.checks.iter().all(|check| {
@@ -3109,7 +3218,16 @@ account = "gongbu-caller"
             .iter()
             .any(|check| check.code == "temporal_reachable"));
 
+        assert_eq!(
+            report
+                .checks
+                .iter()
+                .filter(|check| check.code == "retired_credential")
+                .count(),
+            2
+        );
         fs::remove_file(managed_hubu.join("approval")).unwrap();
+        fs::remove_file(managed_hubu.join("agent")).unwrap();
         let degraded = inspect_profile_with(&profile, opaque_available, Some(&renderer));
         assert_ne!(degraded.classification, ProfileClassification::RunningReady);
         assert!(degraded

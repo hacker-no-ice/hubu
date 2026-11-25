@@ -786,7 +786,7 @@ dependencies = [
 
 [[package]]
 name = "gongbu-api"
-version = "0.2.5"
+version = "0.3.0"
 dependencies = [
  "axum",
  "base64",
@@ -815,7 +815,7 @@ dependencies = [
 
 [[package]]
 name = "gongbu-build-info"
-version = "0.2.5"
+version = "0.3.0"
 dependencies = [
  "serde",
 ]
@@ -931,7 +931,7 @@ checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 
 [[package]]
 name = "hubu-api"
-version = "0.2.5"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "block2",
@@ -954,7 +954,7 @@ dependencies = [
 
 [[package]]
 name = "hubu-bench"
-version = "0.2.5"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "serde_json",
@@ -962,7 +962,7 @@ dependencies = [
 
 [[package]]
 name = "hubu-cli"
-version = "0.2.5"
+version = "0.3.0"
 dependencies = [
  "anstyle",
  "anyhow",
@@ -986,7 +986,7 @@ dependencies = [
 
 [[package]]
 name = "hubu-common"
-version = "0.2.5"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "proptest",
@@ -998,7 +998,7 @@ dependencies = [
 
 [[package]]
 name = "hubu-core"
-version = "0.2.5"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "hubu-common",
@@ -1015,7 +1015,7 @@ dependencies = [
 
 [[package]]
 name = "hubu-feedback"
-version = "0.2.5"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1023,7 +1023,7 @@ dependencies = [
 
 [[package]]
 name = "hubu-ledger"
-version = "0.2.5"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "hubu-common",
@@ -1035,7 +1035,7 @@ dependencies = [
 
 [[package]]
 name = "hubu-unified-mcp"
-version = "0.2.5"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -1055,7 +1055,7 @@ dependencies = [
 
 [[package]]
 name = "hubu-wallet"
-version = "0.2.5"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "hubu-common",
@@ -2868,18 +2868,18 @@ checksum = "8f50febec83f5ee1df3015341d8bd429f2d1cc62bcba7ea2076759d315084683"
 
 [[package]]
 name = "thiserror"
-version = "2.0.20"
+version = "2.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec86235f5fcc2a73650310756d2ac5b138a5780bbbdfae3eeccec992c435ba4f"
+checksum = "09e52cb86a36cede5cb101bf8908837b3e4c6e5e59fe7fd85c23fb56200d189e"
 dependencies = [
  "thiserror-impl",
 ]
 
 [[package]]
 name = "thiserror-impl"
-version = "2.0.20"
+version = "2.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc04cd3e1236dd4a98afca4569f2deb3f120e5422a4023be2cb683f8486292af"
+checksum = "fe5197923287db20a58125f0bc85c062f7f2c892de97b18c356f9efb14b28524"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3295,9 +3295,9 @@ checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
 
 [[package]]
 name = "uuid"
-version = "1.29.2"
+version = "1.29.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bed99139f7dac9b5cfe5f17be4d66dc7079a34dee1d74bcc77217119240e267c"
+checksum = "3c14b15dffa2f4bd712103e857140aa04a4f2ff6e955c77d7eb8e53ee02a3b64"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",

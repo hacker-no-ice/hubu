@@ -1,4 +1,4 @@
-use std::{fmt::Write as _, fs, path::Path};
+use std::{fmt::Write as _, fs, io::Write as _, path::Path};
 
 use anyhow::{anyhow, bail, Context, Result};
 
@@ -30,8 +30,9 @@ pub(crate) fn write_config(config_path: &Path, block: &str, force: bool) -> Resu
     }
     let existing = read_config(config_path)?;
     let updated = upsert(&existing, block, force)?;
-    fs::write(config_path, &updated)
-        .with_context(|| format!("write Codex config `{}`", config_path.display()))?;
+    if updated != existing {
+        replace_config(config_path, &updated)?;
+    }
     const RETIRED_FLAG: &str = "HUBU_MCP_TRUST_CLIENT_APPROVAL";
     let has_flag = |config: &str| {
         config.lines().any(|line| {
@@ -45,6 +46,194 @@ pub(crate) fn write_config(config_path: &Path, block: &str, force: bool) -> Resu
         );
     }
     Ok(())
+}
+
+fn replace_config(path: &Path, contents: &str) -> Result<()> {
+    // Follow an operator-managed symlink and replace its target atomically.
+    let path = match fs::canonicalize(path) {
+        Ok(path) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => path.to_path_buf(),
+        Err(error) => {
+            return Err(error).with_context(|| format!("resolve Codex config `{}`", path.display()))
+        }
+    };
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)
+        .with_context(|| format!("stage Codex config `{}`", path.display()))?;
+    temporary.write_all(contents.as_bytes())?;
+    temporary.as_file().sync_all()?;
+    temporary
+        .persist(&path)
+        .with_context(|| format!("replace Codex config `{}`", path.display()))?;
+    Ok(())
+}
+
+const BEARER_FILE: &str = "HUBU_UNIFIED_HUBU_BEARER_TOKEN_FILE";
+const STATE_PATH: &str = "HUBU_UNIFIED_OPERATION_STATE_PATH";
+const PROMPT_TOOL: &str = "hubu_prompt_spend_approval";
+const RETIRED_APPROVAL_TOOL: &str = "hubu_resolve_spend_approval";
+const RETIRED_ENV: &[&str] = &[
+    "HUBU_UNIFIED_HUBU_BEARER_TOKEN",
+    "HUBU_AUTH_TOKEN",
+    "HUBU_AUTH_TOKEN_FILE",
+    "HUBU_APPROVAL_TOKEN",
+    "HUBU_APPROVAL_TOKEN_FILE",
+    "HUBU_RECONCILIATION_TOKEN",
+    "HUBU_RECONCILIATION_TOKEN_FILE",
+    "HUBU_MCP_TRUST_CLIENT_APPROVAL",
+    "HUBU_MCP_TRUST_SPEND_APPROVAL",
+];
+
+fn stale_profile_block(
+    existing: &str,
+    handoff: &crate::stack::CodexHandoff,
+) -> Result<Option<toml::Table>> {
+    let Some((start, end)) = managed_block_range(existing)? else {
+        return Ok(None);
+    };
+    let block = existing
+        .lines()
+        .skip(start + 1)
+        .take(end - start - 1)
+        .collect::<Vec<_>>();
+    let managed = toml::from_str::<toml::Table>(&join_lines(&block))
+        .map_err(|_| anyhow!("the Hubu-managed Codex configuration is invalid TOML"))?;
+    let Some(server) = managed
+        .get("mcp_servers")
+        .and_then(|servers| servers.get("hubu"))
+    else {
+        return Ok(None);
+    };
+    let Some(env) = server.get("env") else {
+        return Ok(None);
+    };
+    let references = |key: &str, path: &Path| {
+        env.get(key)
+            .and_then(toml::Value::as_str)
+            .map(Path::new)
+            .is_some_and(|configured| {
+                configured == path
+                    || fs::canonicalize(configured).is_ok_and(|resolved| {
+                        fs::canonicalize(path).is_ok_and(|expected| expected == resolved)
+                    })
+            })
+    };
+    let matches_profile = if env.get(STATE_PATH).is_some() {
+        references(STATE_PATH, &handoff.operation_state_path)
+    } else {
+        references(BEARER_FILE, &handoff.hubu_token_file)
+            || handoff
+                .agent_token_file
+                .as_deref()
+                .is_some_and(|path| references(BEARER_FILE, path))
+    };
+    if !matches_profile {
+        return Ok(None);
+    }
+    let agent = handoff.agent_bearer_file()?;
+    let has_prompt = server
+        .get("tools")
+        .and_then(|tools| tools.get(PROMPT_TOOL))
+        .is_some();
+    let stale = !references(BEARER_FILE, agent)
+        || !has_prompt
+        || RETIRED_ENV.iter().any(|key| env.get(*key).is_some());
+    Ok(stale.then_some(managed))
+}
+
+pub(crate) fn profile_config_is_stale(
+    path: &Path,
+    handoff: &crate::stack::CodexHandoff,
+) -> Result<bool> {
+    Ok(stale_profile_block(&read_config(path)?, handoff)?.is_some())
+}
+
+pub(crate) fn migrate_profile_config(
+    path: &Path,
+    handoff: &crate::stack::CodexHandoff,
+    save_folders_file: &Path,
+) -> Result<bool> {
+    let existing = read_config(path)?;
+    let Some(mut managed) = stale_profile_block(&existing, handoff)? else {
+        return Ok(false);
+    };
+    let server = managed
+        .get_mut("mcp_servers")
+        .and_then(|servers| servers.get_mut("hubu"))
+        .and_then(toml::Value::as_table_mut)
+        .ok_or_else(|| anyhow!("the Hubu-managed Codex server is not a table"))?;
+    // Only update Hubu-owned connection settings. Keep an operator's
+    // explicit disabled state, wrappers, timeouts, and other tool settings.
+    if server
+        .get("command")
+        .and_then(toml::Value::as_str)
+        .is_some_and(|value| {
+            Path::new(value)
+                .file_name()
+                .is_some_and(|name| name == "hubu-unified-mcp")
+        })
+    {
+        server.insert(
+            "command".into(),
+            handoff.mcp_server.display().to_string().into(),
+        );
+    }
+    let env = server
+        .get_mut("env")
+        .and_then(toml::Value::as_table_mut)
+        .ok_or_else(|| anyhow!("the Hubu-managed Codex server environment is not a table"))?;
+    for key in RETIRED_ENV {
+        env.remove(*key);
+    }
+    for (key, value) in [
+        (
+            BEARER_FILE,
+            handoff.agent_bearer_file()?.display().to_string(),
+        ),
+        (
+            STATE_PATH,
+            handoff.operation_state_path.display().to_string(),
+        ),
+        ("HUBU_UNIFIED_HUBU_ENDPOINT", handoff.hubu_endpoint.clone()),
+    ] {
+        env.insert(key.into(), value.into());
+    }
+    env.entry("HUBU_UNIFIED_SAVE_FOLDERS_FILE".to_owned())
+        .or_insert_with(|| save_folders_file.display().to_string().into());
+    let gongbu_endpoint = "HUBU_UNIFIED_GONGBU_ENDPOINT";
+    let gongbu_bearer = "HUBU_UNIFIED_GONGBU_BEARER_TOKEN_FILE";
+    if let Some((endpoint, token)) = handoff
+        .gongbu_endpoint
+        .as_ref()
+        .zip(handoff.gongbu_token_file.as_ref())
+    {
+        env.insert(gongbu_endpoint.into(), endpoint.clone().into());
+        env.insert(gongbu_bearer.into(), token.display().to_string().into());
+    } else {
+        env.remove(gongbu_endpoint);
+        env.remove(gongbu_bearer);
+    }
+
+    let tools = server
+        .entry("tools".to_owned())
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+        .as_table_mut()
+        .ok_or_else(|| anyhow!("the Hubu-managed Codex tools configuration is not a table"))?;
+    tools.remove(RETIRED_APPROVAL_TOOL);
+    tools.entry(PROMPT_TOOL.to_owned()).or_insert_with(|| {
+        toml::Value::Table(toml::Table::from_iter([(
+            "approval_mode".to_owned(),
+            "approve".into(),
+        )]))
+    });
+    let managed =
+        toml::to_string(&managed).context("serialize the updated Hubu-managed Codex block")?;
+    let block = format!("{MANAGED_BEGIN}\n{managed}{MANAGED_END}\n");
+    replace_config(path, &upsert(&existing, &block, false)?)?;
+    Ok(true)
 }
 
 pub(crate) fn unified_block(config: UnifiedConfig<'_>) -> String {
@@ -234,6 +423,68 @@ mod tests {
             "[mcp_servers.hubu.tools.hubu_prompt_spend_approval]\napproval_mode = \"approve\""
         ));
         toml::from_str::<toml::Value>(&block).unwrap();
+    }
+
+    #[test]
+    fn upgrades_only_the_started_profiles_managed_block() {
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join("config.toml");
+        let existing = append_block(r#"model = "keep-me""#, &format!(
+            "{MANAGED_BEGIN}\n[mcp_servers.hubu]\ncommand = \"old-mcp\"\nenabled = false\nargs = [\"--wrapper\"]\ntool_timeout_sec = 99\n\n[mcp_servers.hubu.env]\n{BEARER_FILE} = \"/profiles/alpha/owner\"\nHUBU_MCP_TRUST_CLIENT_APPROVAL = \"1\"\nHUBU_APPROVAL_TOKEN_FILE = \"/profiles/alpha/retired\"\nHUBU_UNIFIED_OPERATION_KEY_DB = \"/custom/operation-keys.sqlite3\"\n[mcp_servers.hubu.tools.custom]\napproval_mode = \"prompt\"\n{MANAGED_END}\n"));
+        fs::write(&config, &existing).unwrap();
+        let handoff = |name: &str| {
+            serde_json::from_value(serde_json::json!({
+                "schema_version": 2,
+                "mcp_server": "/new/hubu-unified-mcp",
+                "hubu_endpoint": "http://127.0.0.1:8787",
+                "hubu_token_file": format!("/profiles/{name}/owner"),
+                "agent_token_file": format!("/profiles/{name}/agent"),
+                "operation_state_path": format!("/profiles/{name}/operations.sqlite3"),
+            }))
+            .unwrap()
+        };
+        let save_folders = Path::new("/custom/save-folders.json");
+        assert!(!migrate_profile_config(&config, &handoff("beta"), save_folders).unwrap());
+        assert_eq!(read_config(&config).unwrap(), existing);
+
+        assert!(profile_config_is_stale(&config, &handoff("alpha")).unwrap());
+        assert!(migrate_profile_config(&config, &handoff("alpha"), save_folders).unwrap());
+        let upgraded = read_config(&config).unwrap();
+        assert!(upgraded.contains(r#"model = "keep-me""#));
+        assert!(
+            upgraded.contains(r#"HUBU_UNIFIED_HUBU_BEARER_TOKEN_FILE = "/profiles/alpha/agent""#)
+        );
+        assert!(upgraded
+            .contains(r#"HUBU_UNIFIED_OPERATION_KEY_DB = "/custom/operation-keys.sqlite3""#));
+        let parsed = toml::from_str::<toml::Value>(&upgraded).unwrap();
+        let hubu = &parsed["mcp_servers"]["hubu"];
+        assert_eq!(hubu["enabled"].as_bool(), Some(false));
+        assert_eq!(hubu["command"].as_str(), Some("old-mcp"));
+        assert_eq!(
+            hubu["args"].as_array().unwrap()[0].as_str(),
+            Some("--wrapper")
+        );
+        assert_eq!(hubu["tool_timeout_sec"].as_integer(), Some(99));
+        assert_eq!(
+            hubu["tools"]["custom"]["approval_mode"].as_str(),
+            Some("prompt")
+        );
+        assert!(upgraded.contains("hubu_prompt_spend_approval"));
+        assert!(!upgraded.contains("/profiles/alpha/owner"));
+        assert!(!upgraded.contains("HUBU_APPROVAL_TOKEN_FILE"));
+        assert!(!upgraded.contains("HUBU_MCP_TRUST_CLIENT_APPROVAL"));
+        assert!(!profile_config_is_stale(&config, &handoff("alpha")).unwrap());
+        assert!(!migrate_profile_config(&config, &handoff("alpha"), save_folders).unwrap());
+        assert_eq!(read_config(&config).unwrap(), upgraded);
+        // A literal bearer takes precedence over the file in unified MCP.
+        let shadowed = upgraded.replace(
+            "[mcp_servers.hubu.env]",
+            "[mcp_servers.hubu.env]\nHUBU_UNIFIED_HUBU_BEARER_TOKEN = \"owner-bearer-override\"",
+        );
+        fs::write(&config, shadowed).unwrap();
+        assert!(profile_config_is_stale(&config, &handoff("alpha")).unwrap());
+        assert!(migrate_profile_config(&config, &handoff("alpha"), save_folders).unwrap());
+        assert_eq!(read_config(&config).unwrap(), upgraded);
     }
 
     #[test]

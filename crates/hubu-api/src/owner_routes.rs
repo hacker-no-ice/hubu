@@ -9,7 +9,7 @@
 //! never blocks other requests.
 use super::*;
 use hubu_core::persistence::OwnerPresenceRecord;
-use owner_presence::{sanitize_id, sanitize_label, OwnerClient, PresenceMethod, PromptRefusal};
+use owner_presence::{prompt_label, sanitize_id, OwnerClient, PresenceMethod, PromptRefusal};
 
 const INVALID_OWNER_ACTION_ERROR_CODE: &str = "invalid_owner_action";
 const OWNER_ACTION_TARGET_NOT_FOUND_ERROR_CODE: &str = "owner_action_target_not_found";
@@ -531,7 +531,7 @@ fn agent_name(state: &ServerState, agent_pub_id: &str) -> Result<String> {
                 .find(|agent| agent["agent_id"].as_str() == Some(agent_pub_id))
         })
         .and_then(|agent| agent["display_name"].as_str())
-        .map(sanitize_label)
+        .map(prompt_label)
         .ok_or_else(|| {
             anyhow::Error::new(UnknownOwnerTarget(format!(
                 "unknown agent `{}`",
@@ -603,7 +603,7 @@ fn owner_action_spec(
         ("POST", "/init") => {
             let map = body_object(&request.body)?;
             let username = body_str(&map, "username")
-                .map_or_else(|| "the default user".to_string(), sanitize_label);
+                .map_or_else(|| "the default user".to_string(), prompt_label);
             action(
                 "user.init",
                 format!("initialize Hubu for owner {username}"),
@@ -629,7 +629,7 @@ fn owner_action_spec(
             let old_name = agent_name(state, agent_id)?;
             action(
                 "agent.rename",
-                format!("rename agent {old_name} to {}", sanitize_label(new_name)),
+                format!("rename agent {old_name} to {}", prompt_label(new_name)),
                 vec![sanitize_id(agent_id)],
             )
         }
@@ -739,7 +739,7 @@ fn approval_spec(
     let name = agent_name(state, agent_id).unwrap_or_else(|_| sanitize_id(agent_id));
     Ok(Some(OwnerActionSpec {
         action: "spend.approval.approve",
-        reason: format!("approve {amount} on {target} for agent {name}"),
+        reason: format!("get your approval for {name} to spend up to {amount} on {target}"),
         targets: vec![sanitize_id(approval_request_id), sanitize_id(agent_id)],
         kind: ActionKind::Approval,
     }))

@@ -17,10 +17,12 @@ import json
 from pathlib import Path
 import re
 
+from catalog import load_catalog
 from verification import Evidence
 
 VERDICT_LABELS = {'holds': 'Holds', 'holds-with-caveat': 'Holds with caveat', 'does-not-hold': 'Does not hold', 'not-tested': 'Not tested'}
 TIER_LABELS = {'verified': 'Verified', 'partially-verified': 'Partially verified', 'unverified': 'Unverified', 'does-not-hold': 'Does not hold'}
+UNCOUNTED_LABELS = {'out-of-scope': 'Out of scope', 'not-applicable': 'Not applicable'}
 PLACEHOLDER = 'export const report = null as ReleaseReport | null;'
 REPORT_PREFIX = 'export const report: ReleaseReport = '
 WRAPPER = '''import { analysisMetadata, ReleaseAnalysis } from "../../components/ReleaseAnalysis";
@@ -90,10 +92,6 @@ def observations(episode, evidence, records):
     return summary, metrics
 
 
-def load_catalog(root):
-    return read(root / 'site/app/releases/claims.json')
-
-
 def documented_gaps(root, release):
     # The same per-release known gaps the site reads (site/app/releases/assessments.json).
     path = root / 'site/app/releases/assessments.json'
@@ -101,8 +99,8 @@ def documented_gaps(root, release):
 
 
 def challenge_status(challenge, report, documented=None):
-    if challenge['status'] == 'out-of-scope':
-        return 'out-of-scope'
+    if challenge['status'] in UNCOUNTED_LABELS:
+        return challenge['status']
     episode = report['episodes'].get(challenge.get('kit') or '')
     if episode:
         return episode['verdict']
@@ -112,7 +110,7 @@ def challenge_status(challenge, report, documented=None):
 def claim_tier(claim_id, catalog, report, documented=None):
     """Verified when every in-scope challenge holds; any failure means the claim does not hold."""
     statuses = [challenge_status(c, report, documented) for c in catalog['challenges'] if c['claim'] == claim_id]
-    in_scope = [s for s in statuses if s != 'out-of-scope']
+    in_scope = [s for s in statuses if s not in UNCOUNTED_LABELS]
     held = sum(s in ('holds', 'holds-with-caveat') for s in in_scope)
     if 'does-not-hold' in in_scope:
         tier = 'does-not-hold'
@@ -156,12 +154,13 @@ def claims_section(catalog, report, documented):
     for claim in catalog['claims']:
         tier = claim_tier(claim['id'], catalog, report, documented)
         lines.append(f'| {claim["id"]} · {claim["title"]} | {TIER_LABELS[tier["tier"]]} | {tier["held"]} of {tier["total"]} |')
-    lines += ['', 'Out-of-scope challenges are not counted. Untested, planned and blocked challenges count as not holding,',
+    lines += ['', 'Out-of-scope and not-applicable challenges are omitted from the totals.',
+              'Untested, planned and blocked challenges count as not holding,',
               'and any failed challenge means its claim does not hold.', '', '## Challenges', '',
               '| Challenge | Status | Kit |', '| --- | --- | --- |']
     for challenge in catalog['challenges']:
         status = challenge_status(challenge, report, documented)
-        label = 'Out of scope' if status == 'out-of-scope' else VERDICT_LABELS[status]
+        label = (VERDICT_LABELS | UNCOUNTED_LABELS)[status]
         if status == 'does-not-hold' and challenge.get('kit') not in report['episodes']:
             label = 'Known gap (documented)'
         if status == 'not-tested' and challenge['status'] in ('planned', 'blocked'):
@@ -226,12 +225,17 @@ def main():
     catalog = load_catalog(root)
     present = [episode for episode in catalog['kits'] if (args.evidence / episode / 'run.json').exists()]
     runs = [read(args.evidence / episode / 'run.json') for episode in present]
+    if any(run.get('build_mode', 'release') != 'release' for run in runs):
+        parser.error('Publication requires a published stable release run; commit rehearsals are private qualification evidence')
     if not runs or any(run.get('kits_worktree_dirty') is not False for run in runs):
         parser.error('Publication requires captured provenance from a clean committed kits checkout')
     identities = {(run.get('release'), run.get('source_commit')) for run in runs}
     if len(identities) != 1 or None in next(iter(identities)):
         parser.error('All included episodes must test one released source with recorded provenance')
     RELEASE, SOURCE = next(iter(identities))
+    catalog = load_catalog(root, RELEASE)
+    if set(present) - catalog['kits'].keys():
+        parser.error(f'The run includes episodes outside the {RELEASE} catalog')
     if not re.fullmatch(r'v\d+\.\d+\.\d+', RELEASE) or not re.fullmatch('[0-9a-f]{40}', SOURCE):
         parser.error('Captured release identity is malformed')
     if any(run.get('binary_versions', {}).get(binary, {}).get('source_commit') != SOURCE

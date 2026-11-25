@@ -73,8 +73,10 @@ jobs:
           # lacks (supplement mode never replaces a published result).
           read -r mode kits < <(python3 - "${release}" <<'PY'
           import json, pathlib, sys
+          sys.path.insert(0, 'break-hubu')
+          from catalog import load_catalog
           release = sys.argv[1]
-          catalog = json.loads(pathlib.Path('site/app/releases/claims.json').read_text())
+          catalog = load_catalog(pathlib.Path.cwd(), release)
           report = pathlib.Path(f'site/app/releases/{release}/report.ts').read_text()
           if 'export const report = null as ReleaseReport | null;' in report:
               print('full', ','.join(catalog['kits']))

@@ -74,6 +74,12 @@ dialog. Each action has its own dialog and may wait up to 60 seconds.
 Touch ID.
 
 On **Approvals**, each pending row has **Review**, **Approve** and **Deny**.
+**Review** opens that request’s details, including agent-provided context,
+the stored execution scope and amount, and the policy decision. The **Review
+request** link from chat opens the same view. Sign in to the portal first,
+then follow the link. Choose **Approve** from the review to open Touch ID.
+A resolved request opens with its final status.
+
 Approving reserves budget for the agent and clears the request from the pending
 list. Pressing **Deny** in the Touch ID dialog also closes the request. The
 agent can submit a new spend request if needed. If the dialog times out, the

@@ -455,12 +455,7 @@ fn spend_approval_request_id(arguments: &Value, tool_name: &str) -> Result<Strin
         .get("approval_request_id")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("{tool_name} requires approval_request_id"))?;
-    if approval_request_id.is_empty()
-        || approval_request_id.len() > 255
-        || !approval_request_id.chars().all(|character| {
-            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.' | ':')
-        })
-    {
+    if !crate::is_safe_approval_request_id(approval_request_id) {
         bail!("{tool_name} requires approval_request_id to be a safe identifier");
     }
     Ok(approval_request_id.to_string())

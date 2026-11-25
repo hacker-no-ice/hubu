@@ -111,6 +111,10 @@ class RendererGuards(unittest.TestCase):
         self.write_run("ep01-runaway", binary_versions={"hubu": version, "hubu-server": version})
         self.assertIn("must match the released source", self.render().stderr)
 
+    def test_refuses_commit_rehearsals_for_publication(self):
+        self.write_run("ep01-runaway", build_mode="commit")
+        self.assertIn("commit rehearsals are private qualification evidence", self.render().stderr)
+
 
     def test_card_and_supplement_never_copy_private_capture_data(self):
         marker = "/Users/private-capture-marker"
@@ -144,6 +148,18 @@ class RendererGuards(unittest.TestCase):
 
 
 class SiteContract(unittest.TestCase):
+    def test_v030_catalog_does_not_regrade_earlier_releases(self):
+        renderer = load_renderer()
+        previous = renderer.load_catalog(ROOT, "v0.2.5")
+        candidate = renderer.load_catalog(ROOT, "v0.3.0")
+        self.assertIn("C6", [claim["id"] for claim in previous["claims"]])
+        self.assertNotIn("C6", [claim["id"] for claim in candidate["claims"]])
+        self.assertIn("C5.5", [item["id"] for item in previous["challenges"]])
+        self.assertNotIn("C5.5", [item["id"] for item in candidate["challenges"]])
+        report = {"episodes": {}}
+        self.assertEqual(renderer.claim_tier("C1", previous, report)["total"], 6)
+        self.assertEqual(renderer.claim_tier("C1", candidate, report)["total"], 5)
+
     def test_rendered_tiers_include_documented_gaps_like_the_site(self):
         renderer = load_renderer()
         report = {"episodes": {kit: {"verdict": "holds"} for kit in ("ep01-runaway", "ep02-last-cent", "ep03-crash-recovery", "ep04-many-clients")}}
