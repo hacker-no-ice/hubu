@@ -67,7 +67,7 @@ async function main() {
     const cli = (...args) => execFileSync(join(bin, 'hubu'), ['--url', serverUrl, ...args],
       { cwd: directory, env, encoding: 'utf8' });
     cli('register', 'human', '--username', 'fixture-owner', '--display-name', 'Fixture owner');
-    const agent = cli('register', 'agent', '--name', 'fixture-agent', '--version', 'browser-test');
+    const agent = cli('register', 'agent', '--name', 'fixture agent', '--version', 'browser-test');
     const agentId = agent.match(/^\s+agent_id:\s+(\S+)/m)[1];
     const accountId = agent.match(/^\s+account_id:\s+(\S+)/m)[1];
     const policy = join(directory, 'policy.yaml');
@@ -215,7 +215,7 @@ async function main() {
     await page.goto(approvalUrl(approvedId));
     await page.reload();
     await expectReview();
-    await page.getByText('Hubu requests your approval for fixture-agent to spend up to 1.00 USD with Black Forest Labs FLUX.', { exact: true }).waitFor();
+    await page.getByText('Hubu requests your approval for fixture agent to spend up to 1.00 USD with Black Forest Labs FLUX.', { exact: true }).waitFor();
     await page.getByText('flux-2-klein-4b', { exact: true }).waitFor();
     await page.getByText('2k', { exact: true }).waitFor();
     await assertApproval(approvedId, 'pending');
@@ -234,6 +234,10 @@ async function main() {
     assert.equal(confirmations.length, 1);
     assert.equal(confirmations[0].outcome, 'confirmed');
     assert.equal(confirmations[0].method, 'fixture');
+    assert.equal(
+      confirmations[0].reason,
+      'get your approval for "fixture agent" to spend up to 1.00 USD on black-forest-labsflux/flux-2-klein-4b',
+    );
 
     await page.goto(approvalUrl(approvedId));
     await expectReview();

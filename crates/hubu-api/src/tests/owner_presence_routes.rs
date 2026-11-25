@@ -625,27 +625,25 @@ fn reasons_are_built_from_stored_data_and_resist_hostile_names() {
         json!({ "name": hostile, "version": "v1" }).to_string(),
         &state,
     );
-    // Registration may reject control characters; fall back to a long name.
-    let agent = agent.unwrap_or_else(|_| {
-        register_agent(
-            json!({ "name": format!("x{}", "y".repeat(60)), "version": "v1" }).to_string(),
-            &state,
-        )
-        .unwrap()
-    });
+    // Registration may reject control characters. The fallback exercises truncation.
+    let (agent, expected_name) = match agent {
+        Ok(agent) => (agent, r#""evil approve 9999 now""#.to_string()),
+        Err(_) => (
+            register_agent(
+                json!({ "name": format!("x{}", "y".repeat(60)), "version": "v1" }).to_string(),
+                &state,
+            )
+            .unwrap(),
+            format!("x{}", "y".repeat(31)),
+        ),
+    };
     fixture(&state, "deny");
     let refused = route(create_budget_request(&agent.agent_id, "7.5"), &state);
     assert_eq!(refused.body["error_code"], "owner_presence_denied");
-    let reason = records(&state)[0]["reason"].as_str().unwrap().to_string();
-    assert!(
-        reason.starts_with("create a 7.50 USD budget for "),
-        "{reason}"
+    assert_eq!(
+        records(&state)[0]["reason"],
+        format!("create a 7.50 USD budget for {expected_name}")
     );
-    let name = reason.trim_start_matches("create a 7.50 USD budget for ");
-    assert!(name.len() <= 32, "{name}");
-    assert!(name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')));
 
     for (request, expected) in [
         (
@@ -684,10 +682,10 @@ fn reasons_are_built_from_stored_data_and_resist_hostile_names() {
         assert!(reason.starts_with(expected), "{reason} vs {expected}");
         assert!(!reason.contains('\n'));
     }
-    assert!(records(&state)[1]["reason"]
-        .as_str()
-        .unwrap()
-        .ends_with(" to newname"));
+    assert_eq!(
+        records(&state)[1]["reason"],
+        format!(r#"rename agent {expected_name} to "new name""#)
+    );
     std::fs::remove_file(path).ok();
 }
 

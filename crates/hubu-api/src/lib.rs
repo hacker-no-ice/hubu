@@ -13598,7 +13598,7 @@ rules: []
             .iter()
             .all(|record| record["action"] == "spend.approval.approve"
                 && record["reason"].as_str().unwrap()
-                    == "approve 6.00 USD on AcmeCafe for agent approval-owner-boundary-agent"));
+                    == "get your approval for approval-owner-boundary-agent to spend up to 6.00 USD on AcmeCafe"));
         std::fs::remove_file(path).ok();
     }
 
