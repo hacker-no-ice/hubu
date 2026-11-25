@@ -107,6 +107,7 @@ class Runtime:
         self.url = context['url']
         self.owner = owner
         self.server = None
+        self.presence_answer = 'confirm'
 
     def note(self, text):
         with (self.output / 'transcript.txt').open('a') as stream:
@@ -298,7 +299,7 @@ class Runtime:
             command = [str(Path(self.context['binary_directory']) / 'hubu-server'), 'serve', '--config', str(self.private / 'server.json')]
             self.note('$ ' + shlex.join(command))
             env = dict(self.environment(), HUBU_OWNER_PRESENCE_PROVIDER='fixture',
-                       HUBU_OWNER_PRESENCE_FIXTURE='confirm')
+                       HUBU_OWNER_PRESENCE_FIXTURE=self.presence_answer)
             with (self.private / 'server.log').open('a') as log:
                 self.server = subprocess.Popen(command, cwd=self.private, env=env, stdout=log, stderr=log)
             for _ in range(100):
@@ -311,11 +312,22 @@ class Runtime:
             event = dict(event='restart', at=now(), pid=self.server.pid)
             append(self.output / 'process-events.jsonl', event); return event
         if action == 'approve':
-            self.note('OWNER STEP: human approval decision with the approval capability; capability stays in parent')
-            token = (self.private / 'approval.token').read_text().strip()
-            return self.request('POST', '/spend/approval/resolve',
-                                {'approval_request_id': kwargs['approval_request_id'], 'decision': kwargs['decision']},
-                                label=kwargs['label'], headers={'x-hubu-approval-capability': token})
+            body = {'approval_request_id': kwargs['approval_request_id'], 'decision': kwargs['decision']}
+            legacy_capability = {'x-hubu-approval-capability': (self.private / 'approval.token').read_text().strip()}
+            if self.context['owner_presence']:
+                if kwargs['decision'] == 'deny' and self.context['episode'] == 'ep10-self-approval':
+                    # Model a readable owner credential and retired capability with explicitly provisioned test inputs.
+                    approval = dict(body, decision='approve')
+                    self.request('POST', '/spend/approval/resolve', approval,
+                                 label='owner-without-confirmation', headers={**legacy_capability, 'x-hubu-no-prompt': '1'})
+                    self.request('POST', '/spend/approval/resolve', approval,
+                                 label='owner-presence-unavailable', headers=legacy_capability)
+                    self.request('GET', '/spend/approval?approval_request_id=' + kwargs['approval_request_id'],
+                                 label='pending-after-owner-presence-refusal')
+                self.note('OWNER STEP: scripted presence for approval; denial uses the owner credential')
+                return self.request('POST', '/spend/approval/resolve', body, label=kwargs['label'])
+            self.note('OWNER STEP: human approval decision with the legacy approval capability')
+            return self.request('POST', '/spend/approval/resolve', body, label=kwargs['label'], headers=legacy_capability)
         if action == 'reconcile':
             claim, receipt = kwargs['claim'], kwargs['receipt']; cost = receipt['actual_vendor_cost']
             self.note('OWNER STEP: explicit reconciliation of a synthetic known bill; capability stays in parent')
@@ -332,15 +344,18 @@ class Runtime:
 
 
 def run_episode(attack, verify, *, episode, budget, short_lease=False, policy=POLICY, setup=None, observe=None):
-    parser = argparse.ArgumentParser(description=episode + ': unchanged released Hubu, synthetic executor')
-    parser.add_argument('--release', help='published stable tag, such as v0.2.5'); parser.add_argument('--output'); parser.add_argument('--cache')
+    parser = argparse.ArgumentParser(description=episode + ': exact Hubu source, synthetic executor')
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument('--release', help='published stable tag, such as v0.2.5')
+    source.add_argument('--commit', help='full SHA of a Hubu source commit')
+    parser.add_argument('--output'); parser.add_argument('--cache')
     parser.add_argument('--attack-context', help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.attack_context:
         attack(Runtime(json.loads(Path(args.attack_context).read_text())))
         return
-    if not args.release:
-        parser.error('--release is required, such as --release v0.2.5')
+    if not (args.release or args.commit):
+        parser.error('choose --release or --commit')
     output = Path(args.output).resolve() if args.output else Path(tempfile.mkdtemp(prefix=episode + '-evidence-'))
     if output.exists() and any(output.iterdir()): raise RuntimeError('Output must be a fresh empty directory')
     output.mkdir(parents=True, exist_ok=True)
@@ -351,7 +366,7 @@ def run_episode(attack, verify, *, episode, budget, short_lease=False, policy=PO
     rt = None; child = None; started = time.monotonic(); error = None
     print('Evidence:', output, flush=True)
     try:
-        metadata = build(args.release, args.cache)
+        metadata = build(args.release, args.cache, commit=args.commit)
         context.update(metadata)
         with socket.socket() as listener:
             listener.bind(('127.0.0.1', 0)); port = listener.getsockname()[1]
@@ -387,8 +402,12 @@ def run_episode(attack, verify, *, episode, budget, short_lease=False, policy=PO
         context['agent_file'] = config.get('agent_token_file', context['auth_file'])
         rt.note(validation.stdout)
         rt.restart()
+        presence = rt.request('GET', '/owner/presence', label='owner-presence-discovery')
+        context['owner_presence'] = presence['status'] == 200
+        if tuple(map(int, metadata['release'][1:].split('.'))) >= (0, 3, 0) and not context['owner_presence']:
+            raise RuntimeError('The source must support owner presence for the v0.3.0 assurance claims')
         rt.cli('register', 'human', '--username', 'proof-kit-owner', '--display-name', 'Synthetic proof-kit owner')
-        registration = rt.cli('register', 'agent', '--name', episode, '--version', args.release)['stdout']
+        registration = rt.cli('register', 'agent', '--name', episode, '--version', metadata['release'])['stdout']
         context['ids'] = {key: re.search(r'\b' + key + r':\s*(\S+)', registration).group(1)
                           for key in ('agent_id', 'account_id')}
         rt.ids = context['ids']
@@ -413,7 +432,7 @@ def run_episode(attack, verify, *, episode, budget, short_lease=False, policy=PO
         dirty = bool(subprocess.check_output(['git', '-C', str(kits_root), 'status', '--porcelain'], text=True).strip())
         save(output / 'run.json', dict(**metadata, episode=episode, budget=budget, currency='usd',
              lease_profile=context['lease_profile'], claim_ttl_seconds=30 if short_lease else 900,
-             credential_split=context['credential_split'],
+             credential_split=context['credential_split'], owner_presence=context['owner_presence'],
              kits_commit=kits_commit, kits_worktree_dirty=dirty, platform=platform.platform(), machine=platform.machine(),
              python=sys.version, started_at=now(), ids=rt.ids, invocation=sys.argv))
         # The attack process holds only the agent credential (plus the executor
@@ -424,6 +443,11 @@ def run_episode(attack, verify, *, episode, budget, short_lease=False, policy=PO
         rt.snapshot('initial')
         if observe:
             observe(rt, 'initial')
+        if context['owner_presence'] and episode == 'ep10-self-approval':
+            # Fixture setup needs confirmation. During this regression check
+            # every prompt remains unconfirmed, and explicit deny still works.
+            rt.presence_answer = 'unavailable'
+            rt.restart()
         command = [sys.executable, str(Path(sys.argv[0]).resolve()), '--attack-context', str(child_context)]
         error_path = private / 'attack-stderr.txt'
         with error_path.open('w') as errors:
@@ -445,7 +469,9 @@ def run_episode(attack, verify, *, episode, budget, short_lease=False, policy=PO
         if rt: rt.note('INCOMPLETE: ' + error)
         else: (output / 'transcript.txt').write_text('INCOMPLETE SETUP: ' + error + '\n')
         if not (output / 'run.json').exists():
-            save(output / 'run.json', dict(release=args.release, episode=episode, budget=budget,
+            save(output / 'run.json', dict(release=context.get('release', args.release),
+                 build_mode='commit' if args.commit else 'release', source_commit=args.commit,
+                 episode=episode, budget=budget,
                  platform=platform.platform(), python=sys.version, invocation=sys.argv, setup_error=error))
     finally:
         if child and child.poll() is None:

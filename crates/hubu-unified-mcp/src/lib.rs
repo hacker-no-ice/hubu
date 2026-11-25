@@ -18,6 +18,7 @@ mod resume_operation;
 use std::{
     env, fmt,
     io::{self, BufRead, Write},
+    net::{Ipv4Addr, SocketAddr, SocketAddrV4},
     path::{Path, PathBuf},
     sync::{mpsc, Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -64,6 +65,9 @@ const GOVERNED_EXECUTION_WAIT_ENV: &str = "HUBU_UNIFIED_GOVERNED_EXECUTION_WAIT_
 const OPERATION_STATE_PATH_ENV: &str = "HUBU_UNIFIED_OPERATION_STATE_PATH";
 const OPERATION_KEY_DB_ENV: &str = "HUBU_UNIFIED_OPERATION_KEY_DB";
 const SAVE_FOLDERS_FILE_ENV: &str = "HUBU_UNIFIED_SAVE_FOLDERS_FILE";
+const APPROVAL_PORTAL_ADDR_ENV: &str = "HUBU_UNIFIED_APPROVAL_PORTAL_ADDR";
+const DEFAULT_APPROVAL_PORTAL_ADDR: SocketAddr =
+    SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 8790));
 const META_SHAPE_DIAGNOSTICS_ENV: &str = "HUBU_UNIFIED_META_SHAPE_DIAGNOSTICS";
 const TRUST_CLIENT_APPROVAL_ENV: &str = "HUBU_MCP_TRUST_CLIENT_APPROVAL";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -206,6 +210,8 @@ pub struct Config {
     pub preallocated_operation_key_path: Option<PathBuf>,
     /// Human-managed allowlist of artifact save folders (`hubu folders`).
     pub save_folders_path: Option<PathBuf>,
+    /// Local admin portal listener used for review links in approval responses.
+    pub approval_portal_addr: SocketAddr,
     /// Emits sanitized `tools/call` metadata shapes to stderr for client
     /// identity compatibility diagnosis. Never changes admission.
     pub meta_shape_diagnostics: bool,
@@ -222,6 +228,7 @@ impl Default for Config {
             operation_state_path: None,
             preallocated_operation_key_path: None,
             save_folders_path: None,
+            approval_portal_addr: DEFAULT_APPROVAL_PORTAL_ADDR,
             meta_shape_diagnostics: false,
         }
     }
@@ -268,6 +275,14 @@ impl Config {
         {
             return Err(ConfigError::InvalidSaveFoldersPath);
         }
+        let approval_portal_addr = match lookup(APPROVAL_PORTAL_ADDR_ENV) {
+            Some(address) => address
+                .parse()
+                .ok()
+                .filter(is_approval_portal_addr)
+                .ok_or(ConfigError::InvalidApprovalPortalAddr)?,
+            None => DEFAULT_APPROVAL_PORTAL_ADDR,
+        };
         Ok(Self {
             hubu: backend_from_values(
                 BackendOwner::Hubu,
@@ -285,6 +300,7 @@ impl Config {
             operation_state_path,
             preallocated_operation_key_path,
             save_folders_path,
+            approval_portal_addr,
             meta_shape_diagnostics: lookup(META_SHAPE_DIAGNOSTICS_ENV)
                 .is_some_and(|value| env_flag_value(&value)),
         })
@@ -391,6 +407,8 @@ pub enum ConfigError {
     InvalidOperationKeyDbPath,
     #[error("save folders file path must be absolute")]
     InvalidSaveFoldersPath,
+    #[error("HUBU_UNIFIED_APPROVAL_PORTAL_ADDR must be a numeric loopback socket address with a nonzero port")]
+    InvalidApprovalPortalAddr,
 }
 
 impl fmt::Display for BackendOwner {
@@ -515,6 +533,7 @@ pub struct Server {
     operation_registry: Arc<OperationRegistryCapability>,
     meta_shape_diagnostics: bool,
     save_folders_path: Option<PathBuf>,
+    approval_portal_addr: SocketAddr,
     #[cfg(test)]
     use_capability_snapshot_for_test: bool,
 }
@@ -596,6 +615,10 @@ impl BackendProbeTiming {
 
 impl Server {
     pub fn new(config: Config) -> Result<Self, ConfigError> {
+        let approval_portal_addr = config.approval_portal_addr;
+        if !is_approval_portal_addr(&approval_portal_addr) {
+            return Err(ConfigError::InvalidApprovalPortalAddr);
+        }
         let operation_registry = match config.operation_state_path.as_deref() {
             Some(path) if path == Path::new(":memory:") => {
                 OperationRegistryCapability::Unavailable {
@@ -656,6 +679,7 @@ impl Server {
             operation_registry: Arc::new(operation_registry),
             meta_shape_diagnostics,
             save_folders_path,
+            approval_portal_addr,
             #[cfg(test)]
             use_capability_snapshot_for_test: false,
         })
@@ -883,7 +907,7 @@ impl Server {
                 .map(str::to_owned)
         })
         .flatten();
-        let response = hubu::call_tool(self, id.clone(), call);
+        let mut response = hubu::call_tool(self, id.clone(), call);
         let Some(approval_request_id) = approval_request_id else {
             return response;
         };
@@ -907,6 +931,9 @@ impl Server {
                     -32000,
                     "approval status could not be synchronized safely",
                 );
+            }
+            if structured["approval_status"] == "pending" {
+                self.add_approval_review_link(&mut response["result"], &approval_request_id);
             }
             return response;
         }
@@ -937,7 +964,38 @@ impl Server {
                 "approval status could not be synchronized safely",
             );
         }
+        if status == "pending" {
+            self.add_approval_review_link(&mut response["result"], &approval_request_id);
+        }
         response
+    }
+
+    fn add_approval_review_link(&self, result: &mut Value, approval_request_id: &str) {
+        if !is_safe_approval_request_id(approval_request_id) {
+            return;
+        }
+        // The shared approval identifier alphabet leaves only colon to encode.
+        let encoded_id = approval_request_id.replace(':', "%3A");
+        let structured = &mut result["structuredContent"];
+        structured["review_url"] = json!(format!(
+            "http://{}/#approvals?request={encoded_id}",
+            self.approval_portal_addr,
+        ));
+        result["content"][0]["text"] =
+            json!(serde_json::to_string_pretty(structured).expect("approval result serializes"));
+    }
+
+    fn add_pending_operation_review_link(
+        &self,
+        status: &operation_registry::DurableOperationStatus,
+        result: &mut Value,
+    ) {
+        if status.state == "approval_required" {
+            if let Ok(Some(target)) = self.approval_sync_target_for_handle(&status.operation_handle)
+            {
+                self.add_approval_review_link(result, &target.approval_request_id);
+            }
+        }
     }
 
     fn list_tools(&self) -> Vec<Value> {
@@ -1358,13 +1416,16 @@ impl Server {
         };
         self.synchronize_pending_approval_for_handle(operation_handle);
         match self.durable_operation_status(operation_handle) {
-            Ok(status) => match self.observe_standalone_authorization(operation_handle) {
-                Some(observation) => success_response(
-                    id,
-                    standalone_authorization_status_result(&status, &observation),
-                ),
-                None => success_response(id, operation_status_result(&status)),
-            },
+            Ok(status) => {
+                let mut result = match self.observe_standalone_authorization(operation_handle) {
+                    Some(observation) => {
+                        standalone_authorization_status_result(&status, &observation)
+                    }
+                    None => operation_status_result(&status),
+                };
+                self.add_pending_operation_review_link(&status, &mut result);
+                success_response(id, result)
+            }
             Err(_) => error_response(
                 id,
                 -32000,
@@ -1605,7 +1666,7 @@ fn operation_status_result(status: &operation_registry::DurableOperationStatus) 
                 "Submit this authorization continuation once with gongbu_create_execution."
             }
             "approval_required" => {
-                "Human approval is required. Inspect the existing approval. After the owner says to approve in the conversation, call hubu_prompt_spend_approval. Keep using the existing operation."
+                "Human approval is required. Share review_url as Review request when present so the owner can inspect the approval in the portal. After the owner says to approve in the conversation, call hubu_prompt_spend_approval. Keep using the existing operation."
             }
             "resume_required" => {
                 "Human approval is recorded. Resume this exact operation once with hubu_resume_operation and its existing operation_handle; do not submit a replacement."
@@ -1800,6 +1861,20 @@ fn operation_result_projection(code: Option<&str>) -> Option<Value> {
     })
 }
 
+fn is_approval_portal_addr(address: &SocketAddr) -> bool {
+    address.ip().is_loopback()
+        && address.port() != 0
+        && !matches!(address, SocketAddr::V6(address) if address.scope_id() != 0)
+}
+
+fn is_safe_approval_request_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 255
+        && value.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.' | ':')
+        })
+}
+
 fn same_approval_request_id(requested: &str, returned: &str) -> bool {
     match (
         uuid::Uuid::parse_str(requested),
@@ -1946,6 +2021,33 @@ mod tests {
             config.gongbu.as_ref().unwrap().endpoint().as_str(),
             "http://127.0.0.1:8788/"
         );
+    }
+
+    #[test]
+    fn validates_approval_portal_listener() {
+        assert_eq!(
+            Config::from_lookup(lookup(&[]))
+                .unwrap()
+                .approval_portal_addr,
+            "127.0.0.1:8790".parse().unwrap(),
+        );
+        assert_eq!(
+            Config::from_lookup(lookup(&[(APPROVAL_PORTAL_ADDR_ENV, "[::1]:4567")]))
+                .unwrap()
+                .approval_portal_addr,
+            "[::1]:4567".parse().unwrap(),
+        );
+        for value in [
+            "0.0.0.0:8790",
+            "127.0.0.1:0",
+            "http://127.0.0.1:8790",
+            "[::1%1]:8790",
+        ] {
+            assert_eq!(
+                Config::from_lookup(lookup(&[(APPROVAL_PORTAL_ADDR_ENV, value)])).unwrap_err(),
+                ConfigError::InvalidApprovalPortalAddr,
+            );
+        }
     }
 
     #[test]

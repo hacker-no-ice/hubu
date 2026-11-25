@@ -564,13 +564,22 @@ fn durable_composite_response(
     server: &Server,
     id: Value,
     operation_handle: &str,
-    result: Value,
+    mut result: Value,
 ) -> Value {
     if result
         .pointer("/structuredContent/terminal")
         .and_then(Value::as_bool)
         != Some(true)
     {
+        if result["structuredContent"]["outcome"] == "approval_required" {
+            let request_id = result
+                .pointer("/structuredContent/authorization/approval/approval_request_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            if let Some(request_id) = request_id {
+                server.add_approval_review_link(&mut result, &request_id);
+            }
+        }
         return success_response(id, result);
     }
     match server.record_governed_result(operation_handle, &result) {
@@ -963,7 +972,7 @@ fn authorization_projection_for_outcome(
                 json!({
                     "action": "resolve_then_resume",
                     "operation_handle": operation_handle,
-                    "message": "Show the existing approval review. After the owner says to approve in the conversation, call hubu_prompt_spend_approval. After confirmation, continue with hubu_resume_operation and this public handle."
+                    "message": "Share review_url as Review request when present so the owner can inspect the approval in the portal. After the owner says to approve in the conversation, call hubu_prompt_spend_approval. After confirmation, continue with hubu_resume_operation and this public handle."
                 }),
             );
         }
@@ -1067,7 +1076,7 @@ fn outcome_guidance(outcome: &str, result_code: Option<&str>) -> &'static str {
     }
     match outcome {
         "approval_required" => {
-            "Human approval is required and no provider work started. After the owner says to approve in the conversation, call hubu_prompt_spend_approval for the existing approval. After confirmation, continue with hubu_resume_operation and this operation_handle."
+            "Human approval is required and no provider work started. Share review_url as Review request when present so the owner can inspect the approval in the portal. After the owner says to approve in the conversation, call hubu_prompt_spend_approval for the existing approval. After confirmation, continue with hubu_resume_operation and this operation_handle."
         }
         "resume_required" => {
             "Human approval is recorded and no provider work started. Continue this exact operation with hubu_resume_operation and this operation_handle; do not redeliver the original composite call or submit a replacement."
@@ -2260,6 +2269,10 @@ mod tests {
         );
         assert_eq!(approval["result"]["structuredContent"]["terminal"], false);
         assert_eq!(
+            approval["result"]["structuredContent"]["review_url"],
+            "http://127.0.0.1:8790/#approvals?request=approval-1",
+        );
+        assert_eq!(
             approval["result"]["structuredContent"]["authorization"]["reasons"],
             json!(["human_review_required"])
         );
@@ -2284,6 +2297,9 @@ mod tests {
         let denied = &responses[2];
         assert_eq!(denied["result"]["structuredContent"]["outcome"], "denied");
         assert_eq!(denied["result"]["structuredContent"]["terminal"], true);
+        assert!(denied["result"]["structuredContent"]
+            .get("review_url")
+            .is_none());
         assert_eq!(
             denied["result"]["structuredContent"]["authorization"]["retry_guidance"]["action"],
             "create_new_operation"

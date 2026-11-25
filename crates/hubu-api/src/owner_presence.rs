@@ -521,21 +521,26 @@ pub(crate) fn random_hex(bytes: usize) -> Result<String> {
     Ok(super::hex_encode(&buffer))
 }
 
-/// Reduces an agent-controlled label to `[A-Za-z0-9._-]`, at most 32 chars.
-pub(crate) fn sanitize_label(value: &str) -> String {
-    let cleaned: String = value
+/// Formats a display name for a native prompt using up to 32 safe characters.
+/// Quotes are added by Hubu to separate multiword names from the action text.
+pub(crate) fn prompt_label(value: &str) -> String {
+    let mut cleaned: String = value
         .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '.' | '_' | '-'))
+        .skip_while(|&c| c == ' ')
         .take(32)
         .collect();
+    cleaned.truncate(cleaned.trim_end_matches(' ').len());
     if cleaned.is_empty() {
         "unnamed".to_string()
+    } else if cleaned.contains(' ') {
+        format!("\"{cleaned}\"")
     } else {
         cleaned
     }
 }
 
-/// Like [`sanitize_label`] for public ids, which can be longer.
+/// Restricts public identifiers to `[A-Za-z0-9._-]` and at most 64 characters.
 pub(crate) fn sanitize_id(value: &str) -> String {
     let cleaned: String = value
         .chars()
@@ -692,13 +697,18 @@ mod tests {
 
     #[test]
     fn labels_are_reduced_to_a_safe_alphabet() {
-        assert_eq!(sanitize_label("design-agent"), "design-agent");
+        assert_eq!(prompt_label("design-agent"), "design-agent");
+        assert_eq!(prompt_label("  design agent  "), "\"design agent\"");
         assert_eq!(
-            sanitize_label("evil\"\n approve $9999 now"),
-            "evilapprove9999now"
+            prompt_label("evil\"\n approve $9999 now"),
+            "\"evil approve 9999 now\""
         );
-        assert_eq!(sanitize_label(&"a".repeat(80)).len(), 32);
-        assert_eq!(sanitize_label("dеsign"), "dsign"); // Cyrillic е removed
-        assert_eq!(sanitize_label("\u{202e}"), "unnamed");
+        assert_eq!(prompt_label(&"a".repeat(80)).len(), 32);
+        assert_eq!(
+            prompt_label(&format!("design {}", "a".repeat(80))),
+            format!("\"design {}\"", "a".repeat(25))
+        );
+        assert_eq!(prompt_label("dеsign"), "dsign"); // Cyrillic е removed
+        assert_eq!(prompt_label(" \u{202e} "), "unnamed");
     }
 }

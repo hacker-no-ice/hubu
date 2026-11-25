@@ -1,6 +1,6 @@
 [package]
 name = "hubu-core"
-version = "0.2.5"
+version = "0.3.0"
 description = "Policy, registration, budget, and spend orchestration for Hubu"
 edition.workspace = true
 homepage.workspace = true
@@ -23,6 +23,4 @@ serde_json.workspace = true
 serde-saphyr.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
-
-[dev-dependencies]
 tempfile.workspace = true

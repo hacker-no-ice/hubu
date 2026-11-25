@@ -13,16 +13,32 @@ PRs.
    The page's system card uses `MeasuredClaims`, so until the measured report
    lands no challenge counts as holding: claims show **Unverified**, or **Does
    not hold** for challenges the page marks as documented known gaps. Add the release to
-   `/releases` and point the navbar version badge at it.
+   `/releases`. Point the navbar version badge at it after stable publication.
 2. Review the four claims, caveats and known limits against the new release.
    If the public contract the kits exercise changed (for example a new
    executor contract), update the kits first; `bootstrap.py` refuses a release
    whose binaries report a contract the kits do not support, and every claim
    then stays **not tested**.
 
+3. For v0.3.0, run the C5 proof kits on the exact intended source SHA before
+   dispatching the stable release:
+
+   ```sh
+   ./break-hubu/run-all.sh --commit "$source_commit" \
+     --kits ep09-raise-own-budget,ep10-self-approval,ep11-rewrite-ledger,ep12-misstated-approval \
+     --output /tmp/v0.3.0-candidate-evidence
+   ```
+
+   Block stable on a failed or incomplete C5 result. EP09 must pass all four
+   checks and EP10 must show that access to the owner bearer and retired
+   approval capability does not substitute for owner confirmation. Capture the
+   real macOS approval flow separately. Run the full suite to review changes
+   against v0.2.5, including the documented gaps scheduled for later releases.
+   See [v0.3.0 qualification](../docs/specs/v0.3.0-owner-agent-separation.md#13-testing).
+
 ## After the stable release is published
 
-3. The Release workflow's completion starts the System card workflow. It
+4. The Release workflow's completion starts the System card workflow. It
    resolves the newest stable release (drafts and prereleases never count),
    skips it if a card already exists or a card PR is open, and otherwise:
    - builds the exact published tag on macOS with its pinned toolchain,
@@ -49,7 +65,7 @@ PRs.
    python3 break-hubu/render-report.py --supplement /tmp/vX.Y.Z-more
    ```
 
-4. Review the PR. Save its run’s encrypted artifact to private storage before
+5. Review the PR. Save its run’s encrypted artifact to private storage before
    the 30-day Actions expiry. Inspect every result, including incomplete or
    contradicted assertions. Review ledger and authorization pages, budget coverage,
    request outcomes, operator interventions, exact arithmetic, tool and host
@@ -65,7 +81,7 @@ PRs.
    card run already tested the site; push a commit or close and reopen the PR
    to run the required checks.
 
-5. After the PR merges and the site deploys, verify the live methodology and
+6. After the PR merges and the site deploys, verify the live methodology and
    reproduction commands. Link the analysis and proof kits in the release notes.
    Keep captured logs, request traces, state exports, and archives out of the
    website, public repository, and GitHub release attachments.

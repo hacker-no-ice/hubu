@@ -1,9 +1,10 @@
 import { EngineeringHeader } from "../components/EngineeringHeader";
 import { documentMetadata } from "../lib/metadata";
+import { report as v030Report } from "./v0.3.0/report";
 
 export const metadata = documentMetadata({
   title: "Release notes", href: "/releases",
-  description: "Stable Hubu releases: what changed, upgrade notes, and the evidence and limits behind each system analysis.",
+  description: "Hubu release notes, upgrade guidance, and the evidence and limits behind each system analysis.",
 });
 
 export default function Releases() {
@@ -15,6 +16,10 @@ export default function Releases() {
         <h1>Release notes.</h1>
         <p>What changed, what to know before upgrading, and what the recorded evidence supports.</p>
       </header>
+      <a className="proof-release-link" href="/releases/v0.3.0">
+        <div><span className="proof-kicker">{v030Report ? "Stable release" : "System analysis pending"}</span><h2>v0.3.0</h2></div>
+        <div><p>Separate agent and owner credentials, with macOS confirmation for owner actions.</p><span className="proof-text-link">Read release notes and system card <span aria-hidden="true">↗</span></span></div>
+      </a>
       <a className="proof-release-link" href="/releases/v0.2.5">
         <div><span className="proof-kicker">Stable · November 6, 2026</span><h2>v0.2.5</h2></div>
         <div><p>Provider packs, a larger image catalog, image editing, model and size policy tiers, saved artifacts, and a local admin web UI.</p><span className="proof-text-link">Read release notes and system card <span aria-hidden="true">↗</span></span></div>
