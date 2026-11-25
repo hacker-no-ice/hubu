@@ -194,6 +194,11 @@ export function StackBento({ policy }: { policy: PolicyExcerpt }) {
                 <h3>Create a live profile</h3>
                 <Command>{'hubu stack init --mode live --profile "$HOME/hubu-live"'}</Command>
                 <Command>{'hubu stack select --profile "$HOME/hubu-live"'}</Command>
+                <Command>hubu stack profiles</Command>
+                <pre className="term">
+                  <span className="hd">SELECTED  DEFAULT  PATH</span>{"\n"}
+                  <span className="ok">*</span>{"                  /Users/you/hubu-live"}
+                </pre>
                 <p>One profile for Hubu, Gongbu and Temporal. Charges can happen only after the stack is started and an agent makes a governed request.</p>
               </div>
               <div className="t-keys">

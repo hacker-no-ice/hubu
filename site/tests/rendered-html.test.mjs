@@ -436,10 +436,10 @@ test("home page offers copyable commands, a mobile menu, and anchored warning", 
   const html = await (await render()).text();
   assert.doesNotMatch(html, /--profile …|--stack-profile …/);
   assert.match(html, /hubu stack init --mode live --profile &quot;\$HOME\/hubu-live&quot;/);
-  assert.equal(html.match(/<button class="copy-code"/g)?.length, 11);
+  assert.equal(html.match(/<button class="copy-code"/g)?.length, 12);
   assert.doesNotMatch(html, /--mode sandbox --profile/, "the bento shows one mode: live, matching the FLUX policy and HUD");
   assert.match(html, /No provider keys yet\?[\s\S]*?href="\/docs\/local-stack"/, "newcomers are pointed to the sandbox guide");
-  assert.match(html, /hubu stack init --mode live[\s\S]*?hubu stack select --profile &quot;\$HOME\/hubu-live&quot;[\s\S]*?contract_bindings[\s\S]*?hubu stack doctor[\s\S]*?hubu stack start[\s\S]*?hubu register agent/, "live setup runs init, select, keys, doctor, start, then registration");
+  assert.match(html, /hubu stack init --mode live[\s\S]*?hubu stack select --profile &quot;\$HOME\/hubu-live&quot;[\s\S]*?hubu stack profiles[\s\S]*?contract_bindings[\s\S]*?hubu stack doctor[\s\S]*?hubu stack start[\s\S]*?hubu register agent/, "live setup runs init, select, keys, doctor, start, then registration");
   assert.doesNotMatch(html, /hubu register human/, "the stack creates a default owner, so the bento registers only the agent");
   assert.match(html, /hubu init codex --stack-profile &quot;\$HOME\/hubu-live&quot;/, "the harness connects to the live profile the prerequisites create");
   assert.doesNotMatch(html, /hubu-sandbox/, "no step points at a sandbox profile the page never creates");
