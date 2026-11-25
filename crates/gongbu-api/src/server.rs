@@ -21,6 +21,7 @@ use crate::{
         MANAGED_CREDENTIAL_DIR_ENV,
     },
     temporal::TemporalWorkerConfig,
+    workflow::HubuActivities,
 };
 use axum::http::{header, HeaderMap};
 use chrono::SecondsFormat;
@@ -652,8 +653,6 @@ pub async fn serve_config(mut config: ServerConfig) -> Result<(), BoxError> {
         .map(|references| ReferenceLibrary::open(&references.root, limits))
         .transpose()
         .map_err(|_| invalid("reference_images.root must be an existing directory"))?;
-    refuse_orphaned_executions(&repository, providers.targets())?;
-
     let hubu_client =
         HubuClient::new(&config.hubu.endpoint).with_bearer_token(hubu_secret.expose().to_vec());
     wait_for_hubu_compatibility(&config.hubu, &hubu_client).await?;
@@ -671,6 +670,14 @@ pub async fn serve_config(mut config: ServerConfig) -> Result<(), BoxError> {
         hubu_client,
         repository.clone(),
     ));
+    // An owner-resolved accounting obligation no longer needs an archived
+    // provider configuration. Keep the ordinary exact-revision guard for
+    // anything still outstanding after these read-only Hubu checks.
+    let now = chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+    for id in repository.list_nonterminal_execution_ids()? {
+        hubu.sync_owner_resolution(&repository.get_execution(&id)?, &now)?;
+    }
+    refuse_orphaned_executions(&repository, providers.targets())?;
 
     let mut temporal_child = start_managed_temporal(&config.temporal)?;
     let temporal_address = config.temporal.address();

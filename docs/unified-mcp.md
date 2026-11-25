@@ -109,19 +109,9 @@ For a rendered local stack profile:
 hubu init codex --stack-profile /absolute/path/to/profile
 ```
 
-An explicitly gated workflow that uses the key-redacted preallocation bridge
-also supplies its non-secret, absolute helper-store coordinate:
-
-```sh
-hubu init codex \
-  --stack-profile /absolute/path/to/profile \
-  --operation-key-db /absolute/private/operation-keys.sqlite3
-```
-
-The option only renders `HUBU_UNIFIED_OPERATION_KEY_DB`; it does not create,
-inspect, or allocate a key. Omit it for ordinary operation. Create the private
-store and its first scoped record only after the workflow's separate human
-authorization gate.
+The unified MCP allocates and stores private operation keys. Agents use the
+public operation handle to check status or resume approved work. The
+operation-key skill is retired.
 
 Re-run `hubu init codex` with your existing setup options to replace the
 managed block and remove legacy trust flags and owner capability settings.
@@ -150,14 +140,6 @@ Manual MCP clients configure these inputs for the router:
 - `HUBU_UNIFIED_OPERATION_STATE_PATH`, an absolute path to the router-owned
   SQLite registry. Managed setup always renders it. A manual client may omit
   it, but new billable Hubu operations are then unavailable.
-- `HUBU_UNIFIED_OPERATION_KEY_DB`, an optional absolute path to the private
-  operation-key helper database. Use it only for an explicitly gated,
-  human-authorized workflow.
-  When configured, new trusted Codex calls require exactly one active helper
-  record whose canonical tool name and arguments match; absence, mismatch,
-  reuse, or store failure rejects the call before backend access with no
-  allocator fallback. Exact redelivery and restart use the binding already in
-  the router registry and do not reread the helper database.
 - `HUBU_UNIFIED_SAVE_FOLDERS_FILE`, an optional absolute path to the
   human-managed [save folder allowlist](#save-artifacts-into-a-project-folder).
   Managed setup renders `$HUBU_HOME/save-folders.json`.
@@ -171,6 +153,28 @@ The Gongbu caller token carries no execution identity claim. One configured
 installation caller may read known executions and artifacts across the owner's
 agents, but the API does not promise owner-wide browse/list and this local
 capability model is not strong multi-user or per-agent isolation.
+
+### Legacy preallocated-key bridge
+
+Operators maintaining an existing human-gated Codex workflow can configure its
+private helper store with `HUBU_UNIFIED_OPERATION_KEY_DB`.
+`hubu init codex --operation-key-db /absolute/private/operation-keys.sqlite3`
+writes that setting. The option only configures the path.
+
+After separate human authorization, an operator can use the
+[compatibility helper](../skills/generate-hubu-operation-key/scripts/operation_keys.py)
+with `begin-unified` to allocate one key-redacted record for the exact public
+tool name and arguments. Use `reuse-unified` to verify its scope during
+recovery and `--reference-only` when listing or closing records. Close the
+record after verifying settlement or release. Keep the store and its sidecars
+in an owner-only directory and keep private keys out of tool arguments,
+metadata, and logs.
+
+New trusted Codex calls require exactly one active matching record. A missing,
+invalid, already claimed, or inaccessible record rejects the call before
+backend access. On exact redelivery with the original trusted call ID, the
+router reuses its existing binding even after restart, without rereading the
+helper store.
 
 ## Ownership boundary
 
@@ -224,14 +228,24 @@ Hubu admin portal.
 Spend submission, authorization, and composite governed execution follow
 Hubu policy. When policy requires human approval, the composite returns
 `approval_required` before payment or provider work. Show the immutable
-approval review. After the owner says to approve in the conversation, call
-`hubu_prompt_spend_approval` with the existing approval request ID. Hubu
-shows the confirmation dialog on the owner's Mac and waits for the result.
+approval review and share the response's `review_url` as **Review request**. The link
+opens the exact request in the signed-in [admin portal](admin-ui.md). The
+owner can choose **Approve** on that page to open Touch ID. After the owner
+says to approve in the conversation, call `hubu_prompt_spend_approval` with
+the existing approval request ID. Hubu shows the confirmation dialog on the
+owner's Mac and waits for the result.
 Deny in the dialog closes the request. Timeout or an unavailable provider
 leaves the request pending. The owner can also decide through the admin portal
 or CLI. After approval, `hubu_resume_operation` continues the same operation
 by public handle. See [owner presence](owner-presence.md) for server-side
 authorization and prompt outcomes.
+
+The router builds pending approval links for `http://127.0.0.1:8790`, the
+default portal address. If you run `hubu ui --listen` on another port, set
+`HUBU_UNIFIED_APPROVAL_PORTAL_ADDR` in the MCP server's environment to its
+loopback address and port, such as `127.0.0.1:8791`. For an OS-assigned port,
+use the address printed by `hubu ui` after it starts. The link carries the
+public approval request ID. Portal sign-in uses the existing session flow.
 
 ## MCP behavior and responses
 

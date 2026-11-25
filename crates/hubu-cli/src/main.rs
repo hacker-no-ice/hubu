@@ -4082,8 +4082,8 @@ Options:
   --name      New owner-facing agent name
   --reason    Why the agent is being renamed (recorded in the revision audit)
 
-Rename is human-owner only and requires HUBU_APPROVAL_TOKEN or
-HUBU_APPROVAL_TOKEN_FILE. Budgets, policies, accounts, and ledger history stay
+Rename requires the owner to confirm the action on the Mac. Budgets,
+policies, accounts, and ledger history stay
 attached to the same agent ID, and clients registered under the previous name
 keep resolving to it with a warning.
 

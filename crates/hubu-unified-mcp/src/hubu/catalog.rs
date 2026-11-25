@@ -37,7 +37,7 @@ pub(crate) fn tool_definitions() -> Vec<Value> {
         ),
         write_tool(
             "hubu_submit_spend",
-            "Submit a mock-only spend request for demos and recover exact retries of that mock operation. Does not execute a real provider payment. Trusted harness metadata supplies normalized operation and optional task identity outside model arguments. Returns a public operation handle and decision-aware recovery guidance; a definitive denial is terminal and corrected work requires a new tool call. Human approval is only required when the decision is needs_approval.",
+            "Submit a mock-only spend request for demos and recover exact retries of that mock operation. Does not execute a real provider payment. Trusted harness metadata supplies normalized operation and optional task identity outside model arguments. Returns a public operation handle and decision-aware recovery guidance; a definitive denial is terminal and corrected work requires a new tool call. Human approval is only required when the decision is needs_approval. Share review_url as Review request when present.",
             json_schema_required(json!({
                 "account_id": { "type": "string" },
                 "amount": spend_amount_input_schema(),
@@ -50,7 +50,7 @@ pub(crate) fn tool_definitions() -> Vec<Value> {
         ),
         write_tool(
             "hubu_authorize_spend",
-            "Authorize an agent spend request. Trusted harness metadata supplies normalized operation and optional task identity outside model arguments. Returns a public operation handle and decision-aware recovery guidance without exposing the private backend operation key; a definitive denial is terminal and corrected work requires a new tool call.",
+            "Authorize an agent spend request. Trusted harness metadata supplies normalized operation and optional task identity outside model arguments. Returns a public operation handle and decision-aware recovery guidance without exposing the private backend operation key; a definitive denial is terminal and corrected work requires a new tool call. Share review_url as Review request when present.",
             json_schema_required(json!({
                 "account_id": { "type": "string" },
                 "amount": spend_amount_input_schema(),
@@ -63,7 +63,7 @@ pub(crate) fn tool_definitions() -> Vec<Value> {
         ),
         read_tool(
             "hubu_get_spend_approval",
-            "Get the durable pending, approved, or denied state and immutable human review payload for one spend approval request.",
+            "Get the durable pending, approved, or denied state and immutable human review payload for one spend approval request. Share review_url as Review request when present.",
             json_schema_required(json!({
                 "approval_request_id": { "type": "string" }
             }), &["approval_request_id"]),

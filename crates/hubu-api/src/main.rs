@@ -40,8 +40,10 @@ fn run() -> anyhow::Result<()> {
                 "HUBU_RECONCILIATION_TOKEN",
                 hubu_api::launch_config::AUTH_TOKEN_FILE_GENERATED_ENV,
                 hubu_api::launch_config::AGENT_TOKEN_FILE_GENERATED_ENV,
-                hubu_api::launch_config::APPROVAL_TOKEN_FILE_GENERATED_ENV,
-                hubu_api::launch_config::RECONCILIATION_TOKEN_FILE_GENERATED_ENV,
+                "HUBU_APPROVAL_TOKEN_FILE",
+                "HUBU_APPROVAL_TOKEN_FILE_GENERATED",
+                "HUBU_RECONCILIATION_TOKEN_FILE",
+                "HUBU_RECONCILIATION_TOKEN_FILE_GENERATED",
                 "HUBU_LOG_FILE",
                 "HUBU_LOG_STDERR",
                 "HUBU_LEASE_CONFIG",
@@ -52,11 +54,9 @@ fn run() -> anyhow::Result<()> {
             std::env::set_var("HUBU_AUTH_TOKEN_FILE", &config.auth_token_file);
             let (agent_token_file, agent_token_file_generated) = config.agent_token_destination();
             std::env::set_var("HUBU_AGENT_TOKEN_FILE", &agent_token_file);
-            std::env::set_var("HUBU_APPROVAL_TOKEN_FILE", &config.approval_token_file);
-            std::env::set_var(
-                "HUBU_RECONCILIATION_TOKEN_FILE",
-                &config.reconciliation_token_file,
-            );
+            if config.approval_token_file.is_some() || config.reconciliation_token_file.is_some() {
+                eprintln!("Approval and reconciliation capability paths in the launch configuration are obsolete and ignored.");
+            }
             for (generated, name) in [
                 (
                     config.auth_token_file_generated,
@@ -65,14 +65,6 @@ fn run() -> anyhow::Result<()> {
                 (
                     agent_token_file_generated,
                     hubu_api::launch_config::AGENT_TOKEN_FILE_GENERATED_ENV,
-                ),
-                (
-                    config.approval_token_file_generated,
-                    hubu_api::launch_config::APPROVAL_TOKEN_FILE_GENERATED_ENV,
-                ),
-                (
-                    config.reconciliation_token_file_generated,
-                    hubu_api::launch_config::RECONCILIATION_TOKEN_FILE_GENERATED_ENV,
                 ),
             ] {
                 std::env::set_var(name, if generated { "1" } else { "0" });

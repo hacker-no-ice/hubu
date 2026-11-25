@@ -193,8 +193,6 @@
 .claim-challenges { width: 100%; margin-top: 14px; border-collapse: collapse; font-size: 13px; }
 .claim-challenges th, .claim-challenges td { padding: 11px 12px 11px 0; border-top: 1px dashed var(--line); text-align: left; vertical-align: top; }
 .claim-challenges th { width: 38%; font-weight: 500; color: var(--text); }
-.claim-challenges th a { color: var(--text); }
-.claim-challenges th a span { color: var(--cyan); }
 .claim-challenges td { color: var(--muted); line-height: 1.6; }
 .claim-challenges td:nth-child(2) { width: 1%; white-space: nowrap; }
 .claim-challenges .release-condition { display: block; margin-top: 6px; color: var(--warning); font-size: 12px; }

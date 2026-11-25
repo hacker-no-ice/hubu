@@ -219,10 +219,12 @@ fn call_tool_with_operation_identity(
         match server.resolve_harness_operation(&identity, identity_name, identity_arguments) {
             Ok(operation) => {
                 if let Some(result) = operation.recorded_result.clone() {
-                    return success_response(id, tool_result_v1(result));
+                    return success_response(id, spend_tool_result(server, result));
                 }
                 match server.mark_harness_operation_dispatch_started(&operation.operation_handle) {
-                    Ok(Some(result)) => return success_response(id, tool_result_v1(result)),
+                    Ok(Some(result)) => {
+                        return success_response(id, spend_tool_result(server, result))
+                    }
                     Ok(None) => {}
                     Err(error) => return error_response(id, -32000, &error.to_string()),
                 }
@@ -256,7 +258,7 @@ fn call_tool_with_operation_identity(
                     .record_harness_operation_result(&operation.operation_handle, &response)
                 {
                     Ok(authoritative_response) => {
-                        success_response(id, tool_result_v1(authoritative_response))
+                        success_response(id, spend_tool_result(server, authoritative_response))
                     }
                     Err(error) => {
                         let message =
@@ -303,6 +305,29 @@ fn call_tool_with_operation_identity(
             error_response(id, -32000, &message)
         }
     }
+}
+
+fn spend_tool_result(server: &Server, response: Value) -> Value {
+    let mut result = tool_result_v1(response);
+    let structured = &result["structuredContent"];
+    let approval = &structured["approval"];
+    if structured["decision"] == "needs_approval"
+        && approval
+            .get("status")
+            .is_none_or(|status| status == "pending")
+        && structured["operation_handle"]
+            .as_str()
+            .is_some_and(|handle| {
+                server
+                    .durable_operation_status(handle)
+                    .is_ok_and(|status| status.state == "approval_required")
+            })
+    {
+        if let Some(request_id) = approval["approval_request_id"].as_str().map(str::to_owned) {
+            server.add_approval_review_link(&mut result, &request_id);
+        }
+    }
+    result
 }
 
 fn approval_prompt_error(error: &anyhow::Error) -> Option<Value> {

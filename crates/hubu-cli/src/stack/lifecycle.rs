@@ -901,6 +901,15 @@ fn start_missing_components(
         return Err(error);
     }
     drop(started);
+    let handoff = codex_handoff(profile, &crate::hubu_home())?;
+    let codex_path = crate::default_codex_config_path();
+    if crate::codex_mcp::migrate_profile_config(
+        &codex_path,
+        &handoff,
+        &crate::save_folders::file_path(&crate::hubu_home())?,
+    ).with_context(|| "the stack is running; refresh the Codex configuration with `hubu init codex --stack-profile`")? {
+        println!("Updated the Hubu-managed Codex config. Restart Codex to use the agent credential.");
+    }
     let style = crate::terminal::stdout();
     println!(
         "{}: {}",
@@ -926,12 +935,7 @@ fn prepare_managed_credential_storage(profile: &Path, manifest: &ActiveManifest)
         .generated_file_digests
         .contains_key("hubu-launch.json")
     {
-        for path in [
-            &paths.hubu_auth,
-            &paths.hubu_agent,
-            &paths.hubu_approval,
-            &paths.hubu_reconciliation,
-        ] {
+        for path in [&paths.hubu_auth, &paths.hubu_agent] {
             if let Some(parent) = path.parent() {
                 directories.push(parent.to_path_buf());
             }
@@ -2267,8 +2271,8 @@ ownership = "managed"
             hubu_endpoint: active_endpoint.clone(),
             hubu_token_file: PathBuf::from("/tmp/hubu-auth"),
             agent_token_file: Some(PathBuf::from("/tmp/hubu-agent")),
-            approval_token_file: PathBuf::from("/tmp/hubu-approval"),
-            reconciliation_token_file: PathBuf::from("/tmp/hubu-reconciliation"),
+            _approval_token_file: None,
+            _reconciliation_token_file: None,
             operation_state_path: PathBuf::from("/tmp/hubu-unified-operations.sqlite3"),
             gongbu_endpoint: Some("http://127.0.0.1:2".into()),
             gongbu_token_file: Some(PathBuf::from("/tmp/gongbu-caller")),

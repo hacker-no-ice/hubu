@@ -44,6 +44,9 @@ mkdir -p "${package_dir}"
 for binary in "${production_binaries[@]}"; do
   cp "${binary_dir}/${binary}" "${package_dir}/${binary}"
 done
+if [[ "${target}" == *-apple-darwin ]]; then
+  "${root_dir}/scripts/sign-hubu-macos-binaries.sh" sign "${package_dir}"
+fi
 cp "${root_dir}/LICENSE-MIT" "${package_dir}/LICENSE-MIT"
 cp "${root_dir}/LICENSE-APACHE" "${package_dir}/LICENSE-APACHE"
 cp "${root_dir}/THIRD-PARTY-NOTICES.md" "${package_dir}/THIRD-PARTY-NOTICES.md"

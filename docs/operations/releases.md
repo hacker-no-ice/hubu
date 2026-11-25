@@ -2,6 +2,8 @@
 
 > Maintainers publishing a release: see [Publishing releases (maintainers)](publishing-releases.md).
 
+> Upgrading to v0.3.0: follow [the owner and agent separation guide](upgrading-to-v0.3.0.md).
+
 > Upgrading to v0.2.5: read
 > [Upgrading to v0.2.5: provider packs](upgrading-to-v0.2.5.md) first.
 > Drain unfinished Gongbu work before installing; Gongbu refuses to start

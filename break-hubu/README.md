@@ -105,10 +105,19 @@ From a checkout of the **kits commit linked by the release card**:
 ./break-hubu/run-all.sh --release v0.2.5
 ```
 
-`--release` is required and names a published stable tag. The kits commit
-differs from the older release commit being tested. `run.json`
-records both identities and whether the kits checkout had uncommitted changes.
-Use a clean kits checkout when publishing results.
+Use `--release` to measure a published stable tag for the System card. To
+qualify an unpublished source commit, use its full SHA from the local Hubu
+repository with `--commit`:
+
+```sh
+./break-hubu/run-all.sh --commit "$(git rev-parse HEAD)" --output /tmp/hubu-candidate-evidence
+```
+
+The candidate build uses the selected commit's package version, pinned
+toolchain and locked dependencies. `run.json` records the build mode, the Hubu
+source SHA, the kits SHA, and whether the kits checkout had uncommitted changes.
+The System card renderer accepts evidence measured with `--release` from a
+clean kits checkout. Keep commit rehearsal evidence private.
 
 To choose retained locations explicitly:
 

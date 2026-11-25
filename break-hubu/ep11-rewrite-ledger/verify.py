@@ -51,7 +51,9 @@ def verify(output):
     e.check('Final accounting shows only the two settlements and the owner\'s reconciliation', lambda: e.final(
         'final', count=3, consumed='0.09', frozen='0', remaining='0.01', pending=0))
     e.check('Operator configuration remained fixed', lambda: e.fixed())
-    return e.result('This covers Hubu\'s public HTTP and CLI interfaces. Editing the database file directly is a separate challenge that needs Hubu\'s state under a different OS user.')
+    if e.json('run.json').get('owner_presence'):
+        return e.result()
+    return e.result('This covers Hubu\'s public HTTP and CLI interfaces. Editing the database file directly is a separate challenge.')
 
 
 if __name__ == '__main__':

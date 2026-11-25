@@ -263,6 +263,9 @@ impl ServerState {
                 "db_path": db_path,
             }),
         );
+        let presence = owner_presence::OwnerPresence::new(default_presence_provider(&path)?);
+        let mut governance =
+            SqliteGovernanceRepository::open(&path).context("initialize governance store")?;
         let mut users = UserManager::open(&path).context("initialize user store")?;
         let default_user = users.ensure_default_user()?;
         let auth = LocalAuth::new(default_user.id.clone()).context("initialize local API auth")?;
@@ -276,7 +279,6 @@ impl ServerState {
                 "owner_user_pub_id": default_user.pub_id,
             }),
         );
-        let presence = owner_presence::OwnerPresence::new(default_presence_provider(&path)?);
         // The fixture prompts nobody, so scripted runs skip the rate limit
         // unless a proof kit asks for it. Tests set it per test.
         if cfg!(test)
@@ -290,8 +292,6 @@ impl ServerState {
             "owner_presence_configured",
             json!({ "provider": presence.provider_name() }),
         );
-        let mut governance =
-            SqliteGovernanceRepository::open(&path).context("initialize governance store")?;
         governance
             .expire_overdue_budget_holds(Utc::now())
             .context("reconcile expired budget holds")?;

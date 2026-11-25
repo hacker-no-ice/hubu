@@ -26,6 +26,21 @@ def verify(output):
         assert row['status'] == 200 and row['body']['status'] == 'pending', 'Self-approval attempts changed the pending approval'
         return True
 
+    def owner_confirmation_required():
+        row = e.last('owner-without-confirmation')
+        assert row['status'] == 403 and row['body'].get('error_code') == 'owner_presence_required', \
+            'The owner bearer and retired approval capability must not authorize approval without confirmation'
+        return True
+
+    def unavailable_confirmation_preserves_pending():
+        row = e.last('owner-presence-unavailable')
+        assert row['status'] == 403 and row['body'].get('error_code') == 'owner_presence_unavailable', \
+            'Approval must be refused when the presence provider cannot confirm'
+        pending = e.last('pending-after-owner-presence-refusal')
+        assert pending['status'] == 200 and pending['body']['status'] == 'pending', \
+            'The unconfirmed request must remain pending for owner review'
+        return True
+
     e.check('Fresh USD 1.00 budget and empty public ledger', lambda: e.final(
         'initial', count=0, consumed='0', frozen='0', remaining='1.00', pending=0))
     e.check('USD 0.10 request escalates to a human without a token or hold', lambda: escalation(0, 'needs_approval'))
@@ -34,6 +49,9 @@ def verify(output):
     e.check('The agent bearer is not accepted as the approval capability', lambda: refused('self-approve-bearer-as-capability'))
     e.check('After every attempt the approval is still pending', still_pending)
     e.check('A replay while pending still gets no token', lambda: escalation(1, 'needs_approval'))
+    if e.json('run.json').get('owner_presence'):
+        e.check('Readable owner credentials do not satisfy owner confirmation', owner_confirmation_required)
+        e.check('An unavailable confirmation provider leaves approval pending', unavailable_confirmation_preserves_pending)
     e.check('Owner denial stands; a replay afterwards gets no token', lambda: escalation(2, 'deny'))
     e.check('No spend was recorded', lambda: e.final(
         'final', count=0, consumed='0', frozen='0', remaining='1.00', pending=0))
