@@ -216,12 +216,12 @@ function spendTraces() {
         {
           nodes: ["agent", "mcp"],
           edges: [["agent", "mcp"]],
-          caption: "The call returns before any provider work, with a durable public operation handle.",
+          caption: "The call returns before any provider work, with a durable public operation handle and a Review request link to the signed-in portal.",
         },
         {
           nodes: ["human", "agent", "mcp", "api", "app"],
           edges: [["agent", "mcp"], ["mcp", "api"], ["api", "app"]],
-          caption: "After the owner says to approve in chat, MCP asks Hubu to show the Mac confirmation dialog. Confirmation allows resume. Deny closes the request.",
+          caption: "The owner reviews the request in the portal and clicks Approve, or asks the agent in chat to raise the Mac dialog. Confirmation allows resume. Deny closes the request.",
         },
         {
           nodes: ["agent", "mcp", "api", "app"],
@@ -782,7 +782,7 @@ const components = {
       ["Trusted identity", "Operation and task IDs come from client metadata, not model-written arguments."],
       ["Durable worker", "Advances operations through their states, retrying only idempotent Gongbu creates and read-only status checks."],
       ["Fails closed", "Rejects unknown tools, attempts to override accounts, endpoints, or credentials, and mismatched backend versions."],
-      ["Owner confirmation", "After the owner says to approve in chat, the agent can ask Hubu to raise the Mac dialog for that request. Hubu records the decision after the owner answers."],
+      ["Owner confirmation", "The agent shares the review link for the pending request. The owner can inspect and approve it in the portal, or ask the agent in chat to raise the Mac dialog. Hubu records the decision after the owner answers."],
       ["Result delivery", "Returns PNG or JPEG artifacts up to 8 MiB, with timing that never labels waiting as provider time. Native gallery export downloads up to 64 MiB directly from Gongbu to a local directory, verifies Hubu settlement and registry binding, and avoids passing image bytes through the model."],
       ["Allowlisted save", "`hubu_save_artifact` writes one verified artifact plus a receipt (artifact ID, digest, settled cost) into a human-allowlisted folder named by the agent, never a path, and never exposes Gongbu storage paths."],
     ],
