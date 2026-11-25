@@ -366,7 +366,10 @@
   .path .ph b { display: none; }
   .path .ph { justify-content: flex-end; }
   .chat .row.out { display: none; }
-  .chat { min-height: 250px; }
+  /* The four-row window slides through the session; a fixed height and
+     two-line messages keep it from resizing and shifting the page below. */
+  .chat { height: 372px; overflow: hidden; }
+  .chat .row > div:not(.img), .chat .row .img .ok { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
   /* Portal: the frame plays on its own; its section bar doubles as the index. */
   .pfeat { display: none; }
   .pbody { height: 400px; }
