@@ -24,6 +24,7 @@ export default function ReleaseNotes() {
           <p className="engineering-deck">Separate agent access from owner approval.</p>
           <div className="release-links">
             {report && <a href={`${repository}/releases/tag/${release}`}>Release on GitHub ↗</a>}
+            {report?.kitsCommit && <a href={`${repository}/tree/${report.kitsCommit}/break-hubu`}>Proof kits ↗</a>}
             <a href={`${repository}/blob/main/CHANGELOG.md`}>Complete changelog ↗</a>
           </div>
         </header>
