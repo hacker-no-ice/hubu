@@ -175,6 +175,12 @@ test("release system cards match their measured or unmeasured report", async () 
       const analysis = await reportPage.text();
       assert.equal(reportPage.status, 200, release);
       const report = JSON.parse(reportSource.slice(reportSource.indexOf("= {") + 2, reportSource.lastIndexOf(";")));
+      if (release === "v0.3.0") {
+        assert.ok(html.includes(`href="https://github.com/hacker-no-ice/hubu/tree/${report.kitsCommit}/break-hubu"`));
+        assert.ok(html.includes('href="/releases/v0.3.0/report"'));
+        assert.ok(html.includes('id="live-verification-title"'));
+        assert.ok(analysis.includes('href="/releases/v0.3.0#live-verification-title"'));
+      }
       const sections = analysis.split(/(?=<section class="claim-detail" id="claim-c\d")/).slice(1).map((section) => section.split("</section>")[0]);
       assert.equal(sections.length, claimIds.length, release);
       const shown = {};

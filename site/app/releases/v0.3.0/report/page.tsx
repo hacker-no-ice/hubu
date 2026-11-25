@@ -4,5 +4,5 @@ import { report } from "../report";
 export const metadata = analysisMetadata(report.release);
 
 export default function ReleaseAnalysisPage() {
-  return <ReleaseAnalysis report={report} />;
+  return <ReleaseAnalysis report={report} liveVerificationHref="/releases/v0.3.0#live-verification-title" />;
 }
