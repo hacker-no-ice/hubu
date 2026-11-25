@@ -411,6 +411,17 @@ test("roadmap shows three linked priorities without promising release dates", as
   assert.ok(html.indexOf(diagram) < html.indexOf('id="1-easy-and-safe-for-individuals"'));
 });
 
+test("home page renders the phone folds open so wide screens and no-JS readers see everything", async () => {
+  const html = await (await render()).text();
+  // Server HTML keeps every fold open; phones close them after hydration.
+  assert.match(html, /<details class="pre-fold" open="">/);
+  assert.equal(html.match(/<details class="fold" open="">/g)?.length, 3, "policy, budget and hubu watch commands fold on phones");
+  assert.doesNotMatch(html, /<details class="(?:pre-)?fold">/, "no fold starts closed in the server HTML");
+  assert.match(html, /<div class="path-tabs" role="tablist" aria-label="Connection path">/);
+  assert.match(html, /<div class="paths" data-tab="remote"><div class="path remote">[\s\S]*?<div class="path local">/, "both harness paths are in the page; phones show one at a time");
+  assert.match(html, /<button type="button" class="more" aria-controls="policy-yaml" aria-expanded="false">/);
+});
+
 test("home page leads with the policy file and keeps stack setup as prerequisites", async () => {
   const html = await (await render()).text();
   assert.match(html, /href="\/docs\/local-stack#install"/);
