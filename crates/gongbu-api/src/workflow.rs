@@ -65,6 +65,13 @@ pub trait HubuActivities {
         amount_minor: i64,
     ) -> Result<String, ActivityError>;
     fn release(&self, execution: &Execution) -> Result<(), ActivityError>;
+    fn sync_owner_resolution(
+        &self,
+        _execution: &Execution,
+        _now: &str,
+    ) -> crate::execution::Result<bool> {
+        Ok(false)
+    }
 }
 pub trait ProviderActivities {
     fn preflight(&self, execution: &Execution) -> Result<(), ActivityError>;
@@ -946,6 +953,9 @@ impl ExecutionWorkflow<'_> {
             )? {
                 return Ok(execution);
             }
+        }
+        if self.hubu.sync_owner_resolution(&execution, now)? {
+            return Ok(self.repository.get_execution(execution_id)?);
         }
         let attempt = match self
             .repository
