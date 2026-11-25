@@ -12,8 +12,8 @@ const changelog = "https://github.com/hacker-no-ice/hubu/blob/main/CHANGELOG.md"
 // The five most recent releases, newest first. Releases older than the site's
 // release pages link to their CHANGELOG section. Update when a release ships.
 export const recentReleases: NavLink[] = [
-  { title: "Owner confirmation on your Mac; separate agent and owner credentials", href: "/releases/v0.3.0", meta: { label: "v0.3.0-rc.1", tone: "candidate", date: "2026-11-24", dateLabel: "Nov 24, 2026" } },
-  { title: "Every provider runs from a verified provider pack", href: "/releases/v0.2.5", meta: { label: "v0.2.5", tone: "latest", date: "2026-11-06", dateLabel: "Nov 6, 2026" } },
+  { title: "Owner confirmation on your Mac; separate agent and owner credentials", href: "/releases/v0.3.0", meta: { label: "v0.3.0", tone: "latest", date: "2026-11-25", dateLabel: "Nov 25, 2026" } },
+  { title: "Every provider runs from a verified provider pack", href: "/releases/v0.2.5", meta: { label: "v0.2.5", date: "2026-11-06", dateLabel: "Nov 6, 2026" } },
   { title: "Append-only governance evidence for policy and approvals", href: "/releases/v0.2.4", meta: { label: "v0.2.4", date: "2026-10-19", dateLabel: "Oct 19, 2026" } },
   { title: "hubu watch: a live terminal view of agent budgets", href: `${changelog}#v023--2026-10-13`, meta: { label: "v0.2.3", date: "2026-10-13", dateLabel: "Oct 13, 2026" } },
   { title: "Authorization records replace spend history", href: `${changelog}#v022--2026-10-05`, meta: { label: "v0.2.2", date: "2026-10-05", dateLabel: "Oct 5, 2026" } },

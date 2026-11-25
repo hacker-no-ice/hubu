@@ -58,10 +58,12 @@ test("release notes lead from the landing page to one concise stable release and
   const hero = home.match(/<section class="hero[^"]*">[\s\S]*?<\/section>/)?.[0];
   assert.ok(header);
   assert.ok(hero);
-  assert.match(header, /class="header-version" href="\/releases\/v0\.2\.5" aria-label="Read Hubu v0.2.5 release notes and system card"/);
-  assert.match(header, /v0\.2\.5 <span aria-hidden="true">↗<\/span>/);
+  assert.match(header, /class="header-version" href="\/releases\/v0\.3\.0" aria-label="Read Hubu v0\.3\.0 release notes and system card"/);
+  assert.match(header, /v0\.3\.0 <span aria-hidden="true">↗<\/span>/);
+  assert.match(header, /<a class="nl nrow" href="\/releases\/v0\.3\.0"><span class="nmeta"><em class="ntag latest">v0\.3\.0<\/em><time dateTime="2026-11-25">Nov 25, 2026<\/time>/i);
+  assert.doesNotMatch(header, /v0\.3\.0-rc\.1/);
   assert.doesNotMatch(header, /\/ docs/);
-  assert.doesNotMatch(hero, /v0\.2\.[45]|hero-version/);
+  assert.doesNotMatch(hero, /v0\.2\.[45]|v0\.3\.0|hero-version/);
   for (const html of [home, index, overview, docs, blog]) {
     assert.match(html, /href="\/releases"/);
     assert.doesNotMatch(html, /Break Hubu|href="\/break-hubu"|linear\.app|HUB-\d+/);

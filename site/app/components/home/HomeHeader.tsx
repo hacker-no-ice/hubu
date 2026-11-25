@@ -71,7 +71,7 @@ export function HomeHeader({ panels, searchIndex, popular }: Props) {
             <a className="brand" href="/" aria-label="Hubu home">
               <HubuWordmark className="brand-wordmark" decorative />
             </a>
-            <a className="header-version" href="/releases/v0.2.5" aria-label="Read Hubu v0.2.5 release notes and system card">v0.2.5 <span aria-hidden="true">↗</span></a>
+            <a className="header-version" href="/releases/v0.3.0" aria-label="Read Hubu v0.3.0 release notes and system card">v0.3.0 <span aria-hidden="true">↗</span></a>
           </div>
           <nav className="nbar" aria-label="Primary navigation">
             <ul>
