@@ -51,6 +51,21 @@ on different issues make the same choices.
 - A behaviour the spec does not cover is fine to add, but name it under "Spec"
   in the PR description so a reviewer can decide whether the spec needs it.
 
+## No-spec lane
+
+An issue labeled `no-spec` in Linear can start without a release spec. These
+are upkeep issues: docs and site fixes and behaviour-neutral cleanup.
+
+- Change no behaviour: no route, CLI, configuration, error code, MCP tool,
+  policy, ledger or stored-data change. Existing tests keep passing unchanged.
+- Touch no path on `.github/auto-merge-blocklist`, except `README.md` for a
+  docs fix.
+- Add no dependency and keep the PR small and focused.
+- If the work turns out to need a behaviour change or a decision, stop, say so
+  on the issue, and leave it for the owner.
+- Docs and site PRs outside `README.md` use `merge:auto`. Cleanup and
+  `README.md` PRs use `merge:manual`.
+
 ## Merge policy
 
 Use the Linear issue's explicit `Merge` label when one exists. An explicit
