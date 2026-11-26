@@ -22,7 +22,7 @@ control of payment keys, provider credentials, or unrestricted budgets.
 | --- | --- |
 | Platform and install | macOS, installed from an exact release tag with the [source installer](operations/releases.md#install-an-exact-release-from-source-macos). |
 | Agent clients | Codex through `hubu init codex`. Other MCP clients can connect to `hubu-unified-mcp` with [manual configuration](unified-mcp.md#setup). |
-| Live providers | Gemini Developer API and FLUX.2 Pro; see [live provider operations](operations/live-providers.md). |
+| Live providers | Gemini Developer API image models and the FLUX suite (FLUX.2 [pro], [max], [flex], [klein] 4B and 9B, FLUX 3 Image and FLUX 3 Image Klein), each with image editing, from the [verified provider packs](provider-packs.md#verified-packs); see [live provider operations](operations/live-providers.md). |
 | Stack modes | `sandbox` with a non-billable fixture and `live` with approved real providers; both start Gongbu by default. |
 | Direct payments | Mock only; no production payment rail. |
 

@@ -168,12 +168,12 @@ see [Unified MCP setup](unified-mcp.md#setup).
 ## Make your first governed request
 
 A *governed request* is one where Hubu checks a policy and a budget before any
-provider work starts. First create an owner, an agent, a policy, and a budget.
-The starter policy allows requests up to $100 and asks for approval otherwise;
+provider work starts. First create an agent, a policy, and a budget. The stack
+creates a default owner, `hubu-user`, when it starts, and agents register under
+it. The starter policy allows requests up to $100 and asks for approval otherwise;
 the sandbox fixture's synthetic price is one cent per image.
 
 ```sh
-hubu register human --username alice-example --display-name "Alice Example"
 hubu register agent --name image-designer --version local-dev
 hubu policy new-template --path policies/policy.yaml
 hubu policy validate --path policies/policy.yaml
@@ -183,7 +183,9 @@ hubu budget create --agent-id agt_EXACT_AGENT_ID --amount 1
 
 `register agent` prints the `agent_id` (for budgets and policies) and the
 `account_id` (for spending). The [CLI administration reference](cli.md)
-explains each command.
+explains each command, including how to
+[name the owner](cli.md#register-the-owner-and-agents) instead of using the
+default.
 
 Then, in a new Codex thread, ask:
 
