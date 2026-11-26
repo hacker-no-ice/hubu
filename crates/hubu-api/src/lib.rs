@@ -1,3 +1,4 @@
+mod agent_credentials;
 mod agent_identity;
 mod financial_observer;
 mod governance;
@@ -222,6 +223,8 @@ struct ServerState {
     auth: LocalAuth,
     users: Mutex<UserManager>,
     registration: Mutex<RegistrationManager>,
+    /// Per-agent and registration credentials (HUB-357).
+    agent_credentials: Mutex<hubu_core::agent_credential::AgentCredentialManager>,
     spend: Arc<Mutex<SpendManager>>,
     budgets: Mutex<BudgetManager>,
     spending_targets: Mutex<SpendingTargetManager>,
@@ -365,6 +368,10 @@ impl ServerState {
             users: Mutex::new(users),
             registration: Mutex::new(
                 RegistrationManager::open(&path).context("initialize agent registration store")?,
+            ),
+            agent_credentials: Mutex::new(
+                hubu_core::agent_credential::AgentCredentialManager::open(&path)
+                    .context("initialize agent credential store")?,
             ),
             spend,
             budgets: Mutex::new(budgets),
@@ -916,6 +923,10 @@ struct RegisterAgentHttpResponse {
     /// `created` for a new identity, `reused` for an existing identity
     /// fingerprint, or `alias` when it resolved through an owner rename.
     identity_resolution: &'static str,
+    /// `pending` until the owner confirms, then `active`; absent for an agent
+    /// that has no credential of its own (HUB-357).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    credential_status: Option<&'static str>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     warnings: Vec<agent_identity::RegistrationWarningHttpResponse>,
 }
@@ -1027,6 +1038,10 @@ struct AgentHttpResponse {
     status: String,
     account_id: String,
     account_status: String,
+    /// `pending`, `active`, `revoked` or `expired`; absent for an agent with
+    /// no credential of its own (HUB-357).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    credential_status: Option<&'static str>,
     created_at: String,
 }
 
@@ -1939,6 +1954,18 @@ fn dispatch_route_locked(
             revoke_spending_target(request.body, state).map(to_json)
         }
         ("POST", "/agents/register") => register_agent(request.body, state).map(to_json),
+        ("POST", agent_credentials::REGISTRATION_CREDENTIALS_ROUTE) => {
+            agent_credentials::record_registration_credential(&request.body, state)
+        }
+        ("POST", agent_credentials::AGENT_CONFIRM_ROUTE) => {
+            agent_credentials::confirm_agents(&request.body, state)
+        }
+        ("POST", agent_credentials::AGENT_CREDENTIAL_REVOKE_ROUTE) => {
+            agent_credentials::revoke_credential(&request.body, state)
+        }
+        ("POST", agent_credentials::AGENT_CREDENTIAL_ROTATE_ROUTE) => {
+            agent_credentials::rotate_credential(&request.body, state)
+        }
         ("POST", agent_identity::AGENT_RENAME_ROUTE) => {
             return agent_identity::rename_agent_http(&request.body, state);
         }
@@ -2033,43 +2060,49 @@ fn dispatch_route_locked(
 
     match result {
         Ok(body) => HttpResponse { status: 200, body },
-        Err(error) => {
-            log_event(
-                "warn",
-                "http_request_rejected",
-                json!({
-                    "method": request.method,
-                    "path": request.path,
-                    "error": error.to_string(),
-                }),
-            );
-            if let Some(response) = budget_version_error_response(&error) {
-                return response;
-            }
-            if let Some(response) = registration_error_response(&error) {
-                return response;
-            }
-            if matches!(
-                error.downcast_ref::<hubu_core::persistence::AuthorizationVoidError>(),
-                Some(
-                    hubu_core::persistence::AuthorizationVoidError::ClaimedOrUsed
-                        | hubu_core::persistence::AuthorizationVoidError::RevokedOrFinalized
-                )
-            ) {
-                return HttpResponse {
-                    status: 409,
-                    body: json!({"error":error.to_string(),"error_code":"authorization_not_voidable"}),
-                };
-            }
-            let message = error.to_string();
-            let (status, retry_guidance) = spend_retry_error_response(&error);
-            let mut body = json!({ "error": message, "retry_guidance": retry_guidance });
-            if let Some(error_code) = spend_http_error_code(&error) {
-                body["error_code"] = json!(error_code);
-            }
-            HttpResponse { status, body }
-        }
+        Err(error) => handler_error_response(&request.method, &request.path, error),
     }
+}
+
+/// The response for an error a route handler returned.
+fn handler_error_response(method: &str, path: &str, error: anyhow::Error) -> HttpResponse {
+    log_event(
+        "warn",
+        "http_request_rejected",
+        json!({
+            "method": method,
+            "path": path,
+            "error": error.to_string(),
+        }),
+    );
+    if let Some(response) = budget_version_error_response(&error) {
+        return response;
+    }
+    if let Some(response) = registration_error_response(&error) {
+        return response;
+    }
+    if let Some(response) = agent_credentials::credential_refusal_response(&error) {
+        return response;
+    }
+    if matches!(
+        error.downcast_ref::<hubu_core::persistence::AuthorizationVoidError>(),
+        Some(
+            hubu_core::persistence::AuthorizationVoidError::ClaimedOrUsed
+                | hubu_core::persistence::AuthorizationVoidError::RevokedOrFinalized
+        )
+    ) {
+        return HttpResponse {
+            status: 409,
+            body: json!({"error":error.to_string(),"error_code":"authorization_not_voidable"}),
+        };
+    }
+    let message = error.to_string();
+    let (status, retry_guidance) = spend_retry_error_response(&error);
+    let mut body = json!({ "error": message, "retry_guidance": retry_guidance });
+    if let Some(error_code) = spend_http_error_code(&error) {
+        body["error_code"] = json!(error_code);
+    }
+    HttpResponse { status, body }
 }
 
 /// Structured responses for registration name conflicts (HUB-251).
@@ -2292,13 +2325,16 @@ fn spend_retry_error_response(error: &anyhow::Error) -> (u16, Option<Value>) {
 
 /// Which class of local bearer presented a request.
 ///
-/// v0.3.0 has two classes: the owner credential and one shared agent
-/// credential. Later releases add per-agent and executor classes, so this is a
-/// class rather than a boolean.
+/// v0.3.1 has the owner credential, agent credentials (each agent's own, or
+/// the shared v0.3.0 credential while it lasts), and registration
+/// credentials. Executor credentials follow in v0.3.2.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CredentialClass {
     Owner,
     Agent,
+    /// Reaches only `POST /agents/register` (spec 5.4); the route layer
+    /// refuses it everywhere else.
+    Registration,
 }
 
 impl CredentialClass {
@@ -2306,6 +2342,7 @@ impl CredentialClass {
         match self {
             Self::Owner => "owner",
             Self::Agent => "agent",
+            Self::Registration => "registration",
         }
     }
 }
@@ -2330,10 +2367,11 @@ impl RouteAccess {
     fn admits(self, class: CredentialClass) -> bool {
         match (self, class) {
             (_, CredentialClass::Owner) => true,
-            (Self::Agent, CredentialClass::Agent) => true,
-            (Self::OwnerBearer | Self::OwnerAction | Self::Executor, CredentialClass::Agent) => {
-                false
-            }
+            (Self::Agent, CredentialClass::Agent | CredentialClass::Registration) => true,
+            (
+                Self::OwnerBearer | Self::OwnerAction | Self::Executor,
+                CredentialClass::Agent | CredentialClass::Registration,
+            ) => false,
         }
     }
 
@@ -2373,7 +2411,8 @@ const ROUTE_ACCESS: &[(&str, &str, RouteAccess)] = &[
     ("GET", "/user", RouteAccess::Agent),
     ("GET", "/policies", RouteAccess::Agent),
     ("GET", "/policies/show", RouteAccess::Agent),
-    // A new agent stays pending until the owner confirms (enforced in v0.3.1).
+    // Also the one route a registration credential reaches. A registration
+    // that brings a credential stays pending until the owner confirms it.
     ("POST", "/agents/register", RouteAccess::Agent),
     ("GET", "/owner/presence", RouteAccess::Agent),
     // Owner reads.
@@ -2405,6 +2444,13 @@ const ROUTE_ACCESS: &[(&str, &str, RouteAccess)] = &[
         OWNER_PRESENCE_RECORDS_ROUTE,
         RouteAccess::OwnerBearer,
     ),
+    // Records the hash of a registration credential minted by `hubu init`.
+    // It grants no spend authority: what it registers waits for the owner.
+    (
+        "POST",
+        agent_credentials::REGISTRATION_CREDENTIALS_ROUTE,
+        RouteAccess::OwnerBearer,
+    ),
     // Tightening writes: they only remove authority.
     ("POST", "/budgets/revoke", RouteAccess::OwnerBearer),
     (
@@ -2414,6 +2460,21 @@ const ROUTE_ACCESS: &[(&str, &str, RouteAccess)] = &[
     ),
     // Owner actions.
     ("POST", "/init", RouteAccess::OwnerAction),
+    (
+        "POST",
+        agent_credentials::AGENT_CONFIRM_ROUTE,
+        RouteAccess::OwnerAction,
+    ),
+    (
+        "POST",
+        agent_credentials::AGENT_CREDENTIAL_REVOKE_ROUTE,
+        RouteAccess::OwnerAction,
+    ),
+    (
+        "POST",
+        agent_credentials::AGENT_CREDENTIAL_ROTATE_ROUTE,
+        RouteAccess::OwnerAction,
+    ),
     ("POST", "/governance/overrides", RouteAccess::OwnerAction),
     ("POST", "/user/spending-target", RouteAccess::OwnerAction),
     (
@@ -2521,7 +2582,10 @@ fn is_public_route(request: &HttpRequest) -> bool {
 // origins, and keep protected traffic on loopback hosts. These checks reduce
 // common localhost attack paths, but the token remains the actual local
 // capability and should not be treated as human approval for real-money flows.
-fn authenticate_request(request: &HttpRequest, state: &ServerState) -> Result<CredentialClass> {
+fn authenticate_request(
+    request: &HttpRequest,
+    state: &ServerState,
+) -> Result<agent_credentials::Principal> {
     if request.headers.contains_key("origin") {
         return Err(anyhow!(
             "browser-origin requests are not accepted by the Hubu local API"
@@ -2568,10 +2632,11 @@ fn authenticate_request(request: &HttpRequest, state: &ServerState) -> Result<Cr
     if !scheme.eq_ignore_ascii_case("bearer") || token.trim().is_empty() {
         return Err(anyhow!("invalid authorization bearer token"));
     }
-    state
-        .auth
-        .classify(token.trim())
-        .ok_or_else(|| anyhow!("invalid authorization bearer token"))
+    let token = token.trim();
+    match state.auth.classify(token) {
+        Some(class) => Ok(agent_credentials::Principal::shared(class)),
+        None => agent_credentials::resolve_principal(token, state),
+    }
 }
 
 fn spend_executor_guidance(state: &ServerState) -> Value {
@@ -2906,6 +2971,21 @@ fn registration_guidance() -> Value {
             "reserved_names": "a previous name stays reserved for its agent; another agent of the same owner cannot register or be renamed into it",
             "protocol_unchanged": "canonicalization, hashing, and server-side fingerprint recompute-and-reject are identical to protocol v1"
         },
+        "agent_credential": {
+            "summary": "each agent has its own credential bound to one account; Hubu stores only a verification hash and never sees the secret",
+            "format": "hubu_agent_<credential_id>_<secret>: credential_id is 16 random bytes and secret 32 random bytes, both lowercase base32 without padding",
+            "verification_hash": "sha256: followed by the lowercase hex SHA-256 of the secret part",
+            "minted_by": "the client that registers (the Hubu MCP server); it writes the credential to the agent's own credential file with mode 0600 before registering",
+            "register_field": "send agent_credential {credential_id, verification_hash, harness?} beside the envelope or simple fields in POST /agents/register",
+            "registration_credential": "hubu_reg_<credential_id>_<secret>, written by hubu init <harness>; it reaches only POST /agents/register and must bring agent_credential",
+            "pending": "a new credential is pending until the owner confirms it with POST /agents/confirm (an owner action); every request with it is refused with agent_pending_owner_confirmation",
+            "pending_limits": "at most 10 registrations wait for the owner at once (too_many_pending_agents); an unconfirmed registration expires after 7 days",
+            "re_registration": "the same identity with the same credential returns the existing ids; a different credential while one is pending or active is refused with agent_already_registered",
+            "revoke": "POST /agents/credential/revoke (owner action): the credential is refused on its next request with agent_credential_revoked; budget, ledger and ids stay",
+            "rotate": "POST /agents/credential/rotate {agent_id, credential_id, verification_hash} (owner action): activates the new hash and revokes the old one",
+            "spend_binding": "an agent credential that names another account on POST /spend/authorize, /spend or /spend/void is refused with agent_account_mismatch before anything is reserved",
+            "credential_status": "GET /agents and the registration response report credential_status: pending, active, revoked or expired"
+        },
         "rename": {
             "actor": "human_owner_only",
             "endpoint": "POST /agents/rename",
@@ -2991,6 +3071,18 @@ fn user_http_response(user: User, current_user_id: &UserId) -> UserHttpResponse 
 }
 
 fn register_agent(body: String, state: &ServerState) -> Result<RegisterAgentHttpResponse> {
+    register_agent_as(body, state, &agent_credentials::Principal::owner())
+}
+
+/// Registers for the presenting principal. A registration that brings
+/// `agent_credential` records it as pending for the owner to confirm; a
+/// registration credential must bring one (HUB-357).
+fn register_agent_as(
+    body: String,
+    state: &ServerState,
+    principal: &agent_credentials::Principal,
+) -> Result<RegisterAgentHttpResponse> {
+    let submitted = agent_credentials::submitted_credential(&body)?;
     let request: RegisterAgentHttpRequest = serde_json::from_str(&body)?;
     let (request_shape, envelope) = match request {
         RegisterAgentHttpRequest::Envelope(envelope) => ("envelope", envelope),
@@ -3029,6 +3121,13 @@ fn register_agent(body: String, state: &ServerState) -> Result<RegisterAgentHttp
             &registration_request.owner_user_id,
             &submitted_fingerprint,
         )?;
+        agent_credentials::precheck_registration(
+            principal,
+            submitted.as_ref(),
+            existing.as_ref().map(|resolution| &resolution.agent.id),
+            &registration_request.owner_user_id,
+            state,
+        )?;
         let response = registration.register_agent(registration_request)?;
         let identity_resolution = match existing {
             None => "created",
@@ -3038,6 +3137,13 @@ fn register_agent(body: String, state: &ServerState) -> Result<RegisterAgentHttp
         (response, identity_resolution)
     };
     let (response, identity_resolution) = response;
+    let credential_status = agent_credentials::record_registration(
+        principal,
+        submitted,
+        &response.agent,
+        &response.account,
+        state,
+    )?;
     let warnings =
         if response.resolved_via_alias && response.agent.fingerprint != submitted_fingerprint {
             let warning = agent_identity::stale_identity_warning(
@@ -3085,6 +3191,7 @@ fn register_agent(body: String, state: &ServerState) -> Result<RegisterAgentHttp
         account_id: response.account.pub_id,
         session_id: response.session.pub_id,
         identity_resolution,
+        credential_status,
         warnings,
     })
 }
@@ -3854,10 +3961,12 @@ fn list_agents_for_scope(state: &ServerState, include_all: bool) -> Result<Agent
         .map_err(|_| anyhow!("registration manager lock poisoned"))?
         .agents_for_user(&user.user_id)?
         .into_iter()
-        .map(|agent| agent_http_response(agent, &owner))
+        .map(|agent| (agent.agent.id.clone(), agent_http_response(agent, &owner)))
         .collect();
 
-    Ok(AgentListHttpResponse { agents })
+    Ok(AgentListHttpResponse {
+        agents: with_credential_statuses(agents, state)?,
+    })
 }
 
 fn list_all_agents(state: &ServerState) -> Result<AgentListHttpResponse> {
@@ -3881,10 +3990,13 @@ fn list_all_agents(state: &ServerState) -> Result<AgentListHttpResponse> {
             registration
                 .agents_for_user(&user.id)?
                 .into_iter()
-                .map(|agent| agent_http_response(agent, &owner)),
+                .map(|agent| (agent.agent.id.clone(), agent_http_response(agent, &owner))),
         );
     }
-    Ok(AgentListHttpResponse { agents })
+    drop(registration);
+    Ok(AgentListHttpResponse {
+        agents: with_credential_statuses(agents, state)?,
+    })
 }
 
 fn agent_http_response(agent: AgentWithAccount, owner: &OwnerHttpMetadata) -> AgentHttpResponse {
@@ -3910,8 +4022,25 @@ fn agent_http_response(agent: AgentWithAccount, owner: &OwnerHttpMetadata) -> Ag
             hubu_common::models::account::AccountStatus::Suspended => "suspended",
         }
         .to_string(),
+        credential_status: None,
         created_at: agent.agent.created_at.to_rfc3339(),
     }
+}
+
+/// Fills each agent's credential status from the credential store.
+fn with_credential_statuses(
+    agents: Vec<(AgentId, AgentHttpResponse)>,
+    state: &ServerState,
+) -> Result<Vec<AgentHttpResponse>> {
+    let statuses =
+        agent_credentials::credential_statuses(agents.iter().map(|(id, _)| id.clone()), state)?;
+    Ok(agents
+        .into_iter()
+        .map(|(id, mut agent)| {
+            agent.credential_status = statuses.get(&id).copied();
+            agent
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -6875,6 +7004,7 @@ mod tests {
         }
     }
     mod authorization_void;
+    mod credential_routes;
     mod governance;
     mod history;
     mod owner_presence_routes;
@@ -7939,6 +8069,22 @@ lease_profiles:
         ),
         ("POST", "/agents/rename", "/agents/rename"),
         ("GET", "/agents/history", "/agents/history"),
+        (
+            "POST",
+            "/agents/registration-credentials",
+            "/agents/registration-credentials",
+        ),
+        ("POST", "/agents/confirm", "/agents/confirm"),
+        (
+            "POST",
+            "/agents/credential/revoke",
+            "/agents/credential/revoke",
+        ),
+        (
+            "POST",
+            "/agents/credential/rotate",
+            "/agents/credential/rotate",
+        ),
         ("GET", "/policies/export", "/policies/export"),
         ("GET", "/policies/history", "/policies/history"),
         ("GET", "/policies/diff", "/policies/diff"),
@@ -8097,6 +8243,20 @@ lease_profiles:
                         "AGENT_RENAME_ROUTE" => agent_identity::AGENT_RENAME_ROUTE.to_string(),
                         "AGENT_IDENTITY_HISTORY_ROUTE" => {
                             agent_identity::AGENT_IDENTITY_HISTORY_ROUTE.to_string()
+                        }
+                        other => panic!("unknown route constant {other}; declare it"),
+                    }
+                } else if let Some(constant) = rest.strip_prefix("agent_credentials::") {
+                    match &constant[..constant.find(')').expect("closing paren")] {
+                        "REGISTRATION_CREDENTIALS_ROUTE" => {
+                            agent_credentials::REGISTRATION_CREDENTIALS_ROUTE.to_string()
+                        }
+                        "AGENT_CONFIRM_ROUTE" => agent_credentials::AGENT_CONFIRM_ROUTE.to_string(),
+                        "AGENT_CREDENTIAL_REVOKE_ROUTE" => {
+                            agent_credentials::AGENT_CREDENTIAL_REVOKE_ROUTE.to_string()
+                        }
+                        "AGENT_CREDENTIAL_ROTATE_ROUTE" => {
+                            agent_credentials::AGENT_CREDENTIAL_ROTATE_ROUTE.to_string()
                         }
                         other => panic!("unknown route constant {other}; declare it"),
                     }
