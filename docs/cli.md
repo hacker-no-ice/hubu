@@ -39,21 +39,29 @@ ignored with a deprecation warning in v0.3.0.
 
 ## Register the owner and agents
 
-Register the human owner once, then register each agent separately. The agent
-command prints the public `agent_id` used by policy and budget assignment and
-the `account_id` used by governed spend requests.
+The stack creates a default owner, `hubu-user`, when it starts, so you can
+register agents straight away. The agent command prints the public `agent_id`
+used by policy and budget assignment and the `account_id` used by governed spend
+requests.
 
 ```sh
 hubu protocol agent-registration
-hubu register human \
-  --username alice-example \
-  --display-name "Alice Example"
-
 hubu register agent --name image-researcher --version local-dev
 hubu register agent --name image-designer --version local-dev
 
 hubu agent list
 ```
+
+To use a named owner instead of the default, run `hubu register human` once,
+before registering agents:
+
+```sh
+hubu register human --username alice-example --display-name "Alice Example"
+```
+
+It creates the owner and makes it the active owner. An agent stays with the
+owner it was registered under, so agents registered earlier remain with
+`hubu-user`.
 
 Agent names are unique per owner, ignoring case and surrounding spaces.
 `hubu register agent` with a new identity under an existing agent's name fails

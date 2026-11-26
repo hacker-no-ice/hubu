@@ -25,9 +25,7 @@ Future release template
 
 ## Unreleased
 
-## v0.3.0-rc.1 — 2026-11-24
-
-Candidate notes for qualification.
+## v0.3.0 — 2026-11-25
 
 ### Highlights
 
@@ -38,6 +36,9 @@ Candidate notes for qualification.
   a budget, loosening policy, approving spend, or reconciling a claim. Each
   confirmation applies to the action in the dialog. The owner can use Touch ID
   or the device password under the default presence policy.
+- Pending approvals link directly to the request in the signed-in portal.
+  The macOS dialog asks for the owner's approval, shows the spending limit
+  and target, and preserves spaces in agent names.
 - Owners can review policy diffs before applying them. Agents can supply drafts
   for the owner to review. Strict permissions are the default. Owners can
   explicitly delegate lowering budgets or adding deny rules.
@@ -47,12 +48,19 @@ Candidate notes for qualification.
 
 ### Breaking or operational changes
 
-- Back up the v0.2.5 profile and upgrade Hubu and Gongbu together. Update the
-  managed Codex setup to use the agent credential, and use the portal or `hubu`
-  CLI for owner actions. External profiles must set `files.hubu_agent` in
-  `credentials.toml`.
+- Follow the [v0.3.0 upgrade guide](docs/operations/upgrading-to-v0.3.0.md)
+  to back up the v0.2.5 profile and upgrade Hubu and Gongbu together. Update
+  the managed Codex setup to use the agent credential, and use the portal or
+  `hubu` CLI for owner actions. External profiles must set `files.hubu_agent`
+  in `credentials.toml`.
 - Owner confirmation replaces the old approval and reconciliation capability
   files. `hubu stack doctor` reports obsolete files and stale client setup.
+
+### Important fixes
+
+- At startup and during reconciliation recovery, Gongbu closes pending
+  reconciliation cases with a matching finalized Hubu owner decision. Gongbu
+  preserves the existing provider and artifact outcomes.
 
 ## v0.2.5 — 2026-11-06
 

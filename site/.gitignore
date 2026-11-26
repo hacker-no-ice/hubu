@@ -40,6 +40,7 @@ yarn-error.log*
 /work/
 /app/generated-docs.ts
 /app/generated-engineering.ts
+/app/generated-home.ts
 /public/architecture/
 /public/sitemap.xml
 /public/break-hubu/evidence/
