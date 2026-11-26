@@ -7,10 +7,10 @@ runs:
     - uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
       id: cache
       with:
-        path: ${{ runner.tool_cache }}/hubu-cargo-deny/0.20.2
-        key: cargo-deny-${{ runner.os }}-${{ runner.arch }}-0.20.2-v1
+        path: ${{ runner.tool_cache }}/hubu-cargo-deny/0.22.0
+        key: cargo-deny-${{ runner.os }}-${{ runner.arch }}-0.22.0-v1
     - if: steps.cache.outputs.cache-hit != 'true'
       shell: bash
-      run: cargo install cargo-deny --version '=0.20.2' --locked --root "${{ runner.tool_cache }}/hubu-cargo-deny/0.20.2"
+      run: cargo install cargo-deny --version '=0.22.0' --locked --root "${{ runner.tool_cache }}/hubu-cargo-deny/0.22.0"
     - shell: bash
-      run: echo "${{ runner.tool_cache }}/hubu-cargo-deny/0.20.2/bin" >> "$GITHUB_PATH"
+      run: echo "${{ runner.tool_cache }}/hubu-cargo-deny/0.22.0/bin" >> "$GITHUB_PATH"
