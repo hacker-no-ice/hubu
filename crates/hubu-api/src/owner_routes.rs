@@ -40,9 +40,21 @@ pub(super) fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
     if is_public_route(&request) {
         return dispatch_route(request, state);
     }
-    let class = match authenticate_request(&request, state) {
-        Ok(class) => class,
+    let principal = match authenticate_request(&request, state) {
+        Ok(principal) => principal,
         Err(error) => {
+            if let Some(refusal) = error.downcast_ref::<agent_credentials::CredentialRefusal>() {
+                log_event(
+                    "warn",
+                    "http_request_credential_refused",
+                    json!({
+                        "method": request.method,
+                        "path": request.path,
+                        "error_code": refusal.error_code,
+                    }),
+                );
+                return refusal.response();
+            }
             log_event(
                 "warn",
                 "http_request_unauthorized",
@@ -58,6 +70,10 @@ pub(super) fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
             };
         }
     };
+    let class = principal.class;
+    if let Some(response) = agent_credentials::registration_scope_refusal(&request, &principal) {
+        return response;
+    }
     let access = effective_route_access(&request);
     if !access.admits(class) {
         if access == RouteAccess::OwnerAction {
@@ -106,8 +122,11 @@ pub(super) fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
         );
         return owner_authority_required_response(&request);
     }
+    if let Some(response) = agent_credentials::spend_account_refusal(&request, &principal, state) {
+        return response;
+    }
     let client = match class {
-        CredentialClass::Agent => OwnerClient::Agent,
+        CredentialClass::Agent | CredentialClass::Registration => OwnerClient::Agent,
         CredentialClass::Owner => OwnerClient::from_header(
             request
                 .headers
@@ -116,11 +135,32 @@ pub(super) fn route(request: HttpRequest, state: &ServerState) -> HttpResponse {
         ),
     };
     match (access, request.method.as_str(), request.path.as_str()) {
+        (_, "POST", "/agents/register") if class != CredentialClass::Owner => {
+            register_as(request, state, &principal)
+        }
         (_, "POST", "/spend/approval/prompt") => approval_prompt(request, state, client),
         (RouteAccess::OwnerAction, _, _) => owner_action(request, state, client),
         (RouteAccess::OwnerBearer, "POST", _) => tightening(request, state, client),
         _ => dispatch_route(request, state),
     }
+}
+
+/// Registration by an agent or registration credential runs with that
+/// principal, so the credential it brings or presents is checked (HUB-357).
+fn register_as(
+    request: HttpRequest,
+    state: &ServerState,
+    principal: &agent_credentials::Principal,
+) -> HttpResponse {
+    with_dispatch(state, || {
+        match register_agent_as(request.body.clone(), state, principal) {
+            Ok(response) => HttpResponse {
+                status: 200,
+                body: to_json(response),
+            },
+            Err(error) => handler_error_response(&request.method, &request.path, error),
+        }
+    })
 }
 
 fn header<'a>(request: &'a HttpRequest, name: &str) -> Option<&'a str> {
@@ -190,6 +230,9 @@ fn tightening(request: HttpRequest, state: &ServerState, client: OwnerClient) ->
         "/budgets/revoke" => "budget.revoke",
         "/user/spending-target/revoke" => "spending_target.revoke",
         "/spend/approval/resolve" => "spend.approval.deny",
+        // Not tightening, but it grants no spend authority: a registration it
+        // submits waits for the owner's confirmation (HUB-357).
+        agent_credentials::REGISTRATION_CREDENTIALS_ROUTE => "registration_credential.create",
         _ => "owner.tightening",
     };
     let targets = body_targets(
@@ -454,6 +497,9 @@ fn invalid_owner_action(request: &HttpRequest, error: &anyhow::Error) -> HttpRes
             "error": error.to_string(),
         }),
     );
+    if let Some(response) = agent_credentials::credential_refusal_response(error) {
+        return response;
+    }
     let (status, error_code) = if error.downcast_ref::<UnknownOwnerTarget>().is_some() {
         (404, OWNER_ACTION_TARGET_NOT_FOUND_ERROR_CODE)
     } else {
@@ -589,6 +635,12 @@ fn owner_action_spec(
                 ),
                 vec![sanitize_id(budget_id), sanitize_id(agent_id)],
             );
+        }
+    }
+    if request.method == "POST" {
+        if let Some((name, reason, targets)) = agent_credentials::owner_action_spec(request, state)?
+        {
+            return action(name, reason, targets);
         }
     }
     match (request.method.as_str(), request.path.as_str()) {

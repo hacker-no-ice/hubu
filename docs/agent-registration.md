@@ -252,6 +252,68 @@ rebuilding the payload Hubu's own clients send and accepting it only when it
 reproduces the stored fingerprint exactly. Otherwise the rename fails with
 `agent_rename_identity_payload_unavailable`.
 
+## Per-agent credentials
+
+Since v0.3.1 (HUB-357) each agent can hold its own credential, bound to its one
+account. The v0.3.1 tech spec, section 5, is the design; this section describes
+what the server enforces today.
+
+The client mints the secret and Hubu never sees it. A credential is
+`hubu_agent_<credential_id>_<secret>`: a 16-byte id and a 32-byte secret, both
+lowercase base32 without padding. The client writes it to the agent's own
+credential file (mode 0600) and registers with only the id and the
+verification hash, `sha256:` plus the hex SHA-256 of the secret:
+
+```json
+{
+  "name": "design",
+  "version": "v1",
+  "agent_credential": {
+    "credential_id": "<26 base32 characters>",
+    "verification_hash": "sha256:<64 hex characters>",
+    "harness": "claude"
+  }
+}
+```
+
+`agent_credential` sits beside either the envelope or the simple fields.
+
+| Step | Route | Who |
+|---|---|---|
+| Record a registration credential (`hubu_reg_...`) minted by `hubu init <harness>` | `POST /agents/registration-credentials` with `harness`, `credential_id`, `verification_hash` | Owner credential; no prompt, recorded as `registration_credential.create` |
+| Register an agent with its credential hash | `POST /agents/register` | Registration credential (must bring `agent_credential`), owner, or the agent's own credential |
+| Confirm one or more pending agents | `POST /agents/confirm` with `agent_ids` | Owner action (`agent.confirm`), one dialog for the whole list |
+| Revoke an agent's credential | `POST /agents/credential/revoke` with `agent_id` | Owner action (`agent.credential.revoke`) |
+| Replace an agent's credential | `POST /agents/credential/rotate` with `agent_id`, `credential_id`, `verification_hash` | Owner action (`agent.credential.rotate`) |
+
+Rules:
+
+- A new credential is **pending**. Every request with it is refused with
+  `agent_pending_owner_confirmation` until the owner confirms. At most 10
+  registrations wait at once (`too_many_pending_agents`), and an unconfirmed
+  one expires after 7 days.
+- A registration credential reaches only `POST /agents/register`; every other
+  route answers `registration_credential_scope`. Recording a new one for the
+  same harness revokes the previous one.
+- Re-registering the same identity with the same credential returns the
+  existing ids. A different credential while one is pending or active is
+  refused with `agent_already_registered`; the owner rotates or revokes
+  instead. After a revoke the agent can register a new credential, which waits
+  for confirmation again. An agent's own credential can re-register only its
+  own agent.
+- A revoked credential is refused on its next request with
+  `agent_credential_revoked`. Budget, ledger and ids stay.
+- On `POST /spend/authorize`, `/spend` and `/spend/void`, an agent credential
+  that names another account is refused with `agent_account_mismatch` before
+  anything is reserved. The shared v0.3.0 agent credential no longer works for
+  an account that has a credential of its own; agents without one keep it until
+  the migration retires it.
+- `GET /agents` and the registration response report `credential_status`:
+  `pending`, `active`, `revoked` or `expired`.
+
+Hubu stores the verification hash in `agent_credentials` and
+`registration_credentials`, never a credential value.
+
 ## Persistence flow
 
 The server flow is:
